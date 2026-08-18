@@ -135,6 +135,22 @@ slices in one `sendmsg`, avoiding Nagle/delayed-ACK interaction. Larger bodies,
 trailers, fragmented header blocks and flow-control-blocked streams use the
 normal multi-write fallback.
 
+HTTP/1 now also exposes the Body-style send boundary that was previously only
+available for HTTP/2:
+
+- `Client.startRequest` returns a stateful `RequestWriter`; fixed-length bodies
+  are checked transactionally across writes, unknown HTTP/1.1 entity bodies use
+  chunked transfer coding, and `finishTrailers` emits only fields announced by
+  `Trailer`;
+- `Connection.startResponse` provides the server counterpart and shares the
+  existing HEAD, 1xx/204/304, and successful CONNECT body-suppression rules;
+- chunk headers, borrowed application bytes, and CRLF are sent as vectored
+  slices without a body-sized concatenation;
+- a request writer owns the connection until its response is consumed, while a
+  response writer releases it only after a complete fixed body or terminating
+  chunk. Abandonment marks the HTTP/1 connection unusable because, unlike
+  HTTP/2 RST_STREAM, HTTP/1 has no per-message reset that can restore framing.
+
 Reusable implementation changes behind all four H2 results:
 
 - a shared Zig 0.16 stream-vector helper correctly reserves `netWrite`'s final
@@ -189,7 +205,7 @@ Reusable implementation changes behind all four H2 results:
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving | Async runtime integration, mature ecosystem |
+| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked request and response writers | Async runtime integration, mature ecosystem and generic Body polling |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server, Upgrade, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const runtime_write = @import("runtime/write.zig");
+const body_writer = @import("runtime/body_writer.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const wire = @import("../internal/wire.zig");
 
@@ -22,6 +23,9 @@ pub const Error = http1.Error || error{
     UnsupportedIoBackend,
     IoUringOperationFailed,
     UnexpectedCompletion,
+    ConnectionBusy,
+    ConnectionUnusable,
+    InvalidWriterState,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -279,6 +283,21 @@ pub const TlsClientConnection = struct {
         try self.client.writer.flush();
         try self.net_writer.interface.flush();
     }
+
+    pub fn writeAllSlices(
+        self: *TlsClientConnection,
+        parts: []const []const u8,
+    ) Error!void {
+        var has_bytes = false;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            has_bytes = true;
+            try self.client.writer.writeAll(part);
+        }
+        if (!has_bytes) return;
+        try self.client.writer.flush();
+        try self.net_writer.interface.flush();
+    }
 };
 
 const RuntimeTransport = union(enum) {
@@ -325,9 +344,29 @@ const RuntimeTransport = union(enum) {
             },
         };
     }
+
+    fn writeAllSlices(
+        self: RuntimeTransport,
+        parts: []const []const u8,
+    ) Error!void {
+        return switch (self) {
+            .tcp => |tcp| stream_io.writeAllSlices(
+                tcp.io,
+                tcp.stream,
+                parts,
+            ),
+            .tls => |conn| conn.writeAllSlices(parts),
+            // io_uring's adapter owns one buffer per send SQE. Preserve the
+            // borrowed-slice behavior without allocating a concatenation.
+            .linux_io_uring => |transport| {
+                for (parts) |part| try transport.writeAll(part);
+            },
+        };
+    }
 };
 
 const WriteScratch = runtime_write.Scratch;
+const StreamingBodyWriter = body_writer.Writer(Error);
 
 pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
     ring: *linux.IoUring,
@@ -759,6 +798,7 @@ pub const Client = struct {
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     write_scratch: WriteScratch = .{},
+    writer_state: body_writer.State = .{},
     default_host: ?[]u8 = null,
     tls_conn: ?*TlsClientConnection = null,
 
@@ -835,6 +875,7 @@ pub const Client = struct {
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
+        try self.writer_state.ensureAvailable();
         var options = request_options;
         if (options.host == null) options.host = self.default_host;
         try writeRequestToTransportScratch(
@@ -844,6 +885,49 @@ pub const Client = struct {
             &self.write_scratch,
         );
         return readResponseFromTransportBufferedForRequest(self.allocator, self.transport(), self.limits, .{}, &self.inbuf, request_options.method);
+    }
+
+    /// Start a request whose body is supplied incrementally.
+    ///
+    /// HTTP/1 serializes exchanges on a connection. The returned writer owns
+    /// that slot through body completion and response receive; abandoning it
+    /// makes the connection unusable because HTTP/1 has no per-message reset.
+    pub fn startRequest(
+        self: *Client,
+        request_options: StreamingRequestOptions,
+    ) Error!RequestWriter {
+        const generation = try self.writer_state.begin();
+        errdefer if (self.writer_state.phase == .writing) {
+            self.writer_state.phase = .idle;
+        };
+
+        var options = request_options;
+        if (options.host == null) options.host = self.default_host;
+        const prepared = try runtime_write.streaming.prepareRequest(
+            self.allocator,
+            options,
+            &self.write_scratch,
+        );
+        const announced_trailers = self.write_scratch.trailer_headers.items;
+        self.transport().writeAll(prepared.head) catch |err| {
+            self.writer_state.phase = .unusable;
+            return err;
+        };
+        return .{
+            .client = self,
+            .method = options.method,
+            .body = StreamingBodyWriter.init(
+                self.allocator,
+                &self.writer_state,
+                generation,
+                self,
+                clientWriteSlices,
+                &self.write_scratch,
+                prepared,
+                announced_trailers,
+                false,
+            ),
+        };
     }
 
     pub fn requestUri(
@@ -960,6 +1044,7 @@ pub const Client = struct {
     }
 
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
+        try self.writer_state.ensureAvailable();
         try http1.validateConnectTarget(target);
         try writeRequestToTransport(self.allocator, self.transport(), .{
             .method = .CONNECT,
@@ -989,6 +1074,7 @@ pub const Connection = struct {
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     write_scratch: WriteScratch = .{},
+    writer_state: body_writer.State = .{},
 
     pub fn close(self: *Connection) void {
         self.inbuf.deinit(self.allocator);
@@ -998,6 +1084,7 @@ pub const Connection = struct {
     }
 
     pub fn readRequest(self: *Connection, options: http1.ParseOptions) Error!OwnedRequest {
+        try self.writer_state.ensureAvailable();
         return readRequestFromStreamBuffered(self.allocator, self.io, self.stream, self.limits, options, &self.inbuf);
     }
 
@@ -1015,6 +1102,7 @@ pub const Connection = struct {
         bodies: [][]const u8,
         options: http1.ParseOptions,
     ) Error!usize {
+        try self.writer_state.ensureAvailable();
         if (heads.len == 0 or heads.len != bodies.len) {
             return error.InvalidResponse;
         }
@@ -1125,12 +1213,54 @@ pub const Connection = struct {
     }
 
     pub fn writeResponse(self: *Connection, response: ResponseOptions) Error!void {
+        try self.writer_state.ensureAvailable();
         try writeResponseToTransportScratch(
             self.allocator,
             .{ .tcp = .{ .io = self.io, .stream = self.stream } },
             response,
             &self.write_scratch,
         );
+    }
+
+    /// Start a response whose body is supplied incrementally.
+    ///
+    /// Body-forbidden responses finish at the head. Ordinary responses retain
+    /// the connection slot until `finish` or `finishTrailers`.
+    pub fn startResponse(
+        self: *Connection,
+        options: StreamingResponseOptions,
+    ) Error!ResponseWriter {
+        const generation = try self.writer_state.begin();
+        errdefer if (self.writer_state.phase == .writing) {
+            self.writer_state.phase = .idle;
+        };
+
+        const prepared = try runtime_write.streaming.prepareResponse(
+            self.allocator,
+            options,
+            &self.write_scratch,
+        );
+        const announced_trailers = self.write_scratch.trailer_headers.items;
+        const transport = RuntimeTransport{
+            .tcp = .{ .io = self.io, .stream = self.stream },
+        };
+        transport.writeAll(prepared.head) catch |err| {
+            self.writer_state.phase = .unusable;
+            return err;
+        };
+        return .{
+            .body = StreamingBodyWriter.init(
+                self.allocator,
+                &self.writer_state,
+                generation,
+                self,
+                connectionWriteSlices,
+                &self.write_scratch,
+                prepared,
+                announced_trailers,
+                true,
+            ),
+        };
     }
 
     /// Validate and flush several pipelined responses as one transport write.
@@ -1144,6 +1274,7 @@ pub const Connection = struct {
         self: *Connection,
         responses: []const ResponseOptions,
     ) Error!void {
+        try self.writer_state.ensureAvailable();
         try writeResponsesToTransportScratch(
             self.allocator,
             .{ .tcp = .{ .io = self.io, .stream = self.stream } },
@@ -1176,6 +1307,7 @@ pub const Connection = struct {
     }
 
     pub fn acceptConnectTunnel(self: *Connection, request: http1.Request, response_headers: []const http1.Header) Error!Tunnel {
+        try self.writer_state.ensureAvailable();
         if (request.method != .CONNECT or request.body.len != 0 or request.trailers.len != 0) return error.InvalidResponse;
         try http1.validateConnectTarget(request.target);
         try writeResponseToStream(self.allocator, self.io, self.stream, .{
@@ -1244,6 +1376,114 @@ pub const OwnedResponse = struct {
 
 pub const RequestOptions = runtime_write.RequestOptions;
 pub const ResponseOptions = runtime_write.ResponseOptions;
+pub const StreamingRequestOptions =
+    runtime_write.streaming.RequestOptions;
+pub const StreamingResponseOptions =
+    runtime_write.streaming.ResponseOptions;
+
+pub const RequestWriter = struct {
+    client: *Client,
+    method: http1.Method,
+    body: StreamingBodyWriter,
+
+    pub fn deinit(self: *RequestWriter) void {
+        self.body.deinit();
+    }
+
+    pub fn write(
+        self: *RequestWriter,
+        data: []const u8,
+    ) Error!void {
+        try self.body.write(data);
+    }
+
+    pub fn finish(self: *RequestWriter) Error!void {
+        try self.body.finish();
+    }
+
+    pub fn finishTrailers(
+        self: *RequestWriter,
+        trailers: []const http1.Header,
+    ) Error!void {
+        try self.body.finishTrailers(trailers);
+    }
+
+    /// Read the response and release the connection exchange slot exactly once.
+    pub fn readResponse(self: *RequestWriter) Error!OwnedResponse {
+        try self.body.ensureExchangeActive();
+        if (!self.body.isBodyFinished()) return error.InvalidWriterState;
+
+        const response = readResponseFromTransportBufferedForRequest(
+            self.client.allocator,
+            self.client.transport(),
+            self.client.limits,
+            .{},
+            &self.client.inbuf,
+            self.method,
+        ) catch |err| {
+            self.body.fail();
+            return err;
+        };
+        self.body.release(responseIsReusable(response.response));
+        return response;
+    }
+};
+
+pub const ResponseWriter = struct {
+    body: StreamingBodyWriter,
+
+    pub fn deinit(self: *ResponseWriter) void {
+        self.body.deinit();
+    }
+
+    pub fn write(
+        self: *ResponseWriter,
+        data: []const u8,
+    ) Error!void {
+        try self.body.write(data);
+    }
+
+    pub fn finish(self: *ResponseWriter) Error!void {
+        try self.body.finish();
+    }
+
+    pub fn finishTrailers(
+        self: *ResponseWriter,
+        trailers: []const http1.Header,
+    ) Error!void {
+        try self.body.finishTrailers(trailers);
+    }
+};
+
+fn clientWriteSlices(
+    context: ?*anyopaque,
+    parts: []const []const u8,
+) Error!void {
+    const client: *Client = @ptrCast(@alignCast(context.?));
+    try client.transport().writeAllSlices(parts);
+}
+
+fn connectionWriteSlices(
+    context: ?*anyopaque,
+    parts: []const []const u8,
+) Error!void {
+    const connection: *Connection = @ptrCast(@alignCast(context.?));
+    try (RuntimeTransport{
+        .tcp = .{
+            .io = connection.io,
+            .stream = connection.stream,
+        },
+    }).writeAllSlices(parts);
+}
+
+fn responseIsReusable(response: http1.Response) bool {
+    // Close-delimited bodies consume EOF as their message boundary, and 101
+    // transfers the socket to another protocol. Neither can begin another
+    // HTTP/1 exchange even if the header block omitted Connection: close.
+    return response.keepAlive() and
+        response.body_framing != .close_delimited and
+        response.status != 101;
+}
 
 fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
     const path_value = uriComponentBytes(uri.path);
@@ -4372,4 +4612,8 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test {
+    _ = @import("runtime/body_writer_tests.zig");
 }
