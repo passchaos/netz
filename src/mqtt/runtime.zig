@@ -4,6 +4,7 @@ const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
+const tls_server = @import("tls/server_connection.zig");
 
 const net = std.Io.net;
 
@@ -420,6 +421,31 @@ pub const Connection = struct {
             ),
             .peer_maximum_qos = options.peer_maximum_qos,
             .peer_retain_available = options.peer_retain_available,
+        };
+    }
+
+    /// Wrap an established server-side TLS stream in shared MQTT state.
+    ///
+    /// The TLS connection owns its accepted TCP stream. Broker-side MQTT
+    /// negotiation remains centralized in `accept`, exactly as for plain TCP
+    /// and WebSocket listeners.
+    pub fn initTlsServer(
+        allocator: std.mem.Allocator,
+        tls_connection: *tls_server.Connection,
+        protocol: mqtt.ProtocolVersion,
+        limits: Limits,
+        max_outgoing_inflight: u16,
+        topic_alias_maximum: u16,
+    ) Connection {
+        return .{
+            .allocator = allocator,
+            .transport = .initTlsServer(tls_connection),
+            .protocol = protocol,
+            .limits = limits,
+            .max_outgoing_inflight = max_outgoing_inflight,
+            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
+                topic_alias_maximum,
+            ),
         };
     }
 

@@ -15,7 +15,7 @@ whole-broker throughput claims.
 | Shared subscriptions | Trie-indexed `{group, filter}` routing with allocation-free match, RoundRobin/Random/Sticky and stable Rendezvous hashing | RoundRobin/Random/Sticky broker strategies |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local and shared groups | Hash maps, logs and broker scheduler |
 | Retained messages | Bounded owned store, O(1) exact lookup, wildcard delivery, MQTT 5 expiry countdown and full subscription-time rules | HashMap store with expiry; audited routing has Retain Forward Rules/re-subscribe TODOs |
-| Runtime transports | Blocking TCP client/server plus `std.Io.async` concurrent server helper; verified native TLS client; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
+| Runtime transports | Blocking TCP and native TLS client/server plus `std.Io.async` concurrent server helpers; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
 | Broker sessions | Bounded Session Store with Session Expiry, full subscription options/identifiers, offline QoS 1/2 queue, incoming/outgoing QoS 2 and reconnect retransmission | Graveyard restores filter names, tracker cursors and PUBREL IDs; no Session Expiry cleanup |
 | Will lifecycle | Owned indexed min-heap scheduler for Will Delay, Session-end deadline, reconnect cancellation, Clean Start/takeover and DISCONNECT actions | Per-link Tokio timeout/channel plus router Last Will map |
 | Broker log persistence | In-memory retained/session stores; no disk commitlog yet | Datalog, segments and graveyard state |
@@ -102,14 +102,22 @@ terminator.
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the
 same Zig 0.16 TLS client as HTTPS/WSS, including operating-system roots,
 caller-managed CA bundles, hostname verification, and explicit truncation
-policy. TCP_NODELAY defaults on for latency-sensitive MQTT control packets and
-can be disabled for batching-oriented deployments.
+policy.
 
-The in-repository TLS 1.3 peer uses project-local vail primitives and performs a
-real encrypted handshake and application-record exchange. End-to-end tests
-cover MQTT 5 CONNECT, verified localhost CA/SAN, QoS 1 PUBLISH/PUBACK, and MQTT
-3.1.1 through `mqtts://`; no OpenSSL process or public network endpoint is
-required.
+`mqtt.tls_runtime.Server` is a native TLS 1.3 listener backed by project-local
+vail primitives. It accepts caller-provided DER certificate chains and
+Ed25519/ECDSA/SM2 signers, generates fresh handshake/key-exchange/signature
+entropy per connection, supports configured TLS 1.3 cipher-suite preference,
+fragments large MQTT writes into bounded TLS records, and preserves byte-stream
+semantics when records and MQTT Control Packets have different boundaries. The
+accepted transport enters the same MQTT broker-side CONNECT, capability, Topic
+Alias, inflight and QoS state machine used by TCP and WebSocket. Client and
+server both default TCP_NODELAY on for latency-sensitive control packets and
+allow callers to retain Nagle for batching-oriented deployments.
+
+End-to-end tests cover a real production-listener handshake with verified
+localhost CA/SAN, MQTT 5 CONNECT and QoS 1 PUBLISH/PUBACK, plus MQTT 3.1.1
+through `mqtts://`; no OpenSSL process or public network endpoint is required.
 
 Run the steady-state 1 KiB QoS 1 baseline with:
 
@@ -117,18 +125,27 @@ Run the steady-state 1 KiB QoS 1 baseline with:
 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
 
-2026-08-18 same-host `ReleaseFast` smoke result after 100 warmups and 2,000
-measured PUBLISH/PUBACK exchanges:
+2026-08-18 same-host `ReleaseFast`, median of three runs after 100 warmups and
+2,000 measured PUBLISH/PUBACK exchanges through the production TLS server and
+MQTT broker-side runtime:
 
 ```text
-ns/publish+PUBACK: 13,674
-operations/s:      73,126
+ns/publish+PUBACK: 19,427
+operations/s:      51,473
 ```
 
 This is a reproducible netz baseline rather than an equal-wire rumqtt speed
 claim. Unlike rumqtt's feature-gated rustls/native-tls split, the netz API is
-available through one built-in Zig TLS transport; rumqtt still has broader
-client-certificate/mTLS configuration.
+available through one built-in Zig TLS transport.
+
+The audited rumqttd rustls path can require a client certificate when built
+with `verify-client-cert`; its native-tls path cannot. Netz's vail dependency
+already provides CertificateRequest and certificate-possession/trust codecs,
+but the stream TLS server flight does not yet request and consume the client
+Certificate/CertificateVerify messages, and Zig 0.16's standard TLS client has
+no client-identity option. Consequently this server does **not** claim mTLS:
+client-certificate support remains a separate interoperability milestone rather
+than an unverified policy switch.
 
 ## Retained-message store
 
@@ -277,8 +294,9 @@ rumqttd.
 
 1. Add a durable disk/replicated commitlog for retained/session/offline/Will
    state.
-2. Add native MQTT TLS server and server-side WSS termination, plus client
-   certificate/mTLS support; verified native TLS and WSS clients are available.
+2. Add server-side WSS termination and complete interoperable
+   client-certificate/mTLS support; native TLS client/server and WSS clients
+   are available.
 3. Build one identical multi-client publish/subscribe load driver for both
    brokers and capture throughput, tail latency, allocation and peak memory.
 4. Add MQTT protocol conformance/interoperability suites beyond in-repository

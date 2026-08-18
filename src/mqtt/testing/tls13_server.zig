@@ -1,8 +1,8 @@
-//! Local TLS 1.3 server used by MQTT transport tests and benchmarks.
+//! Local TLS 1.3 peer and identity fixture used by MQTT transport tests.
 //!
-//! Production MQTT code only depends on the standard-library TLS client. This
-//! fixture uses the project-local vail TLS primitives so validation exercises a
-//! real encrypted TCP connection without requiring OpenSSL or network access.
+//! Production MQTT client tests retain this deliberately small peer to verify
+//! the client independently of the production server. Server tests and the TLS
+//! benchmark use `mqtt.tls_runtime.Server` with the identity exported below.
 
 const std = @import("std");
 const vail = @import("vail");
@@ -327,7 +327,7 @@ pub const Connection = struct {
     }
 };
 
-fn serverKeyPair() !EcdsaP256Sha256.KeyPair {
+pub fn serverKeyPair() !EcdsaP256Sha256.KeyPair {
     const secret = try EcdsaP256Sha256.SecretKey.fromBytes(.{
         0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1,
         0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x12,

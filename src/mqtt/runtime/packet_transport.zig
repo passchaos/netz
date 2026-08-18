@@ -2,10 +2,12 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
+const tls_server = @import("../tls/server_connection.zig");
 
 const net = std.Io.net;
 
-pub const Error = mqtt.Error || websocket_runtime.Error || error{
+pub const Error = mqtt.Error || websocket_runtime.Error ||
+    tls_server.Error || error{
     ConnectionClosed,
     InvalidWebSocketMessage,
     PacketTooLarge,
@@ -27,6 +29,7 @@ pub const Transport = union(enum) {
         stream: net.Stream,
     },
     tls: *http1_runtime.TlsClientConnection,
+    tls_server: *tls_server.Connection,
     websocket: WebSocketTransport,
 
     pub fn initTcp(io: std.Io, stream: net.Stream) Transport {
@@ -45,6 +48,12 @@ pub const Transport = union(enum) {
         return .{ .tls = connection };
     }
 
+    pub fn initTlsServer(
+        connection: *tls_server.Connection,
+    ) Transport {
+        return .{ .tls_server = connection };
+    }
+
     pub fn close(
         self: *Transport,
         allocator: std.mem.Allocator,
@@ -52,6 +61,7 @@ pub const Transport = union(enum) {
         switch (self.*) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
             .tls => |connection| connection.deinit(),
+            .tls_server => |connection| connection.deinit(),
             .websocket => |*ws| {
                 ws.input.deinit(allocator);
                 ws.connection.close();
@@ -67,6 +77,7 @@ pub const Transport = union(enum) {
         switch (self.*) {
             .tcp => |tcp| try writeAll(tcp.io, tcp.stream, bytes),
             .tls => |connection| try connection.writeAll(bytes),
+            .tls_server => |connection| try connection.writeAll(bytes),
             // One packet per write matches rumqtt's WsStream behavior. The
             // reader intentionally does not depend on that optimization.
             // Client MQTT encoders relinquish their temporary bytes after the
@@ -95,6 +106,11 @@ pub const Transport = union(enum) {
                 connection,
                 max_packet_size,
             ),
+            .tls_server => |connection| readStreamPacket(
+                allocator,
+                connection,
+                max_packet_size,
+            ),
             .websocket => |*ws| readWebSocketPacket(
                 allocator,
                 ws,
@@ -106,7 +122,7 @@ pub const Transport = union(enum) {
 
 fn readStreamPacket(
     allocator: std.mem.Allocator,
-    connection: *http1_runtime.TlsClientConnection,
+    connection: anytype,
     max_packet_size: usize,
 ) Error!OwnedPacket {
     var encoded: std.ArrayList(u8) = .empty;
@@ -321,7 +337,7 @@ fn readExact(
 }
 
 fn readExactTls(
-    connection: *http1_runtime.TlsClientConnection,
+    connection: anytype,
     buffer: []u8,
 ) Error!void {
     var offset: usize = 0;

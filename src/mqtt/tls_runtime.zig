@@ -2,8 +2,171 @@ const std = @import("std");
 const mqtt_runtime = @import("runtime.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
+const tls_server = @import("tls/server_connection.zig");
+const vail = @import("vail");
 
 const net = std.Io.net;
+
+pub const ServerIdentity = vail.tls.auth.ServerIdentity;
+pub const ServerSigner = vail.tls.auth.Signer;
+pub const CipherSuite = vail.tls.cipher_suite.Suite;
+
+/// Native MQTT-over-TLS listener using vail's TLS 1.3 primitives.
+///
+/// Each accepted socket completes its TLS handshake before the shared MQTT
+/// runtime reads CONNECT. `Server` borrows the configured certificate-chain
+/// slices while it remains able to accept; established connections retain
+/// traffic keys, not certificate or signer references.
+pub const Server = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    listener: net.Server,
+    limits: mqtt_runtime.Limits,
+    tls: tls_server.Options,
+    tcp_nodelay: bool,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        options: ListenOptions,
+    ) mqtt_runtime.Error!Server {
+        try options.identity.validate();
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .listener = try bind_address.listen(
+                io,
+                .{ .reuse_address = true },
+            ),
+            .limits = options.limits,
+            .tls = .{
+                .identity = options.identity,
+                .cipher_suites = options.cipher_suites,
+                .max_client_hello_size = options.max_client_hello_size,
+            },
+            .tcp_nodelay = options.tcp_nodelay,
+        };
+    }
+
+    pub fn deinit(self: *Server) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn address(self: Server) net.IpAddress {
+        return self.listener.socket.address;
+    }
+
+    pub fn accept(
+        self: *Server,
+        options: mqtt_runtime.AcceptOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.AcceptedClient {
+        const stream = try self.listener.accept(self.io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.io);
+        if (self.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
+        const tls_connection = try tls_server.Connection.init(
+            self.allocator,
+            self.io,
+            stream,
+            self.tls,
+        );
+        stream_owned = false;
+
+        var connection = mqtt_runtime.Connection.initTlsServer(
+            self.allocator,
+            tls_connection,
+            options.protocol,
+            self.limits,
+            options.max_outgoing_inflight,
+            options.topic_alias_maximum,
+        );
+        errdefer connection.close();
+        return connection.accept(options);
+    }
+
+    pub fn serveConcurrent(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *mqtt_runtime.AcceptedClient,
+        ) mqtt_runtime.Error!void,
+        max_connections: usize,
+        options: mqtt_runtime.AcceptOptions,
+    ) mqtt_runtime.AsyncServeError!mqtt_runtime.ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.allocator.alloc(
+            ?anyerror,
+            max_connections,
+        );
+        errdefer self.allocator.free(results);
+        @memset(results, null);
+
+        for (results) |*result| {
+            var accepted = try self.accept(options);
+            errdefer accepted.deinit(self.allocator);
+            const task = ServerTask(HandlerContext){
+                .accepted = accepted,
+                .context = context,
+                .handler = handler,
+                .result = result,
+                .allocator = self.allocator,
+            };
+            group.async(
+                self.io,
+                ServerTask(HandlerContext).run,
+                .{task},
+            );
+        }
+
+        try group.await(self.io);
+        return .{
+            .allocator = self.allocator,
+            .errors = results,
+        };
+    }
+};
+
+pub const ListenOptions = struct {
+    /// Certificate chain storage remains borrowed by `Server` and must outlive
+    /// the listener. Signer key material is copied into the listener value.
+    identity: ServerIdentity,
+    limits: mqtt_runtime.Limits = .{},
+    cipher_suites: []const CipherSuite =
+        &vail.tls.cipher_suite.default_preference,
+    max_client_hello_size: usize = 64 * 1024,
+    /// MQTT control packets are latency sensitive, matching the client
+    /// default. Disable this when deliberate TCP batching is preferred.
+    tcp_nodelay: bool = true,
+};
+
+fn ServerTask(comptime HandlerContext: type) type {
+    return struct {
+        accepted: mqtt_runtime.AcceptedClient,
+        context: *HandlerContext,
+        handler: *const fn (
+            *HandlerContext,
+            *mqtt_runtime.AcceptedClient,
+        ) mqtt_runtime.Error!void,
+        result: *?anyerror,
+        allocator: std.mem.Allocator,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            var accepted = task.accepted;
+            defer accepted.deinit(task.allocator);
+            task.handler(task.context, &accepted) catch |err| {
+                task.result.* = err;
+                return;
+            };
+            task.result.* = null;
+        }
+    };
+}
 
 /// Native MQTT-over-TLS client.
 ///

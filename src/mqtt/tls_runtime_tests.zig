@@ -5,7 +5,182 @@ const mqtt_tls = @import("tls_runtime.zig");
 const tls_test = @import("testing/tls13_server.zig");
 
 const max_packet_size: usize = 4096;
+const tls_server_max_packet_size: usize = 32 * 1024;
+const large_payload_bytes: usize = 20 * 1024;
 const CertificateBundle = std.crypto.Certificate.Bundle;
+
+test "MQTT TLS server completes verified MQTT 5 QoS 1" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{
+                    .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    },
+                },
+            },
+            .limits = .{
+                .max_packet_size = tls_server_max_packet_size,
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *mqtt_tls.Server) !void {
+            var accepted = try server_ptr.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings(
+                "mqtt-tls-server",
+                accepted.connect.connect.client_id,
+            );
+
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(
+                mqtt.QoS.at_least_once,
+                publish.publish.qos,
+            );
+            try std.testing.expectEqualStrings(
+                "server/tls/qos1",
+                publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "encrypted-to-broker",
+                publish.publish.payload,
+            );
+            try accepted.connection.writePubAck(
+                publish.publish.packet_id.?,
+                0,
+            );
+
+            var large_publish = try accepted.connection.readPublish();
+            defer large_publish.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(
+                mqtt.QoS.at_least_once,
+                large_publish.publish.qos,
+            );
+            try std.testing.expectEqualStrings(
+                "server/tls/large-client-write",
+                large_publish.publish.topic,
+            );
+            try expectLargePayload(large_publish.publish.payload);
+            try accepted.connection.writePubAck(
+                large_publish.publish.packet_id.?,
+                0,
+            );
+
+            var response_payload: [large_payload_bytes]u8 = undefined;
+            fillLargePayload(&response_payload);
+            try accepted.connection.publish(
+                "server/tls/large-server-write",
+                &response_payload,
+                .{},
+            );
+
+            var disconnect =
+                try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-tls-server",
+                .limits = .{
+                    .max_packet_size = tls_server_max_packet_size,
+                },
+            },
+            .tls = .{
+                .ca_bundle = .{
+                    .bundle = &ca_bundle,
+                    .lock = &ca_lock,
+                },
+            },
+        },
+    );
+    defer client.close();
+    try client.publish(
+        "server/tls/qos1",
+        "encrypted-to-broker",
+        .{ .qos = .at_least_once },
+    );
+    var large_payload: [large_payload_bytes]u8 = undefined;
+    fillLargePayload(&large_payload);
+    try client.publish(
+        "server/tls/large-client-write",
+        &large_payload,
+        .{ .qos = .at_least_once },
+    );
+    var server_publish = try client.readPublish();
+    defer server_publish.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "server/tls/large-server-write",
+        server_publish.publish.topic,
+    );
+    try expectLargePayload(server_publish.publish.payload);
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+fn fillLargePayload(payload: []u8) void {
+    for (payload, 0..) |*byte, index| {
+        byte.* = @truncate(index *% 29 +% 7);
+    }
+}
+
+fn expectLargePayload(payload: []const u8) !void {
+    try std.testing.expectEqual(large_payload_bytes, payload.len);
+    for (payload, 0..) |byte, index| {
+        try std.testing.expectEqual(
+            @as(u8, @truncate(index *% 29 +% 7)),
+            byte,
+        );
+    }
+}
 
 test "MQTT TLS client verifies local CA and completes MQTT 5 QoS 1" {
     const allocator = std.testing.allocator;

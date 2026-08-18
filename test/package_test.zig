@@ -467,6 +467,34 @@ test "public modules are reachable" {
         "Client",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "Server",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Server,
+        "listen",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Server,
+        "accept",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Server,
+        "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "ServerIdentity",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "ServerSigner",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "CipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.tls_runtime.Client,
         "connectHost",
     ));
@@ -481,6 +509,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ConnectOptions,
         "tcp_nodelay",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ListenOptions,
+        "identity",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
     try std.testing.expect(@hasDecl(

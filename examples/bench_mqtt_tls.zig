@@ -12,15 +12,36 @@ pub fn main(_: std.process.Init) !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var server = try netz.mqtt.testing.tls13_server.Server.listen(
+    var certificate_der: [
+        netz.mqtt.testing.tls13_server.certificate_der_len
+    ]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.mqtt.testing.tls13_server.certificate_base64,
+    );
+    const key_pair =
+        try netz.mqtt.testing.tls13_server.serverKeyPair();
+    var server = try netz.mqtt.tls_runtime.Server.listen(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{
+                    .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    },
+                },
+            },
+            .limits = .{ .max_packet_size = max_packet_size },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
     );
     defer server.deinit();
 
     const Shared = struct {
-        server: *netz.mqtt.testing.tls13_server.Server,
+        server: *netz.mqtt.tls_runtime.Server,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -30,52 +51,24 @@ pub fn main(_: std.process.Init) !void {
         }
 
         fn runFallible(shared: *@This()) !void {
-            var tls = try shared.server.accept();
-            defer tls.deinit();
-            var input: [max_packet_size]u8 = undefined;
-            var output: std.ArrayList(u8) = .empty;
-            defer output.deinit(shared.server.allocator);
-
-            const connect_bytes = try tls.readApplication(&input);
-            var connect = try netz.mqtt.Connect.parse(
-                shared.server.allocator,
-                connect_bytes,
-            );
-            defer connect.deinit(shared.server.allocator);
-            try netz.mqtt.ConnAck.write(
-                &output,
-                shared.server.allocator,
-                .v5,
-                false,
-                0,
-                &.{},
-            );
-            try tls.writeApplication(output.items);
+            var accepted = try shared.server.accept(.{
+                .protocol = .v5,
+            });
+            defer accepted.deinit(shared.server.allocator);
 
             for (0..warmup_iterations + iterations) |_| {
-                const publish_bytes = try tls.readApplication(&input);
-                var publish = try netz.mqtt.Publish.parse(
-                    shared.server.allocator,
-                    .v5,
-                    publish_bytes,
-                );
+                var publish =
+                    try accepted.connection.readPublish();
                 defer publish.deinit(shared.server.allocator);
-                if (publish.qos != .at_least_once or
-                    publish.payload.len != payload_bytes)
+                if (publish.publish.qos != .at_least_once or
+                    publish.publish.payload.len != payload_bytes)
                 {
                     return error.InvalidBenchmarkPacket;
                 }
-                output.clearRetainingCapacity();
-                try netz.mqtt.AckPacket.write(
-                    &output,
-                    shared.server.allocator,
-                    .v5,
-                    .puback,
-                    publish.packet_id.?,
+                try accepted.connection.writePubAck(
+                    publish.publish.packet_id.?,
                     0,
-                    &.{},
                 );
-                try tls.writeApplication(output.items);
             }
         }
     };
