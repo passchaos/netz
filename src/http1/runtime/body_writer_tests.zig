@@ -214,6 +214,74 @@ test "HTTP/1 chunked request writer streams announced trailers" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 body writer batches borrowed chunk boundaries" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *runtime.Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings(
+                "onetwothree",
+                request.request.body,
+            );
+            try connection.writeResponse(.{
+                .headers = &.{.{
+                    .name = "Connection",
+                    .value = "close",
+                }},
+                .body = "ok",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .method = .POST,
+        .target = "/batch",
+        .host = "localhost",
+    });
+    defer writer.deinit();
+    try writer.writeChunks(&.{ "one", "", "two", "three" });
+    try writer.finish();
+    var response = try writer.readResponse();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 chunked response writer streams announced trailers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

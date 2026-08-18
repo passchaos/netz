@@ -88,6 +88,8 @@ pub const Scratch = struct {
     trailer_headers: std.ArrayList(http1.Header) = .empty,
     trailer_name_storage: std.ArrayList(u8) = .empty,
     trailer_value: std.ArrayList(u8) = .empty,
+    streaming_chunk_descriptors: std.ArrayList(u8) = .empty,
+    streaming_parts: std.ArrayList([]const u8) = .empty,
     content_length: [32]u8 = undefined,
 
     fn reset(self: *Scratch) void {
@@ -97,6 +99,8 @@ pub const Scratch = struct {
         self.trailer_headers.clearRetainingCapacity();
         self.trailer_name_storage.clearRetainingCapacity();
         self.trailer_value.clearRetainingCapacity();
+        self.streaming_chunk_descriptors.clearRetainingCapacity();
+        self.streaming_parts.clearRetainingCapacity();
     }
 
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
@@ -107,6 +111,8 @@ pub const Scratch = struct {
         self.trailer_headers.deinit(allocator);
         self.trailer_name_storage.deinit(allocator);
         self.trailer_value.deinit(allocator);
+        self.streaming_chunk_descriptors.deinit(allocator);
+        self.streaming_parts.deinit(allocator);
         self.* = undefined;
     }
 };

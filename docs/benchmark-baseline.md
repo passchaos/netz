@@ -23,6 +23,8 @@ Build mode: -Doptimize=ReleaseFast
 
 ```sh
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=fixed --warmup=20 --iterations=200
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=chunked --warmup=20 --iterations=200
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
@@ -81,6 +83,29 @@ header/body vectored writes and one transactional response-batch flush. This is
 a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
+
+### HTTP/1 persistent bidirectional 1-MiB bodies
+
+Captured on 2026-08-19 against the checked-in same-shape Hyper harness under
+`tools/hyper_http1_body`. Both sides use one persistent TCP_NODELAY connection,
+20 warmups, 200 measured round trips, streaming receive, and 1 MiB in each
+direction. Fixed mode uses one exact Content-Length body; chunked mode uses
+64 × 16-KiB application chunks.
+
+```text
+fixed (five samples):
+  netz:  267.58-270.12 us/op, 7,403-7,474 aggregate MiB/s
+  hyper: 284.63-285.27 us/op, 7,010-7,026 aggregate MiB/s
+
+chunked (five samples):
+  netz:  434.21-508.92 us/op, 3,929-4,606 aggregate MiB/s
+  hyper: 412.28-430.64 us/op, 4,644-4,851 aggregate MiB/s
+```
+
+Netz is 1.05-1.07x faster in the fixed workload. Chunked is close but does not
+support a broad advantage claim. The reusable implementation changes are
+TCP_NODELAY, direct socket-to-callback body delivery, retained chunk/vector
+scratch, batched `writeChunks`, and wide POSIX writev submission.
 
 ### HTTP/2 persistent consecutive and parallel round trips
 

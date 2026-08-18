@@ -171,6 +171,78 @@ pub fn Writer(comptime RuntimeError: type) type {
             self.state.written += data.len;
         }
 
+        /// Write several application chunks in one transport submission.
+        ///
+        /// Fixed framing treats the slices as one contiguous body contribution.
+        /// Chunked framing preserves every application boundary while building
+        /// only small hexadecimal descriptors; payload slices remain borrowed.
+        pub fn writeChunks(
+            self: *Self,
+            chunks: []const []const u8,
+        ) RuntimeError!void {
+            try self.ensureWritable();
+            var additional: usize = 0;
+            var non_empty: usize = 0;
+            for (chunks) |chunk| {
+                additional = std.math.add(
+                    usize,
+                    additional,
+                    chunk.len,
+                ) catch return error.ContentLengthOverflow;
+                if (chunk.len != 0) non_empty += 1;
+            }
+            try self.reserveLength(additional, false);
+            if (non_empty == 0) return;
+
+            switch (self.framing) {
+                .fixed => try self.writeParts(chunks),
+                .chunked => {
+                    const descriptor_bytes = std.math.mul(
+                        usize,
+                        non_empty,
+                        32,
+                    ) catch return error.ContentLengthOverflow;
+                    const part_count = std.math.mul(
+                        usize,
+                        non_empty,
+                        3,
+                    ) catch return error.ContentLengthOverflow;
+                    try self.scratch.streaming_chunk_descriptors.resize(
+                        self.allocator,
+                        descriptor_bytes,
+                    );
+                    try self.scratch.streaming_parts.resize(
+                        self.allocator,
+                        part_count,
+                    );
+                    const descriptors =
+                        self.scratch.streaming_chunk_descriptors.items;
+                    const parts = self.scratch.streaming_parts.items;
+
+                    var part_index: usize = 0;
+                    var descriptor_offset: usize = 0;
+                    for (chunks) |chunk| {
+                        if (chunk.len == 0) continue;
+                        const destination =
+                            descriptors[descriptor_offset..][0..32];
+                        const rendered = std.fmt.bufPrint(
+                            destination,
+                            "{x}\r\n",
+                            .{chunk.len},
+                        ) catch return error.InvalidResponse;
+                        parts[part_index] = rendered;
+                        parts[part_index + 1] = chunk;
+                        parts[part_index + 2] = "\r\n";
+                        part_index += 3;
+                        descriptor_offset += 32;
+                    }
+                    try self.writeParts(parts);
+                },
+                .suppressed => return error.InvalidContentLength,
+            }
+            self.state.written += additional;
+        }
+
         pub fn finish(self: *Self) RuntimeError!void {
             try self.finishTrailers(&.{});
         }

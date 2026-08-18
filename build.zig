@@ -184,6 +184,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/1 persistent 16-request pipelines",
         },
         .{
+            .exe_name = "netz-bench-http1-body",
+            .path = "examples/bench_http1_body.zig",
+            .run_step = "bench-http1-body",
+            .description = "Benchmark HTTP/1 fixed or chunked streaming bodies",
+        },
+        .{
             .exe_name = "netz-bench-http2-hpack",
             .path = "examples/bench_http2_hpack.zig",
             .run_step = "bench-http2-hpack",

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const net = std.Io.net;
 
@@ -72,6 +73,94 @@ pub fn writeAllSlices(
             part_index += 1;
             part_offset = 0;
             while (part_index < parts.len and parts[part_index].len == 0) {
+                part_index += 1;
+            }
+            if (part_index == parts.len) {
+                std.debug.assert(remaining == 0);
+                return;
+            }
+        }
+    }
+}
+
+/// POSIX TCP specialization that can submit up to the platform IOV limit.
+///
+/// Zig 0.16 Threaded intentionally caps generic `netWrite` at eight iovecs for
+/// cross-platform behavior. Large chunked HTTP/1 batches can contain hundreds
+/// of already-borrowed slices, so that cap multiplies syscalls. The portable
+/// helper remains the fallback; POSIX stream sockets use writev directly and
+/// preserve identical partial-write advancement.
+pub fn writeAllSlicesWide(
+    io: std.Io,
+    stream: net.Stream,
+    parts: []const []const u8,
+) net.Stream.Writer.Error!void {
+    if (comptime builtin.os.tag == .windows) {
+        return writeAllSlices(io, stream, parts);
+    }
+    var part_index: usize = 0;
+    var part_offset: usize = 0;
+    while (true) {
+        while (part_index < parts.len and
+            part_offset == parts[part_index].len)
+        {
+            part_index += 1;
+            part_offset = 0;
+        }
+        if (part_index == parts.len) return;
+
+        var iovecs: [std.posix.IOV_MAX]std.posix.iovec_const = undefined;
+        var count: usize = 0;
+        var index = part_index;
+        while (index < parts.len and count < iovecs.len) : (index += 1) {
+            const offset = if (index == part_index) part_offset else 0;
+            const bytes = parts[index][offset..];
+            if (bytes.len == 0) continue;
+            iovecs[count] = .{
+                .base = bytes.ptr,
+                .len = bytes.len,
+            };
+            count += 1;
+        }
+
+        var message: std.posix.msghdr_const = .{
+            .name = null,
+            .namelen = 0,
+            .iov = iovecs[0..count].ptr,
+            .iovlen = @intCast(count),
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+        const rc = std.posix.system.sendmsg(
+            stream.socket.handle,
+            &message,
+            std.posix.MSG.NOSIGNAL,
+        );
+        const written: usize = switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .INTR => continue,
+            .PIPE, .NOTCONN => return error.SocketUnconnected,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .AGAIN => return error.Unexpected,
+            else => return error.Unexpected,
+        };
+        if (written == 0) return error.SocketUnconnected;
+
+        var remaining = written;
+        while (remaining != 0) {
+            const available = parts[part_index].len - part_offset;
+            if (remaining < available) {
+                part_offset += remaining;
+                break;
+            }
+            remaining -= available;
+            part_index += 1;
+            part_offset = 0;
+            while (part_index < parts.len and
+                parts[part_index].len == 0)
+            {
                 part_index += 1;
             }
             if (part_index == parts.len) {

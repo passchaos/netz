@@ -1,6 +1,8 @@
 const std = @import("std");
 const http1 = @import("../mod.zig");
 
+const direct_body_read_bytes: usize = 64 * 1024;
+
 pub fn Reader(comptime RuntimeError: type) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -392,9 +394,27 @@ pub fn Reader(comptime RuntimeError: type) type {
                 return error.BodyTooLarge;
             }
             var remaining = length;
+            var direct_buffer: [direct_body_read_bytes]u8 = undefined;
             while (remaining != 0) {
                 if (self.buffered().len == 0) {
-                    try self.readMore(std.math.maxInt(usize));
+                    // Once Content-Length establishes the exact boundary, read
+                    // directly into callback scratch. Appending to `inbuf`
+                    // would add a full-body memory copy and cannot discover a
+                    // pipeline suffix because this read is capped at remaining.
+                    const count = try self.read_some(
+                        self.context,
+                        direct_buffer[0..@min(
+                            direct_buffer.len,
+                            remaining,
+                        )],
+                    );
+                    if (count == 0) return error.ConnectionClosed;
+                    consume(
+                        callback_context,
+                        direct_buffer[0..count],
+                    ) catch |err| return err;
+                    remaining -= count;
+                    continue;
                 }
                 const available = self.buffered();
                 const count = @min(remaining, available.len);
@@ -474,9 +494,26 @@ pub fn Reader(comptime RuntimeError: type) type {
                     self.limits.max_body_bytes,
                 );
                 var remaining = size;
+                var direct_buffer: [direct_body_read_bytes]u8 = undefined;
                 while (remaining != 0) {
                     if (self.buffered().len == 0) {
-                        try self.readMore(std.math.maxInt(usize));
+                        // Chunk size supplies the same safe read boundary as
+                        // Content-Length. Keep the trailing CRLF on the socket
+                        // and deliver payload without an ArrayList round trip.
+                        const count = try self.read_some(
+                            self.context,
+                            direct_buffer[0..@min(
+                                direct_buffer.len,
+                                remaining,
+                            )],
+                        );
+                        if (count == 0) return error.ConnectionClosed;
+                        consume(
+                            callback_context,
+                            direct_buffer[0..count],
+                        ) catch |err| return err;
+                        remaining -= count;
+                        continue;
                     }
                     const available = self.buffered();
                     const count = @min(

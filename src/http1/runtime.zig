@@ -5,6 +5,7 @@ const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
@@ -19,6 +20,7 @@ pub const Error = http1.Error || error{
     ConnectionClosed,
     InvalidUri,
     InvalidResponse,
+    SocketOptionFailed,
     UnsupportedScheme,
     UnsupportedEndpoint,
     UnsupportedIoBackend,
@@ -29,9 +31,17 @@ pub const Error = http1.Error || error{
     InvalidWriterState,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
 
+fn setTcpNoDelay(stream: net.Stream) Error!void {
+    socket_options.setTcpNoDelay(stream) catch return error.SocketOptionFailed;
+}
+
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
+    /// Disable Nagle for application-driven streaming writes. HTTP/1 has no
+    /// frame coalescer, so a complete chunk followed by a small terminator or
+    /// response can otherwise stall behind Linux delayed ACKs.
+    tcp_nodelay: bool = true,
 };
 
 pub const TlsCaBundle = struct {
@@ -351,7 +361,7 @@ const RuntimeTransport = union(enum) {
         parts: []const []const u8,
     ) Error!void {
         return switch (self) {
-            .tcp => |tcp| stream_io.writeAllSlices(
+            .tcp => |tcp| stream_io.writeAllSlicesWide(
                 tcp.io,
                 tcp.stream,
                 parts,
@@ -681,10 +691,15 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server) Error!Connection {
+        const stream = try self.listener.accept(self.io);
+        errdefer stream.close(self.io);
+        if (self.limits.tcp_nodelay) {
+            try setTcpNoDelay(stream);
+        }
         return .{
             .io = self.io,
             .allocator = self.allocator,
-            .stream = try self.listener.accept(self.io),
+            .stream = stream,
             .limits = self.limits,
         };
     }
@@ -810,10 +825,13 @@ pub const Client = struct {
     }
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Client {
+        const stream = try address.connect(io, .{ .mode = .stream });
+        errdefer stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         return .{
             .io = io,
             .allocator = allocator,
-            .stream = try address.connect(io, .{ .mode = .stream }),
+            .stream = stream,
             .limits = limits,
         };
     }
@@ -828,10 +846,13 @@ pub const Client = struct {
         const host_name = try net.HostName.init(host);
         const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         errdefer allocator.free(owned_host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        errdefer stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         return .{
             .io = io,
             .allocator = allocator,
-            .stream = try host_name.connect(io, port, .{ .mode = .stream }),
+            .stream = stream,
             .limits = limits,
             .default_host = owned_host,
         };
@@ -849,6 +870,7 @@ pub const Client = struct {
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         const tls_conn = try TlsClientConnection.init(allocator, io, stream, host, tls_options);
         stream_owned = false;
         errdefer tls_conn.deinit();
@@ -1025,6 +1047,7 @@ pub const Client = struct {
         const stream = try endpoint.connect(io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         var client = if (is_https) blk: {
             const tls_conn = try TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, tls_options);
             stream_owned = false;
@@ -1569,6 +1592,13 @@ pub const RequestWriter = struct {
         try self.body.write(data);
     }
 
+    pub fn writeChunks(
+        self: *RequestWriter,
+        chunks: []const []const u8,
+    ) Error!void {
+        try self.body.writeChunks(chunks);
+    }
+
     pub fn finish(self: *RequestWriter) Error!void {
         try self.body.finish();
     }
@@ -1651,6 +1681,13 @@ pub const ResponseWriter = struct {
         data: []const u8,
     ) Error!void {
         try self.body.write(data);
+    }
+
+    pub fn writeChunks(
+        self: *ResponseWriter,
+        chunks: []const []const u8,
+    ) Error!void {
+        try self.body.writeChunks(chunks);
     }
 
     pub fn finish(self: *ResponseWriter) Error!void {

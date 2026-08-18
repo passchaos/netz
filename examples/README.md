@@ -24,6 +24,8 @@ zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
+  --mode=fixed --warmup=20 --iterations=200
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
@@ -42,6 +44,20 @@ response is 89 wire bytes, and performs untimed warmup batches before
 measurement. Pin both reference executables to the same CPU when collecting
 comparison evidence; see `docs/hyper_parity.md` for exact commands and captured
 same-host results.
+
+`bench-http1-body` sends and receives 1 MiB on one persistent HTTP/1
+connection. `--mode=fixed` uses one Content-Length contribution in each
+direction; `--mode=chunked` preserves 64 application chunks of 16 KiB.
+Both peers consume bodies incrementally. The same-shape Hyper harness lives in
+`tools/hyper_http1_body` and is run through:
+
+```sh
+taskset -c 0 tools/bench_hyper_http1_body.sh \
+  --mode=fixed --warmup=20 --iterations=200
+```
+
+The wrapper uses the checked-in Cargo lockfile and offline mode, and expects the
+reference checkout at `~/Work/hyper`.
 
 `bench-http2-h2c` mirrors Hyper's `http2_consecutive_x1_empty`,
 `http2_consecutive_x1_req_10b`, `http2_consecutive_x1_req_100kb`, and

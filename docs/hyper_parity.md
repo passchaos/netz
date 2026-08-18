@@ -69,6 +69,57 @@ The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the
 general path.
 
+## HTTP/1 bidirectional 1-MiB streaming bodies
+
+Hyper's existing `end_to_end` benchmark includes fixed-size HTTP/1 bodies, but
+does not expose a runnable 1-MiB fixed/chunked pair. The checked-in
+`tools/hyper_http1_body` harness therefore imports the audited local Hyper
+revision without modifying `~/Work/hyper`; `bench-http1-body` mirrors it.
+Its Cargo lockfile pins the support crates and the wrapper builds offline after
+the initial dependency cache is populated.
+Both use one persistent connection, current-thread event loops, TCP_NODELAY,
+20 warmup plus 200 measured round trips, a 1-MiB request and response, and
+borrowed streaming receive. Fixed mode sends one exact Content-Length body per
+direction. Chunked mode preserves 64 application chunks of 16 KiB per
+direction; Hyper's `StreamBody` and netz's `writeChunks` retain those same
+boundaries. Both include the same Date value.
+
+Commands:
+
+```sh
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
+  --mode=fixed --warmup=20 --iterations=200
+taskset -c 0 tools/bench_hyper_http1_body.sh \
+  --mode=fixed --warmup=20 --iterations=200
+
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
+  --mode=chunked --warmup=20 --iterations=200
+taskset -c 0 tools/bench_hyper_http1_body.sh \
+  --mode=chunked --warmup=20 --iterations=200
+```
+
+2026-08-19 ranges, each from five CPU-0-pinned process runs:
+
+```text
+fixed Content-Length, 1 MiB each direction:
+  netz:  267.58-270.12 us/round-trip, 7,403-7,474 aggregate MiB/s
+  hyper: 284.63-285.27 us/round-trip, 7,010-7,026 aggregate MiB/s
+  netz is about 1.05-1.07x faster
+
+chunked, 64 x 16 KiB each direction:
+  netz:  434.21-508.92 us/round-trip, 3,929-4,606 aggregate MiB/s
+  hyper: 412.28-430.64 us/round-trip, 4,644-4,851 aggregate MiB/s
+```
+
+The chunked ranges overlap only at their edges; this is near parity, not a
+superiority claim. The work removed a much larger initial gap: H1 now enables
+TCP_NODELAY, fixed/chunked readers deliver socket bytes directly to callbacks,
+chunk descriptors and vectored slice lists retain connection scratch, and
+`writeChunks` batches many caller boundaries without concatenating payloads.
+On POSIX, large HTTP/1 batches use the platform IOV limit instead of Zig
+Threaded's portable eight-iovec cap. The fixed result demonstrates a measured
+advantage; chunked remains explicit follow-up optimization evidence.
+
 ## HTTP/2 consecutive and parallel round trips
 
 Hyper's `benches/end_to_end.rs` defines consecutive empty GET, consecutive
@@ -217,6 +268,8 @@ Reusable implementation changes behind all four H2 results:
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server, Upgrade, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
+| HTTP/1 fixed 1-MiB duplex | 267.58-270.12 us/op pinned | 284.63-285.27 us/op pinned |
+| HTTP/1 chunked 1-MiB duplex | 434.21-508.92 us/op pinned | 412.28-430.64 us/op pinned |
 | HTTP/2 consecutive empty | 9.55-9.96 us/op pinned | 12.51-12.54 us/op pinned |
 | HTTP/2 consecutive 10-byte POST | 10.09-10.38 us/op pinned, coalesced frame submission | 41.15-41.37 ms/op pinned, delayed-ACK cliff on this host |
 | HTTP/2 consecutive 100-KiB POST | 23.52-23.57 us/op pinned, streaming receive | 37.24-38.68 us/op pinned |
@@ -224,8 +277,8 @@ Reusable implementation changes behind all four H2 results:
 
 ## Remaining evidence
 
-1. Add same-shape Hyper comparisons for fixed 1-MiB bodies, chunked bodies and
-   body-bearing HTTP/2 parallel workloads.
+1. Add same-shape Hyper comparisons for body-bearing HTTP/2 parallel workloads
+   and continue narrowing the remaining HTTP/1 chunked gap.
 2. Measure allocation count and peak memory, not only elapsed time.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;

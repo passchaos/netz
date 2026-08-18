@@ -1,0 +1,12 @@
+[package]
+name = "netz-hyper-http1-body"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bytes = "1.2"
+futures-core = "0.3"
+http-body-util = "0.1"
+hyper = { path = "../../../../Work/hyper", features = ["client", "http1", "server"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
