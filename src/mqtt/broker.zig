@@ -15,13 +15,14 @@ const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
 const will_driver_mod = @import("broker/will_driver.zig");
 const retained_mod = @import("retained/mod.zig");
+const session_mod = @import("session/mod.zig");
 const will_mod = @import("will/mod.zig");
 
 const net = std.Io.net;
 
 pub const Error = runtime.Error || router_mod.Error ||
     retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
-    will_mod.Error || error{
+    session_mod.Error || will_mod.Error || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
@@ -43,6 +44,7 @@ pub const Options = struct {
     limits: Limits = .{},
     router: router_mod.Options = .{},
     retained: retained_mod.Options = .{},
+    session: session_mod.Options = .{},
     will: will_mod.Options = .{},
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
@@ -74,6 +76,8 @@ const ClientSlot = struct {
     active: bool = false,
     connection: ?runtime.Connection = null,
     will_handle: ?will_mod.Handle = null,
+    session_handle: ?session_mod.Handle = null,
+    session_present: bool = false,
     graceful_disconnect: bool = false,
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
@@ -172,8 +176,13 @@ pub const Broker = struct {
     router: router_mod.Router,
     pending_qos2: qos2_mod.Store,
     retained: retained_mod.Store,
+    sessions: session_mod.Store,
     wills: will_mod.Scheduler,
     will_driver: will_driver_mod.Driver = .{},
+    session_owners: std.AutoHashMapUnmanaged(
+        session_mod.Handle,
+        router_mod.SubscriberId,
+    ) = .empty,
     will_publishers: std.AutoHashMapUnmanaged(
         will_mod.Handle,
         ?router_mod.SubscriberId,
@@ -217,11 +226,25 @@ pub const Broker = struct {
             options.retained,
         );
         errdefer retained.deinit();
+        var sessions = session_mod.Store.init(
+            allocator,
+            options.session,
+        );
+        errdefer sessions.deinit();
         var wills = will_mod.Scheduler.init(
             allocator,
             options.will,
         );
         errdefer wills.deinit();
+        var session_owners: std.AutoHashMapUnmanaged(
+            session_mod.Handle,
+            router_mod.SubscriberId,
+        ) = .empty;
+        errdefer session_owners.deinit(allocator);
+        try session_owners.ensureTotalCapacity(
+            allocator,
+            @intCast(options.limits.max_connections),
+        );
         var will_publishers: std.AutoHashMapUnmanaged(
             will_mod.Handle,
             ?router_mod.SubscriberId,
@@ -244,7 +267,9 @@ pub const Broker = struct {
             .router = router,
             .pending_qos2 = pending_qos2,
             .retained = retained,
+            .sessions = sessions,
             .wills = wills,
+            .session_owners = session_owners,
             .will_publishers = will_publishers,
             .slots = slots,
         };
@@ -257,8 +282,10 @@ pub const Broker = struct {
             if (slot.connection) |*connection| connection.close();
         }
         self.allocator.free(self.slots);
+        self.session_owners.deinit(self.allocator);
         self.will_publishers.deinit(self.allocator);
         self.wills.deinit();
+        self.sessions.deinit();
         self.retained.deinit();
         self.pending_qos2.deinit();
         self.router.deinit();
@@ -290,6 +317,18 @@ pub const Broker = struct {
             Broker.runWillDriver,
             .{self},
         );
+        var clients_started: usize = 0;
+        var clients_joined = false;
+        defer if (!clients_joined) {
+            // An accept/setup failure must not strand already-started readers
+            // behind this finite serve call.
+            for (self.slots[0..clients_started]) |*slot| {
+                if (slot.connection) |*connection| {
+                    connection.shutdown() catch {};
+                }
+            }
+            group.cancel(self.io);
+        };
         var stop_driver = true;
         defer if (stop_driver) {
             self.will_driver.stop(self.io);
@@ -303,13 +342,28 @@ pub const Broker = struct {
         @memset(errors, null);
 
         for (errors, 0..) |*result, index| {
-            var accepted = try self.server.accept(self.options.accept);
-            errdefer accepted.deinit(self.allocator);
+            var pending = try self.server.acceptPending(
+                self.options.accept,
+            );
+            errdefer pending.deinit(self.allocator);
             const subscriber_id = try self.register(
                 index,
-                &accepted.connection,
-                accepted.connect.connect,
+                pending.connect.connect,
             );
+            var accept_options = self.options.accept;
+            accept_options.session_present =
+                self.slots[index].session_present;
+            var accepted = pending.finish(accept_options) catch |err| {
+                self.abortRegistration(index, subscriber_id);
+                return err;
+            };
+            errdefer accepted.deinit(self.allocator);
+            self.attachConnection(
+                index,
+                subscriber_id,
+                &accepted.connection,
+            );
+            try self.flushSlot(index, &self.slots[index]);
             const task = ClientTask{
                 .broker = self,
                 .slot_index = index,
@@ -318,8 +372,10 @@ pub const Broker = struct {
                 .result = result,
             };
             group.async(self.io, ClientTask.run, .{task});
+            clients_started += 1;
         }
         group.await(self.io) catch {};
+        clients_joined = true;
         self.will_driver.stop(self.io);
         const will_result = will_future.await(self.io);
         stop_driver = false;
@@ -332,7 +388,6 @@ pub const Broker = struct {
     fn register(
         self: *Broker,
         slot_index: usize,
-        connection: *runtime.Connection,
         connect: mqtt.Connect,
     ) Error!router_mod.SubscriberId {
         self.state_mutex.lockUncancelable(self.io);
@@ -342,10 +397,11 @@ pub const Broker = struct {
         slot.generation +%= 1;
         if (slot.generation == 0) slot.generation = 1;
         slot.active = true;
-        slot.connection = connection.*;
+        slot.connection = null;
         slot.will_handle = null;
+        slot.session_handle = null;
+        slot.session_present = false;
         slot.graceful_disconnect = false;
-        connection.* = undefined;
         // The configured queue count is also the memory bound. Reserve it once
         // during setup so routing performs no destination queue allocation
         // while holding the global router lock.
@@ -354,21 +410,70 @@ pub const Broker = struct {
             self.options.limits
                 .max_queued_deliveries_per_connection,
         ) catch |err| {
-            connection.* = slot.connection.?;
-            slot.connection = null;
             slot.active = false;
             return err;
         };
         const id = subscriberId(slot_index, slot.generation);
+        const now = std.Io.Clock.awake.now(self.io);
+        const previous_session_handle = self.sessions.find(
+            connect.client_id,
+            now,
+        );
+        const previous_session_owner = if (previous_session_handle) |handle|
+            self.session_owners.get(handle)
+        else
+            null;
+        const opened_session = self.sessions.openConnect(
+            connect,
+            now,
+        ) catch |err| {
+            slot.active = false;
+            return err;
+        };
+        if (previous_session_handle) |handle| {
+            _ = self.session_owners.remove(handle);
+        }
+        if (opened_session.replaced_connection) {
+            if (previous_session_owner) |owner_id| {
+                self.detachReplacedSessionOwner(owner_id);
+            }
+        }
+        slot.session_handle = opened_session.handle;
+        slot.session_present = opened_session.session_present;
+        self.session_owners.putAssumeCapacityNoClobber(
+            opened_session.handle,
+            id,
+        );
+        self.restoreSessionSubscriptions(
+            id,
+            opened_session.handle,
+        ) catch |err| {
+            // `openConnect` gave this connection a fresh generation. Roll it
+            // offline on setup failure rather than leaving a phantom connected
+            // owner in the Store.
+            self.sessions.disconnect(
+                opened_session.handle,
+                null,
+                now,
+            ) catch {};
+            _ = self.session_owners.remove(opened_session.handle);
+            slot.active = false;
+            return err;
+        };
         const previous_handle = self.wills.handleForClient(
             connect.client_id,
         );
         const accepted_will = self.wills.acceptConnect(
             connect,
-            std.Io.Clock.awake.now(self.io),
+            now,
         ) catch |err| {
-            connection.* = slot.connection.?;
-            slot.connection = null;
+            self.sessions.disconnect(
+                opened_session.handle,
+                null,
+                now,
+            ) catch {};
+            _ = self.session_owners.remove(opened_session.handle);
+            _ = self.router.removeSubscriber(id) catch {};
             slot.active = false;
             return err;
         };
@@ -394,6 +499,105 @@ pub const Broker = struct {
         }
         self.will_driver.notify(self.io);
         return id;
+    }
+
+    fn detachReplacedSessionOwner(
+        self: *Broker,
+        owner_id: router_mod.SubscriberId,
+    ) void {
+        const owner_index = subscriberIndex(
+            owner_id,
+            self.slots.len,
+        ) orelse return;
+        const owner = &self.slots[owner_index];
+        if (!owner.active or
+            subscriberId(owner_index, owner.generation) != owner_id)
+        {
+            return;
+        }
+        _ = self.router.removeSubscriber(owner_id) catch {};
+        owner.session_handle = null;
+        // Wake its reader without closing the descriptor under it. The task
+        // remains the owning closer and sees its invalidated Session handle.
+        if (owner.connection) |*connection| {
+            connection.shutdown() catch {};
+        }
+    }
+
+    fn attachConnection(
+        self: *Broker,
+        slot_index: usize,
+        id: router_mod.SubscriberId,
+        connection: *runtime.Connection,
+    ) void {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        const slot = &self.slots[slot_index];
+        std.debug.assert(slot.active);
+        std.debug.assert(slot.connection == null);
+        std.debug.assert(
+            subscriberId(slot_index, slot.generation) == id,
+        );
+        slot.connection = connection.*;
+        connection.* = undefined;
+    }
+
+    fn abortRegistration(
+        self: *Broker,
+        slot_index: usize,
+        id: router_mod.SubscriberId,
+    ) void {
+        self.state_mutex.lockUncancelable(self.io);
+        const slot = &self.slots[slot_index];
+        // Session Store, router, and Will scheduler are committed before the
+        // CONNACK write. A transport failure at that final step must roll back
+        // every provisional owner, not leave a resumable ghost Session.
+        if (slot.session_handle) |handle| {
+            _ = self.session_owners.remove(handle);
+            self.sessions.discardHandle(handle) catch {};
+        }
+        if (slot.will_handle) |handle| {
+            _ = self.will_publishers.remove(handle);
+            _ = self.wills.close(handle, .normal_disconnect, .zero) catch {};
+        }
+        _ = self.router.removeSubscriber(id) catch {};
+        slot.active = false;
+        slot.connection = null;
+        slot.session_handle = null;
+        slot.session_present = false;
+        slot.will_handle = null;
+        self.state_mutex.unlock(self.io);
+        self.will_driver.notify(self.io);
+    }
+
+    fn restoreSessionSubscriptions(
+        self: *Broker,
+        subscriber_id: router_mod.SubscriberId,
+        handle: session_mod.Handle,
+    ) Error!void {
+        const stats = try self.sessions.stats(handle);
+        const subscriptions = try self.allocator.alloc(
+            session_mod.Subscription,
+            stats.subscription_count,
+        );
+        defer self.allocator.free(subscriptions);
+        const restored = try self.sessions.subscriptionsInto(
+            handle,
+            subscriptions,
+        );
+        for (restored) |subscription| {
+            _ = try self.router.subscribeWithIdentifierStatus(
+                subscriber_id,
+                .{
+                    .topic_filter = subscription.topic_filter,
+                    .qos = subscription.qos,
+                    .no_local = subscription.no_local,
+                    .retain_as_published = subscription.retain_as_published,
+                    .retain_handling = subscription.retain_handling,
+                },
+                subscription.subscription_identifier,
+            );
+        }
     }
 
     fn unregister(
@@ -425,6 +629,19 @@ pub const Broker = struct {
                 };
             }
         }
+        if (slot.session_handle) |handle| {
+            _ = self.session_owners.remove(handle);
+            self.sessions.disconnect(
+                handle,
+                null,
+                std.Io.Clock.awake.now(self.io),
+            ) catch |err| {
+                if (err != error.SessionNotFound) {
+                    self.state_mutex.unlock(self.io);
+                    return err;
+                }
+            };
+        }
         _ = self.router.removeSubscriber(id) catch {};
         _ = self.pending_qos2.removePublisher(id);
         slot.active = false;
@@ -434,6 +651,8 @@ pub const Broker = struct {
         if (slot.connection) |*value| value.close();
         slot.connection = null;
         slot.will_handle = null;
+        slot.session_handle = null;
+        slot.session_present = false;
     }
 
     fn handleDisconnect(
@@ -455,6 +674,19 @@ pub const Broker = struct {
                 _ = self.will_publishers.remove(handle);
                 slot.will_handle = null;
             }
+        }
+        if (slot.session_handle) |handle| {
+            _ = self.session_owners.remove(handle);
+            self.sessions.disconnectPacket(
+                handle,
+                slot.connection.?.protocol,
+                disconnect,
+                std.Io.Clock.awake.now(self.io),
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
+            slot.session_handle = null;
         }
         slot.graceful_disconnect = true;
         self.state_mutex.unlock(self.io);
@@ -485,6 +717,18 @@ pub const Broker = struct {
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         for (subscribe.subscriptions, 0..) |subscription, index| {
+            const session_handle = slot.session_handle orelse {
+                self.state_mutex.unlock(self.io);
+                return error.SessionNotFound;
+            };
+            const session_existed = self.sessions.setSubscription(
+                session_handle,
+                subscription,
+                subscription_identifier,
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
             const existed = self.router.subscribeWithIdentifierStatus(
                 id,
                 subscription,
@@ -493,6 +737,7 @@ pub const Broker = struct {
                 self.state_mutex.unlock(self.io);
                 return err;
             };
+            std.debug.assert(existed == session_existed);
             reasons[index] = @intFromEnum(subscription.qos);
             const deliveries = self.retained.deliveriesAlloc(
                 self.allocator,
@@ -577,10 +822,23 @@ pub const Broker = struct {
             unsubscribe.topic_filters.len,
         );
         defer self.allocator.free(reasons);
+        const slot = try self.slotForSubscriber(id);
         self.state_mutex.lockUncancelable(self.io);
         for (unsubscribe.topic_filters, 0..) |filter, index| {
+            const session_handle = slot.session_handle orelse {
+                self.state_mutex.unlock(self.io);
+                return error.SessionNotFound;
+            };
+            const session_removed = self.sessions.removeSubscription(
+                session_handle,
+                filter,
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
             self.router.unsubscribe(id, filter) catch |err| switch (err) {
                 error.SubscriptionNotFound => {
+                    std.debug.assert(!session_removed);
                     reasons[index] = 0x11;
                     continue;
                 },
@@ -589,10 +847,10 @@ pub const Broker = struct {
                     return err;
                 },
             };
+            std.debug.assert(session_removed);
             reasons[index] = 0;
         }
         self.state_mutex.unlock(self.io);
-        const slot = try self.slotForSubscriber(id);
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         try connection.writeUnsubAck(

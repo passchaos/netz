@@ -19,7 +19,7 @@ and equal-wire broker results are kept separate.
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no live match | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
-| Broker sessions | Separate bounded Session Store; not yet composed into live Broker | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
+| Broker sessions | Live Session Present, Clean Start, Session Expiry, takeover and persistent subscription restore; offline QoS drain remains next | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
 
@@ -152,6 +152,35 @@ Mosquitto uses one ordered Will-delay list in its event loop; rumqttd instead
 spawns a Tokio timeout/channel per disconnected link. Netz keeps Mosquitto's
 single-driver ownership model while using the indexed heap's O(log n)
 reschedule/cancel operations and generation-safe handles.
+
+## Live persistent subscription Sessions
+
+The first live Session Store integration closes the subscription/session
+continuity loop:
+
+- the runtime server now exposes a two-stage `acceptPending`/`finish` API, so a
+  stateful broker reads CONNECT and opens Session State before emitting
+  CONNACK,
+- the compatibility `accept` API still performs both stages for stateless
+  servers,
+- CONNACK Session Present comes from the Session Store rather than a static
+  listener option,
+- successful SUBSCRIBE and UNSUBSCRIBE mutate both the live router and the
+  deeply owned Session subscription set under the same broker lock,
+- Session resume rebuilds router entries with QoS, No Local, Retain As
+  Published, Retain Handling and Subscription Identifier intact,
+- Clean Start discards prior subscriptions, and a DISCONNECT Session Expiry
+  override of zero removes the Session immediately,
+- duplicate ClientID takeover invalidates the old generation, removes its
+  router ownership and wakes the old reader before restoring exactly one live
+  subscription owner,
+- a failed CONNACK or setup path rolls the opened Session offline and removes
+  provisional router/Will ownership.
+
+This mirrors the audited Mosquitto ordering: restore Session State, set Session
+Present, send CONNACK, then make queued/inflight state writable. The Session
+Store already models offline QoS 1/2 queues and retransmission; wiring those
+transmissions into the broker network path remains the next Session increment.
 
 ## Shared router benchmark
 
@@ -442,8 +471,8 @@ rumqttd.
    state.
 2. Add a native client-identity option for WSS; native MQTT TLS client/server
    mTLS and WS/WSS server transports are available.
-3. Compose the existing Session Store into the live Broker, including durable
-   QoS 2 continuation across reconnect.
+3. Complete Session Store network integration for offline QoS 1/2 queueing,
+   reconnect drain and durable QoS 2 continuation.
 4. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.

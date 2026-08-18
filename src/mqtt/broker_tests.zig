@@ -396,4 +396,5 @@ test {
     _ = @import("broker/qos2_tests.zig");
     _ = @import("broker/retained_tests.zig");
     _ = @import("broker/will_tests.zig");
+    _ = @import("broker/session_tests.zig");
 }

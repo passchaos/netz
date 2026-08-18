@@ -471,6 +471,19 @@ pub const Store = struct {
         return true;
     }
 
+    /// Discard exactly the generation represented by `handle`.
+    ///
+    /// Broker accept rollback uses this after Session State was opened but
+    /// CONNACK could not be written. A stale takeover handle must not remove
+    /// the newer Session generation.
+    pub fn discardHandle(
+        self: *Store,
+        handle: Handle,
+    ) Error!void {
+        _ = try self.getSession(handle);
+        self.removeAt(handle.index);
+    }
+
     pub fn pruneExpired(
         self: *Store,
         now: std.Io.Timestamp,

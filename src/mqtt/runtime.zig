@@ -53,6 +53,15 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server, options: AcceptOptions) Error!AcceptedClient {
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPending(
+        self: *Server,
+        options: AcceptOptions,
+    ) Error!PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
         errdefer stream.close(self.io);
 
@@ -65,7 +74,7 @@ pub const Server = struct {
             .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
         };
         errdefer connection.close();
-        return connection.accept(options);
+        return connection.acceptPending(options);
     }
 
     pub fn serveConcurrent(
@@ -165,6 +174,49 @@ pub const AcceptedClient = struct {
     connect: OwnedConnect,
 
     pub fn deinit(self: *AcceptedClient, allocator: std.mem.Allocator) void {
+        self.connect.deinit(allocator);
+        self.connection.close();
+        self.* = undefined;
+    }
+};
+
+/// Server-side CONNECT accepted at the packet/runtime layer but not yet
+/// acknowledged.
+///
+/// Stateful brokers inspect the owned CONNECT, open/restore Session State,
+/// then call `finish` so Session Present reflects that atomic decision.
+pub const PendingAcceptedClient = struct {
+    connection: Connection,
+    connect: OwnedConnect,
+
+    pub fn finish(
+        self: *PendingAcceptedClient,
+        options: AcceptOptions,
+    ) Error!AcceptedClient {
+        try self.connection.writeConnAck(.{
+            .session_present = options.session_present,
+            .reason_code = options.reason_code,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
+            .topic_alias_maximum = options.topic_alias_maximum,
+            .server_keep_alive_seconds = options.server_keep_alive_seconds,
+            .maximum_qos = options.maximum_qos,
+            .retain_available = options.retain_available,
+            .wildcard_subscription_available = options.wildcard_subscription_available,
+            .subscription_identifier_available = options.subscription_identifier_available,
+            .shared_subscription_available = options.shared_subscription_available,
+        });
+        const accepted = AcceptedClient{
+            .connection = self.connection,
+            .connect = self.connect,
+        };
+        self.* = undefined;
+        return accepted;
+    }
+
+    pub fn deinit(
+        self: *PendingAcceptedClient,
+        allocator: std.mem.Allocator,
+    ) void {
         self.connect.deinit(allocator);
         self.connection.close();
         self.* = undefined;
@@ -504,6 +556,18 @@ pub const Connection = struct {
         self: *Connection,
         options: AcceptOptions,
     ) Error!AcceptedClient {
+        const allocator = self.allocator;
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(allocator);
+        return pending.finish(options);
+    }
+
+    /// Parse CONNECT and apply peer capability limits without sending CONNACK.
+    pub fn acceptPending(
+        self: *Connection,
+        options: AcceptOptions,
+    ) Error!PendingAcceptedClient {
+        _ = options;
         var connect = try self.readConnect();
         errdefer connect.deinit(self.allocator);
         if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| {
@@ -518,19 +582,6 @@ pub const Connection = struct {
         if (mqtt.topicAliasMaximum(connect.connect.properties)) |topic_alias_maximum| {
             self.peer_topic_alias_maximum = topic_alias_maximum;
         }
-        try self.writeConnAck(.{
-            .session_present = options.session_present,
-            .reason_code = options.reason_code,
-            .max_outgoing_inflight = options.max_outgoing_inflight,
-            .topic_alias_maximum = options.topic_alias_maximum,
-            .server_keep_alive_seconds = options.server_keep_alive_seconds,
-            .maximum_qos = options.maximum_qos,
-            .retain_available = options.retain_available,
-            .wildcard_subscription_available = options.wildcard_subscription_available,
-            .subscription_identifier_available = options.subscription_identifier_available,
-            .shared_subscription_available = options.shared_subscription_available,
-        });
-
         const owned_connection = self.*;
         self.* = undefined;
         return .{
