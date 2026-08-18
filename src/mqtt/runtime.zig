@@ -159,6 +159,7 @@ pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     session_present: bool = false,
     reason_code: u8 = 0,
+    assigned_client_identifier: ?[]const u8 = null,
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
@@ -193,9 +194,20 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         options: AcceptOptions,
     ) Error!AcceptedClient {
+        var properties: [1]mqtt.Property = undefined;
+        const connack_properties = if (self.connection.protocol == .v5 and
+            options.assigned_client_identifier != null)
+        blk: {
+            properties[0] = .{ .utf8 = .{
+                .id = .assigned_client_identifier,
+                .value = options.assigned_client_identifier.?,
+            } };
+            break :blk properties[0..1];
+        } else properties[0..0];
         try self.connection.writeConnAck(.{
             .session_present = options.session_present,
             .reason_code = options.reason_code,
+            .properties = connack_properties,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .topic_alias_maximum = options.topic_alias_maximum,
             .server_keep_alive_seconds = options.server_keep_alive_seconds,
@@ -426,6 +438,7 @@ pub const Connection = struct {
     outgoing_qos2_pubrel: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
+    assigned_client_id: ?[]u8 = null,
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -530,6 +543,9 @@ pub const Connection = struct {
         for (self.outgoing_topic_aliases) |maybe_topic| {
             if (maybe_topic) |topic| self.allocator.free(topic);
         }
+        if (self.assigned_client_id) |client_id| {
+            self.allocator.free(client_id);
+        }
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -546,6 +562,16 @@ pub const Connection = struct {
         self: *const Connection,
     ) ?[]const []const u8 {
         return self.transport.peerCertificates();
+    }
+
+    /// Return the MQTT 5 Client Identifier assigned for an empty CONNECT ID.
+    ///
+    /// The value is deep-owned by this Connection, so it remains available
+    /// when `Client.connect` discards the transient CONNACK object.
+    pub fn assignedClientId(
+        self: *const Connection,
+    ) ?[]const u8 {
+        return self.assigned_client_id;
     }
 
     /// Complete the broker side of MQTT CONNECT on an already-open transport.
@@ -667,6 +693,14 @@ pub const Connection = struct {
             return .{ .connection = null, .connack = connack };
         }
         applyConnAckNegotiation(self, connack.connack);
+        if (mqtt.assignedClientIdentifier(
+            connack.connack.properties,
+        )) |client_id| {
+            self.assigned_client_id = try allocator.dupe(
+                u8,
+                client_id,
+            );
+        }
 
         const owned_connection = self.*;
         self.* = undefined;

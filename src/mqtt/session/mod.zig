@@ -306,6 +306,13 @@ pub const Store = struct {
         return self.total_bytes;
     }
 
+    pub fn containsClientId(
+        self: Store,
+        client_id: []const u8,
+    ) bool {
+        return self.client_index.contains(client_id);
+    }
+
     pub fn expiryForConnect(
         protocol: mqtt.ProtocolVersion,
         clean_start: bool,

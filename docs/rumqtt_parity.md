@@ -83,6 +83,13 @@ MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
 
 - MQTT 3.1.1 and MQTT 5 publishers/subscribers can share one listener and route
   between versions.
+- Empty clean-session Client IDs receive secure random UUID-style identities
+  with a copied, configurable prefix. MQTT 5 reports the value through Assigned
+  Client Identifier and the client runtime preserves it after CONNACK cleanup;
+  MQTT 3.1.1 uses the unique identity internally without an unavailable
+  property. Multiple anonymous clients therefore cannot accidentally take over
+  the same empty-string Session, and an MQTT 5 client can reconnect using its
+  assigned value.
 - MQTT 5 Application Message properties are preserved for MQTT 5 destinations
   and omitted when encoding the same fanout for an MQTT 3.1.1 destination.
 - MQTT 3.1.1 CleanSession=0 resumes subscriptions and offline QoS 1/2 state

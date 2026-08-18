@@ -470,3 +470,288 @@ test "broker downgrades MQTT 3.1.1 QoS 2 quota rejection handshake" {
     try rejected.disconnect(0);
     try joinServer(thread, &joined, &serve);
 }
+
+test "broker assigns unique MQTT 5 anonymous Client Identifiers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var prefix = [_]u8{ 't', 'e', 's', 't', '-' };
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .auto_client_id_prefix = &prefix,
+        },
+    );
+    defer broker.deinit();
+    // `listen` owns the prefix rather than borrowing mutable caller storage.
+    @memset(&prefix, 'x');
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var first = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "",
+            .clean_start = true,
+        },
+    );
+    defer first.deinit(allocator);
+    var second = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "",
+            .clean_start = true,
+        },
+    );
+    defer second.deinit(allocator);
+
+    const first_id = mqtt.assignedClientIdentifier(
+        first.connack.connack.properties,
+    ).?;
+    const second_id = mqtt.assignedClientIdentifier(
+        second.connack.connack.properties,
+    ).?;
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        first_id,
+        "test-",
+    ));
+    try std.testing.expectEqual(@as(usize, 41), first_id.len);
+    try std.testing.expect(!std.mem.eql(u8, first_id, second_id));
+    try std.testing.expectEqualStrings(
+        first_id,
+        first.connection.assignedClientId().?,
+    );
+
+    var first_suback = try first.connection.subscribe(
+        &.{.{ .topic_filter = "anonymous/first" }},
+        .{},
+    );
+    defer first_suback.deinit(allocator);
+    var second_suback = try second.connection.subscribe(
+        &.{.{ .topic_filter = "anonymous/second" }},
+        .{},
+    );
+    defer second_suback.deinit(allocator);
+    // Both connections remain live. If the empty ClientID had been used as a
+    // shared Session key, accepting `second` would have shut down `first`.
+    try first.connection.ping();
+    try second.connection.ping();
+
+    try first.connection.disconnect(0);
+    try second.connection.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker assigned MQTT 5 Client Identifier can resume Session" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var first = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "",
+            .clean_start = true,
+            .properties = &.{.{ .four_byte = .{
+                .id = .session_expiry_interval,
+                .value = 30,
+            } }},
+        },
+    );
+    const assigned = try allocator.dupe(
+        u8,
+        mqtt.assignedClientIdentifier(
+            first.connack.connack.properties,
+        ).?,
+    );
+    defer allocator.free(assigned);
+    defer first.deinit(allocator);
+    var suback = try first.connection.subscribe(
+        &.{.{ .topic_filter = "assigned/resume" }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try first.connection.disconnect(0);
+    try waitForPeerClose(&first.connection);
+
+    var resumed = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = assigned,
+            .clean_start = false,
+            .properties = &.{.{ .four_byte = .{
+                .id = .session_expiry_interval,
+                .value = 30,
+            } }},
+        },
+    );
+    defer resumed.deinit(allocator);
+    try std.testing.expect(resumed.connack.connack.session_present);
+    try std.testing.expect(
+        mqtt.assignedClientIdentifier(
+            resumed.connack.connack.properties,
+        ) == null,
+    );
+    try resumed.connection.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "runtime Client.connect retains assigned Client Identifier" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "",
+            .clean_start = true,
+        },
+    );
+    defer client.close();
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        client.assignedClientId().?,
+        "netz-",
+    ));
+    try client.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker keeps assigned MQTT 3.1.1 Client Identifier internal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var first = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v3_1_1,
+            .client_id = "",
+            .clean_start = true,
+        },
+    );
+    defer first.deinit(allocator);
+    var second = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v3_1_1,
+            .client_id = "",
+            .clean_start = true,
+        },
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        first.connack.connack.properties.len,
+    );
+    try first.connection.ping();
+    try second.connection.ping();
+
+    try first.connection.disconnect(0);
+    try second.connection.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker validates anonymous Client Identifier prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        context.BrokerType.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .auto_client_id_prefix = "x" ** 51 },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        context.BrokerType.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .auto_client_id_prefix = "bad\x00prefix" },
+        ),
+    );
+}

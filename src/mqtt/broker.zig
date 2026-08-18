@@ -10,6 +10,7 @@ const std = @import("std");
 const mqtt = @import("mod.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
+const client_id_mod = @import("broker/client_id.zig");
 const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
 const session_route = @import("broker/session_route.zig");
@@ -22,7 +23,7 @@ const net = std.Io.net;
 
 pub const Error = runtime.Error || router_mod.Error ||
     retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
-    session_mod.Error || will_mod.Error || error{
+    session_mod.Error || will_mod.Error || std.Io.RandomSecureError || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
@@ -42,6 +43,11 @@ pub const Limits = struct {
 
 pub const Options = struct {
     limits: Limits = .{},
+    /// Prefix for broker-assigned Client Identifiers. Copied by `listen`.
+    ///
+    /// Mosquitto limits `auto_id_prefix` to 50 bytes; matching that cap keeps
+    /// the generated identifier below MQTT's u16 UTF-8 string bound.
+    auto_client_id_prefix: []const u8 = "netz-",
     router: router_mod.Options = .{},
     retained: retained_mod.Options = .{},
     session: session_mod.Options = .{},
@@ -87,6 +93,8 @@ const ClientSlot = struct {
     will_handle: ?will_mod.Handle = null,
     session_handle: ?session_mod.Handle = null,
     session_present: bool = false,
+    assigned_client_id_len: u8 = 0,
+    assigned_client_id: [client_id_mod.max_len]u8 = undefined,
     graceful_disconnect: bool = false,
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
@@ -213,10 +221,20 @@ pub const Broker = struct {
             options.limits.max_queued_deliveries_per_connection == 0 or
             options.limits.max_pending_incoming_qos2 == 0 or
             options.limits.max_pending_incoming_qos2 >
-                std.math.maxInt(u32))
+                std.math.maxInt(u32) or
+            options.auto_client_id_prefix.len >
+                client_id_mod.max_prefix_len)
         {
             return error.InvalidProperty;
         }
+        try mqtt.validateUtf8String(options.auto_client_id_prefix);
+        const auto_client_id_prefix = try allocator.dupe(
+            u8,
+            options.auto_client_id_prefix,
+        );
+        errdefer allocator.free(auto_client_id_prefix);
+        var owned_options = options;
+        owned_options.auto_client_id_prefix = auto_client_id_prefix;
         const slots = try allocator.alloc(
             ClientSlot,
             options.limits.max_connections,
@@ -275,7 +293,7 @@ pub const Broker = struct {
                 bind_address,
                 options.limits.runtime,
             ),
-            .options = options,
+            .options = owned_options,
             .router = router,
             .pending_qos2 = pending_qos2,
             .retained = retained,
@@ -294,6 +312,7 @@ pub const Broker = struct {
             if (slot.connection) |*connection| connection.close();
         }
         self.allocator.free(self.slots);
+        self.allocator.free(self.options.auto_client_id_prefix);
         self.session_owners.deinit(self.allocator);
         self.will_publishers.deinit(self.allocator);
         self.wills.deinit();
@@ -365,6 +384,10 @@ pub const Broker = struct {
             var accept_options = self.options.accept;
             accept_options.session_present =
                 self.slots[index].session_present;
+            if (self.slots[index].assigned_client_id_len != 0) {
+                accept_options.assigned_client_identifier =
+                    self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
+            }
             var accepted = pending.finish(accept_options) catch |err| {
                 self.abortRegistration(index, subscriber_id);
                 return err;
@@ -412,6 +435,7 @@ pub const Broker = struct {
         slot.will_handle = null;
         slot.session_handle = null;
         slot.session_present = false;
+        slot.assigned_client_id_len = 0;
         slot.graceful_disconnect = false;
         // The configured queue count is also the memory bound. Reserve it once
         // during setup so routing performs no destination queue allocation
@@ -433,8 +457,17 @@ pub const Broker = struct {
             slot.active = false;
             return err;
         };
+        var effective_connect = connect;
+        if (connect.client_id.len == 0) {
+            effective_connect.client_id = self.assignClientIdLocked(
+                slot,
+            ) catch |err| {
+                slot.active = false;
+                return err;
+            };
+        }
         const previous_session_handle = self.sessions.find(
-            connect.client_id,
+            effective_connect.client_id,
             now,
         );
         const previous_route_id = if (previous_session_handle) |handle|
@@ -449,7 +482,7 @@ pub const Broker = struct {
         else
             null;
         const opened_session = self.sessions.openConnect(
-            connect,
+            effective_connect,
             now,
         ) catch |err| {
             slot.active = false;
@@ -493,10 +526,10 @@ pub const Broker = struct {
             return err;
         };
         const previous_handle = self.wills.handleForClient(
-            connect.client_id,
+            effective_connect.client_id,
         );
         const accepted_will = self.wills.acceptConnect(
-            connect,
+            effective_connect,
             now,
         ) catch |err| {
             self.rollbackOpenedSessionLocked(
@@ -530,6 +563,24 @@ pub const Broker = struct {
         }
         self.will_driver.notify(self.io);
         return id;
+    }
+
+    fn assignClientIdLocked(
+        self: *Broker,
+        slot: *ClientSlot,
+    ) Error![]const u8 {
+        while (true) {
+            var random: [client_id_mod.random_len]u8 = undefined;
+            try std.Io.randomSecure(self.io, &random);
+            const id = client_id_mod.format(
+                &slot.assigned_client_id,
+                self.options.auto_client_id_prefix,
+                random,
+            );
+            if (self.sessions.containsClientId(id)) continue;
+            slot.assigned_client_id_len = @intCast(id.len);
+            return id;
+        }
     }
 
     /// Roll back a Session generation opened before CONNACK commits.

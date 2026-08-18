@@ -350,6 +350,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "maximumPacketSize"));
     try std.testing.expect(@hasDecl(
         netz.mqtt,
+        "assignedClientIdentifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt,
         "messageExpiryInterval",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "retained"));
@@ -477,6 +481,10 @@ test "public modules are reachable" {
         @as(usize, 16_384),
         (netz.mqtt.broker.Options{}).session.max_sessions,
     );
+    try std.testing.expectEqualStrings(
+        "netz-",
+        (netz.mqtt.broker.Options{}).auto_client_id_prefix,
+    );
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "acceptPending",
@@ -484,6 +492,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
         "PendingAcceptedClient",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.AcceptOptions,
+        "assigned_client_identifier",
     ));
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubAck"));
@@ -506,6 +518,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "shutdown",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "assignedClientId",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

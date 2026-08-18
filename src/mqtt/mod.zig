@@ -165,6 +165,10 @@ fn validateMqttUtf8String(value: []const u8) Error!void {
     }
 }
 
+pub fn validateUtf8String(value: []const u8) Error!void {
+    return validateMqttUtf8String(value);
+}
+
 pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     if (value.len > std.math.maxInt(u16)) return error.InvalidProperty;
     try wire.appendInt(list, allocator, u16, @intCast(value.len), .big);
@@ -421,6 +425,19 @@ pub fn receiveMaximum(properties: []const Property) ?u16 {
 pub fn maximumPacketSize(properties: []const Property) ?u32 {
     for (properties) |property| {
         if (property == .four_byte and property.four_byte.id == .maximum_packet_size) return property.four_byte.value;
+    }
+    return null;
+}
+
+pub fn assignedClientIdentifier(
+    properties: []const Property,
+) ?[]const u8 {
+    for (properties) |property| {
+        if (property == .utf8 and
+            property.utf8.id == .assigned_client_identifier)
+        {
+            return property.utf8.value;
+        }
     }
     return null;
 }
@@ -1806,6 +1823,20 @@ test "MQTT remaining length roundtrip" {
     }
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0x80, 0x00 }));
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0xff, 0x00 }));
+}
+
+test "MQTT Assigned Client Identifier lookup" {
+    const properties = [_]Property{
+        .{ .utf8 = .{
+            .id = .assigned_client_identifier,
+            .value = "auto-client",
+        } },
+    };
+    try std.testing.expectEqualStrings(
+        "auto-client",
+        assignedClientIdentifier(&properties).?,
+    );
+    try std.testing.expect(assignedClientIdentifier(&.{}) == null);
 }
 
 test "MQTT UTF-8 strings reject NUL but allow discouraged controls" {
