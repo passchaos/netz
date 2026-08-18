@@ -26,6 +26,115 @@ fn writeAll(
     }
 }
 
+test "HTTP/1 chunked reader batches transport reads across chunk boundaries" {
+    const allocator = std.testing.allocator;
+    const body_reader = @import("body_reader.zig");
+    const chunk_bytes = 16 * 1024;
+    const head =
+        "POST /batch HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n";
+    const pipeline =
+        "GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const TestError = http1.Error || std.mem.Allocator.Error || error{
+        BodyTooLarge,
+        ConnectionClosed,
+        HeadersTooLarge,
+    };
+    const Reader = body_reader.Reader(TestError);
+    const raw =
+        head ++
+        "4000\r\n" ++ ("a" ** chunk_bytes) ++ "\r\n" ++
+        "4000\r\n" ++ ("b" ** chunk_bytes) ++ "\r\n" ++
+        "4000\r\n" ++ ("c" ** chunk_bytes) ++ "\r\n" ++
+        "0\r\n\r\n" ++
+        pipeline;
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+        reads: usize = 0,
+
+        fn readSome(
+            context: ?*anyopaque,
+            destination: []u8,
+        ) TestError!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.reads += 1;
+            if (self.offset == self.bytes.len) return 0;
+            var count = @min(
+                destination.len,
+                self.bytes.len - self.offset,
+            );
+            // Keep the first transport completion at the head boundary. The
+            // next 16-KiB size-buffer read ends in the second payload, forcing
+            // the optimized path to perform one larger cross-chunk read-ahead.
+            if (self.reads == 1) count = @min(count, head.len);
+            @memcpy(
+                destination[0..count],
+                self.bytes[self.offset..][0..count],
+            );
+            self.offset += count;
+            return count;
+        }
+    };
+    var source = Source{ .bytes = raw };
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .inbuf = &inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{},
+    };
+    const Context = struct {
+        chunk_index: usize = 0,
+        remaining: usize = chunk_bytes,
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            const expected_byte: u8 = switch (self.chunk_index) {
+                0 => 'a',
+                1 => 'b',
+                2 => 'c',
+                else => return error.UnexpectedChunk,
+            };
+            try std.testing.expect(bytes.len <= self.remaining);
+            for (bytes) |byte| {
+                try std.testing.expectEqual(expected_byte, byte);
+            }
+            self.remaining -= bytes.len;
+            if (self.remaining == 0) {
+                self.chunk_index += 1;
+                self.remaining = chunk_bytes;
+            }
+        }
+    };
+    var context: Context = .{};
+    var request = try reader.readRequest(
+        &context,
+        struct {
+            fn begin(_: *Context, _: Reader.RequestHead) !void {}
+        }.begin,
+        Context.consume,
+    );
+    defer request.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), source.reads);
+    try std.testing.expectEqual(@as(usize, 3), context.chunk_index);
+    try std.testing.expectEqual(
+        @as(usize, chunk_bytes * 3),
+        request.body_bytes,
+    );
+    try std.testing.expectEqualStrings(
+        pipeline,
+        inbuf.items,
+    );
+}
+
 test "HTTP/1 streaming request reads fixed body without aggregation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

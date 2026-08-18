@@ -2,6 +2,9 @@ const std = @import("std");
 const http1 = @import("../mod.zig");
 
 const direct_body_read_bytes: usize = 64 * 1024;
+// Four 16-KiB chunks fit in one read for the common streaming shape while the
+// persistent per-connection allocation remains bounded and reusable.
+const buffered_read_ahead_bytes: usize = 64 * 1024;
 
 pub fn Reader(comptime RuntimeError: type) type {
     return struct {
@@ -494,26 +497,15 @@ pub fn Reader(comptime RuntimeError: type) type {
                     self.limits.max_body_bytes,
                 );
                 var remaining = size;
-                var direct_buffer: [direct_body_read_bytes]u8 = undefined;
                 while (remaining != 0) {
                     if (self.buffered().len == 0) {
-                        // Chunk size supplies the same safe read boundary as
-                        // Content-Length. Keep the trailing CRLF on the socket
-                        // and deliver payload without an ArrayList round trip.
-                        const count = try self.read_some(
-                            self.context,
-                            direct_buffer[0..@min(
-                                direct_buffer.len,
-                                remaining,
-                            )],
-                        );
-                        if (count == 0) return error.ConnectionClosed;
-                        consume(
-                            callback_context,
-                            direct_buffer[0..count],
-                        ) catch |err| return err;
-                        remaining -= count;
-                        continue;
+                        // Chunked framing has an explicit terminator and this
+                        // reader owns a persistent inbuf, so it is safe to read
+                        // beyond the current payload into later chunks or the
+                        // next pipelined head. A bounded read-ahead amortizes
+                        // size/data/CRLF parsing over one socket read while
+                        // callbacks still receive each chunk incrementally.
+                        try self.readMore(buffered_read_ahead_bytes);
                     }
                     const available = self.buffered();
                     const count = @min(
@@ -636,19 +628,23 @@ pub fn Reader(comptime RuntimeError: type) type {
             if (self.inbuf.items.len >= max_buffer_bytes) {
                 return error.BodyTooLarge;
             }
-            var scratch: [16 * 1024]u8 = undefined;
-            const count = try self.read_some(
-                self.context,
-                scratch[0..@min(
-                    scratch.len,
-                    max_buffer_bytes - self.inbuf.items.len,
-                )],
-            );
-            if (count == 0) return error.ConnectionClosed;
-            try self.inbuf.appendSlice(
+            const original_len = self.inbuf.items.len;
+            const destination = try self.inbuf.addManyAsSlice(
                 self.allocator,
-                scratch[0..count],
+                @min(
+                    buffered_read_ahead_bytes,
+                    max_buffer_bytes - original_len,
+                ),
             );
+            const count = self.read_some(
+                self.context,
+                destination,
+            ) catch |err| {
+                self.inbuf.shrinkRetainingCapacity(original_len);
+                return err;
+            };
+            self.inbuf.shrinkRetainingCapacity(original_len + count);
+            if (count == 0) return error.ConnectionClosed;
         }
 
         fn buffered(self: Self) []u8 {

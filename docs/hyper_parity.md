@@ -102,23 +102,27 @@ taskset -c 0 tools/bench_hyper_http1_body.sh \
 
 ```text
 fixed Content-Length, 1 MiB each direction:
-  netz:  267.58-270.12 us/round-trip, 7,403-7,474 aggregate MiB/s
-  hyper: 284.63-285.27 us/round-trip, 7,010-7,026 aggregate MiB/s
-  netz is about 1.05-1.07x faster
+  netz:  268.72-270.10 us/round-trip, 7,404-7,442 aggregate MiB/s
+  hyper: 288.61-293.14 us/round-trip, 6,822-6,929 aggregate MiB/s
+  netz is about 1.07-1.09x faster
 
 chunked, 64 x 16 KiB each direction:
-  netz:  434.21-508.92 us/round-trip, 3,929-4,606 aggregate MiB/s
-  hyper: 412.28-430.64 us/round-trip, 4,644-4,851 aggregate MiB/s
+  netz:  284.04-286.06 us/round-trip, 6,991-7,041 aggregate MiB/s
+  hyper: 414.64-417.45 us/round-trip, 4,790-4,823 aggregate MiB/s
+  netz is about 1.45-1.47x faster
 ```
 
-The chunked ranges overlap only at their edges; this is near parity, not a
-superiority claim. The work removed a much larger initial gap: H1 now enables
-TCP_NODELAY, fixed/chunked readers deliver socket bytes directly to callbacks,
-chunk descriptors and vectored slice lists retain connection scratch, and
-`writeChunks` batches many caller boundaries without concatenating payloads.
-On POSIX, large HTTP/1 batches use the platform IOV limit instead of Zig
-Threaded's portable eight-iovec cap. The fixed result demonstrates a measured
-advantage; chunked remains explicit follow-up optimization evidence.
+H1 enables TCP_NODELAY, fixed readers deliver socket bytes directly to
+callbacks, chunk descriptors and vectored slice lists retain connection
+scratch, and `writeChunks` batches many caller boundaries without concatenating
+payloads. On POSIX, large HTTP/1 batches use the platform IOV limit instead of
+Zig Threaded's portable eight-iovec cap. Chunked readers now read up to 64 KiB
+directly into their retained connection buffer. One transport read may span
+multiple size/data/CRLF records or reach the next pipelined message, while the
+parser still invokes the callback at each wire-chunk boundary and commits only
+the current message. This removes repeated exact-boundary reads without
+aggregating a whole body. Both modes demonstrate an advantage in these named
+loopback workloads; neither establishes whole-library superiority.
 
 ## HTTP/2 consecutive and parallel round trips
 
@@ -310,8 +314,8 @@ Reusable implementation changes behind these H2 results:
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server, Upgrade, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
-| HTTP/1 fixed 1-MiB duplex | 267.58-270.12 us/op pinned | 284.63-285.27 us/op pinned |
-| HTTP/1 chunked 1-MiB duplex | 434.21-508.92 us/op pinned | 412.28-430.64 us/op pinned |
+| HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |
+| HTTP/1 chunked 1-MiB duplex | 284.04-286.06 us/op pinned | 414.64-417.45 us/op pinned |
 | HTTP/2 consecutive empty | 9.55-9.96 us/op pinned | 12.51-12.54 us/op pinned |
 | HTTP/2 consecutive 10-byte POST | 10.09-10.38 us/op pinned, coalesced frame submission | 41.15-41.37 ms/op pinned, delayed-ACK cliff on this host |
 | HTTP/2 consecutive 100-KiB POST | 23.52-23.57 us/op pinned, streaming receive | 37.24-38.68 us/op pinned |
@@ -321,8 +325,8 @@ Reusable implementation changes behind these H2 results:
 
 ## Remaining evidence
 
-1. Continue narrowing the remaining HTTP/1 chunked gap and extend parallel H2
-   response evidence to flow-control-blocked and cancellation-heavy workloads.
+1. Extend parallel H2 response evidence to flow-control-blocked and
+   cancellation-heavy workloads.
 2. Measure allocation count and peak memory, not only elapsed time.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;

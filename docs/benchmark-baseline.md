@@ -94,18 +94,22 @@ direction. Fixed mode uses one exact Content-Length body; chunked mode uses
 
 ```text
 fixed (five samples):
-  netz:  267.58-270.12 us/op, 7,403-7,474 aggregate MiB/s
-  hyper: 284.63-285.27 us/op, 7,010-7,026 aggregate MiB/s
+  netz:  268.72-270.10 us/op, 7,404-7,442 aggregate MiB/s
+  hyper: 288.61-293.14 us/op, 6,822-6,929 aggregate MiB/s
 
 chunked (five samples):
-  netz:  434.21-508.92 us/op, 3,929-4,606 aggregate MiB/s
-  hyper: 412.28-430.64 us/op, 4,644-4,851 aggregate MiB/s
+  netz:  284.04-286.06 us/op, 6,991-7,041 aggregate MiB/s
+  hyper: 414.64-417.45 us/op, 4,790-4,823 aggregate MiB/s
 ```
 
-Netz is 1.05-1.07x faster in the fixed workload. Chunked is close but does not
-support a broad advantage claim. The reusable implementation changes are
-TCP_NODELAY, direct socket-to-callback body delivery, retained chunk/vector
-scratch, batched `writeChunks`, and wide POSIX writev submission.
+Netz is 1.07-1.09x faster in the fixed workload and 1.45-1.47x faster in the
+chunked workload. The reusable implementation changes are TCP_NODELAY, direct
+socket-to-callback fixed-body delivery, retained chunk/vector scratch, batched
+`writeChunks`, wide POSIX writev submission, and 64-KiB chunked read-ahead into
+the persistent connection buffer. Read-ahead can span several chunk boundaries
+or a pipelined suffix, but callbacks still receive one wire chunk at a time and
+the suffix remains buffered for the next message. These are focused workload
+results, not a whole-library superiority claim.
 
 ### HTTP/2 persistent consecutive and parallel round trips
 
