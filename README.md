@@ -139,7 +139,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   compressed-flag validation, eight-digit `grpc-timeout` parse/format with
   non-shortening deadline rounding, all canonical status codes, HTTP-to-gRPC
   fallback mapping, tolerant percent-encoded `grpc-message` handling,
-  content-type/TE/method-path/custom-metadata validation, and unary h2c
+  content-type/TE/method-path/custom-metadata validation, unpadded binary
+  metadata Base64 sending with padded/unpadded/comma-joined receive support,
+  and unary h2c
   client/server helpers with opaque protobuf payloads, initial/trailing
   metadata, trailers-only errors, compression negotiation guards, and
   `grpc-status` enforcement; protobuf codecs remain an application-layer

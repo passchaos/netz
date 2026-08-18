@@ -2,9 +2,11 @@
 
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
+const metadata_mod = @import("metadata.zig");
 const wire = @import("wire.zig");
 
-pub const Error = wire.Error || http2.runtime.Error || error{
+pub const Error = wire.Error || metadata_mod.Error ||
+    http2.runtime.Error || error{
     CompressionNotNegotiated,
     InvalidContentType,
     InvalidGrpcRequest,
@@ -88,7 +90,10 @@ pub const UnaryCallOptions = struct {
     compressed: bool = false,
     encoding: ?[]const u8 = null,
     timeout: ?Timeout = null,
+    /// ASCII application metadata already suitable for HTTP/2.
     metadata: []const http2.Hpack.HeaderField = &.{},
+    /// Raw application bytes encoded as unpadded Base64 `-bin` fields.
+    binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
     max_message_size: usize = 16 * 1024 * 1024,
 };
 
@@ -124,6 +129,12 @@ pub fn unaryCall(
     );
     _ = try splitMethodPath(options.path);
     try validateCustomMetadata(options.metadata);
+    try validateCustomBinaryMetadata(options.binary_metadata);
+    var binary_metadata = try metadata_mod.encodeFieldsAlloc(
+        allocator,
+        options.binary_metadata,
+    );
+    defer binary_metadata.deinit();
 
     var framed: std.ArrayList(u8) = .empty;
     defer framed.deinit(allocator);
@@ -138,7 +149,11 @@ pub fn unaryCall(
     const header_count = std.math.add(
         usize,
         options.metadata.len,
-        4,
+        std.math.add(
+            usize,
+            binary_metadata.fields.len,
+            4,
+        ) catch return error.MessageTooLarge,
     ) catch return error.MessageTooLarge;
     const buffer = if (header_count <= header_storage.len)
         header_storage[0..header_count]
@@ -171,6 +186,7 @@ pub fn unaryCall(
         });
     }
     headers.appendSliceAssumeCapacity(options.metadata);
+    headers.appendSliceAssumeCapacity(binary_metadata.fields);
 
     const response = try connection.request(.{
         .method = "POST",
@@ -195,6 +211,10 @@ pub const UnaryResponseOptions = struct {
     status_message: ?[]const u8 = null,
     initial_metadata: []const http2.Hpack.HeaderField = &.{},
     trailing_metadata: []const http2.Hpack.HeaderField = &.{},
+    /// Raw initial metadata encoded into HTTP/2 response headers.
+    initial_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+    /// Raw trailing metadata encoded into gRPC response trailers.
+    trailing_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
     trailers_only: bool = false,
 };
 
@@ -206,6 +226,22 @@ pub fn writeUnaryResponse(
 ) Error!void {
     try validateCustomMetadata(options.initial_metadata);
     try validateCustomMetadata(options.trailing_metadata);
+    try validateCustomBinaryMetadata(
+        options.initial_binary_metadata,
+    );
+    try validateCustomBinaryMetadata(
+        options.trailing_binary_metadata,
+    );
+    var initial_binary = try metadata_mod.encodeFieldsAlloc(
+        allocator,
+        options.initial_binary_metadata,
+    );
+    defer initial_binary.deinit();
+    var trailing_binary = try metadata_mod.encodeFieldsAlloc(
+        allocator,
+        options.trailing_binary_metadata,
+    );
+    defer trailing_binary.deinit();
     if (options.status == .ok and options.message == null) {
         return error.InvalidMessageCount;
     }
@@ -246,7 +282,11 @@ pub fn writeUnaryResponse(
 
     const trailing_count = std.math.add(
         usize,
-        options.trailing_metadata.len,
+        std.math.add(
+            usize,
+            options.trailing_metadata.len,
+            trailing_binary.fields.len,
+        ) catch return error.MessageTooLarge,
         @as(usize, 1) +
             @intFromBool(options.status_message != null),
     ) catch return error.MessageTooLarge;
@@ -263,7 +303,11 @@ pub fn writeUnaryResponse(
     ) catch return error.MessageTooLarge;
     const initial_count = std.math.add(
         usize,
-        options.initial_metadata.len,
+        std.math.add(
+            usize,
+            options.initial_metadata.len,
+            initial_binary.fields.len,
+        ) catch return error.MessageTooLarge,
         initial_extra,
     ) catch return error.MessageTooLarge;
     const initial_buffer = if (initial_count <= initial_storage.len)
@@ -286,6 +330,7 @@ pub fn writeUnaryResponse(
         });
     }
     initial.appendSliceAssumeCapacity(options.initial_metadata);
+    initial.appendSliceAssumeCapacity(initial_binary.fields);
 
     var trailing_storage: [16]http2.Hpack.HeaderField = undefined;
     const trailing_buffer = if (trailing_count <= trailing_storage.len)
@@ -308,6 +353,7 @@ pub fn writeUnaryResponse(
         });
     }
     trailing.appendSliceAssumeCapacity(options.trailing_metadata);
+    trailing.appendSliceAssumeCapacity(trailing_binary.fields);
 
     if (options.trailers_only) {
         initial.appendSliceAssumeCapacity(trailing.items);
@@ -460,10 +506,22 @@ pub fn validateCustomMetadata(
 ) Error!void {
     for (metadata) |field| {
         if (field.name.len == 0 or field.name[0] == ':' or
+            metadata_mod.isBinaryName(field.name) or
             std.ascii.eqlIgnoreCase(field.name, "content-type") or
             std.ascii.eqlIgnoreCase(field.name, "te") or
             std.ascii.startsWithIgnoreCase(field.name, "grpc-"))
         {
+            return error.InvalidMetadata;
+        }
+    }
+}
+
+pub fn validateCustomBinaryMetadata(
+    metadata: []const metadata_mod.BinaryMetadata,
+) Error!void {
+    for (metadata) |field| {
+        try metadata_mod.validateBinaryName(field.name);
+        if (std.ascii.startsWithIgnoreCase(field.name, "grpc-")) {
             return error.InvalidMetadata;
         }
     }

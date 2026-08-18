@@ -115,6 +115,125 @@ test "gRPC timeout status and percent-message codecs" {
     try std.testing.expectEqualStrings("bad value%XY", decoded);
 }
 
+test "gRPC binary metadata encodes unpadded and decodes joined values" {
+    const allocator = std.testing.allocator;
+    var encoded = try grpc.encodeBinaryMetadataAlloc(
+        allocator,
+        &.{
+            .{ .name = "trace-bin", .value = "f" },
+            .{ .name = "token-bin", .value = "foobar" },
+        },
+    );
+    defer encoded.deinit();
+    try std.testing.expectEqualStrings("Zg", encoded.fields[0].value);
+    try std.testing.expectEqualStrings(
+        "Zm9vYmFy",
+        encoded.fields[1].value,
+    );
+    try std.testing.expect(encoded.fields[0].never_index);
+
+    const fields = [_]http2.Hpack.HeaderField{
+        .{ .name = "trace-bin", .value = "Zg==, Zm8" },
+        .{ .name = "other", .value = "ignored" },
+        .{ .name = "trace-bin", .value = "Zm9v" },
+    };
+    const required = try grpc.binaryMetadataFieldsDecodedUpperBound(
+        &fields,
+        "trace-bin",
+    );
+    try std.testing.expectEqual(@as(usize, 6), required);
+    var scratch: [6]u8 = undefined;
+    var iterator = try grpc.BinaryMetadataIterator.init(
+        &fields,
+        "trace-bin",
+        &scratch,
+    );
+    try std.testing.expectEqualStrings(
+        "f",
+        (try iterator.next()).?.value,
+    );
+    try std.testing.expectEqualStrings(
+        "fo",
+        (try iterator.next()).?.value,
+    );
+    try std.testing.expectEqualStrings(
+        "foo",
+        (try iterator.next()).?.value,
+    );
+    try std.testing.expect(try iterator.next() == null);
+
+    const empty_fields = [_]http2.Hpack.HeaderField{
+        .{ .name = "empty-bin", .value = ",Zg, " },
+    };
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try grpc.binaryMetadataFieldsDecodedUpperBound(
+            &empty_fields,
+            "empty-bin",
+        ),
+    );
+    var empty_scratch: [1]u8 = undefined;
+    var empty_iterator = try grpc.BinaryMetadataIterator.init(
+        &empty_fields,
+        "empty-bin",
+        &empty_scratch,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try empty_iterator.next()).?.value.len,
+    );
+    try std.testing.expectEqualStrings(
+        "f",
+        (try empty_iterator.next()).?.value,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try empty_iterator.next()).?.value.len,
+    );
+    try std.testing.expect(try empty_iterator.next() == null);
+
+    var short_scratch: [5]u8 = undefined;
+    var short_iterator = try grpc.BinaryMetadataIterator.init(
+        &fields,
+        "trace-bin",
+        &short_scratch,
+    );
+    _ = try short_iterator.next();
+    _ = try short_iterator.next();
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        short_iterator.next(),
+    );
+    // BufferTooSmall is transactional, so a caller can supply a larger
+    // scratch slice and retry the same metadata value.
+    short_iterator.scratch = &scratch;
+    try std.testing.expectEqualStrings(
+        "foo",
+        (try short_iterator.next()).?.value,
+    );
+
+    try std.testing.expectError(
+        error.InvalidMetadata,
+        grpc.encodeBinaryMetadataAlloc(
+            allocator,
+            &.{.{ .name = "not-binary", .value = "x" }},
+        ),
+    );
+    const invalid = [_]http2.Hpack.HeaderField{
+        .{ .name = "bad-bin", .value = "Zm=v" },
+    };
+    var invalid_scratch: [8]u8 = undefined;
+    var invalid_iterator = try grpc.BinaryMetadataIterator.init(
+        &invalid,
+        "bad-bin",
+        &invalid_scratch,
+    );
+    try std.testing.expectError(
+        error.InvalidBinaryMetadata,
+        invalid_iterator.next(),
+    );
+}
+
 test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -159,16 +278,47 @@ test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
                 @as(i96, std.time.ns_per_s),
                 call.timeout.?.duration().toNanoseconds(),
             );
+            const request_binary_size =
+                try grpc.binaryMetadataFieldsDecodedUpperBound(
+                    request.headers,
+                    "request-bin",
+                );
+            var request_binary: [16]u8 = undefined;
+            var request_metadata =
+                try grpc.BinaryMetadataIterator.init(
+                    request.headers,
+                    "request-bin",
+                    request_binary[0..request_binary_size],
+                );
+            try std.testing.expectEqualSlices(
+                u8,
+                &.{ 0x00, 0xff, 0x7f },
+                (try request_metadata.next()).?.value,
+            );
             try writeUnaryResponse(
                 &connection,
                 server_ptr.allocator,
                 call.stream_id,
                 .{
                     .message = "\x0a\x04netz",
+                    .initial_binary_metadata = &.{.{
+                        .name = "initial-bin",
+                        .value = "\x01\x02",
+                    }},
                     .trailing_metadata = &.{.{
                         .name = "server-meta",
                         .value = "ok",
                     }},
+                    .trailing_binary_metadata = &.{
+                        .{
+                            .name = "result-bin",
+                            .value = "one",
+                        },
+                        .{
+                            .name = "result-bin",
+                            .value = "two",
+                        },
+                    },
                 },
             );
         }
@@ -193,6 +343,10 @@ test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
         .authority = "localhost",
         .message = "\x0a\x03zig",
         .timeout = try Timeout.init(1, .second),
+        .binary_metadata = &.{.{
+            .name = "request-bin",
+            .value = &.{ 0x00, 0xff, 0x7f },
+        }},
     });
     defer response.deinit();
 
@@ -209,6 +363,31 @@ test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
             response.transport.trailers,
             "server-meta",
         ).?,
+    );
+    var initial_binary: [2]u8 = undefined;
+    var initial_metadata = try grpc.BinaryMetadataIterator.init(
+        response.transport.headers,
+        "initial-bin",
+        &initial_binary,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x02 },
+        (try initial_metadata.next()).?.value,
+    );
+    var trailing_binary: [6]u8 = undefined;
+    var trailing_metadata = try grpc.BinaryMetadataIterator.init(
+        response.transport.trailers,
+        "result-bin",
+        &trailing_binary,
+    );
+    try std.testing.expectEqualStrings(
+        "one",
+        (try trailing_metadata.next()).?.value,
+    );
+    try std.testing.expectEqualStrings(
+        "two",
+        (try trailing_metadata.next()).?.value,
     );
 }
 
@@ -328,6 +507,13 @@ test "gRPC validates custom metadata and HTTP fallback response" {
         grpc.validateCustomMetadata(&.{.{
             .name = "grpc-reserved",
             .value = "value",
+        }}),
+    );
+    try std.testing.expectError(
+        error.InvalidMetadata,
+        grpc.validateCustomBinaryMetadata(&.{.{
+            .name = "grpc-status-details-bin",
+            .value = "reserved",
         }}),
     );
     try std.testing.expectError(

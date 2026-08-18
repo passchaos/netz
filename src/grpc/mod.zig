@@ -5,6 +5,7 @@
 //! implementation.
 
 pub const wire = @import("wire.zig");
+pub const metadata = @import("metadata.zig");
 pub const call = @import("call.zig");
 
 pub const Error = call.Error;
@@ -20,6 +21,14 @@ pub const isContentType = wire.isContentType;
 pub const encodeStatusMessageInto = wire.encodeStatusMessageInto;
 pub const encodeStatusMessageAlloc = wire.encodeStatusMessageAlloc;
 pub const decodeStatusMessageAlloc = wire.decodeStatusMessageAlloc;
+pub const BinaryMetadata = metadata.BinaryMetadata;
+pub const EncodedMetadataFields = metadata.EncodedFields;
+pub const BinaryMetadataIterator = metadata.ValueIterator;
+pub const isBinaryMetadataName = metadata.isBinaryName;
+pub const encodeBinaryMetadataAlloc = metadata.encodeFieldsAlloc;
+pub const binaryMetadataDecodedUpperBound = metadata.decodedUpperBound;
+pub const binaryMetadataFieldsDecodedUpperBound =
+    metadata.decodedFieldsUpperBound;
 
 pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
@@ -30,6 +39,8 @@ pub const unaryCall = call.unaryCall;
 pub const writeUnaryResponse = call.writeUnaryResponse;
 pub const statusFromHttp = call.statusFromHttp;
 pub const validateCustomMetadata = call.validateCustomMetadata;
+pub const validateCustomBinaryMetadata =
+    call.validateCustomBinaryMetadata;
 pub const validateMessageEncoding = call.validateMessageEncoding;
 
 test {

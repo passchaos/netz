@@ -20,6 +20,10 @@ existing HTTP/2 runtime:
   deadline,
 - gRPC content-type, `TE: trailers`, method path, compression flag, and reserved
   custom-metadata validation,
+- `-bin` metadata APIs that emit standard Base64 without padding, accept both
+  padded and unpadded input, split proxy-combined comma values, preserve empty
+  binary values, and decode repeated HTTP/2 fields through caller-provided
+  bounded scratch,
 - tolerant `grpc-message` percent decoding that preserves malformed percent
   sequences as required by the protocol,
 - HTTP status fallback mapping when a broken intermediary omits `grpc-status`,
@@ -57,13 +61,11 @@ custom metadata, and a real HTTP 503 response without `grpc-status`.
 2. Integrate gzip/deflate message compression and accepted-encoding
    negotiation; current helpers validate but do not transform compressed
    payloads.
-3. Add binary metadata base64 encoding/decoding, including comma-split padded
-   and unpadded receive compatibility.
-4. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
+3. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
    and servers, not only netz's h2c runtime.
-5. Build generated service/client bindings on `pbz`, including unary and all
+4. Build generated service/client bindings on `pbz`, including unary and all
    streaming method shapes.
-6. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
+5. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
    policy, health checking, reflection, and conformance/interop runners.
 
 The current tests establish the first real gRPC wire and unary transport

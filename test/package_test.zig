@@ -6,6 +6,19 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "Status"));
     try std.testing.expect(@hasDecl(netz.grpc, "MessageIterator"));
     try std.testing.expect(@hasDecl(netz.grpc, "Timeout"));
+    try std.testing.expect(@hasDecl(netz.grpc, "BinaryMetadata"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "BinaryMetadataIterator",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "encodeBinaryMetadataAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "binaryMetadataFieldsDecodedUpperBound",
+    ));
     try std.testing.expect(@hasDecl(netz.grpc, "unaryCall"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseUnaryRequest"));
     try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
