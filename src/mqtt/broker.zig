@@ -12,10 +12,13 @@ const mqtt = @import("mod.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const qos2_mod = @import("broker/qos2.zig");
+const publication_mod = @import("broker/publication.zig");
+const retained_mod = @import("retained/mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = runtime.Error || router_mod.Error || error{
+pub const Error = runtime.Error || router_mod.Error ||
+    retained_mod.Error || publication_mod.Error || qos2_mod.Error || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
@@ -36,66 +39,20 @@ pub const Limits = struct {
 pub const Options = struct {
     limits: Limits = .{},
     router: router_mod.Options = .{},
+    retained: retained_mod.Options = .{},
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
     },
 };
 
-const Publication = struct {
-    allocator: std.mem.Allocator,
-    references: std.atomic.Value(usize),
-    bytes: []u8,
-    topic_len: usize,
-
-    fn create(
-        allocator: std.mem.Allocator,
-        publish: mqtt.Publish,
-        reference_count: usize,
-    ) std.mem.Allocator.Error!*Publication {
-        std.debug.assert(reference_count != 0);
-        const bytes_len = std.math.add(
-            usize,
-            publish.topic.len,
-            publish.payload.len,
-        ) catch return error.OutOfMemory;
-        const bytes = try allocator.alloc(u8, bytes_len);
-        errdefer allocator.free(bytes);
-        @memcpy(bytes[0..publish.topic.len], publish.topic);
-        @memcpy(bytes[publish.topic.len..], publish.payload);
-        const publication = try allocator.create(Publication);
-        publication.* = .{
-            .allocator = allocator,
-            .references = .init(reference_count),
-            .bytes = bytes,
-            .topic_len = publish.topic.len,
-        };
-        return publication;
-    }
-
-    fn topic(self: Publication) []const u8 {
-        return self.bytes[0..self.topic_len];
-    }
-
-    fn payload(self: Publication) []const u8 {
-        return self.bytes[self.topic_len..];
-    }
-
-    fn release(self: *Publication) void {
-        const previous = self.references.fetchSub(1, .acq_rel);
-        std.debug.assert(previous != 0);
-        if (previous != 1) return;
-        const allocator = self.allocator;
-        allocator.free(self.bytes);
-        self.* = undefined;
-        allocator.destroy(self);
-    }
-};
+const Publication = publication_mod.Publication;
 
 const Delivery = struct {
     publication: *Publication,
     qos: mqtt.QoS,
     retain: bool,
+    subscription_identifier: ?usize = null,
 
     fn deinit(self: *Delivery) void {
         self.publication.release();
@@ -203,6 +160,7 @@ pub const Broker = struct {
     options: Options,
     router: router_mod.Router,
     pending_qos2: qos2_mod.Store,
+    retained: retained_mod.Store,
     slots: []ClientSlot,
     state_mutex: std.Io.Mutex = .init,
 
@@ -237,6 +195,11 @@ pub const Broker = struct {
             options.limits.max_pending_incoming_qos2,
         );
         errdefer pending_qos2.deinit();
+        var retained = retained_mod.Store.init(
+            allocator,
+            options.retained,
+        );
+        errdefer retained.deinit();
         return .{
             .allocator = allocator,
             .io = io,
@@ -249,6 +212,7 @@ pub const Broker = struct {
             .options = options,
             .router = router,
             .pending_qos2 = pending_qos2,
+            .retained = retained,
             .slots = slots,
         };
     }
@@ -260,6 +224,7 @@ pub const Broker = struct {
             if (slot.connection) |*connection| connection.close();
         }
         self.allocator.free(self.slots);
+        self.retained.deinit();
         self.pending_qos2.deinit();
         self.router.deinit();
         self.server.deinit();
@@ -369,23 +334,98 @@ pub const Broker = struct {
             subscribe.subscriptions.len,
         );
         defer self.allocator.free(reasons);
+        const subscription_identifier = mqtt.subscriptionIdentifier(
+            subscribe.properties,
+        );
+        const now = std.Io.Clock.awake.now(self.io);
+        const slot = try self.slotForSubscriber(id);
+        // Serialize the subscription transition with every writer. Once the
+        // router makes a new subscription visible, concurrent publishers may
+        // enqueue for this slot; holding the writer lock guarantees SUBACK is
+        // emitted before either retained replay or those live deliveries.
+        slot.writer_mutex.lockUncancelable(self.io);
+        defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         for (subscribe.subscriptions, 0..) |subscription, index| {
-            self.router.subscribe(id, subscription) catch |err| {
+            const existed = self.router.subscribeWithIdentifierStatus(
+                id,
+                subscription,
+                subscription_identifier,
+            ) catch |err| {
                 self.state_mutex.unlock(self.io);
                 return err;
             };
             reasons[index] = @intFromEnum(subscription.qos);
+            const deliveries = self.retained.deliveriesAlloc(
+                self.allocator,
+                subscription,
+                .{
+                    .subscription_existed = existed,
+                    .subscriber_id = id,
+                    .subscription_identifier = subscription_identifier,
+                },
+                now,
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
+            defer self.allocator.free(deliveries);
+            self.enqueueRetainedDeliveries(
+                slot,
+                deliveries,
+                now,
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
         }
         self.state_mutex.unlock(self.io);
-        const slot = try self.slotForSubscriber(id);
-        slot.writer_mutex.lockUncancelable(self.io);
-        defer slot.writer_mutex.unlock(self.io);
         try connection.writeSubAck(
             subscribe.packet_id,
             reasons,
             &.{},
         );
+        // Retained replay is deliberately queued before SUBACK but flushed
+        // only afterwards. This preserves protocol ordering while using the
+        // same Receive Maximum/backpressure path as live fanout.
+        try self.flushSlotLocked(slot);
+    }
+
+    /// Queue retained replay while `state_mutex` is held.
+    ///
+    /// Each Store delivery is a borrowed view. Clone it into one
+    /// reference-counted Publication per retained Application Message before
+    /// releasing the Store lock, then transfer that sole reference into the
+    /// subscriber queue.
+    fn enqueueRetainedDeliveries(
+        self: *Broker,
+        slot: *ClientSlot,
+        deliveries: []const retained_mod.Delivery,
+        now: std.Io.Timestamp,
+    ) Error!void {
+        for (deliveries) |delivery| {
+            if (slot.queuedCount() >= self.options.limits
+                .max_queued_deliveries_per_connection)
+            {
+                // Retained replay follows the same bounded outgoing queue
+                // policy as live fanout. A successful SUBSCRIBE is not turned
+                // into a connection failure merely because this client is
+                // already saturated.
+                continue;
+            }
+            const publication = try Publication.createFromRetained(
+                self.allocator,
+                delivery,
+                1,
+                now,
+            );
+            slot.appendDeliveryAssumeCapacity(.{
+                .publication = publication,
+                .qos = delivery.qos,
+                .retain = true,
+                .subscription_identifier = delivery.subscription_identifier,
+            });
+        }
     }
 
     fn handleUnsubscribe(
@@ -430,6 +470,11 @@ pub const Broker = struct {
         publisher: *runtime.Connection,
         publish: mqtt.Publish,
     ) Error!void {
+        // Subscription Identifier is generated by a Server while forwarding;
+        // it is never legal on a Client-to-Server PUBLISH.
+        if (mqtt.subscriptionIdentifier(publish.properties) != null) {
+            return error.InvalidProperty;
+        }
         if (publish.qos == .exactly_once) {
             return self.recordQoS2Publish(
                 publisher_id,
@@ -455,6 +500,7 @@ pub const Broker = struct {
         _ = self.pending_qos2.record(
             publisher_id,
             publish,
+            std.Io.Clock.awake.now(self.io),
         ) catch |err| {
             self.state_mutex.unlock(self.io);
             if (err != error.ReceiveMaximumExceeded) return err;
@@ -505,13 +551,20 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         defer pending.deinit();
 
-        const publish = pending.asPublish(ack.packet_id);
-        try self.routeReleasedPublish(
-            publisher_id,
-            publisher,
-            publish,
-            false,
-        );
+        var properties: std.ArrayList(mqtt.Property) = .empty;
+        defer properties.deinit(self.allocator);
+        if (try pending.asPublish(
+            ack.packet_id,
+            std.Io.Clock.awake.now(self.io),
+            &properties,
+        )) |publish| {
+            try self.routeReleasedPublish(
+                publisher_id,
+                publisher,
+                publish,
+                false,
+            );
+        }
 
         const publisher_slot = try self.slotForSubscriber(publisher_id);
         publisher_slot.writer_mutex.lockUncancelable(self.io);
@@ -527,6 +580,14 @@ pub const Broker = struct {
         acknowledge_qos1: bool,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
+        _ = self.retained.applyParsedPublish(
+            publish,
+            publisher_id,
+            std.Io.Clock.awake.now(self.io),
+        ) catch |err| {
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
         const matches = self.router.matchAllocForPublisher(
             self.allocator,
             publish.topic,
@@ -579,10 +640,11 @@ pub const Broker = struct {
         const publication = if (plan.len == 0)
             null
         else
-            Publication.create(
+            Publication.createFromPublish(
                 self.allocator,
                 publish,
                 plan.len,
+                std.Io.Clock.awake.now(self.io),
             ) catch |err| {
                 self.releaseRouteReservations(plan);
                 self.state_mutex.unlock(self.io);
@@ -605,6 +667,7 @@ pub const Broker = struct {
                     publish.retain
                 else
                     false,
+                .subscription_identifier = match.subscription_identifier,
             };
             destination.appendDeliveryAssumeCapacity(delivery);
         }
@@ -687,8 +750,16 @@ pub const Broker = struct {
         slot_index: usize,
         slot: *ClientSlot,
     ) Error!void {
+        _ = slot_index;
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
+        return self.flushSlotLocked(slot);
+    }
+
+    fn flushSlotLocked(
+        self: *Broker,
+        slot: *ClientSlot,
+    ) Error!void {
         while (true) {
             self.state_mutex.lockUncancelable(self.io);
             if (!slot.active or slot.connection == null or
@@ -701,12 +772,24 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
 
             const connection = &slot.connection.?;
+            var properties: std.ArrayList(mqtt.Property) = .empty;
+            defer properties.deinit(self.allocator);
+            if (!try delivery.publication.appendDeliveryProperties(
+                &properties,
+                self.allocator,
+                delivery.subscription_identifier,
+                std.Io.Clock.awake.now(self.io),
+            )) {
+                delivery.deinit();
+                continue;
+            }
             const packet_id = connection.writePublish(
                 delivery.publication.topic(),
                 delivery.publication.payload(),
                 .{
                     .qos = delivery.qos,
                     .retain = delivery.retain,
+                    .properties = properties.items,
                 },
             ) catch |err| switch (err) {
                 error.InflightFull => {
@@ -728,7 +811,6 @@ pub const Broker = struct {
             // QoS 1 completion arrives later through this connection's reader;
             // only one writer mutates its outgoing inflight table at a time.
             _ = packet_id;
-            _ = slot_index;
         }
     }
 };

@@ -16,9 +16,9 @@ and equal-wire broker results are kept separate.
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL | Both brokers support QoS 0/1/2 |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
-| Fanout ownership | One ref-counted topic/payload allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
+| Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no live match | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
-| Retained messages | Separate bounded Store with full MQTT 5 rules; not yet composed into live Broker | Both production brokers integrate retained delivery |
+| Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
 | Broker sessions | Separate bounded Session Store; not yet composed into live Broker | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Separate indexed scheduler; not yet composed into live Broker | Both production brokers integrate Will publication |
 | Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
@@ -72,8 +72,36 @@ MQTT 5 listener from `rumqttd.toml`. The workload shape and payload bytes were
 identical; equal checksums prove all 80,000 measured deliveries completed.
 This result is evidence for this bounded live QoS 1 fanout shape only. It does
 not benchmark the QoS 2 path or claim netz exceeds Mosquitto or rumqttd in
-persistence, offline sessions, retained/Will integration, tail latency, memory
-use, or broader conformance.
+persistence, offline sessions, Will integration, tail latency, memory use, or
+broader conformance.
+
+## Live retained-message integration
+
+The bounded retained Store is now part of `mqtt.broker.Broker` rather than an
+isolated utility:
+
+- a released QoS 0/1/2 PUBLISH atomically applies retained replacement or
+  empty-payload deletion while the broker state lock is held,
+- Topic Alias is expanded by the runtime and stripped from stored/forwarded
+  state,
+- SUBSCRIBE uses the router's atomic new-versus-replacement result for Retain
+  Handling 1,
+- replay is suppressed for Retain Handling 2, shared subscriptions, and
+  matching No Local publisher identity,
+- retained delivery QoS is `min(stored QoS, subscription QoS)`, RETAIN is one,
+  and Subscription Identifier is preserved in the replay,
+- Message Expiry starts at the original publish (including time spent awaiting
+  QoS 2 PUBREL), is decremented on replay, and is checked again after time
+  queued behind Receive Maximum,
+- replay enters the same bounded per-client queue as live fanout, so a large
+  retained set cannot bypass outgoing backpressure,
+- live fanout now deep-owns and forwards MQTT 5 Application Message properties
+  through one Mosquitto-style ref-counted Publication.
+
+Mosquitto likewise updates retained state from the routed base message and
+queues retained matches according to whether `sub__add` inserted or replaced
+the subscription. The netz integration additionally keeps all replay planning
+within its explicit store/queue memory limits.
 
 ## Live QoS 2 dispatch
 
@@ -386,8 +414,8 @@ rumqttd.
    state.
 2. Add a native client-identity option for WSS; native MQTT TLS client/server
    mTLS and WS/WSS server transports are available.
-3. Compose the existing retained/session/Will stores into the live Broker,
-   including durable QoS 2 continuation across reconnect.
+3. Compose the existing session/Will stores into the live Broker, including
+   durable QoS 2 continuation across reconnect.
 4. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.

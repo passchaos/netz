@@ -11,6 +11,7 @@ pub const SubscriberId = u64;
 pub const Match = struct {
     subscriber_id: SubscriberId,
     subscription: mqtt.Subscription,
+    subscription_identifier: ?usize,
 };
 
 /// Selection policy for one MQTT 5 shared-subscription group/filter.
@@ -36,6 +37,7 @@ pub const Options = struct {
 const Entry = struct {
     subscriber_id: SubscriberId,
     subscription: mqtt.Subscription,
+    subscription_identifier: ?usize = null,
     effective_filter: []const u8,
     shared_group: ?[]const u8 = null,
     shared_group_index: ?usize = null,
@@ -146,7 +148,31 @@ pub const Router = struct {
         subscriber_id: SubscriberId,
         subscription: mqtt.Subscription,
     ) Error!bool {
+        return self.subscribeWithIdentifierStatus(
+            subscriber_id,
+            subscription,
+            null,
+        );
+    }
+
+    /// Add or replace a subscription together with its MQTT 5 identifier.
+    ///
+    /// The identifier is packet-level SUBSCRIBE metadata but becomes part of
+    /// every stored subscription from that packet. Keeping the legacy
+    /// `subscribeWithStatus` wrapper preserves source compatibility for router
+    /// users that do not need identifiers.
+    pub fn subscribeWithIdentifierStatus(
+        self: *Router,
+        subscriber_id: SubscriberId,
+        subscription: mqtt.Subscription,
+        subscription_identifier: ?usize,
+    ) Error!bool {
         try mqtt.validateTopicFilter(subscription.topic_filter);
+        if (subscription_identifier) |identifier| {
+            if (identifier == 0 or identifier > 268_435_455) {
+                return error.InvalidProperty;
+            }
+        }
         const parsed_input = parseFilter(subscription.topic_filter) orelse return error.InvalidSubscription;
         if (parsed_input.group != null and subscription.no_local) return error.InvalidSubscription;
         if (self.findEntry(subscriber_id, subscription.topic_filter)) |entry_index| {
@@ -158,6 +184,7 @@ pub const Router = struct {
             entry.subscription.no_local = subscription.no_local;
             entry.subscription.retain_as_published = subscription.retain_as_published;
             entry.subscription.retain_handling = subscription.retain_handling;
+            entry.subscription_identifier = subscription_identifier;
             return true;
         }
 
@@ -176,6 +203,7 @@ pub const Router = struct {
                 .retain_as_published = subscription.retain_as_published,
                 .retain_handling = subscription.retain_handling,
             },
+            .subscription_identifier = subscription_identifier,
             .effective_filter = parsed.effective_filter,
             .shared_group = parsed.group,
         });
@@ -834,7 +862,11 @@ fn optionalEql(a: ?[]const u8, b: ?[]const u8) bool {
 }
 
 fn entryMatch(entry: Entry) Match {
-    return .{ .subscriber_id = entry.subscriber_id, .subscription = entry.subscription };
+    return .{
+        .subscriber_id = entry.subscriber_id,
+        .subscription = entry.subscription,
+        .subscription_identifier = entry.subscription_identifier,
+    };
 }
 
 fn rendezvousScore(
@@ -1179,16 +1211,22 @@ test "MQTT router subscribeWithStatus reports replacement atomically" {
     var router = try Router.init(allocator);
     defer router.deinit();
 
-    try std.testing.expect(!(try router.subscribeWithStatus(1, .{
+    try std.testing.expect(!(try router.subscribeWithIdentifierStatus(1, .{
         .topic_filter = "state/+",
         .retain_handling = 1,
-    })));
-    try std.testing.expect(try router.subscribeWithStatus(1, .{
+    }, 7)));
+    try std.testing.expect(try router.subscribeWithIdentifierStatus(1, .{
         .topic_filter = "state/+",
         .qos = .at_least_once,
         .retain_handling = 1,
-    }));
+    }, 9));
     try std.testing.expectEqual(@as(usize, 1), router.subscriptionCount());
+    var matches: [1]Match = undefined;
+    const routed = try router.matchInto("state/value", &matches);
+    try std.testing.expectEqual(
+        @as(?usize, 9),
+        routed[0].subscription_identifier,
+    );
 }
 
 test "MQTT router enforces no-local semantics" {

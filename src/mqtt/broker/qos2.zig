@@ -6,7 +6,12 @@
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
+const owned_properties = @import("../owned_properties.zig");
 const router = @import("../router.zig");
+
+pub const Error = mqtt.Error || error{
+    PendingLimitExceeded,
+};
 
 pub const Key = packed struct(u80) {
     publisher_id: router.SubscriberId,
@@ -18,28 +23,47 @@ pub const Pending = struct {
     bytes: []u8,
     topic_len: usize,
     retain: bool,
+    properties: []mqtt.Property,
+    stored_at_ns: i96,
+    expiry_interval: ?u32,
 
     pub fn create(
         allocator: std.mem.Allocator,
         publish: mqtt.Publish,
-    ) std.mem.Allocator.Error!Pending {
+        now: std.Io.Timestamp,
+    ) Error!Pending {
         const bytes_len = std.math.add(
             usize,
             publish.topic.len,
             publish.payload.len,
         ) catch return error.OutOfMemory;
         const bytes = try allocator.alloc(u8, bytes_len);
+        errdefer allocator.free(bytes);
         @memcpy(bytes[0..publish.topic.len], publish.topic);
         @memcpy(bytes[publish.topic.len..], publish.payload);
+        const property_result = owned_properties.clone(
+            allocator,
+            publish.properties,
+            keepPendingProperty,
+        ) catch |err| switch (err) {
+            error.OwnedPropertyLimitExceeded => return error.PendingLimitExceeded,
+            else => return @errorCast(err),
+        };
         return .{
             .allocator = allocator,
             .bytes = bytes,
             .topic_len = publish.topic.len,
             .retain = publish.retain,
+            .properties = property_result.properties,
+            .stored_at_ns = now.nanoseconds,
+            .expiry_interval = mqtt.messageExpiryInterval(
+                publish.properties,
+            ),
         };
     }
 
     pub fn deinit(self: *Pending) void {
+        owned_properties.deinit(self.allocator, self.properties);
         self.allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -47,13 +71,40 @@ pub const Pending = struct {
     pub fn asPublish(
         self: Pending,
         packet_id: u16,
-    ) mqtt.Publish {
-        return .{
+        now: std.Io.Timestamp,
+        adjusted_properties: *std.ArrayList(mqtt.Property),
+    ) Error!?mqtt.Publish {
+        const remaining = remainingExpiry(
+            self.expiry_interval,
+            self.stored_at_ns,
+            now.nanoseconds,
+        );
+        if (remaining == 0) return null;
+        try adjusted_properties.ensureTotalCapacity(
+            self.allocator,
+            self.properties.len,
+        );
+        for (self.properties) |property| {
+            if (property == .four_byte and
+                property.four_byte.id == .message_expiry_interval)
+            {
+                adjusted_properties.appendAssumeCapacity(.{
+                    .four_byte = .{
+                        .id = .message_expiry_interval,
+                        .value = remaining.?,
+                    },
+                });
+            } else {
+                adjusted_properties.appendAssumeCapacity(property);
+            }
+        }
+        return mqtt.Publish{
             .dup = false,
             .qos = .exactly_once,
             .retain = self.retain,
             .topic = self.bytes[0..self.topic_len],
             .packet_id = packet_id,
+            .properties = adjusted_properties.items,
             .payload = self.bytes[self.topic_len..],
         };
     }
@@ -97,6 +148,7 @@ pub const Store = struct {
         self: *Store,
         publisher_id: router.SubscriberId,
         publish: mqtt.Publish,
+        now: std.Io.Timestamp,
     ) !bool {
         const packet_id = publish.packet_id orelse
             return error.InvalidPacketIdentifier;
@@ -117,7 +169,11 @@ pub const Store = struct {
         if (self.entries.count() >= self.maximum) {
             return error.ReceiveMaximumExceeded;
         }
-        const pending = try Pending.create(self.allocator, publish);
+        const pending = try Pending.create(
+            self.allocator,
+            publish,
+            now,
+        );
         self.entries.putAssumeCapacityNoClobber(key, pending);
         return true;
     }
@@ -156,6 +212,30 @@ pub const Store = struct {
     }
 };
 
+fn keepPendingProperty(property: mqtt.Property) bool {
+    // Topic Alias is scoped to the publisher connection. `readBrokerEvent`
+    // has already expanded the full Topic Name before this transaction is
+    // stored.
+    return !(property == .two_byte and
+        property.two_byte.id == .topic_alias);
+}
+
+fn remainingExpiry(
+    interval: ?u32,
+    stored_at_ns: i96,
+    now_ns: i96,
+) ?u32 {
+    const value = interval orelse return null;
+    if (value == 0) return 0;
+    const elapsed_ns = @max(now_ns - stored_at_ns, 0);
+    const expiry_ns = @as(i96, value) * std.time.ns_per_s;
+    if (elapsed_ns >= expiry_ns) return 0;
+    const elapsed_seconds: u32 = @intCast(
+        @divTrunc(elapsed_ns, std.time.ns_per_s),
+    );
+    return value - elapsed_seconds;
+}
+
 test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
     var store = try Store.init(std.testing.allocator, 2);
     defer store.deinit();
@@ -170,7 +250,11 @@ test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
         .packet_id = 7,
         .payload = &payload,
     };
-    try std.testing.expect(try store.record(10, publish));
+    try std.testing.expect(try store.record(
+        10,
+        publish,
+        std.Io.Timestamp.zero,
+    ));
     @memset(&topic, 'x');
     @memset(&payload, 'x');
 
@@ -178,18 +262,28 @@ test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
     retry.dup = true;
     retry.topic = "q/2";
     retry.payload = "one";
-    try std.testing.expect(!try store.record(10, retry));
+    try std.testing.expect(!try store.record(
+        10,
+        retry,
+        std.Io.Timestamp.zero,
+    ));
 
     var changed = retry;
     changed.payload = "two";
     try std.testing.expectError(
         error.InvalidPacketIdentifier,
-        store.record(10, changed),
+        store.record(10, changed, std.Io.Timestamp.zero),
     );
 
     var pending = store.take(10, 7).?;
     defer pending.deinit();
-    const restored = pending.asPublish(7);
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(std.testing.allocator);
+    const restored = (try pending.asPublish(
+        7,
+        std.Io.Timestamp.zero,
+        &properties,
+    )).?;
     try std.testing.expectEqualStrings("q/2", restored.topic);
     try std.testing.expectEqualStrings("one", restored.payload);
     try std.testing.expect(restored.retain);

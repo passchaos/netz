@@ -110,6 +110,20 @@ fn writeDuplicatePublish(
     try connection.transport.writePacket(encoded.items);
 }
 
+fn subscribeWithIdentifier(
+    connection: *runtime.Connection,
+    subscription: mqtt.Subscription,
+    identifier: usize,
+) !runtime.OwnedSubAck {
+    return connection.subscribe(
+        &.{subscription},
+        .{ .properties = &.{.{ .varint = .{
+            .id = .subscription_identifier,
+            .value = identifier,
+        } }} },
+    );
+}
+
 test "broker routes QoS 1 across live TCP clients" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -366,4 +380,5 @@ test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
 
 test {
     _ = @import("broker/qos2_tests.zig");
+    _ = @import("broker/retained_tests.zig");
 }

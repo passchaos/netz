@@ -330,6 +330,10 @@ test "public modules are reachable" {
         netz.mqtt.router.Router,
         "subscribeWithStatus",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.router.Router,
+        "subscribeWithIdentifierStatus",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "unsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchInto"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchIntoForPublisher"));
