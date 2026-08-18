@@ -146,6 +146,10 @@ transactional cumulative length validation, trailer/FIN completion and
 unfinished-writer cancellation. The client-side `RequestWriter` adds the same
 multi-call upload and trailer lifecycle, then hands the live stream to owned or
 callback-streaming response receive without first aggregating request bytes.
+An early response encountered while the upload waits for WINDOW_UPDATE is
+retained in one bounded owned-frame slot and returned as `ResponseAvailable`;
+the writer records any successfully sent prefix and transfers that response
+without losing HPACK or wire ordering.
 Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the

@@ -171,7 +171,13 @@ Reusable implementation changes behind all four H2 results:
   length retries, remains responsible for cancellation after request-body FIN,
   and hands off exactly once to either aggregate or callback-streaming response
   receive. This matches Hyper's request `Body` → h2 `SendStream` ownership
-  boundary without aggregating the upload first;
+  boundary without aggregating the upload first. If response HEADERS or a peer
+  reset arrives while upload DATA is blocked on flow control, netz preserves
+  the one owned application frame, reports partial write progress through the
+  writer state, closes the request half and transfers the response to either
+  receive mode instead of discarding it. The pending storage stays bounded to
+  one frame because control returns to the caller immediately, paralleling
+  Hyper's independently driven response future/body pipe;
 - `requestBatchInto` opens bodyless streams together, accepts response frames in
   any stream order, and returns owned responses in request order;
 - `writeResponseBatch` validates and encodes a bodyless response set before one

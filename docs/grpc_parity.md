@@ -73,7 +73,10 @@ HTTP 503 response without `grpc-status`.
    (`RequestWriter`, `readRequestStreaming`, `requestStreaming`, and
    `ResponseWriter`),
    including frame reassembly when a 5-byte gRPC prefix or payload spans DATA
-   callbacks and per-message compression without cross-message context.
+   callbacks and per-message compression without cross-message context. The
+   HTTP/2 RequestWriter already preserves an early server status while a client
+   upload is flow-control blocked, matching the cancellation edge exercised by
+   upstream gRPC Core's client-streaming tests.
 2. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
    and servers, not only netz's h2c runtime.
 3. Build generated service/client bindings on `pbz`, including unary and all

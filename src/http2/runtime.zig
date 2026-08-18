@@ -24,6 +24,7 @@ pub const Error = http2.Error || http1_runtime.Error || error{
     FlowControlViolation,
     ExtendedConnectDisabled,
     StreamReset,
+    ResponseAvailable,
     ConnectionGoAway,
     UnsupportedScheme,
     PriorityCapacityExceeded,
@@ -681,6 +682,10 @@ pub const Connection = struct {
     hpack_encoder: http2.Hpack.Encoder = .{},
     write_batch: std.ArrayList(u8) = .empty,
     frame_reader: frame_io.Reader = .{},
+    /// One application frame encountered while a RequestWriter is blocked on
+    /// send credit. Returning to the caller immediately keeps this naturally
+    /// bounded while preserving HPACK/wire order for the response reader.
+    pending_client_frame: ?OwnedFrame = null,
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -735,6 +740,9 @@ pub const Connection = struct {
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.write_batch.deinit(self.allocator);
+        if (self.pending_client_frame) |*frame| {
+            frame.deinit(self.allocator);
+        }
         self.frame_reader.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
@@ -2058,6 +2066,10 @@ pub const Connection = struct {
     }
 
     fn readOwnedFrame(self: *Connection) Error!OwnedFrame {
+        if (self.pending_client_frame) |frame| {
+            self.pending_client_frame = null;
+            return frame;
+        }
         const borrowed = try self.readBufferedFrame();
         const bytes = try self.allocator.dupe(u8, borrowed.bytes);
         errdefer self.allocator.free(bytes);
@@ -3272,7 +3284,14 @@ pub const Connection = struct {
         var body_bytes: usize = 0;
 
         while (true) {
-            const frame = try self.readFrameScratch();
+            var pending_owned: ?OwnedFrame = null;
+            defer if (pending_owned) |*owned| {
+                owned.deinit(self.allocator);
+            };
+            const frame = if (self.pending_client_frame != null) blk: {
+                pending_owned = try self.readOwnedFrame();
+                break :blk pending_owned.?.frame;
+            } else try self.readFrameScratch();
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
@@ -4058,7 +4077,27 @@ pub const Connection = struct {
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
+        var ignored_written: usize = 0;
+        return self.writeDataTracked(
+            stream_id,
+            data,
+            end_stream,
+            &ignored_written,
+        );
+    }
+
+    fn writeDataTracked(
+        self: *Connection,
+        stream_id: u31,
+        data: []const u8,
+        end_stream: bool,
+        written: *usize,
+    ) Error!void {
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
+        if (self.role == .client and self.pending_client_frame != null) {
+            return error.ResponseAvailable;
+        }
+        written.* = 0;
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
             try writeFrame(
@@ -4100,6 +4139,7 @@ pub const Connection = struct {
                 stream_window,
             );
             offset += burst_len;
+            written.* = offset;
         }
     }
 
@@ -4158,7 +4198,8 @@ pub const Connection = struct {
     fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {
         while (self.send_connection_window.available() == 0 or (try self.sendStreamWindow(stream_id)).available() == 0) {
             var frame = try self.readOwnedFrame();
-            defer frame.deinit(self.allocator);
+            var frame_owned = true;
+            defer if (frame_owned) frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) {
                 if (self.push_state.localStatus(stream_id) ==
                     .canceled)
@@ -4179,10 +4220,24 @@ pub const Connection = struct {
                         return error.StreamReset;
                     }
                 },
-                // This blocking runtime does not keep a general-purpose frame
-                // reorder buffer.  While waiting for flow-control credit, only
-                // connection management frames and same-stream reset/GOAWAY can
-                // be consumed safely; application frames would otherwise be lost.
+                .headers, .data, .push_promise => {
+                    if (self.role != .client) {
+                        return error.UnexpectedFrame;
+                    }
+                    if (frame.frame.header.stream_id != stream_id) {
+                        return error.UnexpectedFrame;
+                    }
+                    // Transfer the owning frame to the eventual response
+                    // reader. Only one can be pending because this method
+                    // returns immediately, so peer input cannot grow an
+                    // unbounded side queue while the application is uploading.
+                    if (self.pending_client_frame != null) {
+                        return error.UnexpectedFrame;
+                    }
+                    self.pending_client_frame = frame;
+                    frame_owned = false;
+                    return error.ResponseAvailable;
+                },
                 else => return error.UnexpectedFrame,
             }
         }
@@ -4594,8 +4649,34 @@ pub const RequestWriter = struct {
     ) Error!void {
         try self.ensureWritable();
         try self.reserveLength(data.len, false);
-        try self.connection.writeData(self.stream_id, data, false);
-        self.written += data.len;
+        var sent: usize = 0;
+        self.connection.writeDataTracked(
+            self.stream_id,
+            data,
+            false,
+            &sent,
+        ) catch |err| switch (err) {
+            error.ResponseAvailable => {
+                self.written += sent;
+                self.body_finished = true;
+                // Stop the request half while preserving the peer's already
+                // buffered response frame for readResponse*. Use the raw frame
+                // writer because the tracked DATA helper intentionally refuses
+                // further request DATA once a response is pending.
+                writeFrame(
+                    self.connection.allocator,
+                    self.connection.io,
+                    self.connection.stream,
+                    .data,
+                    flag_end_stream,
+                    self.stream_id,
+                    &.{},
+                ) catch {};
+                return error.ResponseAvailable;
+            },
+            else => return err,
+        };
+        self.written += sent;
     }
 
     pub fn finishData(
@@ -4604,8 +4685,30 @@ pub const RequestWriter = struct {
     ) Error!void {
         try self.ensureWritable();
         try self.reserveLength(data.len, true);
-        try self.connection.writeData(self.stream_id, data, true);
-        self.written += data.len;
+        var sent: usize = 0;
+        self.connection.writeDataTracked(
+            self.stream_id,
+            data,
+            true,
+            &sent,
+        ) catch |err| switch (err) {
+            error.ResponseAvailable => {
+                self.written += sent;
+                self.body_finished = true;
+                writeFrame(
+                    self.connection.allocator,
+                    self.connection.io,
+                    self.connection.stream,
+                    .data,
+                    flag_end_stream,
+                    self.stream_id,
+                    &.{},
+                ) catch {};
+                return error.ResponseAvailable;
+            },
+            else => return err,
+        };
+        self.written += sent;
         self.body_finished = true;
     }
 
@@ -5999,6 +6102,26 @@ pub const testing = struct {
         stream_id: u31,
     ) Error!void {
         return connection.addActivePeerStream(stream_id);
+    }
+
+    pub fn sendStreamWindow(
+        connection: *Connection,
+        stream_id: u31,
+    ) Error!*FlowWindow {
+        return connection.sendStreamWindow(stream_id);
+    }
+
+    pub fn readOwnedFrame(
+        connection: *Connection,
+    ) Error!OwnedFrame {
+        return connection.readOwnedFrame();
+    }
+
+    pub fn handleConnectionFrame(
+        connection: *Connection,
+        frame: http2.Frame,
+    ) Error!bool {
+        return connection.handleConnectionFrame(frame);
     }
 
     pub fn writeHeaders(
