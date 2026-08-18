@@ -14,7 +14,7 @@ superiority.
 | HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover | Server-side support exists; the audited 0.16 client explicitly rejects compression configuration |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
-| Receive/send ownership | `parseFrameInto` and `receiveMessageInto` use caller storage; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads; client send APIs require mutable payloads and leave them masked |
+| Receive/send ownership | `parseFrameInto` and `receiveMessageInto` use caller storage, including permessage-deflate output with reusable connection scratch; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies | Handler callbacks and automatic default control replies |
 | Concurrent sends | Serialized by per-connection `std.Io.Mutex` and covered by a runtime test | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
@@ -77,7 +77,15 @@ io_uring adapter.
 Netz uses `sendBinaryInPlace` and `receiveMessageInto`; the former deliberately
 leaves caller storage masked, matching websocket.zig's mutable-input contract,
 while the latter assembles fragments and handles control frames without a
-message allocation.
+message allocation. With permessage-deflate, the decompressed message lands
+directly in the caller buffer. TCP and RFC 8441 connections retain bounded
+compressed-wire scratch plus one reusable 64 KiB DEFLATE history window. TCP
+compressed receives allocate nothing after first-use warmup; the H2 adapter
+still owns tunnel-frame/message scratch but avoids a separate decompressed
+message allocation. Tests cover a zlib-generated dynamic-DEFLATE fixture,
+fragmented compressed text with interleaved PING, two-message TCP scratch reuse
+under a failing allocator, output overflow, and H2 compressed caller storage in
+both directions.
 
 ```sh
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast

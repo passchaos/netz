@@ -883,6 +883,60 @@ pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []con
     return output.toOwnedSlice();
 }
 
+/// Inflate one RFC 7692 no-context-takeover message into caller storage.
+///
+/// `compressed_scratch` must hold the wire payload plus the nine-byte
+/// sync-flush/final-block suffix. `flate_window` is reusable connection state;
+/// keeping it outside this function avoids a 64 KiB allocation per message.
+pub fn decompressMessageInto(
+    out: []u8,
+    compressed_payload: []const u8,
+    compressed_scratch: []u8,
+    flate_window: []u8,
+) Error![]u8 {
+    const tail: []const u8 = &.{
+        0x00, 0x00, 0xff, 0xff, // RFC 7692 sync-flush tail.
+        0x01, 0x00, 0x00, 0xff, 0xff, // Final empty stored block.
+    };
+    const input_len = std.math.add(
+        usize,
+        compressed_payload.len,
+        tail.len,
+    ) catch return error.PayloadTooLarge;
+    if (compressed_scratch.len < input_len or
+        flate_window.len < std.compress.flate.max_window_len)
+    {
+        return error.BufferTooShort;
+    }
+    if (compressed_payload.ptr != compressed_scratch.ptr) {
+        @memcpy(
+            compressed_scratch[0..compressed_payload.len],
+            compressed_payload,
+        );
+    }
+    @memcpy(
+        compressed_scratch[compressed_payload.len..input_len],
+        tail,
+    );
+
+    var input_reader = std.Io.Reader.fixed(
+        compressed_scratch[0..input_len],
+    );
+    var decompressor = std.compress.flate.Decompress.init(
+        &input_reader,
+        .raw,
+        flate_window[0..std.compress.flate.max_window_len],
+    );
+    var output_writer: std.Io.Writer = .fixed(out);
+    _ = decompressor.reader.streamRemaining(&output_writer) catch |err| {
+        return switch (err) {
+            error.WriteFailed => error.PayloadTooLarge,
+            error.ReadFailed => error.InvalidFrame,
+        };
+    };
+    return output_writer.buffered();
+}
+
 fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
     if (value.len == 0) return null;
     var parts = std.mem.splitScalar(u8, value, ';');

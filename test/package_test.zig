@@ -202,6 +202,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket, "parseFrameInto"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessageInto"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveMessageInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket,
+        "decompressMessageInto",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendBinaryInPlace"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendFragmented"));

@@ -9,6 +9,8 @@ const tls_stream = @import("../tls/mod.zig").stream;
 const tls_client_identity = @import(
     "runtime/tls_client_identity.zig",
 );
+const compression_scratch =
+    @import("runtime/compression_scratch.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
@@ -830,6 +832,7 @@ pub const Connection = struct {
     close_received: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_receive: compression_scratch.Scratch = .{},
 
     /// Verified TLS client chain for WSS server connections. Anonymous,
     /// cleartext, and client-side connections return null.
@@ -855,6 +858,7 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
+        self.compression_receive.deinit(self.allocator);
         self.transport().close();
         self.* = undefined;
     }
@@ -1053,28 +1057,33 @@ pub const Connection = struct {
         }
     }
 
-    /// Receive one complete uncompressed message into caller-owned storage.
+    /// Receive one complete message into caller-owned storage.
     ///
     /// `out` must be at least `limits.max_message_bytes`; this lets the method
     /// consume arbitrarily fragmented messages transactionally without finding
     /// a later fragment that no longer fits after earlier frames were removed
     /// from the transport buffer. Control frames retain the same automatic
-    /// Pong/Close behavior as `receiveMessage`.
+    /// Pong/Close behavior as `receiveMessage`. Negotiated compressed messages
+    /// use reusable connection scratch and inflate directly into `out`.
     pub fn receiveMessageInto(
         self: *Connection,
         out: []u8,
     ) Error!Message {
-        if (self.permessage_deflate) return error.InvalidFrame;
         if (out.len < self.limits.max_message_bytes) {
             return error.BufferTooShort;
         }
 
         var opcode: ?websocket.Opcode = null;
+        var compressed: ?bool = null;
         var written: usize = 0;
         var control_storage: [125]u8 = undefined;
         while (true) {
+            const frame_out = if (compressed == true)
+                self.compression_receive.payload.items[written..]
+            else
+                out[written..];
             const frame = try self.receiveFrameInto(
-                out[written..],
+                frame_out,
                 &control_storage,
             );
             switch (frame.header.opcode) {
@@ -1093,9 +1102,28 @@ pub const Connection = struct {
                 .text, .binary => {
                     if (opcode != null) return error.InvalidFrame;
                     opcode = frame.header.opcode;
+                    compressed = frame.header.rsv1;
+                    if (compressed.? and !self.permessage_deflate) {
+                        return error.UnexpectedRsv;
+                    }
+                    if (compressed.?) {
+                        try self.ensureCompressionReceiveScratch();
+                    }
+                    // `receiveFrameInto` selected output before seeing this
+                    // first frame's RSV1. Move its payload into reusable
+                    // compressed storage exactly once; continuations decode
+                    // there directly.
+                    if (compressed.? and frame.payload.len != 0) {
+                        @memcpy(
+                            self.compression_receive
+                                .payload.items[0..frame.payload.len],
+                            frame.payload,
+                        );
+                    }
                 },
                 .continuation => {
                     if (opcode == null) return error.InvalidFrame;
+                    if (frame.header.rsv1) return error.UnexpectedRsv;
                 },
                 _ => return error.InvalidFrame,
             }
@@ -1109,7 +1137,15 @@ pub const Connection = struct {
             }
             if (!frame.header.fin) continue;
             const message_opcode = opcode orelse return error.InvalidFrame;
-            const payload = out[0..written];
+            const payload = if (compressed == true)
+                try websocket.decompressMessageInto(
+                    out[0..self.limits.max_message_bytes],
+                    self.compression_receive.payload.items[0..written],
+                    self.compression_receive.payload.allocatedSlice(),
+                    self.compression_receive.flate_window.?,
+                )
+            else
+                out[0..written];
             if (message_opcode == .text and
                 !std.unicode.utf8ValidateSlice(payload))
             {
@@ -1159,8 +1195,16 @@ pub const Connection = struct {
         ) catch return error.PayloadTooLarge;
         try self.ensureBuffered(total_len);
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
-            .client => .{ .expect_mask = .unmasked },
-            .server => .{ .expect_mask = .masked },
+            .client => .{
+                .expect_mask = .unmasked,
+                .allow_rsv1 = self.permessage_deflate,
+                .validate_utf8 = false,
+            },
+            .server => .{
+                .expect_mask = .masked,
+                .allow_rsv1 = self.permessage_deflate,
+                .validate_utf8 = false,
+            },
         };
         const frame = try websocket.parseFrameInto(
             payload_out,
@@ -1172,6 +1216,13 @@ pub const Connection = struct {
             return error.ConnectionClosed;
         }
         return frame;
+    }
+
+    fn ensureCompressionReceiveScratch(self: *Connection) Error!void {
+        try self.compression_receive.prepare(
+            self.allocator,
+            self.limits.max_message_bytes,
+        );
     }
 
     fn writeFrameLocked(self: *Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
@@ -1263,6 +1314,8 @@ pub const H2Connection = struct {
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     send_frame_buffer: std.ArrayList(u8) = .empty,
+    message_buffer: std.ArrayList(u8) = .empty,
+    compression_receive: compression_scratch.Scratch = .{},
 
     fn init(
         allocator: std.mem.Allocator,
@@ -1286,6 +1339,8 @@ pub const H2Connection = struct {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
         self.send_frame_buffer.deinit(self.allocator);
+        self.message_buffer.deinit(self.allocator);
+        self.compression_receive.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -1444,6 +1499,96 @@ pub const H2Connection = struct {
                 },
             }
         }
+    }
+
+    /// Receive one complete message into caller-owned storage.
+    ///
+    /// HTTP/2 tunnel chunks may split WebSocket frame headers or payloads. This
+    /// adapter reuses connection-owned frame/message scratch and avoids a
+    /// separate owned final message; compressed output lands directly in
+    /// `out`.
+    pub fn receiveMessageInto(
+        self: *H2Connection,
+        out: []u8,
+    ) Error!Message {
+        if (out.len < self.limits.max_message_bytes) {
+            return error.BufferTooShort;
+        }
+        try self.message_buffer.ensureTotalCapacityPrecise(
+            self.allocator,
+            self.limits.max_message_bytes,
+        );
+        self.message_buffer.clearRetainingCapacity();
+
+        var opcode: ?websocket.Opcode = null;
+        var compressed = false;
+        while (true) {
+            var frame = try self.receiveFrameAuto();
+            defer frame.deinit(self.allocator);
+            switch (frame.header.opcode) {
+                .ping, .pong => continue,
+                .close => return error.ConnectionClosed,
+                .text, .binary => {
+                    if (opcode != null) return error.InvalidFrame;
+                    opcode = frame.header.opcode;
+                    compressed = frame.header.rsv1;
+                },
+                .continuation => {
+                    if (opcode == null) return error.InvalidFrame;
+                },
+                _ => return error.InvalidFrame,
+            }
+            const next_len = std.math.add(
+                usize,
+                self.message_buffer.items.len,
+                frame.payload.len,
+            ) catch return error.PayloadTooLarge;
+            if (next_len > self.limits.max_message_bytes) {
+                return error.PayloadTooLarge;
+            }
+            try self.message_buffer.appendSlice(
+                self.allocator,
+                frame.payload,
+            );
+            if (!frame.header.fin) continue;
+
+            const message_opcode = opcode orelse return error.InvalidFrame;
+            const payload = if (compressed) blk: {
+                try self.ensureCompressionReceiveScratch();
+                const compressed_len = self.message_buffer.items.len;
+                @memcpy(
+                    self.compression_receive
+                        .payload.items[0..compressed_len],
+                    self.message_buffer.items,
+                );
+                break :blk try websocket.decompressMessageInto(
+                    out[0..self.limits.max_message_bytes],
+                    self.compression_receive
+                        .payload.items[0..compressed_len],
+                    self.compression_receive.payload.allocatedSlice(),
+                    self.compression_receive.flate_window.?,
+                );
+            } else blk: {
+                @memcpy(
+                    out[0..self.message_buffer.items.len],
+                    self.message_buffer.items,
+                );
+                break :blk out[0..self.message_buffer.items.len];
+            };
+            if (message_opcode == .text and
+                !std.unicode.utf8ValidateSlice(payload))
+            {
+                return error.InvalidUtf8;
+            }
+            return .{ .opcode = message_opcode, .payload = payload };
+        }
+    }
+
+    fn ensureCompressionReceiveScratch(self: *H2Connection) Error!void {
+        try self.compression_receive.prepare(
+            self.allocator,
+            self.limits.max_message_bytes,
+        );
     }
 
     fn writeFrameLocked(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
@@ -2811,8 +2956,10 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
             try std.testing.expectEqualStrings("chat.v1", ws.selected_protocol.?);
             try std.testing.expect(ws.permessage_deflate);
 
-            var request = try ws.receiveMessage();
-            defer request.deinit(server_ptr.allocator);
+            var request_storage: [4096]u8 = undefined;
+            const request = try ws.receiveMessageInto(
+                &request_storage,
+            );
             try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
             try std.testing.expectEqualStrings("hello over h2 websocket", request.payload);
 
@@ -2848,8 +2995,10 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
     try std.testing.expect(ws_client.permessage_deflate);
 
     try ws_client.sendFragmented(.text, &.{ "hello over ", "h2 websocket" });
-    var response = try ws_client.receiveMessage();
-    defer response.deinit(allocator);
+    var response_storage: [4096]u8 = undefined;
+    const response = try ws_client.receiveMessageInto(
+        &response_storage,
+    );
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
     try std.testing.expectEqualStrings("world over h2 websocket", response.payload);
 

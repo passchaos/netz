@@ -378,8 +378,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 - WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
   validation including control/continuation RSV rejection, typed close-frame parse/write helpers and close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic active-state PING→PONG and close echo/completed-close short-circuit handling plus tungstenite-style data-send/read suppression after receiving Close,
-  caller-buffer frame/message receive for allocation-free persistent echo
-  loops, plus explicit mutable-buffer in-place client masking for applications
+  caller-buffer frame/message receive for allocation-free uncompressed
+  persistent echo loops plus compressed-message output directly into caller
+  storage with reusable per-connection wire/history scratch across HTTP/1 and
+  RFC 8441 HTTP/2, plus explicit mutable-buffer in-place client masking for applications
   that accept the same post-send mutation contract as websocket.zig,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation with strict client response selection, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
