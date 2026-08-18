@@ -428,39 +428,18 @@ fn connectVailStreamAttempt(
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
-    var local_store: ?vail.x509.trust.SystemStore = null;
-    defer if (local_store) |*store| store.deinit();
-    var caller_bundle_locked = false;
-    defer if (caller_bundle_locked) {
-        options.tls.ca_bundle.?.lock.unlockShared(io);
-    };
-    var bundle_verifier: vail.x509.trust.BundleVerifier = undefined;
-    const server_verifier = options.server_verifier orelse blk: {
-        if (!options.tls.verify_host) {
-            return error.CertificateUntrusted;
-        }
-        const now = std.Io.Timestamp.now(io, .real);
-        if (options.tls.ca_bundle) |ca_bundle| {
-            try ca_bundle.lock.lockShared(io);
-            caller_bundle_locked = true;
-            bundle_verifier = .{
-                .bundle = ca_bundle.bundle,
-                .now_seconds = now.toSeconds(),
-            };
-        } else {
-            local_store = try .init(allocator, io, now);
-            bundle_verifier = local_store.?.verifier(now.toSeconds());
-        }
-        break :blk bundle_verifier.clientVerifier();
-    };
-
-    const connection = try tls_stream.ClientConnection.init(
+    const connection = try tls_stream.ClientConnection.initVerified(
         allocator,
         io,
         stream,
         .{
             .server_name = tls_host,
-            .server_verifier = server_verifier,
+            .verify_host = options.tls.verify_host,
+            .ca_bundle = if (options.tls.ca_bundle) |bundle|
+                .{ .bundle = bundle.bundle, .lock = bundle.lock }
+            else
+                null,
+            .server_verifier = options.server_verifier,
             .client_identity = client_identity,
             .cipher_suites = options.cipher_suites,
             .max_server_handshake_size = options.max_server_handshake_size,

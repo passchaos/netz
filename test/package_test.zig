@@ -724,6 +724,42 @@ test "public modules are reachable" {
         netz.mqtt.websocket_runtime.ConnectOptions,
         "tls",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
+        "client_identity",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
+        "server_verifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "TlsClientIdentityOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "ClientIdentity",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "ClientCertificateVerifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsHost",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriTls",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.ConnectOptions,
+        "tls_identity",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "initVerified",
+    ));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.quic.runtime.Limits{}).max_datagram_size);
     try std.testing.expect(!(netz.quic.runtime.Limits{}).enable_gro_receive);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatch"));

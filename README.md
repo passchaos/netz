@@ -382,8 +382,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
-  Host/port synthesis, shared TLS client transport plus native TLS 1.3 WSS
-  listeners with optional client authentication and concurrent serving, and RFC 8441
+  Host/port synthesis, shared verified TLS client transport plus opt-in
+  Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
+  optional client authentication and concurrent serving, and RFC 8441
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel
@@ -419,8 +420,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   pluggable trust verification, and verified peer-chain access, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
   strict `mqtt` subprotocol
-  negotiation, `ws://`/`wss://` client and server transports, MQTT byte-stream
-  reassembly across binary-message boundaries, and in-place client masking,
+  negotiation, `ws://`/`wss://` client and server transports, WSS client
+  identities with system/caller CA or pin/custom server verification, MQTT
+  byte-stream reassembly across binary-message boundaries, and in-place client
+  masking,
   MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` request/response advertisement, and
@@ -456,13 +459,14 @@ long-header versions; MQTT has blocking TCP and WebSocket client/server
 runtimes plus native TLS client/server transport for
 CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1 and QoS 2
 publish acknowledgements. The TLS and
-WebSocket clients support `mqtts://`/`ssl://` and `wss://` respectively through
-the shared verified TLS client transport. The TLS server reuses the same MQTT
+MQTT TLS and WebSocket clients support `mqtts://`/`ssl://` and `wss://`
+respectively through the shared verified TLS client transport. Configuring
+either client's `client_identity` selects the vail TLS 1.3 stream and answers
+CertificateRequest while preserving system/caller CA and hostname policy or an
+explicit server verifier. The TLS server reuses the same MQTT
 broker-side state machine as TCP/WebSocket and supports optional or required
 TLS 1.3 client certificates with application-visible verified DER chains.
-Configuring a native client's `client_identity` selects the vail TLS 1.3
-stream transport, while clients without an identity retain Zig's standard TLS
-implementation.
+Clients without an identity retain Zig's standard TLS implementation.
 WSS servers reuse the cleartext HTTP Upgrade/frame state machine and may expose
 verified TLS client chains. Event loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on

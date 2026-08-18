@@ -10,7 +10,7 @@ superiority.
 | Area | netz | `websocket.zig` reference |
 | --- | --- | --- |
 | HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, strict duplicate critical-header checks and upgrade-body rejection | Covered with configurable handshake parsing and handler callbacks |
-| WSS client/server | Covered through shared TLS transports with host/CA verification, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
+| WSS client/server | Covered through shared TLS transports with host/CA verification, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover | Server-side support exists; the audited 0.16 client explicitly rejects compression configuration |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
@@ -23,9 +23,14 @@ superiority.
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.
 End-to-end tests cover verified localhost CA/SAN, strict subprotocol selection,
-encrypted binary echo, and the shared close/ownership path. TLS client reads are
-true short reads, so a small Upgrade response no longer waits for a caller's
-larger scratch buffer to fill.
+encrypted binary echo, public-client mTLS with server pin verification and
+application-visible client certificate chains, and the shared close/ownership
+path. Setting `ConnectOptions.tls_identity` on the existing TLS host/URI
+helpers selects the same vail stream transport as native MQTT TLS; absent a
+pin/custom verifier, it maps caller CA bundles or system roots plus hostname
+verification. TLS
+client reads are true short reads, so a small Upgrade response no longer waits
+for a caller's larger scratch buffer to fill.
 
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration

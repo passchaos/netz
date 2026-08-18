@@ -11,11 +11,14 @@ const record_stream = @import("record_stream.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
+const CertificateBundle = std.crypto.Certificate.Bundle;
 
 const x25519_group: u16 = 0x001d;
 
 pub const Error = std.mem.Allocator.Error ||
     std.Io.RandomSecureError ||
+    std.Io.Cancelable ||
+    CertificateBundle.RescanError ||
     record_io.Error ||
     record_stream.Error ||
     vail.tls.auth.Error ||
@@ -37,6 +40,28 @@ pub const Error = std.mem.Allocator.Error ||
 pub const Options = struct {
     server_name: []const u8,
     server_verifier: vail.tls.auth.ClientVerifier,
+    client_identity: vail.tls.client_auth.ClientIdentity,
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    max_server_handshake_size: usize = 256 * 1024,
+};
+
+pub const CaBundle = struct {
+    bundle: *CertificateBundle,
+    lock: *std.Io.RwLock,
+};
+
+/// High-level trust and identity policy for the vail TLS client.
+///
+/// The low-level `Options` API remains useful for custom verifiers. This
+/// wrapper gives application transports the same system-root/caller-bundle
+/// defaults as netz's standard-library TLS client while adding the client
+/// identity that Zig 0.16's standard client cannot send.
+pub const VerifiedOptions = struct {
+    server_name: []const u8,
+    verify_host: bool = true,
+    ca_bundle: ?CaBundle = null,
+    server_verifier: ?vail.tls.auth.ClientVerifier = null,
     client_identity: vail.tls.client_auth.ClientIdentity,
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
@@ -207,6 +232,55 @@ pub const Connection = struct {
         return connection;
     }
 
+    /// Establish a client-authenticated TLS connection with normal host trust.
+    ///
+    /// Caller-managed CA bundles are read-locked only for the synchronous
+    /// handshake. The resulting connection retains traffic keys, not verifier
+    /// context pointers or trust-store locks.
+    pub fn initVerified(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: VerifiedOptions,
+    ) Error!*Connection {
+        var system_store: ?vail.x509.trust.SystemStore = null;
+        defer if (system_store) |*store| store.deinit();
+        var caller_bundle_locked = false;
+        defer if (caller_bundle_locked) {
+            options.ca_bundle.?.lock.unlockShared(io);
+        };
+
+        var bundle_verifier: vail.x509.trust.BundleVerifier = undefined;
+        const verifier = options.server_verifier orelse blk: {
+            // Disabling hostname verification without supplying an explicit
+            // pin/custom verifier would silently turn mTLS into unauthenticated
+            // encryption. Reject that ambiguous configuration.
+            if (!options.verify_host) return error.CertificateUntrusted;
+            const now = std.Io.Timestamp.now(io, .real);
+            if (options.ca_bundle) |ca_bundle| {
+                try ca_bundle.lock.lockShared(io);
+                caller_bundle_locked = true;
+                bundle_verifier = .{
+                    .bundle = ca_bundle.bundle,
+                    .now_seconds = now.toSeconds(),
+                };
+            } else {
+                system_store = try .init(allocator, io, now);
+                bundle_verifier =
+                    system_store.?.verifier(now.toSeconds());
+            }
+            break :blk bundle_verifier.clientVerifier();
+        };
+
+        return init(allocator, io, stream, .{
+            .server_name = options.server_name,
+            .server_verifier = verifier,
+            .client_identity = options.client_identity,
+            .cipher_suites = options.cipher_suites,
+            .max_server_handshake_size = options.max_server_handshake_size,
+        });
+    }
+
     pub fn deinit(self: *Connection) void {
         if (!self.records.closed) {
             self.records.sendCloseNotify(self.io, self.stream) catch {};
@@ -227,6 +301,19 @@ pub const Connection = struct {
         bytes: []const u8,
     ) Error!void {
         return self.records.writeAll(self.io, self.stream, bytes);
+    }
+
+    pub fn writeAllParts(
+        self: *Connection,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        return self.records.writeAllParts(
+            self.io,
+            self.stream,
+            first,
+            second,
+        );
     }
 };
 

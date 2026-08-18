@@ -6,6 +6,9 @@ const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
 const http2_runtime = http2.runtime;
 const tls_stream = @import("../tls/mod.zig").stream;
+const tls_client_identity = @import(
+    "runtime/tls_client_identity.zig",
+);
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
@@ -45,9 +48,14 @@ pub const Role = enum {
     server,
 };
 
+pub const ClientIdentity = tls_client_identity.ClientIdentity;
+pub const ClientCertificateVerifier =
+    tls_client_identity.CertificateVerifier;
+
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
     tls: *http1_runtime.TlsClientConnection,
+    tls_vail: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
     linux_io_uring: http1_runtime.LinuxIoUringStream,
 
@@ -55,6 +63,7 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
             .tls => |conn| conn.read(buffer),
+            .tls_vail => |conn| conn.read(buffer),
             .tls_server => |conn| conn.read(buffer),
             .linux_io_uring => |conn| conn.read(buffer),
         };
@@ -64,6 +73,7 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls => |conn| conn.writeAll(bytes),
+            .tls_vail => |conn| conn.writeAll(bytes),
             .tls_server => |conn| conn.writeAll(bytes),
             .linux_io_uring => |conn| conn.writeAll(bytes),
         };
@@ -82,6 +92,7 @@ const RuntimeTransport = union(enum) {
                 payload,
             ),
             .tls => |conn| conn.writeAllParts(header, payload),
+            .tls_vail => |conn| conn.writeAllParts(header, payload),
             .tls_server => |conn| conn.writeAllParts(header, payload),
             // The raw io_uring adapter currently exposes one-slice sends.
             // Two submissions still avoid a payload-sized temporary copy.
@@ -96,6 +107,7 @@ const RuntimeTransport = union(enum) {
         switch (self) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
             .tls => |conn| conn.deinit(),
+            .tls_vail => |conn| conn.deinit(),
             .tls_server => |conn| conn.deinit(),
             .linux_io_uring => |conn| conn.close(),
         }
@@ -370,6 +382,7 @@ fn acceptTransport(
             .tcp => |tcp| tcp.stream,
             .tls_server => |connection| connection.stream,
             .tls => |connection| connection.stream,
+            .tls_vail => |connection| connection.stream,
             .linux_io_uring => undefined,
         },
         .tls_server_conn = switch (transport) {
@@ -442,6 +455,8 @@ pub const AcceptOptions = struct {
     enable_permessage_deflate: bool = false,
 };
 
+pub const TlsClientIdentityOptions = tls_client_identity.Options;
+
 pub const Client = struct {
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -449,6 +464,7 @@ pub const Client = struct {
         address: net.IpAddress,
         options: ConnectOptions,
     ) Error!Connection {
+        if (options.tls_identity != null) return error.UnsupportedScheme;
         const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| return err;
         errdefer stream.close(io);
         return connectStream(allocator, io, stream, null, options);
@@ -461,6 +477,7 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
     ) Error!Connection {
+        if (options.tls_identity != null) return error.UnsupportedScheme;
         const host_name = try net.HostName.init(host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         errdefer stream.close(io);
@@ -483,13 +500,40 @@ pub const Client = struct {
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
-        const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, host, tls_options);
-        stream_owned = false;
-        errdefer tls_conn.deinit();
         const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         defer allocator.free(default_host);
         var connect_options = options;
         if (connect_options.host.len == 0) connect_options.host = default_host;
+        if (connect_options.tls_identity) |identity| {
+            // The standard Zig 0.16 client cannot answer
+            // CertificateRequest, so identities select the shared vail path.
+            const tls_conn = try tls_client_identity.init(
+                allocator,
+                io,
+                stream,
+                host,
+                tls_options,
+                identity,
+            );
+            stream_owned = false;
+            errdefer tls_conn.deinit();
+            return connectVailStream(
+                allocator,
+                io,
+                stream,
+                tls_conn,
+                connect_options,
+            );
+        }
+        const tls_conn = try http1_runtime.TlsClientConnection.init(
+            allocator,
+            io,
+            stream,
+            host,
+            tls_options,
+        );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
         return connectStream(allocator, io, stream, tls_conn, connect_options);
     }
 
@@ -513,6 +557,11 @@ pub const Client = struct {
         const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
         const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
         if (!is_ws and !is_wss) return error.UnsupportedScheme;
+        if (options.tls_identity != null and !is_wss) {
+            // Client certificates are TLS credentials. Reject rather than
+            // silently dropping them when this helper receives a ws:// URI.
+            return error.UnsupportedScheme;
+        }
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try http1_runtime.uriEndpoint(allocator, uri, if (is_wss) 443 else 80);
@@ -526,6 +575,25 @@ pub const Client = struct {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (is_wss) {
+            if (options.tls_identity) |identity| {
+                const tls_conn = try tls_client_identity.init(
+                    allocator,
+                    io,
+                    stream,
+                    endpoint.tls_host,
+                    tls_options,
+                    identity,
+                );
+                stream_owned = false;
+                errdefer tls_conn.deinit();
+                return connectVailStream(
+                    allocator,
+                    io,
+                    stream,
+                    tls_conn,
+                    connect_options,
+                );
+            }
             const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, tls_options);
             stream_owned = false;
             errdefer tls_conn.deinit();
@@ -549,6 +617,7 @@ pub const Client = struct {
         uri_text: []const u8,
         options: ConnectOptions,
     ) Error!Connection {
+        if (options.tls_identity != null) return error.UnsupportedScheme;
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.UnsupportedScheme;
         const target = try uriTargetAlloc(allocator, uri);
@@ -575,6 +644,7 @@ pub const Client = struct {
             .{ .linux_io_uring = uring_stream },
             undefined,
             null,
+            null,
             uring_stream,
             connect_options,
         );
@@ -591,7 +661,38 @@ pub const Client = struct {
             try socket_options.setTcpNoDelay(stream);
         }
         const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
-        return connectTransport(allocator, io, transport, stream, tls_conn, null, options);
+        return connectTransport(
+            allocator,
+            io,
+            transport,
+            stream,
+            tls_conn,
+            null,
+            null,
+            options,
+        );
+    }
+
+    fn connectVailStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_conn: *tls_stream.ClientConnection,
+        options: ConnectOptions,
+    ) Error!Connection {
+        if (options.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
+        return connectTransport(
+            allocator,
+            io,
+            .{ .tls_vail = tls_conn },
+            stream,
+            null,
+            tls_conn,
+            null,
+            options,
+        );
     }
 
     fn connectTransport(
@@ -600,6 +701,7 @@ pub const Client = struct {
         transport: RuntimeTransport,
         stream: net.Stream,
         tls_conn: ?*http1_runtime.TlsClientConnection,
+        tls_vail_conn: ?*tls_stream.ClientConnection,
         linux_io_uring: ?http1_runtime.LinuxIoUringStream,
         options: ConnectOptions,
     ) Error!Connection {
@@ -654,6 +756,7 @@ pub const Client = struct {
             .allocator = allocator,
             .stream = stream,
             .tls_conn = tls_conn,
+            .tls_vail_conn = tls_vail_conn,
             .linux_io_uring = linux_io_uring,
             .role = .client,
             .limits = options.limits,
@@ -691,6 +794,9 @@ pub const ConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     tcp_nodelay: bool = true,
     limits: Limits = .{},
+    /// Configure a TLS 1.3 client identity for WSS. Cleartext connect helpers
+    /// reject this field instead of silently dropping credentials.
+    tls_identity: ?TlsClientIdentityOptions = null,
 };
 
 pub const OwnedMessage = struct {
@@ -713,6 +819,7 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     stream: net.Stream,
     tls_conn: ?*http1_runtime.TlsClientConnection = null,
+    tls_vail_conn: ?*tls_stream.ClientConnection = null,
     tls_server_conn: ?*tls_stream.ServerConnection = null,
     linux_io_uring: ?http1_runtime.LinuxIoUringStream = null,
     role: Role,
@@ -740,6 +847,7 @@ pub const Connection = struct {
     fn transport(self: *Connection) RuntimeTransport {
         if (self.linux_io_uring) |conn| return .{ .linux_io_uring = conn };
         if (self.tls_server_conn) |conn| return .{ .tls_server = conn };
+        if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };
         if (self.tls_conn) |conn| return .{ .tls = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }

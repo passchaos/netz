@@ -1,6 +1,5 @@
 const std = @import("std");
 const runtime = @import("../runtime.zig");
-const tls_stream = @import("../../tls/mod.zig").stream;
 const tls_testing = @import("../../tls/testing.zig");
 
 test "WSS server completes verified WebSocket echo" {
@@ -108,7 +107,7 @@ test "WSS server completes verified WebSocket echo" {
     if (shared.err) |err| return err;
 }
 
-test "WSS server exposes verified mTLS client certificate" {
+test "WSS public client identity completes mTLS echo" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -170,7 +169,16 @@ test "WSS server exposes verified mTLS client certificate" {
                 shared.expected_certificate,
             )) {
                 shared.err = error.InvalidPeerCertificate;
+                return;
             }
+            var message = connection.receiveMessage() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer message.deinit(shared.server.allocator);
+            connection.sendBinary(message.payload) catch |err| {
+                shared.err = err;
+            };
         }
     };
     var shared = Shared{
@@ -181,47 +189,74 @@ test "WSS server exposes verified mTLS client certificate" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    const tcp = try server.address().connect(io, .{ .mode = .stream });
-    var tls = try tls_stream.ClientConnection.init(
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://localhost:{d}/mtls",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var client = try runtime.Client.connectUriTls(
         allocator,
         io,
-        tcp,
+        uri,
         .{
-            .server_name = "localhost",
-            .server_verifier = .{
-                .pinned_ecdsa_p256_public_key = public_key,
+            .protocols = &.{"mtls.v1"},
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = 4096,
+                .max_message_bytes = 4096,
             },
-            .client_identity = .{
-                .certificate_chain = &.{&certificate_der},
-                .signer = .{ .ecdsa_p256_sha256 = .{
-                    .key_pair = key_pair,
-                } },
+            .tls_identity = .{
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .cipher_suites = &.{.aes_128_gcm_sha256},
             },
-            .cipher_suites = &.{.aes_128_gcm_sha256},
         },
+        .{},
     );
-    defer tls.deinit();
-    try tls.writeAll(
-        "GET /mtls HTTP/1.1\r\n" ++
-            "Host: localhost\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
-            "Sec-WebSocket-Version: 13\r\n" ++
-            "Sec-WebSocket-Protocol: mtls.v1\r\n" ++
-            "\r\n",
+    defer client.close();
+    try client.sendBinary("authenticated websocket");
+    var echoed = try client.receiveMessage();
+    defer echoed.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "authenticated websocket",
+        echoed.payload,
     );
-    var response: [4096]u8 = undefined;
-    const response_len = try tls.read(&response);
-    try std.testing.expect(std.mem.startsWith(
-        u8,
-        response[0..response_len],
-        "HTTP/1.1 101 ",
-    ));
 
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "WebSocket client identity is rejected for cleartext URI" {
+    const key_pair = try tls_testing.serverKeyPair();
+    var certificate_der: [tls_testing.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    try std.testing.expectError(
+        error.UnsupportedScheme,
+        runtime.Client.connectUri(
+            std.testing.allocator,
+            std.testing.io,
+            "ws://127.0.0.1:1/",
+            .{ .tls_identity = .{ .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            } } },
+        ),
+    );
 }
 
 fn localCaBundle(

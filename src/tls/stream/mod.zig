@@ -2,6 +2,9 @@
 
 pub const ClientConnection = @import("client_connection.zig").Connection;
 pub const ClientOptions = @import("client_connection.zig").Options;
+pub const ClientVerifiedOptions =
+    @import("client_connection.zig").VerifiedOptions;
+pub const ClientCaBundle = @import("client_connection.zig").CaBundle;
 pub const ServerConnection = @import("server_connection.zig").Connection;
 pub const ServerOptions = @import("server_connection.zig").Options;
 pub const PeerCertificateChain =

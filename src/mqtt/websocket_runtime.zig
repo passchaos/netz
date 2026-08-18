@@ -4,9 +4,13 @@ const runtime = @import("runtime.zig");
 const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
+const vail = @import("vail");
 
 const net = std.Io.net;
 const mqtt_subprotocol = "mqtt";
+
+pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
+pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
 
 /// MQTT-over-WebSocket listener.
 ///
@@ -256,6 +260,11 @@ pub const Client = struct {
         address: net.IpAddress,
         options: ConnectOptions,
     ) runtime.Error!runtime.ConnectAttempt {
+        // This overload establishes cleartext WS. Requiring an explicit WSS
+        // URI for identities avoids silently discarding client credentials.
+        if (options.client_identity != null) {
+            return error.UnsupportedScheme;
+        }
         const ws = try websocket_runtime.Client.connect(
             allocator,
             io,
@@ -316,6 +325,14 @@ pub const ConnectOptions = struct {
     max_head_bytes: usize = 64 * 1024,
     tcp_nodelay: bool = true,
     tls: http1_runtime.TlsClientOptions = .{},
+    /// Select the vail-backed WSS client and answer CertificateRequest.
+    client_identity: ?ClientIdentity = null,
+    /// Optional pin/custom trust callback for the client-identity path.
+    /// Otherwise `tls.ca_bundle` or system roots verify the server and host.
+    server_verifier: ?ClientCertificateVerifier = null,
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    max_server_handshake_size: usize = 256 * 1024,
 };
 
 fn websocketLimits(
@@ -341,6 +358,15 @@ fn websocketConnectOptions(
             options.mqtt.limits,
             options.max_head_bytes,
         ),
+        .tls_identity = if (options.client_identity) |identity|
+            .{
+                .identity = identity,
+                .server_verifier = options.server_verifier,
+                .cipher_suites = options.cipher_suites,
+                .max_server_handshake_size = options.max_server_handshake_size,
+            }
+        else
+            null,
     };
 }
 

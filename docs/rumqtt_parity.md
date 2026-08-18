@@ -300,11 +300,23 @@ The audited rumqtt client supports MQTT 3.1.1 and MQTT 5 over WebSocket, while
 the rumqttd server path still contains `TODO: Add support for V5 protocol with
 websockets`. Netz tests both versions end to end on its client and server and
 also covers cross-message packet reassembly, QoS 1, QoS 2, and strict
-subprotocol rejection. Client `wss://` uses the existing HTTP/1 TLS transport.
+subprotocol rejection. Client `wss://` uses the generic WebSocket TLS
+transport. Setting `ConnectOptions.client_identity` selects the shared
+vail-backed TLS 1.3 client, which sends Ed25519/ECDSA/SM2 identities and maps
+the same system/caller CA plus hostname policy or a pin/custom
+`server_verifier`. Cleartext address-based `connect` rejects configured TLS
+credentials instead of silently dropping them.
+
 Netz additionally terminates WSS natively with the same strict `mqtt`
 subprotocol and MQTT 3.1.1/5 state machine as WS. The TLS listener supports
 concurrent serving and optional/required client certificates; verified peer
-chains remain visible through `Connection.peerCertificates()`.
+chains remain visible through `Connection.peerCertificates()`. End-to-end
+tests prove the public MQTT WSS client performs authenticated CONNECT and QoS 1
+PUBLISH/PUBACK while the server observes the exact verified client DER chain.
+Mosquitto exposes the analogous client certificate/key capability through
+`mosquitto_tls_set` regardless of whether MQTT is carried directly or over
+WebSocket; netz now preserves that transport parity with typed in-memory
+identities instead of requiring certificate/key file paths.
 
 ## Native MQTT-over-TLS transport
 
@@ -521,12 +533,8 @@ rumqttd.
 
 1. Add a durable disk/replicated commitlog for retained/session/offline/Will
    state.
-2. Add a native client-identity option for WSS; native MQTT TLS client/server
-   mTLS and WS/WSS server transports are available.
-3. Add durable disk/replicated persistence beneath the now-integrated live
-   retained/Session/Will state.
-4. Extend the equal-wire driver with concurrent publisher windows, latency
+2. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.
-5. Run Mosquitto's protocol/conformance and interoperability suites against
+3. Run Mosquitto's protocol/conformance and interoperability suites against
    netz in addition to in-repository codec/runtime tests.
