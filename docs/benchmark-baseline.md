@@ -132,6 +132,7 @@ taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_10b
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_100kb
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_empty
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_req_10kb_100_chunks_max_window
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_res_1mb
 ```
 
 ```text
@@ -158,6 +159,11 @@ parallel x10, 100 x 10-KiB request chunks/stream, max windows:
   netz:  1.64-1.74 ms/batch, 164-174 us/request
   hyper: 3.36-3.40 ms/batch, 336-340 us/request
   netz batch-latency advantage: 1.93-2.07x
+
+parallel x10, 1-MiB response/stream, max windows (2026-08-19):
+  netz:  1.681-1.805 ms/batch, 168.1-180.5 us/request
+  hyper: 2.957-3.035 ms/batch, 295.7-303.5 us/request
+  netz batch-latency advantage: 1.64-1.81x
 ```
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
@@ -184,10 +190,16 @@ without losing HPACK or wire ordering.
 Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the
-implementation audit and remaining H2 comparison work.
+implementation audit and additional H2 comparison work.
 Body-bearing max-window batches add transactional credit preflight, staged
 HEADERS, round-robin borrowed DATA contributions, and server-side interleaved
 streaming request demultiplexing without body aggregation.
+The response-body batch uses the symmetric server scheduler and client
+stream-ID demultiplexer: ten borrowed 1-MiB payloads are framed round-robin,
+using the same 16-KiB per-stream turn as Hyper's locked h2 0.4.15 scheduler,
+and callbacks account response DATA without retaining a 10-MiB aggregate.
+These ranges establish advantages for the named loopback workloads only; they
+do not establish whole-library HTTP/2 superiority.
 
 ### HTTP/3 QPACK dynamic encode
 

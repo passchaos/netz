@@ -64,8 +64,10 @@ reference checkout at `~/Work/hyper`.
 `http2_parallel_x10_empty` on persistent prior-knowledge connections. It also
 includes Hyper's `http2_parallel_x10_req_10kb_100_chunks_max_window`: ten
 concurrent streams each carry 100 round-robin 10-KiB contributions under max
-connection/stream windows. It
-includes a same-length Date field and Hyper-style receive windows so
+connection/stream windows. The
+`http2_parallel_x10_res_1mb` scenario sends ten bodyless requests and streams a
+1-MiB response on every stream without client-side body aggregation. The
+benchmark includes a same-length Date field and Hyper-style receive windows so
 steady-state wire sizes and flow-control shape match the reference. The 100-KiB
 server path consumes DATA through `readRequestStreaming` without aggregation.
 

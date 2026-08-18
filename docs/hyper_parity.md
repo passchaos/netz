@@ -123,10 +123,12 @@ advantage; chunked remains explicit follow-up optimization evidence.
 ## HTTP/2 consecutive and parallel round trips
 
 Hyper's `benches/end_to_end.rs` defines consecutive empty GET, consecutive
-10-byte and 100-KiB POST, and parallel x10 empty GET scenarios on persistent
-HTTP/2 connections. The netz h2c benchmark mirrors them with 1,000 untimed
-warmup iterations for small messages (100 for 100 KiB) and 2,000 measured
-iterations:
+10-byte and 100-KiB POST, parallel x10 empty GET, max-window chunked request,
+and max-window 1-MiB response scenarios on persistent HTTP/2 connections. The
+netz h2c benchmark mirrors them with 1,000 untimed warmup iterations for small
+messages (100 for 100 KiB) and 2,000 measured iterations. The 10-stream body
+workloads use 5 warmups and 20 measured batches because each batch transfers
+about 10 MiB:
 
 ```sh
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
@@ -144,6 +146,8 @@ taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_100kb
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_empty
 taskset -c 0 "$HYPER_H2_BENCH" \
   --bench http2_parallel_x10_req_10kb_100_chunks_max_window
+taskset -c 0 "$HYPER_H2_BENCH" \
+  --bench http2_parallel_x10_res_1mb
 ```
 
 The reference revision/toolchain are the same as the HTTP/1 comparison above.
@@ -185,7 +189,20 @@ http2_parallel_x10_req_10kb_100_chunks_max_window:
   hyper: 3.36-3.40 ms/10-stream batch
          336-340 us/request
   netz is about 1.93-2.07x faster per batch
+
+http2_parallel_x10_res_1mb (2026-08-19):
+  netz:  1.681-1.805 ms/10-stream batch
+         168.1-180.5 us/request
+  hyper: 2.957-3.035 ms/10-stream batch
+         295.7-303.5 us/request
+  netz is about 1.64-1.81x faster per batch
 ```
+
+For the response case, Hyper supplies one `Full<Bytes>` per stream. The locked
+h2 0.4.15 scheduler splits it at the default 16-KiB frame limit and requeues
+the stream after each frame. Netz uses the same 16-KiB round-robin contribution,
+so the comparison matches not only body and window sizes but also DATA
+interleaving.
 
 The 10-byte result is a specific Linux TCP scheduling cliff, not a general
 3,500x whole-stack claim. In the audited Hyper run, HEADERS and DATA are two
@@ -219,7 +236,7 @@ available for HTTP/2:
   handoff after an incremental upload. Callback or framing failure poisons the
   HTTP/1 connection rather than risking reuse at an unknown message boundary.
 
-Reusable implementation changes behind all four H2 results:
+Reusable implementation changes behind these H2 results:
 
 - a shared Zig 0.16 stream-vector helper correctly reserves `netWrite`'s final
   data element as its splat pattern and handles partial writes;
@@ -275,6 +292,14 @@ Reusable implementation changes behind all four H2 results:
 - `writeResponseBatch` validates and encodes a bodyless response set before one
   submission; a deep-cloned HPACK encoder is committed only after the wire
   write succeeds, so a failed batch cannot desynchronize compression state;
+- `writeResponseBodyBatch` extends the server boundary to complete bodies that
+  fit current connection and per-stream credit. It stages all HPACK state,
+  borrows payloads, and submits each stream's application contribution
+  round-robin while retaining normal DATA frame limits. The corresponding
+  `requestBatchStreamingInto` client path demultiplexes interleaved DATA by
+  request index, continuously returns flow credit, validates each declared
+  length, and retains only owned response metadata rather than a batch-sized
+  body aggregate;
 - large batch header blocks retain normal HEADERS/CONTINUATION framing.
 
 ## Current feature comparison
@@ -292,11 +317,12 @@ Reusable implementation changes behind all four H2 results:
 | HTTP/2 consecutive 100-KiB POST | 23.52-23.57 us/op pinned, streaming receive | 37.24-38.68 us/op pinned |
 | HTTP/2 parallel x10 empty | 26.35-26.60 us/batch pinned | 47.50-48.46 us/batch pinned |
 | HTTP/2 parallel x10 × 100 × 10-KiB request chunks | 1.64-1.74 ms/batch pinned | 3.36-3.40 ms/batch pinned |
+| HTTP/2 parallel x10 × 1-MiB responses | 1.681-1.805 ms/batch pinned | 2.957-3.035 ms/batch pinned |
 
 ## Remaining evidence
 
-1. Continue narrowing the remaining HTTP/1 chunked gap and add response-body
-   parallel H2 evidence.
+1. Continue narrowing the remaining HTTP/1 chunked gap and extend parallel H2
+   response evidence to flow-control-blocked and cancellation-heavy workloads.
 2. Measure allocation count and peak memory, not only elapsed time.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;

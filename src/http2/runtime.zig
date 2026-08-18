@@ -1117,6 +1117,114 @@ pub const Connection = struct {
         }
     }
 
+    /// Send bodyless request heads and stream interleaved response DATA.
+    ///
+    /// Response metadata is returned in request order, while `consume`
+    /// receives that same request index plus each borrowed DATA slice. This is
+    /// the no-aggregation counterpart to `requestBatchInto`. If the callback
+    /// fails, unfinished streams are cancelled and no output element becomes
+    /// caller-owned. A transport write failure may have exposed only a prefix
+    /// of the staged request set, so the connection must be closed rather than
+    /// reused after such an error.
+    pub fn requestBatchStreamingInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (requests.len != responses.len) return error.InvalidResponse;
+        if (requests.len == 0) return;
+        if (self.active_local_streams.items.len != 0) {
+            return error.UnexpectedFrame;
+        }
+        for (requests) |request_options| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+            if (methodIsConnect(request_options.method)) {
+                return error.InvalidHeader;
+            }
+        }
+
+        var states_stack: [16]BatchResponseState = undefined;
+        const states = if (requests.len <= states_stack.len)
+            states_stack[0..requests.len]
+        else
+            try self.allocator.alloc(BatchResponseState, requests.len);
+        defer if (states.ptr != states_stack[0..].ptr) {
+            self.allocator.free(states);
+        };
+
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
+        var staged_encoder_owned = true;
+        defer if (staged_encoder_owned) {
+            staged_encoder.deinit(self.allocator);
+        };
+        var started: usize = 0;
+        var requests_written = false;
+        errdefer {
+            for (states[0..started]) |*state| {
+                if (requests_written and !state.done) {
+                    self.writeResetStreamFrame(
+                        state.stream_id,
+                        .cancel,
+                    ) catch {};
+                }
+                self.releaseLocalStream(state.stream_id);
+                state.deinit(self.allocator);
+            }
+        }
+        for (requests, states) |request_options, *state| {
+            const pending = try self.appendBodylessRequestToBatch(
+                request_options,
+                batch,
+                &staged_encoder,
+            );
+            state.* = .{
+                .stream_id = pending.stream_id,
+                .request_method = pending.request_method,
+                .extended_connect = pending.extended_connect,
+            };
+            started += 1;
+        }
+        writeAll(self.io, self.stream, batch.items) catch |err| {
+            // Some HEADERS may already be visible. As with body-bearing
+            // batches, retain advanced HPACK state and consumed stream IDs so
+            // accidental reuse cannot pretend the transaction never started.
+            self.hpack_encoder.deinit(self.allocator);
+            self.hpack_encoder = staged_encoder;
+            staged_encoder_owned = false;
+            return err;
+        };
+        self.hpack_encoder.deinit(self.allocator);
+        self.hpack_encoder = staged_encoder;
+        staged_encoder_owned = false;
+        requests_written = true;
+
+        try self.readResponseBatchStreaming(
+            states,
+            context,
+            consume,
+        );
+        for (states, responses) |*state, *response| {
+            response.* = .{
+                .headers = state.headers.?,
+                .status = state.status.?,
+                .body_bytes = state.body_bytes,
+                .trailers = state.trailers,
+            };
+            state.headers = null;
+            state.trailers = &.{};
+            self.releaseLocalStream(state.stream_id);
+        }
+    }
+
     /// Send a batch whose complete bodies fit current flow-control credit.
     ///
     /// Unlike `requestBatchInto`, this accepts DATA but never pumps incoming
@@ -1404,7 +1512,14 @@ pub const Connection = struct {
         states: []const BatchResponseState,
         application_chunk_size: usize,
     ) Error!void {
-        const frame_limit = self.outboundFramePayloadLimit();
+        var views_stack: [16]BatchDataView = undefined;
+        const views = if (requests.len <= views_stack.len)
+            views_stack[0..requests.len]
+        else
+            try self.allocator.alloc(BatchDataView, requests.len);
+        defer if (views.ptr != views_stack[0..].ptr) {
+            self.allocator.free(views);
+        };
         var offsets_stack: [16]usize = undefined;
         const offsets = if (requests.len <= offsets_stack.len)
             offsets_stack[0..requests.len]
@@ -1414,43 +1529,92 @@ pub const Connection = struct {
             self.allocator.free(offsets);
         };
         @memset(offsets, 0);
+        for (views, requests, states) |*view, request_options, state| {
+            view.* = .{
+                .stream_id = state.stream_id,
+                .body = request_options.body,
+            };
+        }
+        try self.prepareBodyBatchData(views, application_chunk_size);
+        try self.writeBodyBatchData(
+            views,
+            offsets,
+            application_chunk_size,
+        );
+    }
 
+    const BatchDataView = struct {
+        stream_id: u31,
+        body: []const u8,
+    };
+
+    fn prepareBodyBatchData(
+        self: *Connection,
+        views: []const BatchDataView,
+        application_chunk_size: usize,
+    ) Error!void {
+        const frame_limit = self.outboundFramePayloadLimit();
+        var max_body_len: usize = 0;
+        for (views) |view| max_body_len = @max(max_body_len, view.body.len);
         self.batch_data_headers.clearRetainingCapacity();
         self.batch_data_parts.clearRetainingCapacity();
+        if (max_body_len == 0) return;
+
+        // A caller may use an arbitrarily large application contribution to
+        // mean "all remaining bytes". Cap scratch sizing at the largest
+        // actual body instead of reserving for frames that cannot be emitted.
         const per_round_frames = std.math.divCeil(
             usize,
-            application_chunk_size,
+            @min(application_chunk_size, max_body_len),
             frame_limit,
         ) catch return error.MessageTooLarge;
         const header_capacity = std.math.mul(
             usize,
-            requests.len,
+            views.len,
             per_round_frames,
         ) catch return error.MessageTooLarge;
         try self.batch_data_headers.ensureTotalCapacity(
             self.allocator,
             header_capacity,
         );
+        const parts_capacity = std.math.mul(
+            usize,
+            header_capacity,
+            2,
+        ) catch return error.MessageTooLarge;
         try self.batch_data_parts.ensureTotalCapacity(
             self.allocator,
-            header_capacity * 2,
+            parts_capacity,
         );
+    }
+
+    fn writeBodyBatchData(
+        self: *Connection,
+        views: []const BatchDataView,
+        offsets: []usize,
+        application_chunk_size: usize,
+    ) Error!void {
+        // Response batches call `prepareBodyBatchData` before HEADERS are
+        // written. The send loop is therefore allocation-free and cannot fail
+        // for local memory after committing those responses to the wire.
+        std.debug.assert(views.len == offsets.len);
+        const frame_limit = self.outboundFramePayloadLimit();
 
         while (true) {
             self.batch_data_headers.clearRetainingCapacity();
             self.batch_data_parts.clearRetainingCapacity();
             var has_data = false;
-            for (requests, states, offsets) |
-                request_options,
-                state,
+            for (views, offsets) |
+                view,
                 *offset,
             | {
-                if (offset.* == request_options.body.len) continue;
+                if (offset.* == view.body.len) continue;
                 has_data = true;
-                const contribution_end = @min(
-                    request_options.body.len,
-                    offset.* + application_chunk_size,
+                const contribution_len = @min(
+                    application_chunk_size,
+                    view.body.len - offset.*,
                 );
+                const contribution_end = offset.* + contribution_len;
                 while (offset.* < contribution_end) {
                     const end = @min(
                         contribution_end,
@@ -1462,18 +1626,18 @@ pub const Connection = struct {
                     try encodeFrameHeader(
                         &self.batch_data_headers.items[header_index],
                         .data,
-                        if (end == request_options.body.len)
+                        if (end == view.body.len)
                             flag_end_stream
                         else
                             0,
-                        state.stream_id,
+                        view.stream_id,
                         end - offset.*,
                     );
                     self.batch_data_parts.appendAssumeCapacity(
                         &self.batch_data_headers.items[header_index],
                     );
                     self.batch_data_parts.appendAssumeCapacity(
-                        request_options.body[offset.*..end],
+                        view.body[offset.*..end],
                     );
                     offset.* = end;
                 }
@@ -1615,6 +1779,7 @@ pub const Connection = struct {
         trailers: []http2.Hpack.HeaderField = &.{},
         forbids_body: bool = false,
         done: bool = false,
+        body_bytes: usize = 0,
 
         fn deinit(
             self: *BatchResponseState,
@@ -1785,10 +1950,207 @@ pub const Connection = struct {
         }
     }
 
+    fn readResponseBatchStreaming(
+        self: *Connection,
+        states: []BatchResponseState,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        var remaining = states.len;
+        while (remaining != 0) {
+            const frame = try self.readFrameScratch();
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame);
+                try self.recordPeerGoAway(goaway);
+                for (states) |state| {
+                    if (!state.done and
+                        state.stream_id > goaway.last_stream_id)
+                    {
+                        return error.ConnectionGoAway;
+                    }
+                }
+                continue;
+            }
+
+            const state_index = findBatchResponseStateIndex(
+                states,
+                frame.header.stream_id,
+            ) orelse return error.UnexpectedFrame;
+            const state = &states[state_index];
+            if (state.done) return error.UnexpectedFrame;
+            switch (frame.header.frame_type) {
+                .push_promise => {
+                    if (!self.limits.enable_push) {
+                        _ = try self.validatePushPromiseForClientStream(
+                            frame,
+                        );
+                        return error.InvalidFrame;
+                    }
+                    try self.receivePushPromise(frame);
+                },
+                .headers => {
+                    if (state.headers != null) {
+                        if (state.forbids_body or
+                            (frame.header.flags & flag_end_stream) == 0)
+                        {
+                            return error.UnexpectedFrame;
+                        }
+                        state.trailers = try self.readHeaderBlock(frame);
+                        var trailers_owned = true;
+                        errdefer if (trailers_owned) {
+                            freeHeaders(self.allocator, state.trailers);
+                            state.trailers = &.{};
+                        };
+                        try validateHeaderBlock(
+                            state.trailers,
+                            .response_trailers,
+                        );
+                        try validateExpectedContentLength(
+                            state.content_length,
+                            state.body_bytes,
+                        );
+                        state.done = true;
+                        remaining -= 1;
+                        trailers_owned = false;
+                        continue;
+                    }
+
+                    const headers = try self.readHeaderBlock(frame);
+                    var headers_owned_by_state = false;
+                    errdefer if (!headers_owned_by_state) {
+                        freeHeaders(self.allocator, headers);
+                    };
+                    try validateHeaderBlock(headers, .response);
+                    const lookup = try responseHeaderLookup(headers);
+                    const status_text = lookup.status orelse
+                        return error.MissingPseudoHeader;
+                    const status = std.fmt.parseInt(
+                        u16,
+                        status_text,
+                        10,
+                    ) catch return error.InvalidStatus;
+                    if (informationalResponseToSkip(status)) {
+                        if ((frame.header.flags & flag_end_stream) != 0 or
+                            lookup.content_length != null)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        freeHeaders(self.allocator, headers);
+                        continue;
+                    }
+
+                    state.headers = headers;
+                    headers_owned_by_state = true;
+                    state.status = status;
+                    state.content_length = lookup.content_length;
+                    state.forbids_body = responseForbidsBody(
+                        status,
+                        state.request_method,
+                        state.extended_connect,
+                    );
+                    if ((lookup.content_length orelse 0) >
+                        self.limits.max_body_bytes)
+                    {
+                        return error.MessageTooLarge;
+                    }
+                    if (state.forbids_body) {
+                        const traditional_connect =
+                            methodIsConnect(state.request_method) and
+                            !state.extended_connect;
+                        if (traditional_connect and
+                            (lookup.content_length orelse 0) != 0)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        if ((statusIsInformational(status) or status == 204) and
+                            lookup.content_length != null)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                    }
+                    if ((frame.header.flags & flag_end_stream) != 0) {
+                        try validateExpectedContentLength(
+                            lookup.content_length,
+                            0,
+                        );
+                        state.done = true;
+                        remaining -= 1;
+                    }
+                },
+                .data => {
+                    if (state.headers == null) return error.UnexpectedFrame;
+                    const data = try self.receiveDataPayload(
+                        state.stream_id,
+                        frame,
+                    );
+                    if (state.forbids_body and data.data.len != 0) {
+                        return error.InvalidContentLength;
+                    }
+                    state.body_bytes = std.math.add(
+                        usize,
+                        state.body_bytes,
+                        data.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (state.body_bytes > self.limits.max_body_bytes) {
+                        return error.MessageTooLarge;
+                    }
+                    if (data.data.len != 0) {
+                        consume(
+                            context,
+                            state_index,
+                            data.data,
+                        ) catch |err| {
+                            // Restore exact charged credit before the outer
+                            // cleanup cancels every unfinished stream. Relying
+                            // on low-watermark updates here would leak usable
+                            // connection credit across callback failures.
+                            self.releaseReceivedCapacity(
+                                state.stream_id,
+                                frame.payload.len,
+                            ) catch {};
+                            // A final DATA already closed the remote half; do
+                            // not emit a redundant reset for that stream while
+                            // cancelling the rest of the batch.
+                            if ((frame.header.flags &
+                                flag_end_stream) != 0)
+                            {
+                                state.done = true;
+                            }
+                            return err;
+                        };
+                    }
+                    try self.maybeReleaseReceivedCapacity(state.stream_id);
+                    if ((frame.header.flags & flag_end_stream) != 0) {
+                        try validateExpectedContentLength(
+                            state.content_length,
+                            state.body_bytes,
+                        );
+                        state.done = true;
+                        remaining -= 1;
+                    }
+                },
+                .rst_stream => return error.StreamReset,
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
     fn findBatchResponseState(
         states: []BatchResponseState,
         stream_id: u31,
     ) ?*BatchResponseState {
+        const index = findBatchResponseStateIndex(
+            states,
+            stream_id,
+        ) orelse return null;
+        return &states[index];
+    }
+
+    fn findBatchResponseStateIndex(
+        states: []const BatchResponseState,
+        stream_id: u31,
+    ) ?usize {
         if (states.len == 0 or stream_id < states[0].stream_id) return null;
         const delta = stream_id - states[0].stream_id;
         if ((delta & 1) != 0) return null;
@@ -1796,7 +2158,7 @@ pub const Connection = struct {
         if (index >= states.len or states[index].stream_id != stream_id) {
             return null;
         }
-        return &states[index];
+        return index;
     }
 
     pub fn takePromisedRequest(
@@ -3239,6 +3601,261 @@ pub const Connection = struct {
         self.hpack_encoder = staged_encoder;
         staged_encoder_owned = false;
         for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
+    }
+
+    /// Send complete response bodies round-robin when all DATA fits current
+    /// peer flow-control credit.
+    ///
+    /// HEADERS are HPACK-staged transactionally, body slices stay borrowed, and
+    /// `body_chunk_size` controls each stream's contribution per round. The
+    /// method rejects trailers and body-suppressed response semantics because
+    /// those require a different completion lifecycle. Validation, encoding,
+    /// allocation, and credit errors happen before wire I/O and are retryable.
+    /// A transport error after submission begins may leave a partial response
+    /// set on the wire; close the connection instead of retrying that batch.
+    pub fn writeResponseBodyBatch(
+        self: *Connection,
+        stream_ids: []const u31,
+        responses: []const ResponseOptions,
+        body_chunk_size: usize,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (stream_ids.len != responses.len) return error.InvalidResponse;
+        if (stream_ids.len == 0) return;
+        if (body_chunk_size == 0) return error.InvalidFrameSize;
+
+        var total_body_bytes: usize = 0;
+        for (stream_ids, responses, 0..) |stream_id, options, index| {
+            if (!self.outboundStreamIsActive(stream_id)) {
+                return error.InvalidStreamId;
+            }
+            for (stream_ids[0..index]) |prior| {
+                if (prior == stream_id) return error.InvalidStreamId;
+            }
+            if (options.trailers.len != 0) {
+                return error.InvalidContentLength;
+            }
+            const semantics = self.responseSemanticsFor(stream_id, options);
+            if (responseWriteSuppressesBodySemantics(
+                options.status,
+                semantics,
+            )) {
+                return error.InvalidContentLength;
+            }
+            total_body_bytes = std.math.add(
+                usize,
+                total_body_bytes,
+                options.body.len,
+            ) catch return error.MessageTooLarge;
+            if (options.body.len > self.sendStreamWindowAvailable(stream_id)) {
+                return error.FlowControlBlocked;
+            }
+        }
+        if (total_body_bytes > self.send_connection_window.available()) {
+            return error.FlowControlBlocked;
+        }
+
+        var views_stack: [16]BatchDataView = undefined;
+        const views = if (responses.len <= views_stack.len)
+            views_stack[0..responses.len]
+        else
+            try self.allocator.alloc(BatchDataView, responses.len);
+        defer if (views.ptr != views_stack[0..].ptr) {
+            self.allocator.free(views);
+        };
+        var offsets_stack: [16]usize = undefined;
+        const offsets = if (responses.len <= offsets_stack.len)
+            offsets_stack[0..responses.len]
+        else
+            try self.allocator.alloc(usize, responses.len);
+        defer if (offsets.ptr != offsets_stack[0..].ptr) {
+            self.allocator.free(offsets);
+        };
+        @memset(offsets, 0);
+        for (views, stream_ids, responses) |*view, stream_id, response| {
+            view.* = .{ .stream_id = stream_id, .body = response.body };
+        }
+        try self.prepareBodyBatchData(views, body_chunk_size);
+
+        var credit_reserved_stack: [16]bool = undefined;
+        const credit_reserved =
+            if (responses.len <= credit_reserved_stack.len)
+                credit_reserved_stack[0..responses.len]
+            else
+                try self.allocator.alloc(bool, responses.len);
+        defer if (credit_reserved.ptr != credit_reserved_stack[0..].ptr) {
+            self.allocator.free(credit_reserved);
+        };
+        @memset(credit_reserved, false);
+
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
+        var staged_encoder_owned = true;
+        defer if (staged_encoder_owned) {
+            staged_encoder.deinit(self.allocator);
+        };
+        for (stream_ids, responses) |stream_id, options| {
+            try self.appendResponseHeadToBatch(
+                stream_id,
+                options,
+                batch,
+                &staged_encoder,
+            );
+        }
+
+        var reserved_connection_bytes: usize = 0;
+        errdefer if (reserved_connection_bytes != 0) {
+            self.send_connection_window.update(
+                @intCast(reserved_connection_bytes),
+            ) catch unreachable;
+            for (stream_ids, responses, credit_reserved) |
+                stream_id,
+                options,
+                stream_credit_reserved,
+            | {
+                if (!stream_credit_reserved) continue;
+                (self.sendStreamWindow(stream_id) catch continue)
+                    .update(@intCast(options.body.len)) catch unreachable;
+            }
+        };
+        try self.send_connection_window.reserve(total_body_bytes);
+        reserved_connection_bytes = total_body_bytes;
+        for (stream_ids, responses, credit_reserved) |
+            stream_id,
+            options,
+            *stream_credit_reserved,
+        | {
+            if (options.body.len == 0) continue;
+            try (try self.sendStreamWindow(stream_id)).reserve(
+                options.body.len,
+            );
+            stream_credit_reserved.* = true;
+        }
+
+        writeAll(self.io, self.stream, batch.items) catch |err| {
+            // A transport failure may expose only a prefix of the staged HPACK
+            // sequence. It cannot be retried or rolled back; commit encoder
+            // state so accidental connection reuse fails closed.
+            self.hpack_encoder.deinit(self.allocator);
+            self.hpack_encoder = staged_encoder;
+            staged_encoder_owned = false;
+            return err;
+        };
+        self.hpack_encoder.deinit(self.allocator);
+        self.hpack_encoder = staged_encoder;
+        staged_encoder_owned = false;
+        var body_write_succeeded = false;
+        errdefer if (!body_write_succeeded) {
+            // A failed wide write may have emitted an unknown DATA prefix.
+            // Retain the full reservation conservatively; callers must close
+            // this connection rather than retrying the response batch.
+            reserved_connection_bytes = 0;
+        };
+        try self.writeBodyBatchData(views, offsets, body_chunk_size);
+        body_write_succeeded = true;
+        reserved_connection_bytes = 0;
+        for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
+    }
+
+    fn appendResponseHeadToBatch(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        batch: *std.ArrayList(u8),
+        encoder: *http2.Hpack.Encoder,
+    ) Error!void {
+        if (options.status < 100 or options.status > 999 or
+            statusIsInformational(options.status))
+        {
+            return error.InvalidStatus;
+        }
+        var status_buf: [3]u8 = undefined;
+        const status = std.fmt.bufPrint(
+            &status_buf,
+            "{}",
+            .{options.status},
+        ) catch return error.InvalidStatus;
+        const semantics = self.responseSemanticsFor(stream_id, options);
+
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            options.headers.len,
+            2,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{
+            .name = ":status",
+            .value = status,
+        });
+        fields.appendSliceAssumeCapacity(options.headers);
+        stripConnectionHeaders(&fields, .response);
+        const declared_length = try contentLength(fields.items);
+        try validateResponseBodyForStatusWithLength(
+            options.status,
+            declared_length,
+            options.body,
+            &.{},
+        );
+        try validateResponseBodyForRequestSemanticsWithLength(
+            options.status,
+            semantics,
+            declared_length,
+            options.body,
+            &.{},
+        );
+        try validateDeclaredResponseLengthValue(
+            options.status,
+            semantics,
+            declared_length,
+            options.body.len,
+        );
+        if (responseShouldDefaultContentLengthValue(
+            options.status,
+            semantics,
+            declared_length,
+            options.body.len,
+        )) {
+            var content_length_buf: [32]u8 = undefined;
+            const value = std.fmt.bufPrint(
+                &content_length_buf,
+                "{}",
+                .{options.body.len},
+            ) catch unreachable;
+            fields.appendAssumeCapacity(.{
+                .name = "content-length",
+                .value = value,
+            });
+        }
+        try validateHeaderBlock(fields.items, .response);
+        try validateHeaderListSize(
+            fields.items,
+            self.peer_max_header_list_size,
+        );
+        const block = try encoder.encodeBlockRetained(
+            self.allocator,
+            fields.items,
+        );
+        try appendHeaderBlockBytes(
+            batch,
+            self.allocator,
+            stream_id,
+            block,
+            options.body.len == 0,
+            self.outboundFramePayloadLimit(),
+        );
     }
 
     pub fn promisePush(
@@ -5152,6 +5769,19 @@ pub const Connection = struct {
         });
         slot.value_ptr.* = index;
         return &self.send_stream_windows.items[index].window;
+    }
+
+    fn sendStreamWindowAvailable(
+        self: *const Connection,
+        stream_id: u31,
+    ) usize {
+        if (self.send_stream_window_index.count() != 0) {
+            if (self.send_stream_window_index.get(stream_id)) |index| {
+                return self.send_stream_windows.items[index].window.available();
+            }
+        }
+        if (self.peer_initial_stream_window <= 0) return 0;
+        return @intCast(self.peer_initial_stream_window);
     }
 
     fn recvStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
@@ -13728,6 +14358,7 @@ test {
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
+    _ = @import("runtime/response_batch_tests.zig");
     _ = @import("runtime/response_writer_tests.zig");
     _ = @import("runtime/request_writer_tests.zig");
 }
