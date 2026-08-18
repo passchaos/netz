@@ -87,6 +87,12 @@ pub fn build(b: *std.Build) void {
             .description = "Run the HTTP/2 h2c local client/server example",
         },
         .{
+            .exe_name = "netz-grpc-h2c",
+            .path = "examples/grpc_h2c.zig",
+            .run_step = "run-grpc-h2c",
+            .description = "Run a local gRPC unary call over HTTP/2 h2c",
+        },
+        .{
             .exe_name = "netz-http3-handshake",
             .path = "examples/http3_handshake.zig",
             .run_step = "run-http3-handshake",

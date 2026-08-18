@@ -10,6 +10,7 @@ pub const tls = @import("tls/mod.zig");
 pub const http1 = @import("http1/mod.zig");
 pub const http2 = @import("http2/mod.zig");
 pub const http3 = @import("http3/mod.zig");
+pub const grpc = @import("grpc/mod.zig");
 pub const quic = @import("quic/mod.zig");
 pub const websocket = @import("websocket/mod.zig");
 pub const mqtt = @import("mqtt/mod.zig");
@@ -22,6 +23,7 @@ comptime {
     _ = http1;
     _ = http2;
     _ = http3;
+    _ = grpc;
     _ = quic;
     _ = websocket;
     _ = mqtt;

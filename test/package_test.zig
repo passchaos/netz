@@ -2,6 +2,13 @@ const std = @import("std");
 const netz = @import("netz");
 
 test "public modules are reachable" {
+    try std.testing.expect(@hasDecl(netz, "grpc"));
+    try std.testing.expect(@hasDecl(netz.grpc, "Status"));
+    try std.testing.expect(@hasDecl(netz.grpc, "MessageIterator"));
+    try std.testing.expect(@hasDecl(netz.grpc, "Timeout"));
+    try std.testing.expect(@hasDecl(netz.grpc, "unaryCall"));
+    try std.testing.expect(@hasDecl(netz.grpc, "parseUnaryRequest"));
+    try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
     try std.testing.expect(@hasDecl(netz, "tls"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(

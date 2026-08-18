@@ -135,6 +135,16 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   PUSH_PROMISE plus the corresponding unidirectional pushed response with
   shared dynamic QPACK state, plus a
   `std.Io.async` request receive helper for the development runtime
+- gRPC over HTTP/2 with bounded 5-byte length-prefixed message framing,
+  compressed-flag validation, eight-digit `grpc-timeout` parse/format with
+  non-shortening deadline rounding, all canonical status codes, HTTP-to-gRPC
+  fallback mapping, tolerant percent-encoded `grpc-message` handling,
+  content-type/TE/method-path/custom-metadata validation, and unary h2c
+  client/server helpers with opaque protobuf payloads, initial/trailing
+  metadata, trailers-only errors, compression negotiation guards, and
+  `grpc-status` enforcement; protobuf codecs remain an application-layer
+  choice so the transport can integrate with `~/project-z/pbz` without a hard
+  dependency
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, direct single-/multi-varint, varint-payload, STREAM, DATAGRAM, NEW_CONNECTION_ID, and ACK_FREQUENCY write/length, fixed PATH, STREAM flag-byte, reset/stop, NEW_TOKEN, NEW_CONNECTION_ID, CRYPTO, MAX_DATA, stream flow-control, close, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
