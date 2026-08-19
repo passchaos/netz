@@ -5,6 +5,9 @@ const http1_runtime = http1.runtime;
 const frame_io = @import("runtime/frame_io.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
+const response_scheduler = @import(
+    "runtime/response_scheduler.zig",
+);
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
 
@@ -230,7 +233,12 @@ pub const Server = struct {
         try connection.applySettings(peer_settings);
         try connection.reservePeerStream(1);
         errdefer connection.releasePeerStream(1);
-        try connection.rememberResponseSemantics(1, request.request.method.string(), null);
+        try connection.rememberResponseSemantics(
+            1,
+            request.request.method.string(),
+            null,
+            .{},
+        );
 
         stream_owned = false;
         return .{ .connection = connection, .request = request, .stream_id = 1 };
@@ -1548,6 +1556,27 @@ pub const Connection = struct {
         body: []const u8,
     };
 
+    fn responseBatchSelection(
+        self: *const Connection,
+        views: []const BatchDataView,
+        offsets: []const usize,
+        candidates: []response_scheduler.Candidate,
+    ) ?response_scheduler.Selection {
+        std.debug.assert(views.len == offsets.len);
+        std.debug.assert(views.len == candidates.len);
+        for (views, offsets, candidates) |view, offset, *candidate| {
+            candidate.* = .{
+                .stream_id = view.stream_id,
+                .remaining = view.body.len - offset,
+                .send_capacity = self.sendStreamWindowAvailable(
+                    view.stream_id,
+                ),
+                .priority = self.responsePriority(view.stream_id),
+            };
+        }
+        return response_scheduler.select(candidates);
+    }
+
     fn prepareBodyBatchData(
         self: *Connection,
         views: []const BatchDataView,
@@ -2249,6 +2278,15 @@ pub const Connection = struct {
         return update.field_value;
     }
 
+    fn effectiveRequestPriority(
+        self: Connection,
+        stream_id: u31,
+        header_value: ?[]const u8,
+    ) http2.ExtensiblePriority {
+        return self.peerPriority(stream_id) orelse
+            http2.ExtensiblePriority.parse(header_value orelse "");
+    }
+
     /// Send an HTTP/2 PRIORITY_UPDATE after the peer opted into RFC 9218.
     ///
     /// RFC 9218 only permits clients to send this frame. The target may be a
@@ -2439,6 +2477,17 @@ pub const Connection = struct {
                     const protocol = lookup.protocol orelse return error.InvalidHeader;
                     if (!methodIsConnect(method)) return error.InvalidHeader;
                     if (!std.mem.eql(u8, protocol, expected_protocol)) return error.InvalidHeader;
+                    const request_priority =
+                        self.effectiveRequestPriority(
+                            stream_id,
+                            lookup.priority,
+                        );
+                    try self.rememberResponseSemantics(
+                        stream_id,
+                        method,
+                        protocol,
+                        request_priority,
+                    );
 
                     return .{
                         .stream_id = stream_id,
@@ -2448,12 +2497,7 @@ pub const Connection = struct {
                         .scheme = lookup.scheme orelse "",
                         .authority = lookup.requestAuthority(),
                         .protocol = protocol,
-                        .priority = if (self.peerPriority(stream_id)) |value|
-                            value
-                        else
-                            http2.ExtensiblePriority.parse(
-                                lookup.priority orelse "",
-                            ),
+                        .priority = request_priority,
                     };
                 },
                 .goaway => continue,
@@ -2623,7 +2667,17 @@ pub const Connection = struct {
                     }
 
                     try validateExpectedContentLength(lookup.content_length, body.items.len);
-                    try self.rememberResponseSemantics(stream_id, method, protocol);
+                    const request_priority =
+                        self.effectiveRequestPriority(
+                            stream_id,
+                            lookup.priority,
+                        );
+                    try self.rememberResponseSemantics(
+                        stream_id,
+                        method,
+                        protocol,
+                        request_priority,
+                    );
                     return .{
                         .stream_id = stream_id,
                         .headers = headers,
@@ -2634,12 +2688,7 @@ pub const Connection = struct {
                         .protocol = protocol,
                         .body = try body.toOwnedSlice(self.allocator),
                         .trailers = trailers,
-                        .priority = if (self.peerPriority(stream_id)) |value|
-                            value
-                        else
-                            http2.ExtensiblePriority.parse(
-                                lookup.priority orelse "",
-                            ),
+                        .priority = request_priority,
                     };
                 },
                 .goaway => continue,
@@ -2848,10 +2897,15 @@ pub const Connection = struct {
                 lookup.content_length,
                 body_bytes,
             );
+            const request_priority = self.effectiveRequestPriority(
+                stream_id,
+                lookup.priority,
+            );
             try self.rememberResponseSemantics(
                 stream_id,
                 method,
                 protocol,
+                request_priority,
             );
             headers_owned = false;
             trailers_owned = false;
@@ -2865,12 +2919,7 @@ pub const Connection = struct {
                 .protocol = protocol,
                 .body_bytes = body_bytes,
                 .trailers = trailers,
-                .priority = if (self.peerPriority(stream_id)) |value|
-                    value
-                else
-                    http2.ExtensiblePriority.parse(
-                        lookup.priority orelse "",
-                    ),
+                .priority = request_priority,
             };
         }
     }
@@ -3009,6 +3058,11 @@ pub const Connection = struct {
                     }
 
                     const index = initialized;
+                    const request_priority =
+                        self.effectiveRequestPriority(
+                            stream_id,
+                            lookup.priority,
+                        );
                     requests[index] = .{
                         .stream_id = stream_id,
                         .headers = headers,
@@ -3017,12 +3071,7 @@ pub const Connection = struct {
                         .scheme = lookup.scheme orelse "",
                         .authority = lookup.requestAuthority(),
                         .body_bytes = 0,
-                        .priority = if (self.peerPriority(stream_id)) |value|
-                            value
-                        else
-                            http2.ExtensiblePriority.parse(
-                                lookup.priority orelse "",
-                            ),
+                        .priority = request_priority,
                     };
                     expected[index] = lookup.content_length;
                     initialized += 1;
@@ -3101,6 +3150,7 @@ pub const Connection = struct {
             streaming_request.stream_id,
             streaming_request.method,
             streaming_request.protocol,
+            streaming_request.priority,
         );
     }
 
@@ -3279,7 +3329,16 @@ pub const Connection = struct {
         const is_extended_connect = is_connect and protocol != null;
         if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
         try validateExpectedContentLength(lookup.content_length, body.len);
-        try self.rememberResponseSemantics(stream_id, method, protocol);
+        const request_priority = self.effectiveRequestPriority(
+            stream_id,
+            lookup.priority,
+        );
+        try self.rememberResponseSemantics(
+            stream_id,
+            method,
+            protocol,
+            request_priority,
+        );
         return .{
             .stream_id = stream_id,
             .headers = headers,
@@ -3290,12 +3349,7 @@ pub const Connection = struct {
             .protocol = protocol,
             .body = body,
             .trailers = trailers,
-            .priority = if (self.peerPriority(stream_id)) |value|
-                value
-            else
-                http2.ExtensiblePriority.parse(
-                    lookup.priority orelse "",
-                ),
+            .priority = request_priority,
         };
     }
 
@@ -3671,6 +3725,18 @@ pub const Connection = struct {
         defer if (round_reserved.ptr != round_reserved_stack[0..].ptr) {
             self.allocator.free(round_reserved);
         };
+        var candidates_stack: [16]response_scheduler.Candidate =
+            undefined;
+        const candidates = if (responses.len <= candidates_stack.len)
+            candidates_stack[0..responses.len]
+        else
+            try self.allocator.alloc(
+                response_scheduler.Candidate,
+                responses.len,
+            );
+        defer if (candidates.ptr != candidates_stack[0..].ptr) {
+            self.allocator.free(candidates);
+        };
         for (views, stream_ids, responses) |*view, stream_id, response| {
             view.* = .{ .stream_id = stream_id, .body = response.body };
         }
@@ -3714,6 +3780,7 @@ pub const Connection = struct {
             views,
             offsets,
             round_reserved,
+            candidates,
             body_chunk_size,
         );
         for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
@@ -3724,10 +3791,12 @@ pub const Connection = struct {
         views: []const BatchDataView,
         offsets: []usize,
         round_reserved: []usize,
+        candidates: []response_scheduler.Candidate,
         application_chunk_size: usize,
     ) Error!void {
         std.debug.assert(views.len == offsets.len);
         std.debug.assert(views.len == round_reserved.len);
+        std.debug.assert(views.len == candidates.len);
         const frame_limit = self.outboundFramePayloadLimit();
         var remaining_streams = views.len;
         for (views) |view| {
@@ -3760,6 +3829,15 @@ pub const Connection = struct {
                 }
             };
             const pass_start = next_stream;
+            const priority_selection =
+                if (self.limits.no_rfc7540_priorities)
+                    self.responseBatchSelection(
+                        views,
+                        offsets,
+                        candidates,
+                    )
+                else
+                    null;
             var scanned: usize = 0;
             while (scanned < views.len) : (scanned += 1) {
                 const index = (pass_start + scanned) % views.len;
@@ -3767,6 +3845,10 @@ pub const Connection = struct {
                 const offset = &offsets[index];
                 if (offset.* == view.body.len) continue;
                 if (self.send_connection_window.available() == 0) break;
+                if (self.limits.no_rfc7540_priorities) {
+                    const selection = priority_selection orelse break;
+                    if (!selection.includes(candidates, index)) continue;
+                }
 
                 const stream_window = try self.sendStreamWindow(
                     view.stream_id,
@@ -3790,10 +3872,14 @@ pub const Connection = struct {
                 round_reserved[index] = contribution_len;
                 if (offset.* == view.body.len) remaining_streams -= 1;
                 made_progress = true;
-                // Continue the next scheduler pass after the last stream that
-                // made progress. A small connection WINDOW_UPDATE therefore
-                // cannot repeatedly feed stream zero while peers starve.
-                next_stream = (index + 1) % views.len;
+                if (!self.limits.no_rfc7540_priorities or
+                    candidates[index].priority.incremental)
+                {
+                    // Rotate default and incremental traffic. A small
+                    // connection WINDOW_UPDATE therefore cannot repeatedly
+                    // feed one stream while equal peers starve.
+                    next_stream = (index + 1) % views.len;
+                }
             }
 
             if (made_progress) {
@@ -4039,6 +4125,9 @@ pub const Connection = struct {
             promised_stream_id,
             findHeader(request_headers, ":method") orelse "GET",
             findHeader(request_headers, ":protocol"),
+            http2.ExtensiblePriority.parse(
+                findHeader(request_headers, "priority") orelse "",
+            ),
         );
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
@@ -4530,12 +4619,19 @@ pub const Connection = struct {
         _ = self.priority_state.remove(self.allocator, stream_id);
     }
 
-    fn rememberResponseSemantics(self: *Connection, stream_id: u31, method: []const u8, protocol: ?[]const u8) Error!void {
+    fn rememberResponseSemantics(
+        self: *Connection,
+        stream_id: u31,
+        method: []const u8,
+        protocol: ?[]const u8,
+        priority: http2.ExtensiblePriority,
+    ) Error!void {
         const semantics = StreamResponseSemantics{
             .stream_id = stream_id,
             .head = methodIsHead(method),
             .traditional_connect = methodIsConnect(method) and protocol == null,
             .extended_connect = methodIsConnect(method) and protocol != null,
+            .priority = priority,
         };
         const slot = try self.response_semantics_index.getOrPut(
             self.allocator,
@@ -4562,6 +4658,16 @@ pub const Connection = struct {
             const moved = self.response_semantics.items[index];
             self.response_semantics_index.getPtr(moved.stream_id).?.* = index;
         }
+    }
+
+    fn responsePriority(self: Connection, stream_id: u31) http2.ExtensiblePriority {
+        // PRIORITY_UPDATE has precedence over the request's original Priority
+        // field and may arrive after the application accepted the request.
+        if (self.peerPriority(stream_id)) |updated| return updated;
+        if (self.response_semantics_index.count() == 0) return .{};
+        const index = self.response_semantics_index.get(stream_id) orelse
+            return .{};
+        return self.response_semantics.items[index].priority;
     }
 
     fn responseSemanticsFor(self: Connection, stream_id: u31, options: ResponseOptions) ResponseBodySemantics {
@@ -6026,6 +6132,7 @@ const StreamResponseSemantics = struct {
     head: bool = false,
     traditional_connect: bool = false,
     extended_connect: bool = false,
+    priority: http2.ExtensiblePriority = .{},
 };
 
 const ResponseBodySemantics = struct {
@@ -13746,7 +13853,12 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
-    try connection.rememberResponseSemantics(1, "HEAD", null);
+    try connection.rememberResponseSemantics(
+        1,
+        "HEAD",
+        null,
+        .{},
+    );
     try std.testing.expectEqual(@as(?usize, 0), connection.response_semantics_index.get(1));
     try std.testing.expect((connection.responseSemanticsFor(1, .{})).head);
     connection.forgetResponseSemantics(1);

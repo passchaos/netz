@@ -341,6 +341,49 @@ while the server is blocked on response credit. It remains one synchronous
 loopback shape, not a claim about all priorities, cancellation races or network
 conditions.
 
+### RFC 9218 priority-aware response scheduling
+
+When `SETTINGS_NO_RFC7540_PRIORITIES=1` is enabled, the same flow-controlled
+batch writer now applies the Priority request field and later
+`PRIORITY_UPDATE` signals to DATA selection:
+
+- the lowest urgency that currently has both connection and stream credit is
+  selected first;
+- non-incremental responses at that urgency complete one at a time in ascending
+  stream-ID order;
+- incremental responses at that urgency share each application-chunk pass and
+  rotate their starting stream;
+- a high-urgency stream with zero stream credit does not idle usable
+  connection credit that a lower-urgency stream can consume;
+- priority is re-read each pass, so an update received while the writer pumps
+  WINDOW_UPDATE can affect the next DATA burst.
+
+The ordinary benchmark path remains round-robin so the Hyper comparison above
+keeps its previous equal scheduling shape. An opt-in internal workload uses one
+urgency-0 non-incremental stream, four urgency-2 incremental streams and five
+urgency-5 incremental streams:
+
+```sh
+taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
+  --priority --parallel=10 --body-bytes=1048576 \
+  --stream-window=8192 --connection-window=65535 \
+  --warmup=2 --iterations=5
+```
+
+Two sets of three CPU-0-pinned 2026-08-19 runs:
+
+```text
+7.880-8.015 ms/10-stream batch
+1,247-1,268 body MiB/s
+```
+
+This is an internal overhead/repeatability baseline, not a cross-stack ratio.
+The audited Hyper dependency, h2 0.4.15, queues streams without RFC 9218
+urgency/incremental state and therefore cannot run an equal semantic workload.
+End-to-end tests prove non-incremental stream-ID order, incremental sharing,
+Priority-header ordering, PRIORITY_UPDATE precedence, and use of lower-urgency
+connection credit while a more urgent stream has no stream credit.
+
 ## Current feature comparison
 
 | Area | netz | hyper |
@@ -361,8 +404,9 @@ conditions.
 
 ## Remaining evidence
 
-1. Extend parallel H2 response evidence to priority-weighted and
-   cancellation-race workloads.
+1. Add a cancellation-race benchmark that combines reset timing with the
+   priority-aware flow scheduler; reset behavior currently has end-to-end tests
+   but no same-shape timing evidence.
 2. Measure allocation count and peak memory, not only elapsed time.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;

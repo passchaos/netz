@@ -20,6 +20,7 @@ const Options = struct {
     connection_window: u32 = default_connection_window,
     warmups: usize = default_warmups,
     iterations: usize = default_iterations,
+    priority: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -41,6 +42,7 @@ pub fn main(init: std.process.Init) !void {
         .max_body_bytes = options.body_bytes,
         .initial_window_size = options.stream_window,
         .initial_connection_window_size = options.connection_window,
+        .no_rfc7540_priorities = options.priority,
     };
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -136,11 +138,21 @@ pub fn main(init: std.process.Init) !void {
         options.parallel,
     );
     defer allocator.free(requests);
-    @memset(requests, .{
-        .path = "/flow",
-        .scheme = "http",
-        .authority = authority,
-    });
+    for (requests, 0..) |*request, index| {
+        request.* = .{
+            .path = "/flow",
+            .scheme = "http",
+            .authority = authority,
+            .priority = if (!options.priority)
+                null
+            else if (index == 0)
+                .{ .urgency = 0 }
+            else if (index < @max(options.parallel / 2, 2))
+                .{ .urgency = 2, .incremental = true }
+            else
+                .{ .urgency = 5, .incremental = true },
+        };
+    }
     const responses = try allocator.alloc(
         netz.http2.runtime.StreamingResponse,
         options.parallel,
@@ -188,6 +200,7 @@ pub fn main(init: std.process.Init) !void {
         \\  response bytes/stream: {d}
         \\  initial stream window: {d}
         \\  initial connection window: {d}
+        \\  scheduler: {s}
         \\  warmup iterations: {d}
         \\  iterations: {d}
         \\  ns/batch: {d}
@@ -199,6 +212,7 @@ pub fn main(init: std.process.Init) !void {
         options.body_bytes,
         options.stream_window,
         options.connection_window,
+        if (options.priority) "RFC 9218" else "round-robin",
         options.warmups,
         options.iterations,
         elapsed / options.iterations,
@@ -285,6 +299,8 @@ fn parseOptions(init: std.process.Init) !Options {
                 argument["--iterations=".len..],
                 10,
             );
+        } else if (std.mem.eql(u8, argument, "--priority")) {
+            options.priority = true;
         } else {
             return error.InvalidArguments;
         }

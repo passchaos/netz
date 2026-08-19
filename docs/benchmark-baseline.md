@@ -221,6 +221,22 @@ taskset -c 0 tools/bench_hyper_http2_flow.sh \
   --warmup=5 --iterations=20
 ```
 
+The netz workload also accepts `--priority`. This enables RFC 9218 on both
+peers and assigns one urgency-0 non-incremental, four urgency-2 incremental,
+and five urgency-5 incremental requests in the default ten-stream batch:
+
+```sh
+taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
+  --priority --parallel=10 --body-bytes=1048576 \
+  --stream-window=8192 --connection-window=65535 \
+  --warmup=2 --iterations=5
+```
+
+Two sets of three CPU-0-pinned 2026-08-19 runs completed in
+7.880-8.015 ms/batch (1,247-1,268 body MiB/s). This is an internal scheduler
+baseline because the locked h2 0.4.15 reference has no RFC 9218
+urgency/incremental scheduler.
+
 ```text
 five CPU-0-pinned samples:
   netz:  7.367-7.447 ms/batch, 1,342-1,357 body MiB/s

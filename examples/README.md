@@ -95,6 +95,15 @@ taskset -c 0 tools/bench_hyper_http2_flow.sh \
   --warmup=5 --iterations=20
 ```
 
+Pass `--priority` to opt into RFC 9218 for an internal mixed-urgency workload.
+The default remains round-robin so the Hyper comparison retains identical
+scheduling semantics:
+
+```sh
+taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
+  --priority --warmup=2 --iterations=5
+```
+
 `run-http3-handshake` is the protected-loopback counterpart to the public
 HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client
 handshake, exchanges one POST/200 response, and exits without relying on
