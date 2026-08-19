@@ -18,6 +18,15 @@ pub const ReceiveTimeoutError = Error ||
     std.Io.ConcurrentError;
 
 pub const Limits = struct {
+    pub const SendInterceptor = struct {
+        context: *anyopaque,
+        /// Return true to consume the datagram without handing it to the
+        /// socket. This narrow hook supports deterministic benchmark/test
+        /// network emulation while production endpoints pay one predictable
+        /// null check and keep all QUIC recovery state unchanged.
+        should_drop: *const fn (context: *anyopaque, bytes: []const u8) bool,
+    };
+
     max_datagram_size: usize = 65_535,
     max_frames_per_datagram: usize = 256,
     /// Best-effort SO_RCVBUF target for UDP sockets.
@@ -36,6 +45,7 @@ pub const Limits = struct {
     /// the batch receive API without per-packet syscalls. Keep this opt-in
     /// because single-datagram consumers cannot amortize GRO bookkeeping.
     enable_gro_receive: bool = false,
+    send_interceptor: ?SendInterceptor = null,
 };
 
 pub const SendManyBytesResult = struct {
@@ -175,6 +185,9 @@ pub const Endpoint = struct {
     pub fn sendBytesWithEcn(self: *Endpoint, to: net.IpAddress, bytes: []const u8, ecn: quic.packet_space.EcnCodepoint) Error!void {
         if (bytes.len == 0) return error.EmptyDatagram;
         if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
+        if (self.limits.send_interceptor) |interceptor| {
+            if (interceptor.should_drop(interceptor.context, bytes)) return;
+        }
         try self.applyOutgoingEcnMark(ecn);
         try self.socket.send(self.io, &to, bytes);
     }
@@ -204,6 +217,15 @@ pub const Endpoint = struct {
         for (datagrams) |bytes| {
             if (bytes.len == 0) return error.EmptyDatagram;
             if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
+        }
+        if (self.limits.send_interceptor != null) {
+            // A dropped datagram is still consumed from QUIC's perspective;
+            // submitting individually preserves exact deterministic filtering
+            // and prevents GSO from hiding segment boundaries.
+            for (datagrams) |bytes| {
+                try self.sendBytesWithEcn(to, bytes, .not_ect);
+            }
+            return .{ .sent_count = datagrams.len };
         }
         try self.applyOutgoingEcnMark(.not_ect);
 
@@ -2151,6 +2173,58 @@ test "QUIC UDP endpoint disables rejected GSO and retries send-many" {
         defer received.deinit(allocator);
         try std.testing.expectEqualStrings(expected, received.bytes);
     }
+}
+
+test "QUIC endpoint send interceptor drops selected single and batch datagrams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var calls: usize = 0;
+    const Interceptor = struct {
+        fn drop(context: *anyopaque, bytes: []const u8) bool {
+            const count: *usize = @ptrCast(@alignCast(context));
+            count.* += 1;
+            return bytes[0] == 0xaa;
+        }
+    };
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 64,
+            .send_interceptor = .{
+                .context = &calls,
+                .should_drop = Interceptor.drop,
+            },
+        },
+    );
+    defer sender.deinit();
+
+    try sender.sendBytes(receiver.address(), &.{0xaa});
+    try sender.sendBytes(receiver.address(), &.{0xbb});
+    var received = try receiver.receiveBytes();
+    try std.testing.expectEqualSlices(u8, &.{0xbb}, received.bytes);
+
+    const batch = [_][]const u8{ &.{0xaa}, &.{0xcc} };
+    const progress = try sender.sendManyBytesProgress(
+        receiver.address(),
+        &batch,
+    );
+    try std.testing.expectEqual(@as(usize, 2), progress.sent_count);
+    received.deinit(allocator);
+    received = try receiver.receiveBytes();
+    try std.testing.expectEqualSlices(u8, &.{0xcc}, received.bytes);
+    try std.testing.expectEqual(@as(usize, 4), calls);
+    received.deinit(allocator);
 }
 
 test "QUIC UDP endpoint routes protected short datagrams by DCID" {

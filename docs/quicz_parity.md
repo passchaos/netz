@@ -59,6 +59,10 @@ quicz Stream Open:         48.1-52.0M streams/s, 100k streams
 netz Stream Open:          680.2-778.0M streams/s, 100k streams
 quicz Aggregate (4 conn):  503.2-533.1 MB/s, 4 x 64 MiB
 netz Aggregate (4 conn):   730.4-900.6 MiB/s, 4 x 64 MiB
+quicz Loss (1/5%):         220.8-236.7 / 216.8-223.6 MB/s
+netz Loss (1/5%):          255.2-289.3 / 287.0-314.3 MiB/s
+quicz Loss +100us RTT:     98.7-105.0 / 95.9-98.4 MB/s
+netz Loss +100us RTT:      121.1-131.2 / 116.4-127.6 MiB/s
 ```
 
 The handshake values are fresh same-host ReleaseFast runs. Latency uses 200
@@ -89,6 +93,12 @@ real handshakes, four 64 MiB uploads, and teardown. Netz verifies every one of
 the 268,435,456 aggregate payload bytes before reporting and is 1.37-1.79x
 faster even without normalizing MB/s versus MiB/s in its favor.
 
+The loss rows use the same 4 MiB single-stream, seeded client-to-server drop
+policy and optional 100 us RTT delay. Netz verifies full receiver completion
+and is conservatively 1.08-1.45x faster across all four scenarios without unit
+normalization. Its loss mode reports exact injected and transport-observed loss
+and can wrap the full run in allocator telemetry.
+
 The old values share a host and aggregate transfer shape but not a controlled
 CPU layout. A fresh CPU-0-pinned quicz run produced 15.97/16.12 MB/s because
 both same-process endpoints contend for one CPU; a matching netz raw probe was
@@ -117,6 +127,7 @@ benchmarks.
 | QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered and improved; current authenticated netz sample remains slower | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; consecutive 200-connection samples sustained 824.1-830.7 conn/s, with the best sample at P50 1172.1 us / P99 1367.8 us. Exact Initial sizing also cut allocator calls from 167.0 to 92.0 per connection. | Equalize verification/scheduling policy before a direct verdict; quicz's 563.4 us / 775.3 us and 1131.3 conn/s sample skips CertificateVerify validation. |
 | QUIC stream-open churn (`quic_bench_hs`) | Covered and faster for the reference reservation workload | `examples/bench_quic_handshake_stream.zig`, `--mode=stream-churn`; CPU-0-pinned netz sustained 680.2-778.0M streams/s versus quicz 48.1-52.0M streams/s, a 13.1-16.2x range. IDs, limit enforcement, both endpoint roles, zero timed-loop allocation, final ID and checksum are validated. | Add a separate on-wire FIN/reset/recycling workload before generalizing this to full stream lifecycle churn. |
 | QUIC concurrent aggregate (`quic_bench_hs`) | Covered and faster for four independent connections | `examples/bench_quic_handshake_stream.zig`, `--mode=aggregate --connections=4 --transfer-bytes=67108864`; netz completed at 730.35-900.57 MiB/s versus quicz 503.23-533.10 MB/s, a conservative 1.37-1.79x range, while verifying 4 x 64 MiB at receiver completion. | Add connection-count scaling curves and shared-event-loop comparison before generalizing beyond the four-worker shape. |
+| QUIC simulated loss (`quic_bench_hs`) | Covered and faster for all four reference scenarios | `examples/bench_quic_handshake_stream.zig`, `--mode=loss`; 1%/5% loopback and 1%/5% with 100 us RTT were conservatively 1.08-1.45x faster than quicz, with deterministic injected-drop counts, full 4 MiB receiver completion, transport loss counters and optional memory telemetry. | Add bidirectional loss, reordering and corruption cases before generalizing beyond the reference one-way loss model. |
 | QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast` | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered for local preconfigured 1-RTT smoke and tests | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close` | Add a full client/server CLI-style close demo only if external manual interop requires it. |
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
@@ -156,11 +167,10 @@ benchmarks.
    not counted as coverage.
 5. **Broader performance comparison against `~/Work/quicz`**: raw QUIC
    STREAM comparisons need equivalent endpoint CPU placement, and HTTP/3 still
-   lacks an equal-wire quicz reference. DATAGRAM has a direct passing sample,
-   while loss simulation still needs a controlled equivalent artifact. Four-
-   connection aggregate throughput and stream reservation now have direct
-   faster artifacts, but on-wire stream lifecycle churn remains open. Echo latency has
-   a controlled artifact with split percentile results. Handshake
+   lacks an equal-wire quicz reference. DATAGRAM, loss simulation, four-
+   connection aggregate throughput, and stream reservation have direct faster
+   artifacts, but on-wire stream lifecycle churn remains open. Echo latency
+   has a controlled artifact with split percentile results. Handshake
    latency/rate now has a real artifact and a smaller netz optimization gap,
    but the two workloads still need equal certificate-verification and worker
    scheduling policies before the whole quicz benchmark surface can be
@@ -169,8 +179,9 @@ benchmarks.
 ## Next recommended work
 
 1. Rebuild the raw QUIC comparison with equivalent endpoint CPU placement,
-   then add loss/on-wire-churn and connection-count scaling cases. Continue
-   optimizing echo median latency. The handshake artifact includes allocation telemetry;
+   then add reordering/corruption/on-wire-churn and connection-count scaling
+   cases. Continue optimizing echo median latency. The handshake artifact
+   includes allocation telemetry;
    equalize certificate verification and endpoint scheduling before comparing
    its rate. The old unpinned ratio is no longer accepted as proof.
 2. Re-run HTTP/3 GRO on a host with larger kernel UDP receive buffers; the

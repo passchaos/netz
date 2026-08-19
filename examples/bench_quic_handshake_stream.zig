@@ -14,6 +14,7 @@ const default_stream_churn_iterations: usize = 100_000;
 const stream_churn_credit: u64 = 1_048_576;
 const default_connections: usize = 4;
 const max_connections: usize = 64;
+const default_loss_transfer_bytes: usize = 4 * 1024 * 1024;
 const max_streams: usize = 64;
 const max_datagram_size: usize = 8900;
 const stream_payload_size: usize = max_datagram_size - 128;
@@ -52,13 +53,21 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake, echo, stream_churn, aggregate };
+const Mode = enum { upload, handshake, echo, stream_churn, aggregate, loss };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
     const server_key = try makeBenchmarkServerKey();
     if (config.mode == .aggregate) {
         try runAggregateBenchmark(config, server_key);
+        return;
+    }
+    if (config.mode == .loss) {
+        try runLossBenchmark(
+            std.heap.smp_allocator,
+            config,
+            server_key,
+        );
         return;
     }
     var counting = CountingAllocator.init(std.heap.smp_allocator);
@@ -154,6 +163,8 @@ const Config = struct {
     enable_pacing: bool = true,
     stats: bool = false,
     connections: usize = default_connections,
+    loss_pct: u8 = 0,
+    rtt_us: u64 = 0,
 };
 
 const IterationResult = struct {
@@ -161,6 +172,8 @@ const IterationResult = struct {
     client_stats: netz.quic.one_rtt.ConnectionStats,
     gso_enabled: bool,
     payload_bytes_received: usize,
+    loss_considered: usize = 0,
+    loss_dropped: usize = 0,
 };
 
 const Summary = struct {
@@ -184,6 +197,53 @@ const AggregateStats = struct {
     }
 };
 
+const LossState = struct {
+    enabled: std.atomic.Value(bool) = .init(false),
+    state: std.atomic.Value(u64) = .init(0x1234_5678),
+    dropped: std.atomic.Value(usize) = .init(0),
+    considered: std.atomic.Value(usize) = .init(0),
+    drop_pct: u8,
+    half_rtt_us: u64,
+    io: std.Io,
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *LossState = @ptrCast(@alignCast(context));
+        if (!self.enabled.load(.acquire)) return false;
+        if (self.half_rtt_us != 0) {
+            // Match quicz's loss workload: delay client-to-server delivery by
+            // half of the configured RTT with a monotonic busy wait. Sleeping
+            // at 50 us would mostly measure scheduler granularity instead.
+            const delay_ns = std.math.mul(
+                u64,
+                self.half_rtt_us,
+                std.time.ns_per_us,
+            ) catch std.math.maxInt(u64);
+            const deadline = nowNs(self.io) +| delay_ns;
+            while (nowNs(self.io) < deadline) std.atomic.spinLoopHint();
+        }
+        _ = self.considered.fetchAdd(1, .monotonic);
+        var current = self.state.load(.monotonic);
+        while (true) {
+            var next = current;
+            next ^= next << 13;
+            next ^= next >> 7;
+            next ^= next << 17;
+            if (self.state.cmpxchgWeak(
+                current,
+                next,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                current = observed;
+                continue;
+            }
+            if (next % 100 >= self.drop_pct) return false;
+            _ = self.dropped.fetchAdd(1, .monotonic);
+            return true;
+        }
+    }
+};
+
 fn runIteration(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -192,12 +252,22 @@ fn runIteration(
     server_key: EcdsaP256Sha256.KeyPair,
 ) !IterationResult {
     const transport_parameters = transferTransportParameters(config);
+    var loss_state = LossState{
+        .drop_pct = config.loss_pct,
+        .half_rtt_us = config.rtt_us / 2,
+        .io = io,
+    };
     const endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = max_datagram_size,
         .max_frames_per_datagram = 32,
         .socket_receive_buffer_bytes = 16 * 1024 * 1024,
         .enable_gso_send = false,
         .enable_gro_receive = false,
+    };
+    var client_endpoint_limits = endpoint_limits;
+    if (config.mode == .loss) client_endpoint_limits.send_interceptor = .{
+        .context = &loss_state,
+        .should_drop = LossState.shouldDrop,
     };
     const one_rtt_config: netz.quic.handshake.OneRttConfig = .{
         .max_datagram_size = max_datagram_size,
@@ -221,7 +291,7 @@ fn runIteration(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        endpoint_limits,
+        client_endpoint_limits,
     );
     defer client_endpoint.deinit();
 
@@ -468,6 +538,7 @@ fn runIteration(
     }
 
     const started_ns = nowNs(io);
+    if (config.mode == .loss) loss_state.enabled.store(true, .release);
     const deadline_ns = started_ns +| transfer_timeout_ns;
     try sendTransfer(
         &established.connection,
@@ -497,6 +568,8 @@ fn runIteration(
         .client_stats = established.connection.stats(),
         .gso_enabled = client_endpoint.gsoSendEnabled(),
         .payload_bytes_received = received,
+        .loss_considered = loss_state.considered.load(.monotonic),
+        .loss_dropped = loss_state.dropped.load(.monotonic),
     };
 }
 
@@ -895,6 +968,8 @@ fn parseArgs(
             config.mode = .stream_churn;
         } else if (std.mem.eql(u8, arg, "--mode=aggregate")) {
             config.mode = .aggregate;
+        } else if (std.mem.eql(u8, arg, "--mode=loss")) {
+            config.mode = .loss;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
@@ -916,6 +991,18 @@ fn parseArgs(
             config.connections = try parsePositiveUsize(
                 arg["--connections=".len..],
             );
+        } else if (std.mem.startsWith(u8, arg, "--loss-pct=")) {
+            config.loss_pct = try std.fmt.parseInt(
+                u8,
+                arg["--loss-pct=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--rtt-us=")) {
+            config.rtt_us = try std.fmt.parseInt(
+                u64,
+                arg["--rtt-us=".len..],
+                10,
+            );
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
@@ -934,6 +1021,11 @@ fn parseArgs(
     if (config.mode == .stream_churn and !iterations_set) {
         config.iterations = default_stream_churn_iterations;
     }
+    if (config.mode == .loss and
+        config.transfer_bytes == default_transfer_bytes)
+    {
+        config.transfer_bytes = default_loss_transfer_bytes;
+    }
     if (config.mode == .echo) config.transfer_bytes =
         config.iterations *| echo_payload_bytes;
     if (config.mode == .stream_churn and
@@ -943,6 +1035,7 @@ fn parseArgs(
     }
     if (config.streams > max_streams or
         config.connections > max_connections or
+        config.loss_pct > 100 or
         config.batch_packets > max_packet_batch_size or
         config.streams > config.transfer_bytes)
     {
@@ -1079,6 +1172,51 @@ fn runAggregateBenchmark(
             peak_live_bytes,
         },
     );
+}
+
+fn runLossBenchmark(
+    allocator: std.mem.Allocator,
+    config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
+) !void {
+    var counting = CountingAllocator.init(allocator);
+    const selected = if (config.stats) counting.allocator() else allocator;
+    var threaded = std.Io.Threaded.init(selected, .{});
+    defer threaded.deinit();
+    const result = try runIteration(
+        selected,
+        threaded.io(),
+        config,
+        0,
+        server_key,
+    );
+    if (result.payload_bytes_received != config.transfer_bytes) {
+        return error.InvalidTransferSize;
+    }
+    std.debug.print(
+        "QUIC real TLS 1.3 simulated-loss benchmark\n" ++
+            "  loss percent: {d}\n" ++
+            "  configured RTT us: {d}\n" ++
+            "  transfer bytes: {d}\n" ++
+            "  elapsed ns: {d}\n" ++
+            "  MiB/s: {d:.2}\n" ++
+            "  datagrams considered: {d}\n" ++
+            "  datagrams dropped: {d}\n" ++
+            "  transport packets lost: {d}\n" ++
+            "  payload bytes verified: {d}\n",
+        .{
+            config.loss_pct,
+            config.rtt_us,
+            config.transfer_bytes,
+            result.elapsed_ns,
+            mibPerSecond(config.transfer_bytes, result.elapsed_ns),
+            result.loss_considered,
+            result.loss_dropped,
+            result.client_stats.packets_lost,
+            result.payload_bytes_received,
+        },
+    );
+    if (config.stats) counting.snapshot().print();
 }
 
 const AggregateWorkerResult = struct {

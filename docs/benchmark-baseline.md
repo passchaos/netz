@@ -965,6 +965,42 @@ made 160,993 allocation calls, allocated 700,944,509 cumulative bytes and had
 This is connection-level parallel scaling evidence, not a single-connection or
 HTTP/3 claim.
 
+### Raw QUIC deterministic loss recovery
+
+Captured on 2026-08-20 using the quicz loss shape: one real handshake, a 4 MiB
+single-stream upload, seeded xorshift client-to-server packet loss, and optional
+50 us one-way busy-wait delay for a configured 100 us RTT. The interceptor is
+enabled only after handshake completion, so TLS setup is not faulted:
+
+```sh
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=loss --loss-pct=1
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=loss --loss-pct=5
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=loss --loss-pct=1 --rtt-us=100
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=loss --loss-pct=5 --rtt-us=100
+```
+
+Three-run ranges against a freshly compiled quicz loss-only binary:
+
+| Scenario | netz MiB/s | quicz MB/s | Conservative ratio |
+| --- | ---: | ---: | ---: |
+| 1% loopback | 255.19-289.29 | 220.84-236.72 | 1.08-1.31x |
+| 5% loopback | 286.99-314.31 | 216.79-223.64 | 1.28-1.45x |
+| 1% / 100 us RTT | 121.13-131.24 | 98.73-105.03 | 1.15-1.33x |
+| 5% / 100 us RTT | 116.43-127.62 | 95.88-98.42 | 1.18-1.33x |
+
+The ratio again does not normalize MB/s versus MiB/s in netz's favor. Each
+run verifies all 4,194,304 receive bytes and reports considered/dropped
+datagrams plus transport-declared loss. The seeded 5% cases consistently
+dropped 25 of 504 client datagrams. A 5%/100 us `--stats` run made 31,254
+allocations, allocated 231,757,047 cumulative bytes, peaked at 832,363 live
+bytes and ended with zero live bytes. The endpoint interceptor consumes dropped
+datagrams from QUIC's send perspective, including batch submissions, so normal
+packet-number/recovery semantics remain active.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary
