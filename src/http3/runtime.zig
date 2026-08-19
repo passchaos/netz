@@ -2,6 +2,7 @@ const std = @import("std");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
+const response_scheduler = @import("runtime/response_scheduler.zig");
 
 const net = std.Io.net;
 
@@ -2115,9 +2116,25 @@ pub const HandshakeSessionOptions = struct {
     /// payload lifetime is subtle for multi-stream batching; benchmark enables
     /// it only for single-stream transfer.
     enable_data_prefix_fast_path: bool = false,
+    /// Optional delay after this many socket-visible response body bytes.
+    ///
+    /// A zero byte threshold disables the delay. Production event loops should
+    /// leave both fields at zero and resume sends from their normal writable or
+    /// timer callbacks. Same-process loopback workloads using jumbo UDP
+    /// datagrams may set them so the peer thread periodically drains a small
+    /// kernel receive queue without delaying every packet-sized scheduler pass.
+    response_scheduler_batch_delay_bytes: usize = 0,
+    response_scheduler_batch_delay_ns: u64 = 0,
+    /// Maximum number of independently prioritized response streams submitted
+    /// in one transport batch. One preserves sequential UDP writes while still
+    /// rotating incremental streams; larger values enable sendmmsg/GSO-style
+    /// cross-stream batches on hosts with suitably sized receive queues.
+    response_scheduler_max_batch_packets: usize =
+        quic.one_rtt.max_batch_packets,
 };
 
 pub const BodyChunk = body_batch.Chunk;
+pub const ResponseBody = body_batch.ResponseBody;
 
 pub const HandshakeServerOptions = struct {
     handshake: quic.handshake.ServerOptions,
@@ -2311,7 +2328,10 @@ pub const HandshakeServerSession = struct {
             assembled.stream_id,
             request.qpack_section_acknowledgments,
         );
-        try self.request_lifecycle.markReceived(assembled.stream_id);
+        try self.request_lifecycle.markReceived(
+            assembled.stream_id,
+            requestPriority(request.headers),
+        );
         try self.sendQpackFeedback();
         return .{
             .from = assembled.from,
@@ -2630,6 +2650,230 @@ pub const HandshakeServerSession = struct {
         );
     }
 
+    /// Send complete response bodies using RFC 9218 request priorities.
+    ///
+    /// This is the multi-stream blocking counterpart to
+    /// `sendResponseBodyPaced`. The scheduler evaluates current QUIC credit
+    /// before each packet pass, gives a received PRIORITY_UPDATE precedence
+    /// over the request's Priority field, serializes non-incremental responses
+    /// by stream ID, and round-robins incremental peers. Processing packets
+    /// between blocked passes also makes live priority updates affect the next
+    /// unsent DATA packet rather than only future API calls.
+    pub fn sendResponseBodiesPaced(
+        self: *HandshakeServerSession,
+        responses: []const ResponseBody,
+    ) Error!void {
+        if (responses.len == 0) return;
+        const allocator =
+            self.established.connection.endpoint.allocator;
+        var response_index = std.AutoHashMapUnmanaged(u62, usize).empty;
+        defer response_index.deinit(allocator);
+        const response_count = std.math.cast(
+            u32,
+            responses.len,
+        ) orelse return error.ExcessiveLoad;
+        try response_index.ensureTotalCapacity(
+            allocator,
+            response_count,
+        );
+        const offsets = try allocator.alloc(usize, responses.len);
+        defer allocator.free(offsets);
+        @memset(offsets, 0);
+        const candidates = try allocator.alloc(
+            response_scheduler.Candidate,
+            responses.len,
+        );
+        defer allocator.free(candidates);
+        const chunks = try allocator.alloc(BodyChunk, responses.len);
+        defer allocator.free(chunks);
+
+        for (responses, 0..) |response, index| {
+            if (self.outbound_bodies.find(response.stream_id) == null) {
+                return error.UnexpectedStream;
+            }
+            const slot = response_index.getOrPutAssumeCapacity(
+                response.stream_id,
+            );
+            if (slot.found_existing) {
+                return error.UnexpectedStream;
+            }
+            slot.value_ptr.* = index;
+        }
+
+        var remaining_responses = responses.len;
+        for (responses) |response| {
+            if (response.data.len == 0) remaining_responses -= 1;
+        }
+        // Empty fixed-length bodies are normally closed by startResponse.
+        // Reject an accidental open zero-length body rather than spinning
+        // without a DATA contribution that can carry FIN.
+        if (remaining_responses != responses.len) {
+            return error.InvalidFrame;
+        }
+
+        const chunk_limit = pacedBodyChunkLimit(self.options);
+        const max_batch_packets = response_scheduler.batchPacketLimit(
+            self.options.response_scheduler_max_batch_packets,
+            quic.one_rtt.max_batch_packets,
+        );
+        var next_stream: usize = 0;
+        var bytes_since_delay: usize = 0;
+        while (remaining_responses != 0) {
+            self.refreshResponseCandidates(
+                responses,
+                offsets,
+                candidates,
+                chunk_limit,
+            );
+            const selection = response_scheduler.select(candidates) orelse {
+                try self.receiveRequestPacket();
+                continue;
+            };
+
+            var chunk_count: usize = 0;
+            var iterator = response_scheduler.Iterator.init(
+                candidates,
+                selection,
+                next_stream,
+            );
+            var last_selected: ?usize = null;
+            while (iterator.next()) |index| {
+                const response = responses[index];
+                const count = @min(
+                    candidates[index].remaining,
+                    candidates[index].send_capacity,
+                    chunk_limit,
+                );
+                if (count == 0) continue;
+                const end = offsets[index] + count;
+                chunks[chunk_count] = .{
+                    .stream_id = response.stream_id,
+                    .data = response.data[offsets[index]..end],
+                    .fin = end == response.data.len,
+                };
+                chunk_count += 1;
+                last_selected = index;
+                if (chunk_count == max_batch_packets) break;
+            }
+            if (chunk_count == 0) {
+                try self.receiveRequestPacket();
+                continue;
+            }
+
+            const sent_count = sendConnectionBodyBatchPacedProgress(
+                &self.established.connection,
+                &self.outbound_bodies,
+                chunks[0..chunk_count],
+                self.options,
+                self,
+                HandshakeServerSession.finishBatchResponseStream,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveRequestPacket();
+                    continue;
+                },
+                error.PacingLimited => {
+                    try self.established.connection
+                        .waitForPacingAvailability();
+                    continue;
+                },
+                else => return err,
+            };
+            for (chunks[0..sent_count]) |chunk| {
+                const index = response_index.get(chunk.stream_id) orelse
+                    return error.UnexpectedStream;
+                offsets[index] += chunk.data.len;
+                if (offsets[index] == responses[index].data.len) {
+                    remaining_responses -= 1;
+                }
+                bytes_since_delay +|= chunk.data.len;
+            }
+            if (self.options.response_scheduler_batch_delay_bytes != 0 and
+                self.options.response_scheduler_batch_delay_ns != 0 and
+                bytes_since_delay >=
+                    self.options.response_scheduler_batch_delay_bytes)
+            {
+                const delay_ns = std.math.cast(
+                    i64,
+                    self.options.response_scheduler_batch_delay_ns,
+                ) orelse std.math.maxInt(i64);
+                try std.Io.sleep(
+                    self.established.connection.endpoint.io,
+                    .fromNanoseconds(delay_ns),
+                    .awake,
+                );
+                bytes_since_delay = 0;
+            }
+            if (selection.exclusive_index == null) {
+                // Rotate only incremental passes. An exclusive stream retains
+                // ownership until completion unless it becomes blocked or a
+                // live PRIORITY_UPDATE changes the selected class.
+                if (sent_count != 0) {
+                    const last_sent = response_index.get(
+                        chunks[sent_count - 1].stream_id,
+                    ) orelse return error.UnexpectedStream;
+                    next_stream = (last_sent + 1) % responses.len;
+                } else if (last_selected != null) {
+                    next_stream = (last_selected.? + 1) % responses.len;
+                }
+            }
+        }
+    }
+
+    fn refreshResponseCandidates(
+        self: *HandshakeServerSession,
+        responses: []const ResponseBody,
+        offsets: []const usize,
+        candidates: []response_scheduler.Candidate,
+        chunk_limit: usize,
+    ) void {
+        std.debug.assert(responses.len == offsets.len);
+        std.debug.assert(responses.len == candidates.len);
+        const connection_capacity =
+            self.established.connection.streamSendCredit(0).connection;
+        const congestion_capacity =
+            self.established.connection.congestionAvailable();
+        for (responses, offsets, candidates) |response, offset, *candidate| {
+            const remaining = response.data.len - offset;
+            const credit = self.established.connection.streamSendCredit(
+                response.stream_id,
+            );
+            const connection = std.math.cast(
+                usize,
+                connection_capacity,
+            ) orelse std.math.maxInt(usize);
+            const stream = std.math.cast(
+                usize,
+                credit.stream,
+            ) orelse std.math.maxInt(usize);
+            candidate.* = .{
+                .stream_id = response.stream_id,
+                .remaining = remaining,
+                .send_capacity = responseBodySendCapacity(
+                    remaining,
+                    connection,
+                    stream,
+                    congestion_capacity,
+                    credit.max_datagram_size,
+                    chunk_limit,
+                ),
+                .priority = self.effectiveResponsePriority(
+                    response.stream_id,
+                ),
+            };
+        }
+    }
+
+    fn effectiveResponsePriority(
+        self: HandshakeServerSession,
+        stream_id: u62,
+    ) http3.Priority {
+        if (self.control.requestPriorityUpdate(stream_id)) |update| {
+            return update.priority();
+        }
+        return self.request_lifecycle.priority(stream_id);
+    }
+
     fn receiveBatchProgressForSend(
         self: *HandshakeServerSession,
     ) Error!void {
@@ -2850,7 +3094,18 @@ pub const HandshakeServerSession = struct {
             try self.sendQpackFeedback();
         }
         if (event == .head) {
-            try self.request_lifecycle.markReceived(stream_id);
+            try self.request_lifecycle.markReceived(
+                stream_id,
+                switch (event) {
+                    .head => |head| switch (head) {
+                        .request => |request| requestPriority(
+                            request.headers,
+                        ),
+                        .response => .{},
+                    },
+                    else => .{},
+                },
+            );
         } else if (event == .finished) {
             self.streaming_requests.remove(stream_id);
         }
@@ -4385,7 +4640,10 @@ pub const ProtectedServer = struct {
             assembled.stream_id,
             request.qpack_section_acknowledgments,
         );
-        try self.request_lifecycle.markReceived(assembled.stream_id);
+        try self.request_lifecycle.markReceived(
+            assembled.stream_id,
+            requestPriority(request.headers),
+        );
         try self.sendQpackFeedback(assembled.from);
         return .{
             .from = assembled.from,
@@ -4991,7 +5249,18 @@ pub const ProtectedServer = struct {
             try self.sendQpackFeedback(from);
         }
         if (event == .head) {
-            try self.request_lifecycle.markReceived(stream_id);
+            try self.request_lifecycle.markReceived(
+                stream_id,
+                switch (event) {
+                    .head => |head| switch (head) {
+                        .request => |request| requestPriority(
+                            request.headers,
+                        ),
+                        .response => .{},
+                    },
+                    else => .{},
+                },
+            );
         } else if (event == .finished) {
             self.streaming_requests.remove(stream_id);
         }
@@ -6210,6 +6479,17 @@ fn updateOutboundBodyFlowLimitsFromFrames(
             frame.max_stream_data.maximum_stream_data,
         );
     }
+}
+
+fn requestPriority(
+    headers: []const http3.Qpack.HeaderField,
+) http3.Priority {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, "priority")) {
+            return http3.Priority.parse(header.value);
+        }
+    }
+    return .{};
 }
 
 pub const OwnedProtectedRequest = struct {
@@ -8192,8 +8472,13 @@ pub const ShutdownState = enum {
 };
 
 const ServerRequestLifecycle = struct {
+    const ActiveRequest = struct {
+        stream_id: u62,
+        priority: http3.Priority,
+    };
+
     allocator: std.mem.Allocator,
-    active_streams: std.ArrayList(u62) = .empty,
+    active_streams: std.ArrayList(ActiveRequest) = .empty,
     active_stream_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     lowest_active_stream_index: ?usize = null,
     highest_processed_stream_id: ?u62 = null,
@@ -8212,6 +8497,7 @@ const ServerRequestLifecycle = struct {
     fn markReceived(
         self: *ServerRequestLifecycle,
         stream_id: u62,
+        initial_priority: http3.Priority,
     ) Error!void {
         const slot = try self.active_stream_index.getOrPut(
             self.allocator,
@@ -8220,7 +8506,10 @@ const ServerRequestLifecycle = struct {
         if (slot.found_existing) return error.UnexpectedStream;
         errdefer _ = self.active_stream_index.remove(stream_id);
         const index = self.active_streams.items.len;
-        try self.active_streams.append(self.allocator, stream_id);
+        try self.active_streams.append(self.allocator, .{
+            .stream_id = stream_id,
+            .priority = initial_priority,
+        });
         slot.value_ptr.* = index;
         self.considerLowestActiveStream(index);
         self.highest_processed_stream_id = if (self.highest_processed_stream_id) |highest|
@@ -8236,10 +8525,10 @@ const ServerRequestLifecycle = struct {
         const last_index = self.active_streams.items.len - 1;
         const lowest = self.lowest_active_stream_index;
         const removed = self.active_streams.swapRemove(index);
-        _ = self.active_stream_index.remove(removed);
+        _ = self.active_stream_index.remove(removed.stream_id);
         if (index != last_index) {
             const moved = self.active_streams.items[index];
-            self.active_stream_index.getPtr(moved).?.* = index;
+            self.active_stream_index.getPtr(moved.stream_id).?.* = index;
         }
         if (self.active_streams.items.len == 0) {
             self.lowest_active_stream_index = null;
@@ -8280,7 +8569,20 @@ const ServerRequestLifecycle = struct {
 
     fn lowestActiveStream(self: ServerRequestLifecycle) ?u62 {
         const index = self.lowest_active_stream_index orelse return null;
-        return self.active_streams.items[index];
+        return self.active_streams.items[index].stream_id;
+    }
+
+    fn priority(
+        self: ServerRequestLifecycle,
+        stream_id: u62,
+    ) http3.Priority {
+        if (self.active_stream_index.count() == 0) return .{};
+        const index = self.active_stream_index.get(stream_id) orelse
+            return .{};
+        if (index >= self.active_streams.items.len) return .{};
+        const active = self.active_streams.items[index];
+        if (active.stream_id != stream_id) return .{};
+        return active.priority;
     }
 
     fn considerLowestActiveStream(
@@ -8291,7 +8593,9 @@ const ServerRequestLifecycle = struct {
             self.lowest_active_stream_index = index;
             return;
         };
-        if (self.active_streams.items[index] < self.active_streams.items[lowest]) {
+        if (self.active_streams.items[index].stream_id <
+            self.active_streams.items[lowest].stream_id)
+        {
             self.lowest_active_stream_index = index;
         }
     }
@@ -8309,18 +8613,29 @@ test "HTTP/3 server request lifecycle indexes active streams" {
     var lifecycle = ServerRequestLifecycle.init(allocator);
     defer lifecycle.deinit();
 
-    try lifecycle.markReceived(0);
+    try lifecycle.markReceived(0, .{ .urgency = 5 });
     try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
-    try lifecycle.markReceived(4);
-    try lifecycle.markReceived(8);
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        lifecycle.priority(0).urgency,
+    );
+    try lifecycle.markReceived(4, .{ .urgency = 1 });
+    try lifecycle.markReceived(8, .{});
     try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
-    try std.testing.expectError(error.UnexpectedStream, lifecycle.markReceived(4));
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        lifecycle.markReceived(4, .{}),
+    );
     try std.testing.expectEqual(@as(?u62, 8), lifecycle.highest_processed_stream_id);
     try std.testing.expectEqual(@as(u64, 12), try lifecycle.finalGoAwayId());
 
     lifecycle.markFinished(4);
     try std.testing.expect(!lifecycle.active_stream_index.contains(4));
     try std.testing.expect(lifecycle.active_stream_index.contains(8));
+    try std.testing.expectEqual(
+        @as(u3, 3),
+        lifecycle.priority(8).urgency,
+    );
     try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
     lifecycle.markFinished(8);
     try std.testing.expect(!lifecycle.active_stream_index.contains(8));
@@ -8333,6 +8648,21 @@ test "HTTP/3 server request lifecycle indexes active streams" {
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
     lifecycle.markFinished(16);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
+}
+
+test "HTTP/3 response capacity bypasses header-only send credit" {
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        responseBodySendCapacity(256, 64, 256, 256, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 192),
+        responseBodySendCapacity(256, 512, 256, 512, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 100),
+        responseBodySendCapacity(100, 512, 512, 512, 1200, 1024),
+    );
 }
 
 test "HTTP/3 outbound body set indexes open streaming bodies" {
@@ -8881,6 +9211,30 @@ fn pacedBodyChunkLimit(options: HandshakeSessionOptions) usize {
     );
 }
 
+fn responseBodySendCapacity(
+    remaining: usize,
+    connection: usize,
+    stream: usize,
+    congestion: usize,
+    datagram_size: usize,
+    chunk_limit: usize,
+) usize {
+    if (remaining == 0) return 0;
+    const credit = @min(
+        connection,
+        stream,
+        congestion,
+        datagram_size,
+        chunk_limit,
+    );
+    // QUIC credit counts the HTTP/3 DATA prefix and QUIC STREAM-frame
+    // metadata too. Requiring this conservative margin prevents a candidate
+    // with only header-sized credit from winning urgency selection and then
+    // blocking a lower-urgency response that could make useful progress.
+    if (credit <= paced_body_frame_overhead_margin) return 0;
+    return @min(remaining, credit - paced_body_frame_overhead_margin);
+}
+
 fn pacedProtectedBodyChunkLimit(config: ProtectedConfig) usize {
     const frame_budget = config.max_stream_frame_data *|
         @max(@as(usize, 1), config.max_frames_per_packet);
@@ -8955,7 +9309,43 @@ fn sendConnectionBodyBatchPaced(
     comptime receive_progress: anytype,
     comptime finish_stream: anytype,
 ) Error!void {
-    if (chunks.len == 0) return;
+    var sent: usize = 0;
+    while (sent < chunks.len) {
+        sent += sendConnectionBodyBatchPacedProgress(
+            connection,
+            bodies,
+            chunks[sent..],
+            options,
+            context,
+            finish_stream,
+        ) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receive_progress(context);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
+                continue;
+            },
+            else => return err,
+        };
+    }
+}
+
+/// Send at most one transport-accepted prefix of `chunks`.
+///
+/// Returning after each socket-visible prefix gives higher-level schedulers a
+/// replan point for newly received PRIORITY_UPDATE frames. The compatibility
+/// batch API loops over this primitive to preserve its all-chunks contract.
+fn sendConnectionBodyBatchPacedProgress(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    options: HandshakeSessionOptions,
+    context: anytype,
+    comptime finish_stream: anytype,
+) Error!usize {
+    if (chunks.len == 0) return 0;
     for (chunks, 0..) |chunk, i| {
         if (chunk.data.len > pacedBodyChunkLimit(options)) {
             return error.DatagramTooLarge;
@@ -8976,111 +9366,93 @@ fn sendConnectionBodyBatchPaced(
     var staged: [quic.one_rtt.max_batch_packets]Staged = undefined;
     var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame =
         undefined;
-    var offset: usize = 0;
-    while (offset < chunks.len) {
-        const count = @min(
-            quic.one_rtt.max_batch_packets,
-            chunks.len - offset,
-        );
-        const window = chunks[offset..][0..count];
-        try bodies.batch_scratch.begin(bodies.allocator, count);
+    const count = @min(quic.one_rtt.max_batch_packets, chunks.len);
+    const window = chunks[0..count];
+    try bodies.batch_scratch.begin(bodies.allocator, count);
 
-        for (window, 0..) |chunk, i| {
-            const current = bodies.find(chunk.stream_id) orelse
-                return error.UnexpectedStream;
-            staged[i] = .{
-                .stream_id = chunk.stream_id,
-                .entry = current.*,
-                .fin = chunk.fin,
-            };
-            try bodies.prepareChunkForEntry(
-                &staged[i].entry,
-                chunk.data.len,
-                chunk.fin,
-            );
-            const frame_start = bodies.batch_scratch.frames.items.len;
-            if (chunk.data.len == 0) {
-                try staged[i].entry.send.appendFrames(
-                    &bodies.batch_scratch.frames,
-                    bodies.allocator,
-                    &.{},
-                    options.max_stream_frame_data,
-                    chunk.fin,
-                );
-            } else if (!try body_batch.appendDataStreamFrames(
-                &staged[i].entry.send,
+    for (window, 0..) |chunk, i| {
+        const current = bodies.find(chunk.stream_id) orelse
+            return error.UnexpectedStream;
+        staged[i] = .{
+            .stream_id = chunk.stream_id,
+            .entry = current.*,
+            .fin = chunk.fin,
+        };
+        try bodies.prepareChunkForEntry(
+            &staged[i].entry,
+            chunk.data.len,
+            chunk.fin,
+        );
+        const frame_start = bodies.batch_scratch.frames.items.len;
+        if (chunk.data.len == 0) {
+            try staged[i].entry.send.appendFrames(
                 &bodies.batch_scratch.frames,
                 bodies.allocator,
-                &bodies.batch_scratch.prefixes.items[i],
-                chunk.data,
-                chunk.fin,
+                &.{},
                 options.max_stream_frame_data,
-            )) {
-                return error.DatagramTooLarge;
-            }
-            const frame_len =
-                bodies.batch_scratch.frames.items.len - frame_start;
-            if (frame_len == 0 or
-                frame_len > @max(@as(usize, 1), options.max_frames_per_packet))
-            {
-                return error.DatagramTooLarge;
-            }
-            bodies.batch_scratch.frame_ranges.items[i] = .{
-                .start = frame_start,
-                .len = frame_len,
-            };
+                chunk.fin,
+            );
+        } else if (!try body_batch.appendDataStreamFrames(
+            &staged[i].entry.send,
+            &bodies.batch_scratch.frames,
+            bodies.allocator,
+            &bodies.batch_scratch.prefixes.items[i],
+            chunk.data,
+            chunk.fin,
+            options.max_stream_frame_data,
+        )) {
+            return error.DatagramTooLarge;
         }
-
-        for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
-            packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
-            if (try connection.packetLenForFramesAtOffset(
-                i,
-                packets[i],
-            ) > connection.currentSendDatagramSize()) {
-                return error.DatagramTooLarge;
-            }
-        }
-
-        const result = connection.sendManyProgress(
-            packets[0..count],
-        ) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                try receive_progress(context);
-                continue;
-            },
-            error.PacingLimited => {
-                try connection.waitForPacingAvailability();
-                continue;
-            },
-            else => return err,
-        };
-        if (result.sent_count > count or
-            result.protected_count > count or
-            result.sent_count > result.protected_count)
+        const frame_len =
+            bodies.batch_scratch.frames.items.len - frame_start;
+        if (frame_len == 0 or
+            frame_len > @max(@as(usize, 1), options.max_frames_per_packet))
         {
-            return error.Unexpected;
+            return error.DatagramTooLarge;
         }
-
-        // QUIC commits only the socket-visible prefix. Mirror that exact
-        // prefix into HTTP/3 body offsets and FIN state; protected-but-unsent
-        // suffix packets consumed nonces but had their transport flow state
-        // rolled back and remain safe to retry under fresh packet numbers.
-        for (staged[0..result.sent_count]) |committed| {
-            const entry = bodies.find(committed.stream_id) orelse
-                return error.UnexpectedStream;
-            entry.* = committed.entry;
-            if (committed.fin) {
-                _ = bodies.finish(committed.stream_id);
-                finish_stream(context, committed.stream_id);
-            }
-        }
-        offset += result.sent_count;
-        if (result.send_error) |err| return err;
-        if (result.sent_count != result.protected_count) {
-            return error.Unexpected;
-        }
-        if (result.sent_count == 0) return error.Unexpected;
+        bodies.batch_scratch.frame_ranges.items[i] = .{
+            .start = frame_start,
+            .len = frame_len,
+        };
     }
+
+    for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
+        packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
+        if (try connection.packetLenForFramesAtOffset(
+            i,
+            packets[i],
+        ) > connection.currentSendDatagramSize()) {
+            return error.DatagramTooLarge;
+        }
+    }
+
+    const result = try connection.sendManyProgress(packets[0..count]);
+    if (result.sent_count > count or
+        result.protected_count > count or
+        result.sent_count > result.protected_count)
+    {
+        return error.Unexpected;
+    }
+
+    // QUIC commits only the socket-visible prefix. Mirror that exact
+    // prefix into HTTP/3 body offsets and FIN state; protected-but-unsent
+    // suffix packets consumed nonces but had their transport flow state
+    // rolled back and remain safe to retry under fresh packet numbers.
+    for (staged[0..result.sent_count]) |committed| {
+        const entry = bodies.find(committed.stream_id) orelse
+            return error.UnexpectedStream;
+        entry.* = committed.entry;
+        if (committed.fin) {
+            _ = bodies.finish(committed.stream_id);
+            finish_stream(context, committed.stream_id);
+        }
+    }
+    if (result.send_error) |err| return err;
+    if (result.sent_count != result.protected_count) {
+        return error.Unexpected;
+    }
+    if (result.sent_count == 0) return error.Unexpected;
+    return result.sent_count;
 }
 
 fn sendProtectedBodyChunk(
@@ -19389,4 +19761,8 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+test {
+    _ = @import("runtime/response_scheduler_tests.zig");
 }

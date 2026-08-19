@@ -13,6 +13,17 @@ pub const Chunk = struct {
     fin: bool = false,
 };
 
+/// A complete response body owned by the caller for the duration of a
+/// priority-aware blocking send.
+///
+/// Unlike `Chunk`, one value may span many QUIC packets. The runtime chooses
+/// packet-sized slices according to the request's effective RFC 9218 priority
+/// and retries after processing ACK, flow-control, and PRIORITY_UPDATE input.
+pub const ResponseBody = struct {
+    stream_id: u62,
+    data: []const u8,
+};
+
 /// The DATA prefix and first body fragment share storage so a packet can borrow
 /// the remainder directly from the caller without allocating a full encoded
 /// HTTP/3 payload. The normal paced body budget keeps this comfortably below

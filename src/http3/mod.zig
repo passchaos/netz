@@ -3132,6 +3132,11 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
             if (host_value != null) return error.InvalidHeader;
             host_value = header.value;
         }
+        if (std.mem.eql(u8, header.name, "priority")) {
+            _ = priority_field.Priority.parseStrict(header.value) catch {
+                return error.InvalidHeader;
+            };
+        }
         if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "te")) {
             switch (kind) {
@@ -4876,6 +4881,35 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
     var decoded = try decodeRequest(allocator, good_te.items);
     defer decoded.deinit(allocator);
     try std.testing.expectEqualStrings("GET", decoded.method);
+
+    var bad_priority: std.ArrayList(u8) = .empty;
+    defer bad_priority.deinit(allocator);
+    try Helper.writeRequestBlock(&bad_priority, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "priority", .value = "u=1," },
+    });
+    try std.testing.expectError(
+        error.InvalidHeader,
+        decodeRequest(allocator, bad_priority.items),
+    );
+
+    var good_priority: std.ArrayList(u8) = .empty;
+    defer good_priority.deinit(allocator);
+    try Helper.writeRequestBlock(&good_priority, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "priority", .value = "u=1, i" },
+    });
+    var priority_decoded = try decodeRequest(
+        allocator,
+        good_priority.items,
+    );
+    priority_decoded.deinit(allocator);
 
     var missing_authority = std.ArrayList(u8).empty;
     defer missing_authority.deinit(allocator);

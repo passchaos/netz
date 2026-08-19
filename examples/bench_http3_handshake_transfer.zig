@@ -29,6 +29,10 @@ const multi_stream_paced_body_chunk_bytes: usize = 3000;
 // rather than regressing one shape to optimize another.
 const large_multi_stream_body_bytes: usize = 64 * 1024 * 1024;
 const large_multi_stream_paced_body_chunk_bytes: usize = 6000;
+// Both endpoints run in this process while the host caps UDP receive buffers
+// at 212,992 bytes. Preserve the old per-round drain opportunity after moving
+// response scheduling into the runtime; production sessions default to zero.
+const multi_stream_response_batch_delay_ns: u64 = 50_000;
 const upload_trace_initial_window: usize = 256 * 1024;
 
 const Mode = enum {
@@ -85,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
         \\HTTP/3 real-handshake transfer benchmark
         \\  mode: {s}
         \\  streams: {d}
+        \\  response scheduler: {s}
         \\  body batch: {}
         \\  GRO receive: {}
         \\  1-RTT datagram bytes: {d}
@@ -98,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -207,6 +212,9 @@ fn runIteration(
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
+                .response_scheduler_batch_delay_bytes = if (config.mode == .download and config.streams > 1) round_robin_chunk_bytes else 0,
+                .response_scheduler_batch_delay_ns = if (config.mode == .download and config.streams > 1) multi_stream_response_batch_delay_ns else 0,
+                .response_scheduler_max_batch_packets = if (config.enable_body_batch) max_streams else 1,
                 .max_concurrent_request_streams = max_streams,
             },
         },
@@ -259,8 +267,9 @@ fn runIteration(
                     &session,
                     shared.body_bytes,
                     shared.streams,
-                    shared.round_robin_chunk_bytes,
                     shared.body,
+                    shared.trace,
+                    shared.iteration,
                 ),
             }
         }
@@ -473,8 +482,9 @@ fn serveDownload(
     session: *netz.http3.runtime.HandshakeServerSession,
     body_bytes: usize,
     streams: usize,
-    round_robin_chunk_bytes: usize,
     body: []const u8,
+    trace: bool,
+    iteration: usize,
 ) !void {
     const allocator = session.established.connection.endpoint.allocator;
     const stream_ids = try allocator.alloc(u62, streams);
@@ -487,6 +497,12 @@ fn serveDownload(
         }
         if (request.request.body.len != 0) return error.InvalidFrame;
         stream_ids[index] = request.stream_id;
+        if (trace) {
+            std.debug.print(
+                "  [iter {d}] server download request {d}/{d} stream={d}\n",
+                .{ iteration, index + 1, streams, request.stream_id },
+            );
+        }
     }
     for (stream_ids, 0..) |stream_id, index| {
         try session.startResponse(
@@ -498,45 +514,33 @@ fn serveDownload(
             transferBytesForStream(body_bytes, streams, index),
         );
     }
-    try sendDownloadBodies(session, stream_ids, body_bytes, streams, round_robin_chunk_bytes, body);
-}
-
-fn sendDownloadBodies(
-    session: *netz.http3.runtime.HandshakeServerSession,
-    stream_ids: []const u62,
-    body_bytes: usize,
-    streams: usize,
-    round_robin_chunk_bytes: usize,
-    body: []const u8,
-) !void {
-    const allocator = session.established.connection.endpoint.allocator;
-    const sent = try allocator.alloc(usize, streams);
-    defer allocator.free(sent);
-    @memset(sent, 0);
-    var finished_count: usize = 0;
-    while (finished_count < streams) {
-        for (stream_ids, 0..) |stream_id, index| {
-            const stream_len = transferBytesForStream(body_bytes, streams, index);
-            if (sent[index] == stream_len) continue;
-            const count = @min(round_robin_chunk_bytes, stream_len - sent[index]);
-            const end = sent[index] + count;
-            try session.sendResponseBodyPaced(
-                stream_id,
-                body[0..count],
-                end == stream_len,
-            );
-            // The benchmark runs both endpoints in one process. A tiny sleep
-            // between response chunks gives the client thread time to drain
-            // loopback UDP, avoiding artificial drops that do not represent an
-            // event-loop driven server.
-            try std.Io.sleep(
-                session.established.connection.endpoint.io,
-                .fromNanoseconds(50_000),
-                .awake,
-            );
-            sent[index] = end;
-            if (end == stream_len) finished_count += 1;
-        }
+    const responses = try allocator.alloc(
+        netz.http3.runtime.ResponseBody,
+        streams,
+    );
+    defer allocator.free(responses);
+    for (responses, stream_ids, 0..) |*response, stream_id, index| {
+        response.* = .{
+            .stream_id = stream_id,
+            .data = body[0..transferBytesForStream(
+                body_bytes,
+                streams,
+                index,
+            )],
+        };
+    }
+    if (trace) {
+        std.debug.print(
+            "  [iter {d}] server download bodies start\n",
+            .{iteration},
+        );
+    }
+    try session.sendResponseBodiesPaced(responses);
+    if (trace) {
+        std.debug.print(
+            "  [iter {d}] server download bodies done\n",
+            .{iteration},
+        );
     }
 }
 
@@ -756,6 +760,13 @@ fn runDownloadClient(
             .path = "/bench-transfer",
             .scheme = "https",
             .authority = "localhost",
+            // The historical multi-stream workload round-robined response
+            // chunks. Express that intent on the wire now that the server
+            // applies RFC 9218 instead of relying on caller loop ordering.
+            .headers = &.{.{
+                .name = "priority",
+                .value = "u=3, i",
+            }},
         });
     }
     return receiveDownloadBodies(allocator, client, stream_ids, body_bytes, streams);
