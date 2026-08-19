@@ -11,7 +11,12 @@ const Config = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
+    // This long-lived broker repeatedly transfers small packet/session
+    // allocations between I/O workers. The SMP allocator's per-thread caches
+    // retain a separate working set for every connection task; libc's shared
+    // arenas keep the same workload throughput while materially reducing RSS.
+    // Library users still choose the allocator passed to Broker.listen.
+    const allocator = std.heap.c_allocator;
     const config = try parseArgs(init);
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
