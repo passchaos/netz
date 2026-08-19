@@ -1177,13 +1177,12 @@ pub const Connection = struct {
         var started: usize = 0;
         var requests_written = false;
         errdefer {
+            if (requests_written) {
+                self.writeBatchResponseResets(
+                    states[0..started],
+                ) catch {};
+            }
             for (states[0..started]) |*state| {
-                if (requests_written and !state.done) {
-                    self.writeResetStreamFrame(
-                        state.stream_id,
-                        .cancel,
-                    ) catch {};
-                }
                 self.releaseLocalStream(state.stream_id);
                 state.deinit(self.allocator);
             }
@@ -2162,6 +2161,33 @@ pub const Connection = struct {
                 .rst_stream => return error.StreamReset,
                 else => return error.UnexpectedFrame,
             }
+        }
+    }
+
+    /// Cancel every unfinished member of a streaming response batch in one
+    /// transport write. Application callback failure is a batch-wide abort;
+    /// emitting one tiny write per RST_STREAM magnifies syscall and delayed-ACK
+    /// cost exactly when the connection is already unwinding an error path.
+    fn writeBatchResponseResets(
+        self: *Connection,
+        states: []const BatchResponseState,
+    ) Error!void {
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        for (states) |state| {
+            if (state.done) continue;
+            try http2.ResetStreamPayload.write(
+                batch,
+                self.allocator,
+                state.stream_id,
+                .cancel,
+            );
+        }
+        if (batch.items.len != 0) {
+            try writeAll(self.io, self.stream, batch.items);
+        }
+        for (states) |state| {
+            if (!state.done) self.forgetRecvStreamWindow(state.stream_id);
         }
     }
 
@@ -6066,6 +6092,20 @@ pub const Connection = struct {
         });
         slot.value_ptr.* = index;
         return &self.recv_stream_windows.items[index].window;
+    }
+
+    fn forgetRecvStreamWindow(self: *Connection, stream_id: u31) void {
+        if (self.recv_stream_window_index.count() == 0) return;
+        const index = self.recv_stream_window_index.get(stream_id) orelse
+            return;
+        const last_index = self.recv_stream_windows.items.len - 1;
+        const removed = self.recv_stream_windows.swapRemove(index);
+        _ = self.recv_stream_window_index.remove(removed.stream_id);
+        if (index != last_index) {
+            const moved = self.recv_stream_windows.items[index];
+            self.recv_stream_window_index.getPtr(moved.stream_id).?.* =
+                index;
+        }
     }
 
     fn hasRecvStreamWindow(self: Connection, stream_id: u31) bool {

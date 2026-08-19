@@ -429,8 +429,16 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
 ## Remaining evidence
 
 1. Add a cancellation-race benchmark that combines reset timing with the
-   priority-aware flow scheduler; reset behavior currently has end-to-end tests
-   but no same-shape timing evidence.
+   priority-aware flow scheduler. **Completed:** `bench-http2-flow --priority
+   --cancel-after=8` opens ten 1-MiB responses behind 8-KiB stream/65,535-byte
+   connection windows, processes eight priority-scheduled DATA callbacks, then
+   cancels all unfinished members. The client now writes every RST_STREAM in
+   one batch instead of one transport write per stream and drops their retained
+   receive-window entries. Five CPU-0 runs took 230.4-241.2 us from request
+   submission through server observation of the reset batch. One `--stats` run
+   used 293 allocations and 1,287,988 peak live bytes. Hyper/h2 has no RFC 9218
+   scheduler, so this is internal timing evidence rather than a cross-stack
+   ratio.
 2. Run the new `bench-http2-flow --stats` allocator telemetry on the full
    netz/Hyper comparison matrix. The netz benchmark now reports allocation
    calls, cumulative allocated/freed bytes, live bytes, peak live bytes and

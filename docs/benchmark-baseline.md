@@ -264,6 +264,24 @@ RST_STREAM while blocked. Payloads remain borrowed and HPACK/scratch validation
 still completes before HEADERS are written. This is focused backpressure and
 fairness evidence, not a whole-stack superiority claim.
 
+The same benchmark now covers a priority/flow-control cancellation race:
+
+```sh
+taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
+  --priority --cancel-after=8 --parallel=10 --body-bytes=1048576 \
+  --stream-window=8192 --connection-window=65535 \
+  --warmup=0 --iterations=1
+```
+
+The client accepts eight scheduled DATA callbacks, then rejects the batch and
+sends RST_STREAM(CANCEL) for all unfinished streams. Timing includes server
+observation of the reset batch. Five CPU-0 runs measured 230.4-241.2 us/batch.
+The cancellation path now coalesces all resets into one transport write instead
+of one write per stream and removes canceled receive-window entries. A `--stats`
+sample made 293 allocations and peaked at 1,287,988 live bytes. This closes the
+previous priority-aware cancellation timing gap; there is no equal Hyper/h2
+RFC 9218 scheduler workload, so it remains internal evidence.
+
 ### HTTP/3 QPACK dynamic encode
 
 ```text

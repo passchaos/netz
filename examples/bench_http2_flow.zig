@@ -24,6 +24,8 @@ const Options = struct {
     iterations: usize = default_iterations,
     priority: bool = false,
     stats: bool = false,
+    cancel: bool = false,
+    cancel_after: usize = 0,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -31,7 +33,8 @@ pub fn main(init: std.process.Init) !void {
     if (options.parallel == 0 or options.body_bytes == 0 or
         options.stream_window == 0 or
         options.connection_window < 65_535 or
-        options.iterations == 0)
+        options.iterations == 0 or
+        (options.cancel and options.cancel_after == 0))
     {
         return error.InvalidArguments;
     }
@@ -93,8 +96,10 @@ pub fn main(init: std.process.Init) !void {
                 .body = shared.response_body,
             });
 
-            const total = shared.options.warmups +
-                shared.options.iterations;
+            const total = if (shared.options.cancel)
+                1
+            else
+                shared.options.warmups + shared.options.iterations;
             for (0..total) |_| {
                 var requests_initialized: usize = 0;
                 const requests = try shared.server.allocator.alloc(
@@ -112,11 +117,22 @@ pub fn main(init: std.process.Init) !void {
                     requests_initialized += 1;
                     stream_id.* = request.stream_id;
                 }
-                try connection.writeResponseBodyBatch(
-                    stream_ids,
-                    responses,
-                    application_chunk_size,
-                );
+                if (shared.options.cancel) {
+                    try std.testing.expectError(
+                        error.StreamReset,
+                        connection.writeResponseBodyBatch(
+                            stream_ids,
+                            responses,
+                            application_chunk_size,
+                        ),
+                    );
+                } else {
+                    try connection.writeResponseBodyBatch(
+                        stream_ids,
+                        responses,
+                        application_chunk_size,
+                    );
+                }
             }
         }
     };
@@ -169,7 +185,13 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(body_bytes);
 
     var checksum: usize = 0;
-    for (0..options.warmups) |_| {
+    var cancel_callbacks: usize = 0;
+    const cancel_iterations = if (options.cancel)
+        @min(options.iterations, @as(usize, 1))
+    else
+        options.iterations;
+    const warmups = if (options.cancel) 0 else options.warmups;
+    for (0..warmups) |_| {
         checksum +%= try exchange(
             &client,
             requests,
@@ -180,22 +202,37 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     const started = nowNs(io);
-    for (0..options.iterations) |_| {
-        checksum +%= try exchange(
-            &client,
-            requests,
-            responses,
-            body_bytes,
-            allocator,
-            options.body_bytes,
-        );
+    for (0..cancel_iterations) |_| {
+        if (options.cancel) {
+            cancel_callbacks += try cancelExchange(
+                &client,
+                requests,
+                responses,
+                @max(options.cancel_after, 1),
+            );
+        } else {
+            checksum +%= try exchange(
+                &client,
+                requests,
+                responses,
+                body_bytes,
+                allocator,
+                options.body_bytes,
+            );
+        }
     }
-    const elapsed = nowNs(io) -| started;
-
+    var elapsed = nowNs(io) -| started;
     thread.join();
+    if (options.cancel) {
+        // Include server observation of every RST_STREAM in cancellation-race
+        // latency rather than stopping at the client socket write.
+        elapsed = nowNs(io) -| started;
+    }
     if (shared.err) |err| return err;
-    const wire_body_bytes = @as(u64, options.body_bytes) *
-        options.parallel * options.iterations;
+    const wire_body_bytes = if (options.cancel)
+        0
+    else
+        @as(u64, options.body_bytes) * options.parallel * cancel_iterations;
     const mebibytes_per_second = if (elapsed == 0)
         0
     else
@@ -208,11 +245,13 @@ pub fn main(init: std.process.Init) !void {
         \\  initial stream window: {d}
         \\  initial connection window: {d}
         \\  scheduler: {s}
+        \\  cancellation race: {}
         \\  warmup iterations: {d}
         \\  iterations: {d}
         \\  ns/batch: {d}
         \\  body MiB/s: {d}
         \\  checksum: {d}
+        \\  cancel callbacks: {d}
         \\
     , .{
         options.parallel,
@@ -220,11 +259,13 @@ pub fn main(init: std.process.Init) !void {
         options.stream_window,
         options.connection_window,
         if (options.priority) "RFC 9218" else "round-robin",
-        options.warmups,
-        options.iterations,
-        elapsed / options.iterations,
+        options.cancel,
+        warmups,
+        cancel_iterations,
+        elapsed / cancel_iterations,
         mebibytes_per_second,
         checksum,
+        cancel_callbacks,
     });
     if (options.stats) counting.snapshot().print();
 }
@@ -265,6 +306,43 @@ fn exchange(
         total += streamed;
     }
     return total;
+}
+
+fn cancelExchange(
+    client: *netz.http2.runtime.Connection,
+    requests: []const netz.http2.runtime.RequestOptions,
+    responses: []netz.http2.runtime.StreamingResponse,
+    cancel_after: usize,
+) !usize {
+    var callback_calls: usize = 0;
+    const Context = struct { calls: *usize, cancel_after: usize };
+    try std.testing.expectError(
+        error.CancelBatch,
+        client.requestBatchStreamingInto(
+            requests,
+            responses,
+            Context{
+                .calls = &callback_calls,
+                .cancel_after = cancel_after,
+            },
+            struct {
+                fn consume(
+                    context: Context,
+                    _: usize,
+                    _: []const u8,
+                ) !void {
+                    context.calls.* += 1;
+                    if (context.calls.* >= context.cancel_after) {
+                        return error.CancelBatch;
+                    }
+                }
+            }.consume,
+        ),
+    );
+    if (callback_calls != cancel_after) {
+        return error.InvalidCancellationRace;
+    }
+    return callback_calls;
 }
 
 fn parseOptions(init: std.process.Init) !Options {
@@ -311,6 +389,16 @@ fn parseOptions(init: std.process.Init) !Options {
             options.priority = true;
         } else if (std.mem.eql(u8, argument, "--stats")) {
             options.stats = true;
+        } else if (std.mem.eql(u8, argument, "--cancel")) {
+            options.cancel = true;
+            options.cancel_after = 1;
+        } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
+            options.cancel = true;
+            options.cancel_after = try std.fmt.parseInt(
+                usize,
+                argument["--cancel-after=".len..],
+                10,
+            );
         } else {
             return error.InvalidArguments;
         }
