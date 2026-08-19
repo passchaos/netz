@@ -38,7 +38,8 @@ The MQTT broker API exposes `Broker.saveSnapshot` and
 atomic replacement, versioned sections and CRC validation. Save is a quiescent
 shutdown/admin operation; restore is intended for startup before accepting
 clients. See `docs/rumqtt_parity.md` for the persisted state surface and
-current persisted surface and remaining incremental-autosave exclusions.
+current persisted surface, including inbound QoS 2 transactions awaiting
+PUBREL, and remaining incremental-autosave exclusions.
 
 The finite `run-mqtt-broker` example enables this with
 `--persistence=netz-mqtt.db`; it restores on startup and snapshots after the

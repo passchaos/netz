@@ -31,6 +31,8 @@ pub const Error = runtime.Error || router_mod.Error ||
     ClientOffline,
 };
 
+pub const PendingQoS2Store = qos2_mod.Store;
+
 pub const Limits = struct {
     max_connections: usize = 1024,
     max_queued_deliveries_per_connection: usize = 256,
@@ -366,8 +368,7 @@ pub const Broker = struct {
                 return error.SnapshotBusy;
             }
         }
-        if (self.pending_qos2.count() != 0 or
-            self.session_owners.count() != 0 or
+        if (self.session_owners.count() != 0 or
             self.will_publishers.count() != self.wills.count())
         {
             return error.SnapshotBusy;
@@ -382,6 +383,7 @@ pub const Broker = struct {
                 .sessions = &self.sessions,
                 .wills = &self.wills,
                 .will_publishers = &self.will_publishers,
+                .pending_qos2 = &self.pending_qos2,
             },
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
@@ -418,6 +420,7 @@ pub const Broker = struct {
             self.options.retained,
             self.options.session,
             self.options.will,
+            self.options.limits.max_pending_incoming_qos2,
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
         );
@@ -426,6 +429,7 @@ pub const Broker = struct {
             restored.sessions.deinit();
             restored.wills.deinit();
             restored.will_publishers.deinit(self.allocator);
+            restored.pending_qos2.deinit();
         }
         var staged_router = try router_mod.Router.initWithOptions(
             self.allocator,
@@ -453,6 +457,7 @@ pub const Broker = struct {
         self.retained.swap(&restored.retained);
         self.sessions.swap(&restored.sessions);
         self.wills.swap(&restored.wills);
+        self.pending_qos2.swap(&restored.pending_qos2);
         std.mem.swap(
             will_mod.PublisherMap,
             &self.will_publishers,
@@ -464,6 +469,7 @@ pub const Broker = struct {
         restored.sessions.deinit();
         restored.wills.deinit();
         restored.will_publishers.deinit(self.allocator);
+        restored.pending_qos2.deinit();
         self.will_driver.notify(self.io);
     }
 
@@ -656,6 +662,9 @@ pub const Broker = struct {
                 _ = self.router.removeSubscriber(
                     sessionSubscriberId(route_id),
                 ) catch {};
+                _ = self.pending_qos2.removePublisher(
+                    sessionSubscriberId(route_id),
+                );
             }
         }
         slot.session_handle = opened_session.handle;
@@ -958,13 +967,21 @@ pub const Broker = struct {
             const stats = self.sessions.stats(handle) catch null;
             if (stats == null or stats.?.expiry_interval == 0) {
                 if (route_id) |value| {
+                    _ = self.pending_qos2.removePublisher(
+                        sessionSubscriberId(value),
+                    );
                     _ = self.router.removeSubscriber(
                         sessionSubscriberId(value),
                     ) catch {};
                 }
             }
         }
-        _ = self.pending_qos2.removePublisher(id);
+        // A transient connection has no stable Session route. Durable Session
+        // transactions are keyed above by route identity and survive this
+        // transport generation.
+        if (slot.session_handle == null) {
+            _ = self.pending_qos2.removePublisher(id);
+        }
         slot.active = false;
         slot.clearQueue();
         self.state_mutex.unlock(self.io);
@@ -1014,6 +1031,9 @@ pub const Broker = struct {
                 err == error.SessionNotFound;
             if (session_removed == true) {
                 if (route_id) |value| {
+                    _ = self.pending_qos2.removePublisher(
+                        sessionSubscriberId(value),
+                    );
                     _ = self.router.removeSubscriber(
                         sessionSubscriberId(value),
                     ) catch {};
@@ -1280,8 +1300,11 @@ pub const Broker = struct {
         publish: mqtt.Publish,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
-        _ = self.pending_qos2.record(
+        const durable_publisher_id = self.canonicalPublisherId(
             publisher_id,
+        );
+        _ = self.pending_qos2.record(
+            durable_publisher_id,
             publish,
             std.Io.Clock.awake.now(self.io),
         ) catch |err| {
@@ -1323,8 +1346,11 @@ pub const Broker = struct {
         ack: mqtt.AckPacket,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
-        var pending = self.pending_qos2.take(
+        const durable_publisher_id = self.canonicalPublisherId(
             publisher_id,
+        );
+        var pending = self.pending_qos2.take(
+            durable_publisher_id,
             ack.packet_id,
         ) orelse {
             self.state_mutex.unlock(self.io);
@@ -1634,6 +1660,9 @@ pub const Broker = struct {
             route_ids,
         );
         for (removed) |route_id| {
+            _ = self.pending_qos2.removePublisher(
+                sessionSubscriberId(route_id),
+            );
             _ = self.router.removeSubscriber(
                 sessionSubscriberId(route_id),
             ) catch {};

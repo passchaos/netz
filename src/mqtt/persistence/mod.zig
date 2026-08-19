@@ -6,17 +6,19 @@
 //! retained section encoding inside their owning modules.
 
 const std = @import("std");
+const pending_qos2 = @import("../broker/qos2.zig");
 const retained = @import("../retained/mod.zig");
 const session = @import("../session/mod.zig");
 const will = @import("../will/mod.zig");
 pub const codec = @import("codec.zig");
 
 const magic = "netz-mqtt-db\x00\x01";
-const version: u32 = 2;
+const version: u32 = 3;
 const max_section_bytes: usize = 1024 * 1024 * 1024;
-const max_snapshot_bytes: usize = 3 * max_section_bytes + 160;
+const max_snapshot_bytes: usize = 4 *| max_section_bytes +| 192;
 
-pub const Error = codec.Error || retained.Error || session.Error || will.Error || error{
+pub const Error = codec.Error || pending_qos2.Error || retained.Error ||
+    session.Error || will.Error || error{
     SnapshotNotFound,
     SnapshotBusy,
     CorruptSnapshot,
@@ -29,6 +31,7 @@ pub const State = struct {
     sessions: *session.Store,
     wills: *will.Scheduler,
     will_publishers: *const will.PublisherMap,
+    pending_qos2: *pending_qos2.Store,
 };
 
 pub const RestoredState = struct {
@@ -36,6 +39,7 @@ pub const RestoredState = struct {
     sessions: session.Store,
     wills: will.Scheduler,
     will_publishers: will.PublisherMap,
+    pending_qos2: pending_qos2.Store,
 };
 
 pub fn saveAtomic(
@@ -73,6 +77,7 @@ pub fn load(
     retained_options: retained.Options,
     session_options: session.Options,
     will_options: will.Options,
+    pending_qos2_maximum: usize,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!RestoredState {
@@ -92,6 +97,7 @@ pub fn load(
         retained_options,
         session_options,
         will_options,
+        pending_qos2_maximum,
         monotonic_now,
         realtime_now,
     );
@@ -125,6 +131,25 @@ pub fn encode(
         monotonic_now,
         state.will_publishers,
     );
+    var qos2_bytes: std.ArrayList(u8) = .empty;
+    defer qos2_bytes.deinit(allocator);
+    try state.pending_qos2.writeSnapshot(
+        &qos2_bytes,
+        allocator,
+        monotonic_now,
+        state.sessions,
+        struct {
+            fn exists(
+                sessions: *session.Store,
+                publisher_id: u64,
+            ) bool {
+                return sessionRouteId(publisher_id) != null and
+                    sessions.handleForRouteId(
+                        sessionRouteId(publisher_id).?,
+                    ) != null;
+            }
+        }.exists,
+    );
 
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
@@ -139,6 +164,7 @@ pub fn encode(
     try appendSection(&encoded, allocator, 1, retained_bytes.items);
     try appendSection(&encoded, allocator, 2, session_bytes.items);
     try appendSection(&encoded, allocator, 3, will_bytes.items);
+    try appendSection(&encoded, allocator, 4, qos2_bytes.items);
     try codec.appendInt(
         &encoded,
         allocator,
@@ -154,6 +180,7 @@ pub fn decode(
     retained_options: retained.Options,
     session_options: session.Options,
     will_options: will.Options,
+    pending_qos2_maximum: usize,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!RestoredState {
@@ -189,6 +216,7 @@ pub fn decode(
     const retained_section = try readSection(&cursor, 1);
     const session_section = try readSection(&cursor, 2);
     const will_section = try readSection(&cursor, 3);
+    const qos2_section = try readSection(&cursor, 4);
     try cursor.finish();
 
     var staged_retained = retained.Store.init(
@@ -230,12 +258,44 @@ pub fn decode(
     );
     try will_cursor.finish();
 
+    var staged_qos2 = try pending_qos2.Store.init(
+        allocator,
+        pending_qos2_maximum,
+    );
+    errdefer staged_qos2.deinit();
+    var qos2_cursor = codec.Cursor.init(qos2_section);
+    try staged_qos2.restoreSnapshot(
+        &qos2_cursor,
+        monotonic_now,
+        downtime_ns,
+        &staged_sessions,
+        struct {
+            fn exists(
+                sessions: *session.Store,
+                publisher_id: u64,
+            ) bool {
+                return sessionRouteId(publisher_id) != null and
+                    sessions.handleForRouteId(
+                        sessionRouteId(publisher_id).?,
+                    ) != null;
+            }
+        }.exists,
+    );
+    try qos2_cursor.finish();
+
     return .{
         .retained = staged_retained,
         .sessions = staged_sessions,
         .wills = staged_wills,
         .will_publishers = staged_publishers,
+        .pending_qos2 = staged_qos2,
     };
+}
+
+fn sessionRouteId(id: u64) ?u64 {
+    const tag: u64 = 1 << 63;
+    if ((id & tag) == 0) return null;
+    return id & ~tag;
 }
 
 fn appendSection(

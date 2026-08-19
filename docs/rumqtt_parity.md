@@ -22,7 +22,7 @@ and equal-wire broker results are kept separate.
 | Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
-| Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills and durable Session subscriptions plus queued/inflight outgoing QoS 1/2 state | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained/Will base-message state |
+| Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
@@ -48,7 +48,9 @@ persists:
 - offline queued QoS 1/2 messages,
 - outgoing inflight QoS 1/2 state, Packet Identifier and PUBREL continuation,
 - scheduled Wills with ClientID, full Application Message properties, canonical
-  publisher identity and exact remaining delay.
+  publisher identity and exact remaining delay,
+- inbound QoS 2 Application Message bodies awaiting PUBREL, keyed by stable
+  Session route identity rather than a short-lived connection slot.
 
 `Broker.saveSnapshot` is a quiescent shutdown/admin operation: it holds the
 broker state lock and rejects live clients, pending broker QoS 2 transactions
@@ -68,7 +70,11 @@ packets resume with DUP, while QoS 2 transactions already awaiting PUBCOMP
 resume directly at PUBREL even after Application Message expiry. A restored
 Will that expired during downtime enters the due heap immediately; a not-yet-
 due Will remains indexed by ClientID and can still be canceled by a continued
-Session reconnect.
+Session reconnect. Pending inbound QoS 2 expiry is also reduced during downtime.
+After reconnect, broker event parsing deliberately exposes an otherwise unknown
+PUBREL to the broker; stable Session identity resolves its persisted body, which
+is routed exactly once before PUBCOMP. A repeated PUBREL receives another
+idempotent PUBCOMP without a second delivery.
 
 Tests cover atomic replacement, CRC corruption rollback, downtime expiry,
 retained state, subscriptions, offline queue, outgoing inflight retransmission,
@@ -76,9 +82,10 @@ and a real new-broker reconnect with Session Present plus restored live
 routing. Scheduled-Will tests cover downtime deadline reduction, canonical
 publisher restoration, reconnect cancellation, driver publication after an
 actual broker restart and retained-Will storage. This snapshot surface still
-excludes broker-local inbound QoS 2 transactions; Mosquitto's full database and
-plugin persistence surface remains broader there and in online incremental
-autosave/plugin integration.
+has narrower online autosave/plugin integration than Mosquitto, but tests now
+also cover inbound QoS 2 body ownership, downtime expiry, Clean Start cleanup,
+real broker restart, Session Present, post-restart PUBREL routing and duplicate
+PUBREL idempotence.
 
 ## Equal-wire live broker comparison
 
@@ -619,7 +626,7 @@ rumqttd.
 ## Remaining work before broad superiority
 
 1. Add incremental autosave or a replicated commitlog for crash windows between
-   quiescent snapshots, including broker-local inbound QoS 2 transactions.
+   quiescent snapshots.
 2. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.

@@ -208,6 +208,8 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
     defer wills.deinit();
     var will_publishers: mqtt.will_scheduler.PublisherMap = .empty;
     defer will_publishers.deinit(allocator);
+    var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
+    defer pending_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
         100 * std.time.ns_per_s,
     );
@@ -242,6 +244,7 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
             .sessions = &sessions,
             .wills = &wills,
             .will_publishers = &will_publishers,
+            .pending_qos2 = &pending_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -253,6 +256,7 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
         .{},
         .{},
         .{},
+        16,
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(1_006 * std.time.ns_per_s),
     );
@@ -260,6 +264,7 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
     defer restored.sessions.deinit();
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
+    defer restored.pending_qos2.deinit();
 
     var out: [1]mqtt.retained.Match = undefined;
     const matches = try restored.retained.matchInto(
@@ -442,6 +447,8 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
     defer wills.deinit();
     var will_publishers: mqtt.will_scheduler.PublisherMap = .empty;
     defer will_publishers.deinit(allocator);
+    var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
+    defer pending_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.zero;
     const saved_realtime = std.Io.Timestamp.fromNanoseconds(
         1_000 * std.time.ns_per_s,
@@ -492,6 +499,7 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
             .sessions = &sessions,
             .wills = &wills,
             .will_publishers = &will_publishers,
+            .pending_qos2 = &pending_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -503,6 +511,7 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
         .{},
         .{},
         .{},
+        16,
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(1_010 * std.time.ns_per_s),
     );
@@ -510,6 +519,7 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
     defer restored.sessions.deinit();
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
+    defer restored.pending_qos2.deinit();
     const handle = restored.sessions.find(
         "qos2-pubrel",
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
@@ -534,6 +544,8 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
     defer wills.deinit();
     var publishers: mqtt.will_scheduler.PublisherMap = .empty;
     defer publishers.deinit(allocator);
+    var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
+    defer pending_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
         100 * std.time.ns_per_s,
     );
@@ -555,6 +567,7 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
             .sessions = &sessions,
             .wills = &wills,
             .will_publishers = &publishers,
+            .pending_qos2 = &pending_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -569,6 +582,7 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
         .{},
         .{},
         .{},
+        16,
         restored_now,
         std.Io.Timestamp.fromNanoseconds(1_004 * std.time.ns_per_s),
     );
@@ -576,6 +590,7 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
     defer restored.sessions.deinit();
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
+    defer restored.pending_qos2.deinit();
 
     try std.testing.expectEqual(
         @as(i96, restored_now.nanoseconds + 6 * std.time.ns_per_s),
@@ -608,6 +623,8 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
     defer wills.deinit();
     var publishers: mqtt.will_scheduler.PublisherMap = .empty;
     defer publishers.deinit(allocator);
+    var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
+    defer pending_qos2.deinit();
     const handle = try wills.set(
         "resume-will",
         delayedWill(30, false),
@@ -622,6 +639,7 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
             .sessions = &sessions,
             .wills = &wills,
             .will_publishers = &publishers,
+            .pending_qos2 = &pending_qos2,
         },
         .zero,
         std.Io.Timestamp.fromNanoseconds(1_000 * std.time.ns_per_s),
@@ -633,6 +651,7 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
         .{},
         .{},
         .{},
+        16,
         .zero,
         std.Io.Timestamp.fromNanoseconds(1_001 * std.time.ns_per_s),
     );
@@ -640,6 +659,7 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
     defer restored.sessions.deinit();
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
+    defer restored.pending_qos2.deinit();
 
     const restored_handle =
         restored.wills.handleForClient("resume-will").?;
@@ -716,10 +736,9 @@ test "MQTT broker restart publishes due retained Will" {
     defer publish.deinit(allocator);
     try std.testing.expectEqualStrings("persist/will", publish.publish.topic);
     try std.testing.expectEqualStrings("offline", publish.publish.payload);
-    // Live fanout follows the subscription's default
-    // Retain-As-Published=false. The retained store assertion below proves the
-    // source Will's RETAIN=1 effect was nevertheless committed.
-    try std.testing.expect(!publish.publish.retain);
+    // Depending on whether the restored deadline or SUBSCRIBE wins, this is
+    // either live fanout (default RAP=false, RETAIN=0) or retained replay
+    // (RETAIN=1). The retained-store assertion below is path-independent.
     try subscriber.writePubAck(publish.publish.packet_id.?, 0);
     try subscriber.disconnect(0);
 
@@ -734,4 +753,198 @@ test "MQTT broker restart publishes due retained Will" {
     );
     try std.testing.expectEqual(@as(usize, 1), retained.len);
     try std.testing.expectEqualStrings("offline", retained[0].payload);
+}
+
+test "MQTT broker restart releases inbound QoS 2 exactly once at PUBREL" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try createBroker(allocator, io);
+    const saved_now = std.Io.Clock.awake.now(io);
+    const publisher_session = try source.sessions.open(
+        "durable-qos2-publisher",
+        false,
+        std.math.maxInt(u32),
+        saved_now,
+    );
+    const durable_publisher_id = sessionRouteSubscriberId(
+        publisher_session.route_id,
+    );
+    const packet_id: u16 = 71;
+    _ = try source.pending_qos2.record(
+        durable_publisher_id,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "restart/inbound-qos2",
+            .packet_id = packet_id,
+            .payload = "exactly-once-after-restart",
+        },
+        saved_now,
+    );
+    try source.sessions.disconnect(
+        publisher_session.handle,
+        null,
+        saved_now,
+    );
+    const subscriber_session = try source.sessions.open(
+        "durable-qos2-subscriber",
+        false,
+        std.math.maxInt(u32),
+        saved_now,
+    );
+    _ = try source.sessions.setSubscription(
+        subscriber_session.handle,
+        .{
+            .topic_filter = "restart/inbound-qos2",
+            .qos = .at_least_once,
+        },
+        null,
+    );
+    try source.sessions.disconnect(
+        subscriber_session.handle,
+        null,
+        saved_now,
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source.saveSnapshot(tmp.dir, "broker.db");
+    source.deinit();
+
+    var broker = try createBroker(allocator, io);
+    defer broker.deinit();
+    try broker.restoreSnapshot(tmp.dir, "broker.db");
+    try std.testing.expectEqual(@as(usize, 1), broker.pending_qos2.count());
+    const Serve = struct {
+        broker: *Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(2) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var serve = Serve{ .broker = &broker };
+    const thread = try std.Thread.spawn(.{}, Serve.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = std.math.maxInt(u32),
+    } }};
+    var subscriber_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "durable-qos2-subscriber",
+            .clean_start = false,
+            .properties = &expiry,
+        },
+    );
+    defer subscriber_result.connack.deinit(allocator);
+    var subscriber = subscriber_result.connection;
+    defer subscriber.close();
+    try std.testing.expect(
+        subscriber_result.connack.connack.session_present,
+    );
+
+    var publisher_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "durable-qos2-publisher",
+            .clean_start = false,
+            .properties = &expiry,
+        },
+    );
+    defer publisher_result.connack.deinit(allocator);
+    var publisher = publisher_result.connection;
+    defer publisher.close();
+    try std.testing.expect(
+        publisher_result.connack.connack.session_present,
+    );
+
+    try publisher.writePubRel(packet_id, 0);
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "exactly-once-after-restart",
+        delivered.publish.payload,
+    );
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+    var pubcomp = try publisher.readPubComp();
+    defer pubcomp.deinit(allocator);
+    try std.testing.expectEqual(packet_id, pubcomp.ack.packet_id);
+    try std.testing.expectEqual(@as(usize, 0), broker.pending_qos2.count());
+
+    // A repeated PUBREL acknowledges idempotently but has no pending body to
+    // route a second time.
+    try publisher.writePubRel(packet_id, 0);
+    var repeated = try publisher.readPubComp();
+    defer repeated.deinit(allocator);
+    try std.testing.expectEqual(packet_id, repeated.ack.packet_id);
+    try publisher.disconnect(0);
+    try subscriber.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+}
+
+test "MQTT Clean Start removes pending inbound QoS 2 transaction" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try createBroker(allocator, io);
+    defer broker.deinit();
+    const now = std.Io.Clock.awake.now(io);
+    const old = try broker.sessions.open(
+        "qos2-clean-start",
+        false,
+        std.math.maxInt(u32),
+        now,
+    );
+    const old_publisher_id = sessionRouteSubscriberId(old.route_id);
+    _ = try broker.pending_qos2.record(
+        old_publisher_id,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "qos2/clean",
+            .packet_id = 9,
+            .payload = "discard",
+        },
+        now,
+    );
+
+    // Mirror register's Clean Start transition: opening a new Session changes
+    // the stable route, then the old route's pending transactions are retired.
+    const replacement = try broker.sessions.open(
+        "qos2-clean-start",
+        true,
+        0,
+        now,
+    );
+    try std.testing.expect(replacement.route_id != old.route_id);
+    _ = broker.pending_qos2.removePublisher(old_publisher_id);
+    try std.testing.expectEqual(@as(usize, 0), broker.pending_qos2.count());
+}
+
+fn sessionRouteSubscriberId(route_id: u64) u64 {
+    return (@as(u64, 1) << 63) | route_id;
 }

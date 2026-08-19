@@ -7,10 +7,12 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
+const persistence = @import("../persistence/codec.zig");
 const router = @import("../router.zig");
 
 pub const Error = mqtt.Error || error{
     PendingLimitExceeded,
+    ReceiveMaximumExceeded,
 };
 
 pub const Key = packed struct(u80) {
@@ -214,6 +216,147 @@ pub const Store = struct {
         }
         return removed;
     }
+
+    pub fn writeSnapshot(
+        self: *Store,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+        context: anytype,
+        comptime publisherExists: anytype,
+    ) (Error || persistence.Error)!void {
+        var snapshot_count: u32 = 0;
+        var iterator = self.entries.iterator();
+        while (iterator.next()) |entry| {
+            if (!publisherExists(context, entry.key_ptr.publisher_id)) {
+                return error.CorruptSnapshot;
+            }
+            if (remainingExpiryNs(
+                entry.value_ptr.*,
+                now.nanoseconds,
+            ) == 0) continue;
+            snapshot_count = std.math.add(
+                u32,
+                snapshot_count,
+                1,
+            ) catch return error.SnapshotLimitExceeded;
+        }
+        try persistence.appendInt(out, allocator, u32, snapshot_count);
+        iterator = self.entries.iterator();
+        while (iterator.next()) |entry| {
+            const pending = entry.value_ptr.*;
+            const remaining_ns = remainingExpiryNs(
+                pending,
+                now.nanoseconds,
+            );
+            if (remaining_ns == 0) continue;
+            try persistence.appendInt(
+                out,
+                allocator,
+                u64,
+                entry.key_ptr.publisher_id,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u16,
+                entry.key_ptr.packet_id,
+            );
+            try persistence.appendBlob(
+                out,
+                allocator,
+                pending.bytes[0..pending.topic_len],
+            );
+            try persistence.appendBlob(
+                out,
+                allocator,
+                pending.bytes[pending.topic_len..],
+            );
+            try persistence.appendBool(out, allocator, pending.retain);
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                remaining_ns,
+            );
+            try persistence.appendProperties(
+                out,
+                allocator,
+                pending.properties,
+            );
+        }
+    }
+
+    pub fn restoreSnapshot(
+        self: *Store,
+        cursor: *persistence.Cursor,
+        restore_now: std.Io.Timestamp,
+        downtime_ns: i96,
+        context: anytype,
+        comptime publisherExists: anytype,
+    ) (Error || persistence.Error)!void {
+        const snapshot_count = try cursor.readInt(u32);
+        if (snapshot_count > self.maximum) {
+            return error.ReceiveMaximumExceeded;
+        }
+        for (0..snapshot_count) |_| {
+            const publisher_id = try cursor.readInt(u64);
+            const packet_id = try cursor.readInt(u16);
+            const topic = try cursor.readBlob();
+            const payload = try cursor.readBlob();
+            const retain = try cursor.readBool();
+            const saved_remaining_ns = try cursor.readOptionalInt(u64);
+            const properties = try cursor.readProperties(self.allocator);
+            defer self.allocator.free(properties);
+            if (!publisherExists(context, publisher_id) or packet_id == 0 or
+                (mqtt.messageExpiryInterval(properties) == null) !=
+                    (saved_remaining_ns == null))
+            {
+                return error.CorruptSnapshot;
+            }
+            try mqtt.validateTopicName(topic);
+            try mqtt.validatePublishProperties(properties);
+            if (mqtt.subscriptionIdentifier(properties) != null) {
+                return error.CorruptSnapshot;
+            }
+            const remaining_ns = remainingAfterDowntimeNs(
+                saved_remaining_ns,
+                downtime_ns,
+            );
+            if (remaining_ns == 0) continue;
+            const publish = mqtt.Publish{
+                .dup = false,
+                .qos = .exactly_once,
+                .retain = retain,
+                .topic = topic,
+                .packet_id = packet_id,
+                .properties = properties,
+                .payload = payload,
+            };
+            _ = try self.record(publisher_id, publish, restore_now);
+            if (remaining_ns) |remaining| {
+                const stored = self.entries.getPtr(.{
+                    .publisher_id = publisher_id,
+                    .packet_id = packet_id,
+                }) orelse return error.CorruptSnapshot;
+                const interval = stored.expiry_interval orelse
+                    return error.CorruptSnapshot;
+                const lifetime_ns = @as(u64, interval) *
+                    std.time.ns_per_s;
+                if (remaining > lifetime_ns) {
+                    return error.CorruptSnapshot;
+                }
+                stored.stored_at_ns = restore_now.nanoseconds -
+                    @as(i96, lifetime_ns - remaining);
+            }
+        }
+    }
+
+    pub fn swap(self: *Store, other: *Store) void {
+        const value = self.*;
+        self.* = other.*;
+        other.* = value;
+    }
 };
 
 fn keepPendingProperty(property: mqtt.Property) bool {
@@ -238,6 +381,28 @@ fn remainingExpiry(
         @divTrunc(elapsed_ns, std.time.ns_per_s),
     );
     return value - elapsed_seconds;
+}
+
+fn remainingExpiryNs(pending: Pending, now_ns: i96) ?u64 {
+    const interval = pending.expiry_interval orelse return null;
+    const lifetime_ns = @as(u64, interval) * std.time.ns_per_s;
+    const elapsed_ns: u64 = @intCast(@max(
+        now_ns - pending.stored_at_ns,
+        0,
+    ));
+    return lifetime_ns -| elapsed_ns;
+}
+
+fn remainingAfterDowntimeNs(
+    remaining: ?u64,
+    downtime_ns: i96,
+) ?u64 {
+    const value = remaining orelse return null;
+    const elapsed: u64 = @intCast(@min(
+        @max(downtime_ns, 0),
+        std.math.maxInt(u64),
+    ));
+    return value -| elapsed;
 }
 
 test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
@@ -291,4 +456,59 @@ test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
     try std.testing.expectEqualStrings("q/2", restored.topic);
     try std.testing.expectEqualStrings("one", restored.payload);
     try std.testing.expect(restored.retain);
+}
+
+test "QoS 2 snapshot deducts downtime expiry" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, 2);
+    defer store.deinit();
+    const publisher_id: router.SubscriberId =
+        (@as(u64, 1) << 63) | 9;
+    var expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .message_expiry_interval,
+        .value = 2,
+    } }};
+    _ = try store.record(
+        publisher_id,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "qos2/expiring",
+            .packet_id = 4,
+            .properties = &expiry,
+            .payload = "payload",
+        },
+        .zero,
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try store.writeSnapshot(
+        &encoded,
+        allocator,
+        .zero,
+        {},
+        struct {
+            fn exists(_: void, _: router.SubscriberId) bool {
+                return true;
+            }
+        }.exists,
+    );
+
+    var restored = try Store.init(allocator, 2);
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(
+        &cursor,
+        .zero,
+        3 * std.time.ns_per_s,
+        {},
+        struct {
+            fn exists(_: void, _: router.SubscriberId) bool {
+                return true;
+            }
+        }.exists,
+    );
+    try cursor.finish();
+    try std.testing.expectEqual(@as(usize, 0), restored.count());
 }
