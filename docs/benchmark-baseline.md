@@ -911,22 +911,26 @@ Three consecutive pinned runs:
 
 ```text
 netz:
-  p50:   20.65-20.71 us
-  p99:   30.53-31.97 us
-  p99.9: 38.74-47.98 us
-  rate:  47,780-47,995 round trips/s
+  p50:   10.44-10.57 us
+  p99:   15.22-15.53 us
+  p99.9: 31.89-47.02 us
+  rate:  92,252-93,030 round trips/s
 
 quicz:
-  p50:   10.4-10.5 us
-  p99:   16.1-16.4 us
-  p99.9: 205.4-212.9 us
+  p50:   10.5-10.7 us
+  p99:   16.0-19.5 us
+  p99.9: 206.3-211.2 us
 ```
 
-The netz implementation has a slower median and p99 but a 4.3-5.5x lower
-p99.9 tail in this controlled run. This is not a whole-stack superiority
-claim. The new `sendWithPendingAck` transport API combines an application
-response with its cumulative ACK, and receiving an ACK-of-ACK now prunes old
-received packet-number ranges. A 5,000-round `--stats` run made 159 total
+Netz is 0.99-1.02x quicz at p50, 1.03-1.28x faster at p99, and 4.4-6.6x lower
+at p99.9 in these controlled runs. The new `sendWithPendingAck` transport API
+combines an application response with its cumulative ACK, and receiving an
+ACK-of-ACK prunes old received packet-number ranges. A subsequent perf profile
+showed sent-packet ACK/loss processing repeatedly scanning the full resolved
+metadata prefix: cost grew with connection lifetime despite one new packet per
+round. `SentPacketTracker` now retains a first-unacknowledged cursor, uses
+binary range boundaries for cumulative ACK validation, and starts recovery
+scans at the unresolved suffix. A 5,000-round `--stats` run made 159 total
 allocations, ended with zero live bytes, and verified all 5,120,000 echoed
 payload bytes.
 

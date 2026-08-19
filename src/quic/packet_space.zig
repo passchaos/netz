@@ -382,6 +382,13 @@ pub const SentPacketTracker = struct {
     /// range scans; this index keeps exact packet operations from walking the
     /// whole sent-packet history.
     packet_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    /// First metadata entry not yet acknowledged by the peer.
+    ///
+    /// ACK ranges are cumulative in steady traffic, so rescanning the entire
+    /// acknowledged prefix makes an otherwise constant-cost ACK grow with the
+    /// connection lifetime. The packet array remains intact for duplicate ACK
+    /// validation and diagnostics; hot ACK/loss scans start at this cursor.
+    first_unacknowledged_index: usize = 0,
     /// PTO scheduling needs the newest still-in-flight ack-eliciting packet on
     /// every timer query.  Keep its packet-list index cached, mirroring the
     /// last-ack-eliciting timestamp maintained by production QUIC recovery
@@ -483,6 +490,10 @@ pub const SentPacketTracker = struct {
             const latest = self.latest_ack_eliciting_in_flight_index;
             _ = self.packets.pop();
             _ = self.packet_index.remove(packet_number);
+            self.first_unacknowledged_index = @min(
+                self.first_unacknowledged_index,
+                self.packets.items.len,
+            );
             if (latest == tail_index) {
                 self.recomputeLatestAckElicitingInFlight();
             }
@@ -492,6 +503,9 @@ pub const SentPacketTracker = struct {
         const latest = self.latest_ack_eliciting_in_flight_index;
         _ = self.packets.orderedRemove(index);
         _ = self.packet_index.remove(packet_number);
+        if (index < self.first_unacknowledged_index) {
+            self.first_unacknowledged_index -= 1;
+        }
         if (index < self.packets.items.len) {
             self.refreshPacketIndexFrom(index);
         }
@@ -500,6 +514,7 @@ pub const SentPacketTracker = struct {
         } else if (latest != null and latest.? > index) {
             self.latest_ack_eliciting_in_flight_index = latest.? - 1;
         }
+        self.advanceFirstUnacknowledged();
         return true;
     }
 
@@ -512,6 +527,7 @@ pub const SentPacketTracker = struct {
             }
         }
         self.observeAcknowledged(packet_number);
+        self.advanceFirstUnacknowledged();
         return true;
     }
 
@@ -629,6 +645,13 @@ pub const SentPacketTracker = struct {
 
         fn observeSentPacket(self: *AckPrecheck, packet: SentPacket) void {
             self.sent_packets += 1;
+            self.observeNewlyAckedPacket(packet);
+        }
+
+        fn observeNewlyAckedPacket(
+            self: *AckPrecheck,
+            packet: SentPacket,
+        ) void {
             if (packet.acknowledged) return;
             self.newly_acked_packets += 1;
             switch (packet.ecn) {
@@ -832,7 +855,11 @@ pub const SentPacketTracker = struct {
         {
             return lost;
         }
-        for (self.packets.items, 0..) |*packet, index| {
+        const scan_start = if (sorted_packets)
+            self.first_unacknowledged_index
+        else
+            0;
+        for (self.packets.items[scan_start..], scan_start..) |*packet, index| {
             if (packet.packet_number > largest_lost) {
                 if (sorted_packets) break;
                 continue;
@@ -857,7 +884,11 @@ pub const SentPacketTracker = struct {
         var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
         if (sorted_packets and self.largestBeforeFirstPacket(largest_acknowledged)) return lost;
-        for (self.packets.items, 0..) |*packet, index| {
+        const scan_start = if (sorted_packets)
+            self.first_unacknowledged_index
+        else
+            0;
+        for (self.packets.items[scan_start..], scan_start..) |*packet, index| {
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) {
                     if (sorted_packets) break;
@@ -1048,21 +1079,18 @@ pub const SentPacketTracker = struct {
         }
 
         if (sorted_packets) {
-            var packet_index: usize = 0;
-            var range_index = ranges.len;
-            while (range_index > 0) {
-                range_index -= 1;
-                const range = ranges[range_index];
-                while (packet_index < self.packets.items.len and
-                    self.packets.items[packet_index].packet_number < range.start)
-                {
-                    packet_index += 1;
-                }
-                while (packet_index < self.packets.items.len and
-                    self.packets.items[packet_index].packet_number <= range.end)
-                {
-                    precheck.observeSentPacket(self.packets.items[packet_index]);
-                    packet_index += 1;
+            for (ranges) |range| {
+                const range_start = self.lowerBoundPacketIndex(range.start);
+                const range_end = self.upperBoundPacketIndex(range.end);
+                precheck.sent_packets += range_end - range_start;
+                const unresolved_start = @max(
+                    range_start,
+                    self.first_unacknowledged_index,
+                );
+                if (unresolved_start < range_end) {
+                    for (self.packets.items[unresolved_start..range_end]) |packet| {
+                        precheck.observeNewlyAckedPacket(packet);
+                    }
                 }
             }
         } else {
@@ -1096,33 +1124,30 @@ pub const SentPacketTracker = struct {
             if (cached_latest_acked) {
                 self.recomputeLatestAckElicitingInFlight();
             }
+            self.advanceFirstUnacknowledged();
             return result;
         }
         var result: AckResult = .{};
         var cached_latest_acked = false;
         if (sorted_packets) {
-            var packet_index: usize = 0;
-            var range_index = ranges.len;
-            while (range_index > 0) {
-                range_index -= 1;
-                const range = ranges[range_index];
-                while (packet_index < self.packets.items.len and
-                    self.packets.items[packet_index].packet_number < range.start)
-                {
-                    packet_index += 1;
-                }
-                while (packet_index < self.packets.items.len and
-                    self.packets.items[packet_index].packet_number <= range.end)
-                {
-                    self.markPacketAcknowledged(
-                        &self.packets.items[packet_index],
-                        &result,
-                        &cached_latest_acked,
-                    );
-                    packet_index += 1;
+            for (ranges) |range| {
+                const range_start = @max(
+                    self.lowerBoundPacketIndex(range.start),
+                    self.first_unacknowledged_index,
+                );
+                const range_end = self.upperBoundPacketIndex(range.end);
+                if (range_start < range_end) {
+                    for (self.packets.items[range_start..range_end]) |*packet| {
+                        self.markPacketAcknowledged(
+                            packet,
+                            &result,
+                            &cached_latest_acked,
+                        );
+                    }
                 }
             }
             if (cached_latest_acked) self.recomputeLatestAckElicitingInFlight();
+            self.advanceFirstUnacknowledged();
             return result;
         }
 
@@ -1131,6 +1156,7 @@ pub const SentPacketTracker = struct {
             self.markPacketAcknowledged(packet, &result, &cached_latest_acked);
         }
         if (cached_latest_acked) self.recomputeLatestAckElicitingInFlight();
+        self.advanceFirstUnacknowledged();
         return result;
     }
 
@@ -1254,7 +1280,11 @@ pub const SentPacketTracker = struct {
 
     fn recomputeLatestAckElicitingInFlight(self: *SentPacketTracker) void {
         self.latest_ack_eliciting_in_flight_index = null;
-        for (self.packets.items, 0..) |packet, index| {
+        const scan_start = if (self.packetsSortedAscending())
+            self.first_unacknowledged_index
+        else
+            0;
+        for (self.packets.items[scan_start..], scan_start..) |packet, index| {
             if (ackElicitingInFlightSentTime(packet) == null) continue;
             self.considerLatestAckElicitingInFlight(index);
         }
@@ -1262,7 +1292,11 @@ pub const SentPacketTracker = struct {
 
     fn scanLatestAckElicitingInFlightSentTime(self: SentPacketTracker) ?u64 {
         var latest: ?u64 = null;
-        for (self.packets.items) |packet| {
+        const scan_start = if (self.packetsSortedAscending())
+            self.first_unacknowledged_index
+        else
+            0;
+        for (self.packets.items[scan_start..]) |packet| {
             const sent_time = ackElicitingInFlightSentTime(packet) orelse
                 continue;
             if (latest == null or sent_time > latest.?) latest = sent_time;
@@ -1331,6 +1365,35 @@ pub const SentPacketTracker = struct {
             }
         }
         return low;
+    }
+
+    fn upperBoundPacketIndex(
+        self: SentPacketTracker,
+        packet_number: u64,
+    ) usize {
+        var low: usize = 0;
+        var high = self.packets.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.packets.items[mid].packet_number <= packet_number) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    fn advanceFirstUnacknowledged(self: *SentPacketTracker) void {
+        if (!self.packetsSortedAscending()) {
+            self.first_unacknowledged_index = 0;
+            return;
+        }
+        while (self.first_unacknowledged_index < self.packets.items.len and
+            self.packets.items[self.first_unacknowledged_index].acknowledged)
+        {
+            self.first_unacknowledged_index += 1;
+        }
     }
 
     fn largestBeforeFirstPacket(self: SentPacketTracker, largest_acknowledged: ?u64) bool {
@@ -1736,6 +1799,52 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expectEqual(@as(usize, 6), after.ack_eliciting_in_flight_packets);
     try std.testing.expectEqual(@as(usize, 6 * 1200), after.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 0), after.lost_packets);
+}
+
+test "QUIC cumulative ACK cursor skips resolved packet prefix" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    for (0..8) |packet_number| {
+        try sent.sentAt(
+            packet_number,
+            true,
+            100,
+            .not_ect,
+            packet_number * 10,
+        );
+    }
+    const first = try sent.applyAckDetailed(.{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 5,
+    });
+    try std.testing.expectEqual(@as(usize, 6), first.packets);
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        sent.first_unacknowledged_index,
+    );
+
+    // A cumulative ACK repeats the resolved prefix while adding one packet.
+    // It remains valid, but only the new suffix contributes completion bytes.
+    const second = try sent.applyAckDetailed(.{
+        .largest_acknowledged = 6,
+        .ack_delay = 0,
+        .first_ack_range = 6,
+    });
+    try std.testing.expectEqual(@as(usize, 1), second.packets);
+    try std.testing.expectEqual(@as(usize, 100), second.bytes);
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        sent.first_unacknowledged_index,
+    );
+
+    try std.testing.expect(sent.forget(0));
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        sent.first_unacknowledged_index,
+    );
 }
 
 test "QUIC sent packet tracker skips packet-threshold scan before first packet" {
