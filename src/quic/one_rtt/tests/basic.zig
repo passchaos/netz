@@ -2625,3 +2625,79 @@ test "QUIC single-packet service applies stream data without owned packet" {
     );
     try std.testing.expectEqual(@as(u64, 1), server.expected_packet_number);
 }
+
+test "QUIC packet visitor exposes borrowed frames after transport apply" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf1} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+    try one_rtt.sendFrames(
+        &client_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 0,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "visited",
+                .fin = true,
+            } }},
+        },
+    );
+
+    const Observed = struct {
+        connection: *one_rtt.Connection,
+        from: ?std.Io.net.IpAddress = null,
+        packet_number: ?u64 = null,
+        stream_state_was_applied: bool = false,
+        data: [7]u8 = undefined,
+
+        fn visit(
+            observed: *@This(),
+            packet: one_rtt.ReceivedPacketView,
+        ) !void {
+            observed.from = packet.from;
+            observed.packet_number = packet.packet_number;
+            observed.stream_state_was_applied =
+                observed.connection.availableReceivedStream(0) != null;
+            try std.testing.expectEqual(@as(usize, 1), packet.frames.len);
+            try std.testing.expect(packet.frames[0] == .stream);
+            @memcpy(&observed.data, packet.frames[0].stream.data);
+        }
+    };
+    var observed: Observed = .{ .connection = &server };
+    try server.visitPacketAt(1_000, &observed, Observed.visit);
+    try std.testing.expect(observed.from.?.eql(&client_endpoint.address()));
+    try std.testing.expectEqual(@as(?u64, 0), observed.packet_number);
+    try std.testing.expect(observed.stream_state_was_applied);
+    try std.testing.expectEqualStrings("visited", &observed.data);
+}

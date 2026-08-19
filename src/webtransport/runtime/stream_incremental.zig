@@ -48,11 +48,9 @@ pub fn read(
             return event;
         }
 
-        var packet = try connection.receivePacketServicingTimers();
-        defer packet.deinit(connection.endpoint.allocator);
-        _ = connection.sendAckForPacketsIfNeeded(
-            @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
-        ) catch {};
+        // `poll` reads assembled QUIC stream state, so packet plaintext and
+        // frame arrays do not need ownership beyond transport processing.
+        try connection.servicePacketServicingTimers();
     }
 }
 

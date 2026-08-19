@@ -45,6 +45,13 @@ pub fn main() !void {
         false,
         true,
     );
+    const visitor_ns = try measureVisitor(
+        allocator,
+        io,
+        keys,
+        client_cid,
+        server_cid,
+    );
     const total_packets = iterations * batch_size;
     if (gro_ns) |gro| {
         const ratio_x100 = ratioTimes100(plain_ns, gro);
@@ -54,6 +61,7 @@ pub fn main() !void {
             \\  GRO batch:    {d} ns/batch, {d} ns/packet
             \\  plain packet: {d} ns/batch, {d} ns/packet
             \\  in-place service: {d} ns/batch, {d} ns/packet
+            \\  borrowed visitor: {d} ns/batch, {d} ns/packet
             \\  GRO relative packet throughput: {d}.{d:0>2}x
             \\  total packets/path: {d}
             \\
@@ -67,6 +75,8 @@ pub fn main() !void {
             plain_ns / total_packets,
             service_ns / iterations,
             service_ns / total_packets,
+            visitor_ns / iterations,
+            visitor_ns / total_packets,
             ratio_x100 / 100,
             ratio_x100 % 100,
             total_packets,
@@ -78,6 +88,7 @@ pub fn main() !void {
             \\  GRO batch:    unavailable on this endpoint
             \\  plain packet: {d} ns/batch, {d} ns/packet
             \\  in-place service: {d} ns/batch, {d} ns/packet
+            \\  borrowed visitor: {d} ns/batch, {d} ns/packet
             \\  total packets/path: {d}
             \\
         , .{
@@ -88,9 +99,83 @@ pub fn main() !void {
             plain_ns / total_packets,
             service_ns / iterations,
             service_ns / total_packets,
+            visitor_ns / iterations,
+            visitor_ns / total_packets,
             total_packets,
         });
     }
+}
+
+fn measureVisitor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    keys: netz.quic.protection.PacketProtectionKeys,
+    client_cid: [4]u8,
+    server_cid: [4]u8,
+) !u64 {
+    var server_endpoint = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer client_endpoint.deinit();
+    var server = try netz.quic.one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const payload = [_]u8{0x01} ++ [_]u8{0x00} ** (payload_size - 1);
+    var packet_storage: [batch_size * 1400]u8 = undefined;
+    var datagrams: [batch_size][]const u8 = undefined;
+    var total_ns: u64 = 0;
+    var first_packet_number: u64 = 0;
+    var observed_frames: usize = 0;
+    for (0..iterations) |_| {
+        _ = try sealPacketBatch(
+            &packet_storage,
+            &datagrams,
+            keys,
+            &server_cid,
+            first_packet_number,
+            &payload,
+        );
+        try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
+
+        const started = nowNs(io);
+        for (0..batch_size) |_| {
+            try server.visitPacketAt(
+                started,
+                &observed_frames,
+                countVisitedFrames,
+            );
+        }
+        total_ns +|= nowNs(io) -| started;
+        first_packet_number += batch_size;
+    }
+    if (observed_frames != iterations * batch_size) {
+        return error.UnexpectedPacketCount;
+    }
+    return total_ns;
+}
+
+fn countVisitedFrames(
+    count: *usize,
+    packet: netz.quic.one_rtt.ReceivedPacketView,
+) error{}!void {
+    count.* += @intFromBool(packet.frames.len != 0);
 }
 
 fn measure(

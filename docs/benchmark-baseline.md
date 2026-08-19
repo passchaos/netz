@@ -308,6 +308,15 @@ owning fallback only for key-phase transitions. Three ReleaseFast runs measured
 1.17-1.38x packet-throughput improvement. The audited quicz short-packet open
 path allocates plaintext and connection-id ownership per packet.
 
+`Connection.visitPacket*` now exposes those transient frames synchronously, so
+HTTP/3 can route control/QPACK/request/response frames without restoring owned
+plaintext and frame-array lifetimes. The same-shape benchmark's borrowed
+visitor was 1.49-2.38 us/packet in three ReleaseFast runs, within measurement
+noise of state-only service at 1.53-2.36 us/packet and faster than the matching
+owning path at 1.92-2.83 us/packet. Handshake HTTP/3 uses the visitor on its
+ordinary non-GRO packet pump; GRO retains its lazy owning suffix because the
+application deliberately routes only one coalesced packet per call.
+
 ### QUIC recovery ACK range application
 
 `bench-quic-ack-ranges` now includes a complete recovery cycle that tracks 128

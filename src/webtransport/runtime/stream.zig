@@ -267,14 +267,9 @@ fn sendPrefixIfNeeded(
 pub fn receiveSendProgress(
     connection: *quic.one_rtt.Connection,
 ) Error!void {
-    var packet = try connection.receivePacketServicingTimers();
-    defer packet.deinit(connection.endpoint.allocator);
-    _ = connection.sendAckForPacketsIfNeeded(
-        @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
-    ) catch {};
-    _ = try connection.retransmitPacketThresholdLosses(
-        quic.one_rtt.max_batch_packets,
-    );
+    // Send progress depends only on ACK/credit/recovery state. Avoid creating
+    // owned packet diagnostics that this pump would immediately discard.
+    try connection.servicePacketServicingTimers();
 }
 
 pub fn receive(
@@ -309,11 +304,7 @@ pub fn receive(
             if (ids.len < stream_ids.len) break;
         }
 
-        var packet = try connection.receivePacketServicingTimers();
-        defer packet.deinit(connection.endpoint.allocator);
-        _ = connection.sendAckForPacketsIfNeeded(
-            @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
-        ) catch {};
+        try connection.servicePacketServicingTimers();
     }
 }
 

@@ -104,6 +104,33 @@ pub const ReceivedPacket = struct {
     }
 };
 
+/// Borrowed application-facing metadata for one packet that has already been
+/// accepted into the connection's transport state.
+///
+/// The frame payloads point into transient receive storage and are valid only
+/// for the duration of a `visitPacket*` callback. Callers that need to retain
+/// diagnostics beyond that callback must continue to use `ReceivedPacket`.
+pub const ReceivedPacketView = struct {
+    from: net.IpAddress,
+    packet_number: u64,
+    frames: []const quic.Frame,
+    peer_initiated_key_update: bool = false,
+};
+
+fn callbackErrorSet(comptime callback: anytype) type {
+    const callback_type = switch (@typeInfo(@TypeOf(callback))) {
+        .@"fn" => @TypeOf(callback),
+        .pointer => |pointer| pointer.child,
+        else => @compileError("packet visitor must be a function"),
+    };
+    const return_type = @typeInfo(callback_type).@"fn".return_type orelse
+        @compileError("packet visitor must have an explicit return type");
+    return switch (@typeInfo(return_type)) {
+        .error_union => |error_union| error_union.error_set,
+        else => @compileError("packet visitor must return an error union"),
+    };
+}
+
 pub const ReceivedPacketBatch = struct {
     allocator: std.mem.Allocator,
     packets: []ReceivedPacket,
@@ -621,9 +648,10 @@ pub const Connection = struct {
     /// recovery's required stable payload ownership.
     send_batch_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
     send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
-    /// Borrowed frame views used only by `servicePacketBatch`. They never
-    /// outlive the current decrypted GRO segment and therefore avoid one frame
-    /// slice allocation per packet on the event-loop fast path.
+    /// Borrowed frame views used by state-only service and synchronous packet
+    /// visitors. They never outlive the current decrypted datagram/GRO segment
+    /// and therefore avoid one frame slice allocation per packet on the
+    /// event-loop fast path.
     receive_frame_buffer: std.ArrayList(quic.Frame) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
@@ -2938,6 +2966,38 @@ pub const Connection = struct {
             }
         }
         if (ack_eliciting_count == 0) return false;
+        return self.sendAckForObservedPacketMetadata(
+            ack_eliciting_count,
+            reordered,
+        );
+    }
+
+    /// Apply ACK policy to one borrowed packet view.
+    ///
+    /// This is the allocation-free counterpart to
+    /// `sendAckForPacketsIfNeeded`; it lets synchronous frame visitors retain
+    /// the same delayed/immediate ACK behavior without manufacturing an owned
+    /// `ReceivedPacket` solely for its packet number and frame slice.
+    pub fn sendAckForPacketIfNeeded(
+        self: *Connection,
+        packet_number: u64,
+        frames: []const quic.Frame,
+    ) Error!bool {
+        if (!ackEliciting(frames)) return false;
+        const reordered = if (self.received.largestReceived()) |largest|
+            packet_number < largest and
+                largest - packet_number >= self.ack_reordering_threshold
+        else
+            false;
+        return self.sendAckForObservedPacketMetadata(1, reordered);
+    }
+
+    fn sendAckForObservedPacketMetadata(
+        self: *Connection,
+        ack_eliciting_count: u64,
+        reordered: bool,
+    ) Error!bool {
+        std.debug.assert(ack_eliciting_count != 0);
 
         const immediate = self.immediate_ack_requested;
         if (immediate) self.immediate_ack_requested = false;
@@ -2952,7 +3012,7 @@ pub const Connection = struct {
             !reordered and
             self.ack_eliciting_since_last_ack < self.ack_eliciting_threshold)
         {
-            self.scheduleAckDelayIfNeeded(packets);
+            self.scheduleAckDelayIfNeeded();
             return false;
         }
 
@@ -2960,8 +3020,7 @@ pub const Connection = struct {
         return true;
     }
 
-    fn scheduleAckDelayIfNeeded(self: *Connection, packets: []const ReceivedPacket) void {
-        _ = packets;
+    fn scheduleAckDelayIfNeeded(self: *Connection) void {
         if (self.requested_max_ack_delay == 0 or self.ack_delay_deadline_ns != null) return;
         const base = self.monotonicNowNs();
         const delay_ns = std.math.mul(u64, self.requested_max_ack_delay, 1_000) catch std.math.maxInt(u64);
@@ -3765,16 +3824,40 @@ pub const Connection = struct {
     /// the next transport deadline, services the timer on timeout, and then
     /// resumes waiting.
     pub fn receivePacketServicingTimers(self: *Connection) Error!ReceivedPacket {
+        var datagram = try self.receiveBytesServicingTimers();
+        defer datagram.deinit(self.endpoint.allocator);
+        var packet = try self.processReceivedBytesAt(
+            datagram.from,
+            datagram.bytes,
+            datagram.ecn,
+            self.monotonicNowNs(),
+        );
+        errdefer packet.deinit(self.endpoint.allocator);
+        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+        return packet;
+    }
+
+    /// Wait for raw packet storage while keeping all connection timers live.
+    ///
+    /// Both owning receives and borrowed visitors use this single scheduler so
+    /// PTO, delayed ACK, pacing, keep-alive, and idle-timeout behavior cannot
+    /// drift when an upper-layer protocol changes its packet ownership model.
+    fn receiveBytesServicingTimers(
+        self: *Connection,
+    ) Error!quic.runtime.OwnedBytes {
         while (true) {
+            if (self.close_info != null or self.idle_timed_out) {
+                return error.ConnectionClosed;
+            }
             const timer = self.nextTimerDeadline() orelse
-                return self.receivePacketServicingAckDrivenRecovery();
+                return self.endpoint.receiveBytes();
             const now_ns = self.monotonicNowNs();
             if (now_ns >= timer.deadline_ns) {
                 if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
                     continue;
                 }
-                if (try self.receivePacketAfterBlockedTimer(now_ns)) |packet| {
-                    return packet;
+                if (try self.receiveBytesAfterBlockedTimer(now_ns)) |datagram| {
+                    return datagram;
                 }
                 continue;
             }
@@ -3782,7 +3865,7 @@ pub const Connection = struct {
                 i96,
                 timer.deadline_ns,
             ) orelse std.math.maxInt(i96);
-            var datagram = self.endpoint.receiveBytesTimeout(.{ .deadline = .{
+            return self.endpoint.receiveBytesTimeout(.{ .deadline = .{
                 .clock = .awake,
                 .raw = .fromNanoseconds(deadline_ns_i96),
             } }) catch |err| switch (err) {
@@ -3791,64 +3874,21 @@ pub const Connection = struct {
                     if (!try self.serviceNextTimerForBlockingReceive(
                         timeout_ns,
                     )) {
-                        if (try self.receivePacketAfterBlockedTimer(
+                        if (try self.receiveBytesAfterBlockedTimer(
                             timeout_ns,
-                        )) |packet| {
-                            return packet;
+                        )) |datagram| {
+                            return datagram;
                         }
                     }
                     continue;
                 },
                 // Some std.Io backends cannot provide a timed network wait.
-                // Preserve correctness by falling back to the existing
-                // blocking receive path on those platforms.
-                error.ConcurrencyUnavailable => {
-                    return self.receivePacketServicingAckDrivenRecovery();
-                },
+                // A plain receive still preserves transport correctness; only
+                // the unavailable backend's timer wake-up precision is lost.
+                error.ConcurrencyUnavailable => self.endpoint.receiveBytes(),
                 else => |other| return @errorCast(other),
             };
-            defer datagram.deinit(self.endpoint.allocator);
-            return try self.processReceivedBytesServicingAckDrivenRecovery(
-                datagram.from,
-                datagram.bytes,
-                datagram.ecn,
-            );
         }
-    }
-
-    /// Finish one blocking receive by immediately repairing losses proved by
-    /// the packet's ACK ranges.
-    ///
-    /// Packet-threshold loss is ACK-driven, not timer-driven. Leaving these
-    /// retransmissions to application protocols makes a blocking caller wait
-    /// for exponentially backed-off PTO probes even though the peer already
-    /// identified the missing packets. Keep this behavior in the transport
-    /// pump so HTTP/3, WebTransport, and future blocking adapters cannot omit
-    /// a required recovery step.
-    fn receivePacketServicingAckDrivenRecovery(
-        self: *Connection,
-    ) Error!ReceivedPacket {
-        var packet = try self.receivePacket();
-        errdefer packet.deinit(self.endpoint.allocator);
-        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
-        return packet;
-    }
-
-    fn processReceivedBytesServicingAckDrivenRecovery(
-        self: *Connection,
-        from: net.IpAddress,
-        bytes: []const u8,
-        ecn: quic.packet_space.EcnCodepoint,
-    ) Error!ReceivedPacket {
-        var packet = try self.processReceivedBytesAt(
-            from,
-            bytes,
-            ecn,
-            self.monotonicNowNs(),
-        );
-        errdefer packet.deinit(self.endpoint.allocator);
-        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
-        return packet;
     }
 
     fn serviceNextTimerForBlockingReceive(
@@ -3866,10 +3906,10 @@ pub const Connection = struct {
         return true;
     }
 
-    fn receivePacketAfterBlockedTimer(
+    fn receiveBytesAfterBlockedTimer(
         self: *Connection,
         now_ns: u64,
-    ) Error!?ReceivedPacket {
+    ) Error!?quic.runtime.OwnedBytes {
         const deadline_ns = std.math.add(
             u64,
             now_ns,
@@ -3879,22 +3919,17 @@ pub const Connection = struct {
             i96,
             deadline_ns,
         ) orelse std.math.maxInt(i96);
-        var datagram = self.endpoint.receiveBytesTimeout(.{ .deadline = .{
+        const datagram = self.endpoint.receiveBytesTimeout(.{ .deadline = .{
             .clock = .awake,
             .raw = .fromNanoseconds(deadline_ns_i96),
         } }) catch |err| switch (err) {
             error.Timeout => return null,
             error.ConcurrencyUnavailable => {
-                return try self.receivePacketServicingAckDrivenRecovery();
+                return try self.endpoint.receiveBytes();
             },
             else => |other| return @errorCast(other),
         };
-        defer datagram.deinit(self.endpoint.allocator);
-        return try self.processReceivedBytesServicingAckDrivenRecovery(
-            datagram.from,
-            datagram.bytes,
-            datagram.ecn,
-        );
+        return datagram;
     }
 
     pub fn receivePacketOrDropAfterClose(self: *Connection) Error!?ReceivedPacket {
@@ -4213,15 +4248,107 @@ pub const Connection = struct {
         self: *Connection,
         now_ns: ?u64,
     ) Error!void {
+        return self.visitPacketAt(now_ns, {}, discardPacketView);
+    }
+
+    /// Receive one packet, apply its transport frames, and synchronously expose
+    /// borrowed frames to an application protocol before receive storage is
+    /// released.
+    ///
+    /// The overwhelmingly common current-key path decrypts in place and reuses
+    /// `receive_frame_buffer`. Key-phase transitions use the owning decoder so
+    /// failed next/previous-key trials can safely retry intact ciphertext.
+    pub fn visitPacket(
+        self: *Connection,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!void {
+        return self.visitPacketAt(self.monotonicNowNs(), context, visitor);
+    }
+
+    pub fn visitPacketAt(
+        self: *Connection,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!void {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
         var datagram = try self.endpoint.receiveBytes();
         defer datagram.deinit(self.endpoint.allocator);
+        return self.processReceivedBytesVisitingAt(
+            datagram.from,
+            datagram.bytes,
+            datagram.ecn,
+            now_ns,
+            context,
+            visitor,
+        );
+    }
+
+    /// Timer-aware borrowed receive used by blocking HTTP/3 and WebTransport
+    /// pumps. ACK-driven retransmission is repaired before the visitor runs,
+    /// matching `receivePacketServicingTimers`; the caller remains responsible
+    /// for ACK policy because it may need to defer a failed cumulative ACK.
+    pub fn visitPacketServicingTimers(
+        self: *Connection,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!void {
+        var datagram = try self.receiveBytesServicingTimers();
+        defer datagram.deinit(self.endpoint.allocator);
+
+        const Context = @TypeOf(context);
+        const VisitorError = callbackErrorSet(visitor);
+        const AdapterContext = struct {
+            connection: *Connection,
+            context: Context,
+        };
+        const Adapter = struct {
+            fn visit(
+                adapter: *AdapterContext,
+                packet: ReceivedPacketView,
+            ) (Error || VisitorError)!void {
+                _ = try adapter.connection.retransmitPacketThresholdLosses(
+                    max_batch_packets,
+                );
+                try visitor(adapter.context, packet);
+            }
+        };
+        var adapter: AdapterContext = .{
+            .connection = self,
+            .context = context,
+        };
+        return self.processReceivedBytesVisitingAt(
+            datagram.from,
+            datagram.bytes,
+            datagram.ecn,
+            self.monotonicNowNs(),
+            &adapter,
+            Adapter.visit,
+        );
+    }
+
+    /// State-only timer-aware receive for stream adapters that consume data
+    /// from connection receive state rather than inspecting packet frames.
+    pub fn servicePacketServicingTimers(self: *Connection) Error!void {
+        return self.visitPacketServicingTimers(self, acknowledgePacketView);
+    }
+
+    fn processReceivedBytesVisitingAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []u8,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!void {
         const keys = self.receive_key_phase.keyUpdateKeys();
         const key_phase = quic.protection.peekShortPacketKeyPhaseForPolicy(
             keys.current.hp,
-            datagram.bytes,
+            bytes,
             self.config.local_connection_id.len,
             self.config.accept_zero_fixed_bit,
         ) catch |err| {
@@ -4231,26 +4358,29 @@ pub const Connection = struct {
             return err;
         };
         if (key_phase == keys.current_key_phase) {
-            return self.processReceivedBytesInPlaceAt(
-                datagram.from,
-                datagram.bytes,
-                datagram.ecn,
+            return self.processReceivedBytesInPlaceVisitingAt(
+                from,
+                bytes,
+                ecn,
                 now_ns,
                 keys.current,
-            ) catch |err| {
-                if (err == error.AuthenticationFailed) {
-                    try self.recordAuthenticationFailureAt(now_ns);
-                }
-                return err;
-            };
+                context,
+                visitor,
+            );
         }
         var packet = try self.processReceivedBytesAt(
-            datagram.from,
-            datagram.bytes,
-            datagram.ecn,
+            from,
+            bytes,
+            ecn,
             now_ns,
         );
-        packet.deinit(self.endpoint.allocator);
+        defer packet.deinit(self.endpoint.allocator);
+        try visitor(context, .{
+            .from = packet.from,
+            .packet_number = packet.packet.packet_number,
+            .frames = packet.frames,
+            .peer_initiated_key_update = packet.peer_initiated_key_update,
+        });
     }
 
     pub fn servicePacketBatchAt(self: *Connection, now_ns: ?u64) Error!usize {
@@ -4272,16 +4402,13 @@ pub const Connection = struct {
                 return err;
             };
             if (key_phase == keys.current_key_phase) {
-                self.processReceivedBytesInPlaceAt(
+                try self.processReceivedBytesInPlaceAt(
                     datagrams.from,
                     bytes,
                     datagrams.ecn,
                     now_ns,
                     keys.current,
-                ) catch |err| {
-                    if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
-                    return err;
-                };
+                );
                 continue;
             }
 
@@ -4308,13 +4435,39 @@ pub const Connection = struct {
         now_ns: ?u64,
         keys: quic.protection.PacketProtectionKeys,
     ) Error!void {
-        const packet = try quic.protection.openShortPacketInPlaceWithFixedBitPolicy(
+        return self.processReceivedBytesInPlaceVisitingAt(
+            from,
+            bytes,
+            ecn,
+            now_ns,
+            keys,
+            {},
+            discardPacketView,
+        );
+    }
+
+    fn processReceivedBytesInPlaceVisitingAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []u8,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+        keys: quic.protection.PacketProtectionKeys,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!void {
+        const packet = quic.protection.openShortPacketInPlaceWithFixedBitPolicy(
             keys,
             bytes,
             self.config.local_connection_id.len,
             self.expected_packet_number,
             self.config.accept_zero_fixed_bit,
-        );
+        ) catch |err| {
+            if (err == error.AuthenticationFailed) {
+                try self.recordAuthenticationFailureAt(now_ns);
+            }
+            return err;
+        };
 
         const frames = try self.parseServicePacketFramesOrClose(packet.payload, now_ns);
         defer {
@@ -4343,6 +4496,11 @@ pub const Connection = struct {
             bytes.len,
             frames,
         );
+        try visitor(context, .{
+            .from = from,
+            .packet_number = packet.packet_number,
+            .frames = frames,
+        });
     }
 
     fn parseServicePacketFramesOrClose(self: *Connection, payload: []const u8, now_ns: ?u64) Error![]quic.Frame {
@@ -5932,6 +6090,18 @@ fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
 fn nsToMs(now_ns: ?u64) ?u64 {
     const ns = now_ns orelse return null;
     return ns / 1_000_000;
+}
+
+fn discardPacketView(_: void, _: ReceivedPacketView) error{}!void {}
+
+fn acknowledgePacketView(
+    connection: *Connection,
+    packet: ReceivedPacketView,
+) Error!void {
+    _ = connection.sendAckForPacketIfNeeded(
+        packet.packet_number,
+        packet.frames,
+    ) catch {};
 }
 
 fn nanosToMillisFloor(ns: u64) u64 {

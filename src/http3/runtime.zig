@@ -373,31 +373,61 @@ const ConnectionPacketCursor = struct {
         self.* = undefined;
     }
 
-    fn take(
+    fn visit(
         self: *ConnectionPacketCursor,
         connection: *quic.one_rtt.Connection,
-    ) Error!quic.one_rtt.ReceivedPacket {
+        context: anytype,
+        comptime visitor: *const fn (
+            @TypeOf(context),
+            quic.one_rtt.ReceivedPacketView,
+        ) Error!void,
+    ) Error!void {
         if (self.ack_pending) {
             try connection.sendAck(0);
             self.ack_pending = false;
         }
         if (self.batch) |*batch| {
-            if (batch.takeNext()) |packet| return packet;
+            if (batch.takeNext()) |packet_value| {
+                var packet = packet_value;
+                defer packet.deinit(connection.endpoint.allocator);
+                return visitor(context, packetView(packet));
+            }
             batch.deinit();
             self.batch = null;
         }
         if (!connection.endpoint.groReceiveEnabled()) {
-            var packet = try connection.receivePacketServicingTimers();
-            errdefer packet.deinit(connection.endpoint.allocator);
-            _ = connection.sendAckForPacketsIfNeeded(
-                @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
-            ) catch {
-                // Transport state has already accepted this packet. Preserve
-                // application delivery and retry the cumulative ACK before
-                // reading another packet rather than dropping the HTTP/3 data.
-                self.ack_pending = true;
+            const Context = @TypeOf(context);
+            const AdapterContext = struct {
+                cursor: *ConnectionPacketCursor,
+                connection: *quic.one_rtt.Connection,
+                context: Context,
             };
-            return packet;
+            const Adapter = struct {
+                fn visit(
+                    adapter: *AdapterContext,
+                    packet: quic.one_rtt.ReceivedPacketView,
+                ) Error!void {
+                    _ = adapter.connection.sendAckForPacketIfNeeded(
+                        packet.packet_number,
+                        packet.frames,
+                    ) catch {
+                        // QUIC and HTTP/3 state already accepted the packet. A
+                        // cumulative ACK can be retried before the next receive
+                        // without manufacturing packet ownership for recovery.
+                        adapter.cursor.ack_pending = true;
+                    };
+                    try visitor(adapter.context, packet);
+                }
+            };
+            var adapter: AdapterContext = .{
+                .cursor = self,
+                .connection = connection,
+                .context = context,
+            };
+            return connection.visitPacketServicingTimers(
+                &adapter,
+                Adapter.visit,
+            );
         }
         var batch = try connection.receivePacketBatchServicingTimers();
         errdefer batch.deinit();
@@ -406,11 +436,21 @@ const ConnectionPacketCursor = struct {
         ) catch {
             self.ack_pending = true;
         };
-        const packet = batch.takeNext() orelse return error.MissingStreamFrame;
+        var packet = batch.takeNext() orelse return error.MissingStreamFrame;
+        defer packet.deinit(connection.endpoint.allocator);
         self.batch = batch;
-        return packet;
+        return visitor(context, packetView(packet));
     }
 };
+
+fn packetView(packet: quic.one_rtt.ReceivedPacket) quic.one_rtt.ReceivedPacketView {
+    return .{
+        .from = packet.from,
+        .packet_number = packet.packet.packet_number,
+        .frames = packet.frames,
+        .peer_initiated_key_update = packet.peer_initiated_key_update,
+    };
+}
 
 /// Stateless-key counterpart used by the preconfigured protected runtime.
 const ProtectedPacketCursor = struct {
@@ -2454,23 +2494,10 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         detached_stream_id: u62,
     ) Error!void {
-        var packet = try self.receive_packets.take(
+        try self.receive_packets.visit(
             &self.established.connection,
-        );
-        defer packet.deinit(
-            self.established.connection.endpoint.allocator,
-        );
-        _ = try applyServerRequestPacketFrames(
-            packet.from,
-            packet.frames,
-            self.established.connection.endpoint.allocator,
-            &self.control,
-            &self.qpack_decode,
-            &self.qpack_encode,
-            &self.request_streams,
-            &self.streaming_requests,
-            self.peer_promised_push_ids.items,
-            detached_stream_id,
+            .{ self, detached_stream_id },
+            visitDetachedServerRequestPacket,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback();
@@ -3065,23 +3092,10 @@ pub const HandshakeServerSession = struct {
     }
 
     fn receiveRequestPacket(self: *HandshakeServerSession) Error!void {
-        var packet = try self.receive_packets.take(
+        try self.receive_packets.visit(
             &self.established.connection,
-        );
-        defer packet.deinit(
-            self.established.connection.endpoint.allocator,
-        );
-        _ = try applyServerRequestPacketFrames(
-            packet.from,
-            packet.frames,
-            self.established.connection.endpoint.allocator,
-            &self.control,
-            &self.qpack_decode,
-            &self.qpack_encode,
-            &self.request_streams,
-            &self.streaming_requests,
-            self.peer_promised_push_ids.items,
-            null,
+            self,
+            visitStreamingServerRequestPacket,
         );
         // Encoder-stream inserts and reset cancellations both queue decoder
         // instructions. Flush them at the packet boundary so a peer does not
@@ -9653,6 +9667,71 @@ fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const qu
     }
 }
 
+fn visitStreamingServerRequestPacket(
+    session: *HandshakeServerSession,
+    packet: quic.one_rtt.ReceivedPacketView,
+) Error!void {
+    _ = try applyServerRequestPacketFrames(
+        packet.from,
+        packet.frames,
+        session.established.connection.endpoint.allocator,
+        &session.control,
+        &session.qpack_decode,
+        &session.qpack_encode,
+        &session.request_streams,
+        &session.streaming_requests,
+        session.peer_promised_push_ids.items,
+        null,
+    );
+}
+
+fn visitDetachedServerRequestPacket(
+    context: struct { *HandshakeServerSession, u62 },
+    packet: quic.one_rtt.ReceivedPacketView,
+) Error!void {
+    const session, const detached_stream_id = context;
+    _ = try applyServerRequestPacketFrames(
+        packet.from,
+        packet.frames,
+        session.established.connection.endpoint.allocator,
+        &session.control,
+        &session.qpack_decode,
+        &session.qpack_encode,
+        &session.request_streams,
+        &session.streaming_requests,
+        session.peer_promised_push_ids.items,
+        detached_stream_id,
+    );
+}
+
+const ConnectionRequestReceiveContext = struct {
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    request_streams: *RequestStreamSet,
+    peer_promised_push_ids: []const u64,
+    reset: ?RequestStreamReset = null,
+};
+
+fn visitConnectionRequestPacket(
+    context: *ConnectionRequestReceiveContext,
+    packet: quic.one_rtt.ReceivedPacketView,
+) Error!void {
+    context.reset = try applyServerRequestPacketFrames(
+        packet.from,
+        packet.frames,
+        context.connection.endpoint.allocator,
+        context.control,
+        context.qpack_decode,
+        context.qpack_encode,
+        context.request_streams,
+        null,
+        context.peer_promised_push_ids,
+        null,
+    );
+}
+
 fn receiveConnectionRequestStreamBytes(
     connection: *quic.one_rtt.Connection,
     receive_packets: *ConnectionPacketCursor,
@@ -9669,20 +9748,20 @@ fn receiveConnectionRequestStreamBytes(
     )) |ready| return ready;
 
     while (true) {
-        var packet = try receive_packets.take(connection);
-        defer packet.deinit(connection.endpoint.allocator);
-        if (try applyServerRequestPacketFrames(
-            packet.from,
-            packet.frames,
-            connection.endpoint.allocator,
-            control,
-            qpack_decode,
-            qpack_encode,
-            request_streams,
-            null,
-            peer_promised_push_ids,
-            null,
-        )) |reset| {
+        var context: ConnectionRequestReceiveContext = .{
+            .connection = connection,
+            .control = control,
+            .qpack_decode = qpack_decode,
+            .qpack_encode = qpack_encode,
+            .request_streams = request_streams,
+            .peer_promised_push_ids = peer_promised_push_ids,
+        };
+        try receive_packets.visit(
+            connection,
+            &context,
+            visitConnectionRequestPacket,
+        );
+        if (context.reset) |reset| {
             return requestResetError(reset.application_error_code);
         }
         if (try request_streams.takeReady(
@@ -9917,8 +9996,49 @@ fn receiveConnectionResponsePacket(
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
 ) Error!void {
-    var packet = try receive_packets.take(connection);
-    defer packet.deinit(connection.endpoint.allocator);
+    var context: ConnectionResponseReceiveContext = .{
+        .connection = connection,
+        .control = control,
+        .qpack_decode = qpack_decode,
+        .qpack_encode = qpack_encode,
+        .response_streams = response_streams,
+        .streaming_responses = streaming_responses,
+        .push_streams = push_streams,
+        .request_lifecycle = request_lifecycle,
+        .detached_stream_id = detached_stream_id,
+    };
+    try receive_packets.visit(
+        connection,
+        &context,
+        visitConnectionResponsePacket,
+    );
+}
+
+const ConnectionResponseReceiveContext = struct {
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    response_streams: *ResponseStreamSet,
+    streaming_responses: ?*StreamingResponseSet,
+    push_streams: ?*PushStreamSet,
+    request_lifecycle: ?*const ClientRequestLifecycle,
+    detached_stream_id: ?u62,
+};
+
+fn visitConnectionResponsePacket(
+    context: *ConnectionResponseReceiveContext,
+    packet: quic.one_rtt.ReceivedPacketView,
+) Error!void {
+    const connection = context.connection;
+    const control = context.control;
+    const qpack_decode = context.qpack_decode;
+    const qpack_encode = context.qpack_encode;
+    const response_streams = context.response_streams;
+    const streaming_responses = context.streaming_responses;
+    const push_streams = context.push_streams;
+    const request_lifecycle = context.request_lifecycle;
+    const detached_stream_id = context.detached_stream_id;
     for (packet.frames) |frame| {
         try rejectCriticalStreamClosureFrame(control.*, frame, .client);
         if (frame == .reset_stream and
