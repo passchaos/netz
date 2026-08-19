@@ -70,21 +70,28 @@ def expect_packet(sock: socket.socket, expected: bytes, label: str) -> None:
 
 
 class NetzBroker:
-    def __init__(self, executable: Path):
+    def __init__(
+        self, executable: Path, connections: int = 1, ignore_errors: bool = False
+    ):
         self.executable = executable
+        self.connections = connections
+        self.ignore_errors = ignore_errors
         self.port = free_port()
         self.process: subprocess.Popen[str] | None = None
 
     def __enter__(self) -> "NetzBroker":
-        self.process = subprocess.Popen(
-            [
+        command = [
                 str(self.executable),
                 f"--bind=127.0.0.1:{self.port}",
-                "--connections=1",
+                f"--connections={self.connections}",
                 "--max-queued-deliveries=1024",
                 "--max-outgoing-inflight=64",
                 "--no-restore",
-            ],
+            ]
+        if self.ignore_errors:
+            command.append("--ignore-connection-errors")
+        self.process = subprocess.Popen(
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -233,6 +240,30 @@ def subscription_identifiers(executable: Path, mqtt_packets, mqtt5_props) -> Non
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def hostile_initial_packets(executable: Path, mqtt_packets) -> None:
+    # Derived from Mosquitto 01-bad-initial-packets.py. A huge declared
+    # Remaining Length must be rejected before payload allocation/read, and a
+    # later well-formed connection proves the finite broker remains usable.
+    packet_types = range(2, 16)
+    with NetzBroker(
+        executable, connections=len(packet_types) + 1, ignore_errors=True
+    ) as broker:
+        for packet_type in packet_types:
+            with broker.connect() as sock:
+                sock.sendall(bytes([packet_type << 4, 0x80, 0x80, 0x80, 0x74]))
+                try:
+                    data = sock.recv(1)
+                    if data:
+                        raise AssertionError(
+                            f"initial packet type {packet_type} received {data.hex()}"
+                        )
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "after-hostile-initial")
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -242,7 +273,8 @@ def main() -> None:
 
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT 5 wire vectors passed: 2 scenarios")
+    hostile_initial_packets(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT 5 wire vectors passed: 3 scenarios")
 
 
 if __name__ == "__main__":

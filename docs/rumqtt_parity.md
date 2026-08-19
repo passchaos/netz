@@ -766,13 +766,17 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs two
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs three
 raw MQTT 5 scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
-with exact forwarded PUBLISH bytes. The gate builds a finite netz broker,
+with exact forwarded PUBLISH bytes; it also ports Mosquitto's hostile
+non-CONNECT-initial-packet shape for all packet types 2-15, using a declared
+~250 MiB Remaining Length without sending its body. Netz closes every malformed
+connection before that allocation/read and accepts a subsequent valid MQTT 5
+CONNECT. The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; both scenarios pass. This is deliberately described as a selected
+packets; all three scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.

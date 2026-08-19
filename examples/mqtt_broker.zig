@@ -8,6 +8,7 @@ const Config = struct {
     max_outgoing_inflight: u16 = 64,
     persistence_path: ?[]const u8 = null,
     restore: bool = true,
+    ignore_connection_errors: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -51,7 +52,16 @@ pub fn main(init: std.process.Init) !void {
         "netz MQTT 3.1.1/5 broker listening on {f} for {d} clients\n",
         .{ broker.address(), config.connections },
     );
-    try broker.serve(config.connections);
+    if (config.ignore_connection_errors) {
+        // Conformance/fuzz harnesses deliberately open malformed connections.
+        // Serve one finite slot at a time so an expected protocol rejection
+        // does not terminate the process before later valid-vector probes.
+        for (0..config.connections) |_| {
+            broker.serve(1) catch {};
+        }
+    } else {
+        try broker.serve(config.connections);
+    }
     if (config.persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
     }
@@ -109,6 +119,8 @@ fn parseArgs(
             config.persistence_path = path;
         } else if (std.mem.eql(u8, arg, "--no-restore")) {
             config.restore = false;
+        } else if (std.mem.eql(u8, arg, "--ignore-connection-errors")) {
+            config.ignore_connection_errors = true;
         } else {
             return error.InvalidArgument;
         }
