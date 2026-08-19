@@ -456,6 +456,24 @@ pub const Store = struct {
             out[0] = matchForEntry(entry, remaining);
             return out[0..1];
         }
+        if (out.len >= self.message_count) {
+            // Every live match is one retained entry. With room for the whole
+            // store, MatchBufferTooSmall is impossible, so retain the API's
+            // transactional guarantee without paying a count-only full scan
+            // before the emit scan.
+            var written: usize = 0;
+            for (self.entries.items) |maybe_entry| {
+                const entry = maybe_entry orelse continue;
+                const remaining = remainingExpiry(entry, now.nanoseconds);
+                if (remaining == 0 or !mqtt.topicMatchesFilter(
+                    entry.topic,
+                    effective_filter,
+                )) continue;
+                out[written] = matchForEntry(entry, remaining);
+                written += 1;
+            }
+            return out[0..written];
+        }
         var required: usize = 0;
         for (self.entries.items) |maybe_entry| {
             const entry = maybe_entry orelse continue;
@@ -561,6 +579,27 @@ pub const Store = struct {
                 remaining,
             );
             return out[0..1];
+        }
+        if (out.len >= self.message_count) {
+            var written: usize = 0;
+            for (self.entries.items) |maybe_entry| {
+                const entry = maybe_entry orelse continue;
+                const remaining = remainingExpiry(entry, now.nanoseconds);
+                if (remaining == 0 or
+                    skipNoLocal(entry, subscription, context) or
+                    !mqtt.topicMatchesFilter(entry.topic, effective_filter))
+                {
+                    continue;
+                }
+                out[written] = deliveryForEntry(
+                    entry,
+                    subscription.qos,
+                    context.subscription_identifier,
+                    remaining,
+                );
+                written += 1;
+            }
+            return out[0..written];
         }
         for (self.entries.items) |maybe_entry| {
             const entry = maybe_entry orelse continue;

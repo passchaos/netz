@@ -559,18 +559,25 @@ Run the internal lookup baseline with:
 zig build bench-mqtt-retained -Doptimize=ReleaseFast
 ```
 
-2026-08-18 same-host `ReleaseFast` smoke result with 4,096 retained entries:
+2026-08-19 CPU-0-pinned `ReleaseFast` result with 4,096 retained entries:
 
 ```text
-exact lookup:            138 ns/op
-wildcard full scan:  325,232 ns/op
+exact lookup:          96-99 ns/op
+wildcard full scan: 162,061-162,368 ns/op
 wildcard matches:       4,096/op
 ```
 
 The exact path uses the topic hash index and both lookup paths write into
 caller-owned buffers without allocation. The wildcard scan deliberately
 returns every entry, so this is an internal scaling baseline rather than a
-whole-broker comparison.
+whole-broker comparison. When caller capacity can hold the whole retained
+store, a wildcard result cannot overflow; match and delivery planning therefore
+emit in one scan instead of count-then-emit. A same-command three-run A/B
+against commit `b501e96` reduced this full-result workload from
+330,460-331,975 ns/op to 162,061-162,368 ns/op, a 2.04-2.05x improvement.
+Smaller caller buffers retain the two-pass transactional preflight and return
+`MatchBufferTooSmall` without partial output. Tests cover expiry, No Local,
+Subscription Identifier and leading-`$` behavior on the fast path.
 
 ## Persistent Session Store
 

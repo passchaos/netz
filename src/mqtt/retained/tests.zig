@@ -386,6 +386,12 @@ test "retained matchInto is allocation free and exact capacity" {
     try std.testing.expectEqual(@as(usize, 2), matches.len);
     try std.testing.expect(!no_alloc.has_induced_failure);
 
+    // Capacity for the full retained store selects the one-pass wildcard
+    // emitter even when expiry and the leading-$ rule reduce actual matches.
+    var full_capacity: [3]Match = undefined;
+    const one_pass = try store.matchInto("a/+", now, &full_capacity);
+    try std.testing.expectEqual(@as(usize, 2), one_pass.len);
+
     // MQTT's leading-wildcard `$` rule applies to retained matching too.
     var system: [1]Match = undefined;
     const non_system = try store.matchInto("#", now, &enough);
@@ -404,6 +410,41 @@ test "retained matchInto is allocation free and exact capacity" {
         @as(usize, 1),
         (try store.matchInto("$SYS/#", now, &system)).len,
     );
+}
+
+test "retained delivery full-capacity wildcard fast path preserves filters" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const now = std.Io.Timestamp.zero;
+    _ = try store.applyPublish("bridge/one", "1", .{
+        .retain = true,
+        .publisher_id = 42,
+        .now = now,
+    });
+    _ = try store.applyPublish("bridge/two", "2", .{
+        .retain = true,
+        .publisher_id = 43,
+        .now = now,
+    });
+    _ = try store.applyPublish("other/two", "3", .{
+        .retain = true,
+        .publisher_id = 43,
+        .now = now,
+    });
+
+    var out: [3]Delivery = undefined;
+    const deliveries = try store.deliveriesInto(.{
+        .topic_filter = "bridge/+",
+        .no_local = true,
+        .qos = .at_least_once,
+    }, .{
+        .subscriber_id = 42,
+        .subscription_identifier = 9,
+    }, now, &out);
+    try std.testing.expectEqual(@as(usize, 1), deliveries.len);
+    try std.testing.expectEqualStrings("bridge/two", deliveries[0].topic);
+    try std.testing.expectEqual(@as(?usize, 9), deliveries[0].subscription_identifier);
 }
 
 test "retained limits and failed replacement preserve old entry" {
