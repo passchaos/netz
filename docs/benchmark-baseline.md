@@ -1274,6 +1274,24 @@ stream windows and 8-KiB datagrams completed at 188-195 MiB/s aggregate across
 three ReleaseFast runs. This replaces the earlier 26 MiB/s result whose fixed
 128-KiB connection window unintentionally serialized four streams.
 
+The benchmark also accepts `--loss-pct=N`. Handshake and CONNECT setup remain
+reliable; a fixed-seed endpoint interceptor starts immediately before the
+associated-stream phase, so STREAM/RESET_STREAM/ACK loss decisions are exactly
+repeatable without conflating certificate setup. Five consecutive runs of:
+
+```sh
+zig build bench-webtransport-stream -Doptimize=ReleaseFast -- \
+  --streams=16 --transfer-bytes=16384 --stream-window=65536 \
+  --reset-every=2 --reset-after-bytes=256 --loss-pct=5
+```
+
+considered 80 server datagrams and dropped the same 7 in every run. All eight
+reset streams reported application code 42 after their 256-byte prefix, all
+eight non-reset streams reached FIN, and every run verified 133,120 bytes, 56
+read events, and checksum 16,972,800. Elapsed time ranged 1.486-1.784 ms
+(71-85 MiB/s). This is deterministic cancellation/recovery evidence, not an
+equal-wire wtransport throughput comparison.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

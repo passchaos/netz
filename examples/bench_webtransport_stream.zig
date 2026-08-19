@@ -9,6 +9,39 @@ const default_stream_window: u64 = 64 * 1024;
 const default_one_rtt_datagram_size: usize = 4096;
 const cancellation_code: u32 = 42;
 
+const LossState = struct {
+    enabled: std.atomic.Value(bool) = .init(false),
+    state: std.atomic.Value(u64) = .init(0x5754_4c4f_5353),
+    considered: std.atomic.Value(usize) = .init(0),
+    dropped: std.atomic.Value(usize) = .init(0),
+    drop_pct: u8,
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *LossState = @ptrCast(@alignCast(context));
+        if (!self.enabled.load(.acquire)) return false;
+        _ = self.considered.fetchAdd(1, .monotonic);
+        var current = self.state.load(.monotonic);
+        while (true) {
+            var next = current;
+            next ^= next << 13;
+            next ^= next >> 7;
+            next ^= next << 17;
+            if (self.state.cmpxchgWeak(
+                current,
+                next,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                current = observed;
+                continue;
+            }
+            if (next % 100 >= self.drop_pct) return false;
+            _ = self.dropped.fetchAdd(1, .monotonic);
+            return true;
+        }
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const io = init.io;
@@ -21,19 +54,25 @@ pub fn main(init: std.process.Init) !void {
     const payload = try allocator.alloc(u8, config.transfer_bytes);
     defer allocator.free(payload);
     for (payload, 0..) |*byte, index| byte.* = payloadByte(index);
+    var loss_state = LossState{ .drop_pct = config.loss_pct };
+    var server_limits: netz.webtransport.runtime.Limits = .{
+        .http3 = .{
+            .quic = .{
+                .max_datagram_size = config.one_rtt_datagram_size,
+                .max_frames_per_datagram = 8,
+            },
+        },
+    };
+    if (config.loss_pct != 0) server_limits.http3.quic.send_interceptor = .{
+        .context = &loss_state,
+        .should_drop = LossState.shouldDrop,
+    };
 
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{
-            .http3 = .{
-                .quic = .{
-                    .max_datagram_size = config.one_rtt_datagram_size,
-                    .max_frames_per_datagram = 8,
-                },
-            },
-        },
+        server_limits,
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
@@ -181,6 +220,10 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     shared.started.waitUncancelable(io);
+    // Handshake and CONNECT setup stay reliable. Loss starts only for the
+    // associated stream phase so repeated runs share one authenticated state
+    // and deterministic RESET_STREAM/ACK loss decisions.
+    loss_state.enabled.store(true, .release);
     const stream_ids = try allocator.alloc(u62, config.streams);
     defer allocator.free(stream_ids);
     for (stream_ids) |*stream_id| {
@@ -258,6 +301,9 @@ pub fn main(init: std.process.Init) !void {
         \\  reset every N streams: {d}
         \\  reset streams: {d}
         \\  bytes before reset: {d}
+        \\  simulated loss percent: {d}
+        \\  datagrams considered: {d}
+        \\  datagrams dropped: {d}
         \\  caller buffer: {d}
         \\  partial writes: {d}
         \\  read events: {d}
@@ -273,6 +319,9 @@ pub fn main(init: std.process.Init) !void {
         config.reset_every,
         resetStreamCount(config),
         reset_prefix_bytes,
+        config.loss_pct,
+        loss_state.considered.load(.monotonic),
+        loss_state.dropped.load(.monotonic),
         read_buffer_bytes,
         write_calls,
         shared.events,
@@ -290,6 +339,7 @@ const Config = struct {
     enable_pacing: bool = true,
     reset_every: usize = 0,
     reset_after_bytes: usize = 1024,
+    loss_pct: u8 = 0,
 };
 
 fn parseArgs(
@@ -336,9 +386,17 @@ fn parseArgs(
                 arg["--reset-after-bytes=".len..],
                 10,
             );
+        } else if (std.mem.startsWith(u8, arg, "--loss-pct=")) {
+            config.loss_pct = try std.fmt.parseInt(
+                u8,
+                arg["--loss-pct=".len..],
+                10,
+            );
         } else return error.InvalidArgument;
     }
-    if (config.streams > max_streams) return error.InvalidArgument;
+    if (config.streams > max_streams or config.loss_pct > 100) {
+        return error.InvalidArgument;
+    }
     return config;
 }
 
