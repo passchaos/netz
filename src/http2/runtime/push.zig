@@ -275,6 +275,13 @@ fn freeHeaders(
     allocator: std.mem.Allocator,
     headers: []http2.Hpack.HeaderField,
 ) void {
+    if (headers.len != 0) {
+        if (headers[0].block_storage) |storage| {
+            allocator.free(storage);
+            allocator.free(headers);
+            return;
+        }
+    }
     for (headers) |header| {
         allocator.free(header.name);
         allocator.free(header.value);

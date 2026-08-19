@@ -7047,35 +7047,50 @@ fn cloneDecodedHeaders(
     defer http2.Hpack.freeDecodedFieldStorages(allocator, decoded);
     try validateHeaderListSize(decoded, limits.max_header_list_size);
     const cloned = try allocator.alloc(http2.Hpack.HeaderField, decoded.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (cloned[0..initialized]) |field| {
-            allocator.free(field.name);
-            allocator.free(field.value);
-        }
-        allocator.free(cloned);
+    errdefer allocator.free(cloned);
+    if (decoded.len == 0) return cloned;
+    var string_bytes: usize = 0;
+    for (decoded) |field| {
+        string_bytes = std.math.add(
+            usize,
+            string_bytes,
+            field.name.len,
+        ) catch return error.MessageTooLarge;
+        string_bytes = std.math.add(
+            usize,
+            string_bytes,
+            field.value.len,
+        ) catch return error.MessageTooLarge;
     }
-    for (decoded, cloned) |*field, *out| {
-        const name = if (field.name_storage) |name_storage| blk: {
-            field.name_storage = null;
-            break :blk name_storage;
-        } else try allocator.dupe(u8, field.name);
-        errdefer allocator.free(name);
-        const value = if (field.value_storage) |value_storage| blk: {
-            field.value_storage = null;
-            break :blk value_storage;
-        } else try allocator.dupe(u8, field.value);
+    const string_storage = try allocator.alloc(u8, string_bytes);
+    errdefer allocator.free(string_storage);
+    var string_offset: usize = 0;
+    for (decoded, cloned, 0..) |field, *out, index| {
+        const name = string_storage[string_offset..][0..field.name.len];
+        @memcpy(name, field.name);
+        string_offset += name.len;
+        const value = string_storage[string_offset..][0..field.value.len];
+        @memcpy(value, field.value);
+        string_offset += value.len;
         out.* = .{
             .name = name,
             .value = value,
             .never_index = field.never_index,
+            .block_storage = if (index == 0) string_storage else null,
         };
-        initialized += 1;
     }
+    std.debug.assert(string_offset == string_storage.len);
     return cloned;
 }
 
 fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField) void {
+    if (headers.len != 0) {
+        if (headers[0].block_storage) |storage| {
+            allocator.free(storage);
+            allocator.free(headers);
+            return;
+        }
+    }
     for (headers) |header| {
         allocator.free(header.name);
         allocator.free(header.value);
@@ -14539,6 +14554,40 @@ test "HTTP/2 runtime enforces header list size limits" {
     try connection.applySettings(&.{.{ .id = .max_header_list_size, .value = 120 }});
     try std.testing.expectEqual(@as(usize, 120), connection.peer_max_header_list_size);
     try std.testing.expectError(error.MessageTooLarge, connection.writeHeaders(1, &oversized, true));
+}
+
+test "HTTP/2 runtime clones decoded headers into one string allocation" {
+    const allocator = std.testing.allocator;
+    const fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "x-first", .value = "one" },
+        .{ .name = "x-second", .value = "two" },
+    };
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &fields);
+    var decoder = http2.Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    const cloned = try cloneDecodedHeaders(
+        allocator,
+        block.items,
+        .{ .max_header_fields = 8 },
+        &decoder,
+    );
+    defer freeHeaders(allocator, cloned);
+
+    try std.testing.expect(cloned[0].block_storage != null);
+    try std.testing.expect(cloned[1].block_storage == null);
+    try std.testing.expectEqualStrings("x-second", cloned[2].name);
+    const storage = cloned[0].block_storage.?;
+    for (cloned) |field| {
+        try std.testing.expect(@intFromPtr(field.name.ptr) >= @intFromPtr(storage.ptr));
+        try std.testing.expect(@intFromPtr(field.value.ptr) >= @intFromPtr(storage.ptr));
+        try std.testing.expect(
+            @intFromPtr(field.value.ptr) + field.value.len <=
+                @intFromPtr(storage.ptr) + storage.len,
+        );
+    }
 }
 
 test "HTTP/2 runtime advertises configured initial SETTINGS" {

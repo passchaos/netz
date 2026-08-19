@@ -929,6 +929,12 @@ pub const Hpack = struct {
         /// only freeing the slice so these allocations are released.
         name_storage: ?[]u8 = null,
         value_storage: ?[]u8 = null,
+        /// Optional allocation shared by every field in one owned decoded
+        /// header block. Runtime-owned blocks set this only on element zero;
+        /// the individual name/value slices then point into the same storage.
+        /// This keeps the public field views unchanged while allowing one free
+        /// instead of two frees per header.
+        block_storage: ?[]u8 = null,
     };
 
     pub const DynamicTable = struct {
@@ -1461,6 +1467,10 @@ pub const Hpack = struct {
             if (field.value_storage) |value| {
                 allocator.free(value);
                 field.value_storage = null;
+            }
+            if (field.block_storage) |storage| {
+                allocator.free(storage);
+                field.block_storage = null;
             }
         }
     }

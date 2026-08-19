@@ -438,6 +438,12 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    frames were transient. Stable runs measured 7.20-7.23 ms/batch; one noisy
    10.81-ms sample is retained as variance rather than folded into a speed
    ratio. Exact-size allocation reporting remains available for the next audit.
+   Owned decoded header blocks now place every name/value string in one shared
+   allocation rather than two allocations per field. The same full flow shape
+   used exactly 1,488 allocations versus 1,910 before (22.1% fewer) across
+   three runs; stable samples were 7.08-7.10 ms/batch and peak live memory
+   remained about 1.29 MB. Push-promise ownership uses the same block-aware
+   deinitializer, and tests cover both ordinary and pushed headers.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.
