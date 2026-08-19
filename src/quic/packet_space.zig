@@ -1028,6 +1028,13 @@ pub const SentPacketTracker = struct {
         ranges: []const AckedRange,
         sorted_packets: bool,
     ) Error!AckPrecheck {
+        if (ranges.len == 1 and ranges[0].start == ranges[0].end) {
+            const packet = self.findSentPacket(ranges[0].start) orelse
+                return error.InvalidAckFrame;
+            var precheck: AckPrecheck = .{ .total_span = 1 };
+            precheck.observeSentPacket(packet);
+            return precheck;
+        }
         var precheck: AckPrecheck = .{};
         for (ranges) |range| {
             precheck.total_span = std.math.add(
@@ -1076,6 +1083,21 @@ pub const SentPacketTracker = struct {
         ranges: []const AckedRange,
         sorted_packets: bool,
     ) AckResult {
+        if (ranges.len == 1 and ranges[0].start == ranges[0].end) {
+            const index = self.findPacketIndex(ranges[0].start) orelse
+                return .{};
+            var result: AckResult = .{};
+            var cached_latest_acked = false;
+            self.markPacketAcknowledged(
+                &self.packets.items[index],
+                &result,
+                &cached_latest_acked,
+            );
+            if (cached_latest_acked) {
+                self.recomputeLatestAckElicitingInFlight();
+            }
+            return result;
+        }
         var result: AckResult = .{};
         var cached_latest_acked = false;
         if (sorted_packets) {

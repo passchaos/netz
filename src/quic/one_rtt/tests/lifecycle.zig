@@ -682,6 +682,155 @@ test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
     try std.testing.expectEqual(@as(u64, 1), client.recovery.pending.items[0].packetNumberAt(0).?);
 }
 
+test "QUIC 1-RTT response piggybacks pending ACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc2} ** quic.protection.secret_len,
+    );
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "request",
+    } }});
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+
+    try server.sendWithPendingAck(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "response",
+    } }}, 0);
+    var response = try client.receivePacket();
+    defer response.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), response.frames.len);
+    try std.testing.expect(response.frames[0] == .stream);
+    try std.testing.expectEqualStrings(
+        "response",
+        response.frames[0].stream.data,
+    );
+    try std.testing.expect(response.frames[1] == .ack);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        response.frames[1].ack.largest_acknowledged,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+}
+
+test "QUIC 1-RTT ACK of ACK prunes received packet history" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{
+        .ip4 = .loopback(0),
+    }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{
+        .ip4 = .loopback(0),
+    }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe2} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .ping = {} }});
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try server.sendAck(0);
+    var server_ack = try client.receivePacket();
+    defer server_ack.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        server.stats().received_packet_stats.retained_packets,
+    );
+
+    try client.sendAck(0);
+    var ack_of_ack = try server.receivePacket();
+    defer ack_of_ack.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        server.stats().received_packet_stats.retained_packets,
+    );
+    try server.sendAck(0);
+    var pruned_ack = try client.receivePacket();
+    defer pruned_ack.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        pruned_ack.frames[0].ack.largest_acknowledged,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        pruned_ack.frames[0].ack.first_ack_range,
+    );
+}
+
 test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" {
     const allocator = std.testing.allocator;
 

@@ -8,6 +8,8 @@ const CountingAllocator = @import("support/counting_allocator.zig")
 const default_iterations: usize = 5;
 const default_transfer_bytes: usize = 64 * 1024 * 1024;
 const default_streams: usize = 1;
+const default_echo_iterations: usize = 5000;
+const echo_payload_bytes: usize = 1024;
 const max_streams: usize = 64;
 const max_datagram_size: usize = 8900;
 const stream_payload_size: usize = max_datagram_size - 128;
@@ -46,7 +48,7 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake };
+const Mode = enum { upload, handshake, echo };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
@@ -63,6 +65,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (config.mode == .handshake) {
         try runHandshakeBenchmark(allocator, io, config, server_key);
+        if (config.stats) counting.snapshot().print();
+        return;
+    }
+    if (config.mode == .echo) {
+        try runEchoBenchmark(allocator, io, config, server_key);
         if (config.stats) counting.snapshot().print();
         return;
     }
@@ -223,6 +230,8 @@ fn runIteration(
         bytes_received: *std.atomic.Value(usize),
         verbose: bool,
         handshake_only: bool,
+        echo_only: bool,
+        echo_connection: *?netz.quic.handshake.EstablishedConnection,
         server_key: EcdsaP256Sha256.KeyPair,
         err: ?anyerror = null,
 
@@ -260,13 +269,20 @@ fn runIteration(
                     .max_crypto_buffer = 64 * 1024,
                 },
             );
+            if (shared.echo_only) {
+                // Transfer ownership to the benchmark thread. This mirrors
+                // quicz's sequential post-handshake loop so echo latency does
+                // not include one executor handoff per half round trip.
+                shared.echo_connection.* = established;
+                shared.ready.store(true, .release);
+                return;
+            }
             defer established.deinit();
             shared.ready.store(true, .release);
             if (shared.handshake_only) {
                 shared.finished.store(true, .release);
                 return;
             }
-
             var packets_since_ack: usize = 0;
             while (shared.bytes_received.load(.acquire) <
                 shared.transfer_bytes)
@@ -307,6 +323,7 @@ fn runIteration(
     var failed = std.atomic.Value(bool).init(false);
     var cancelled = std.atomic.Value(bool).init(false);
     var bytes_received = std.atomic.Value(usize).init(0);
+    var echo_connection: ?netz.quic.handshake.EstablishedConnection = null;
     var shared = Shared{
         .endpoint = &server_endpoint,
         .server_cid = &server_cid,
@@ -322,6 +339,8 @@ fn runIteration(
         .bytes_received = &bytes_received,
         .verbose = config.verbose,
         .handshake_only = config.mode == .handshake,
+        .echo_only = config.mode == .echo,
+        .echo_connection = &echo_connection,
         .server_key = server_key,
     };
     // Use the benchmark's existing I/O executor rather than creating and
@@ -398,6 +417,26 @@ fn runIteration(
             .payload_bytes_received = 0,
         };
     }
+    if (config.mode == .echo) {
+        server_future.await(io);
+        joined = true;
+        if (shared.err) |err| return err;
+        var server_established = echo_connection orelse
+            return error.ServerFailed;
+        defer server_established.deinit();
+        const result = try runEchoRounds(
+            allocator,
+            &established.connection,
+            &server_established.connection,
+            config.iterations,
+        );
+        return .{
+            .elapsed_ns = result.elapsed_ns,
+            .client_stats = established.connection.stats(),
+            .gso_enabled = client_endpoint.gsoSendEnabled(),
+            .payload_bytes_received = result.payload_bytes_received,
+        };
+    }
 
     const started_ns = nowNs(io);
     const deadline_ns = started_ns +| transfer_timeout_ns;
@@ -449,6 +488,106 @@ fn drainReceivedStreams(
         );
         _ = total_received.fetchAdd(count, .release);
     }
+}
+
+const EchoResult = struct {
+    elapsed_ns: u64,
+    payload_bytes_received: usize,
+};
+
+fn runEchoRounds(
+    allocator: std.mem.Allocator,
+    client: *netz.quic.one_rtt.Connection,
+    server: *netz.quic.one_rtt.Connection,
+    iterations: usize,
+) !EchoResult {
+    const latencies = try allocator.alloc(u64, iterations);
+    defer allocator.free(latencies);
+    var payload: [echo_payload_bytes]u8 = @splat('E');
+    const benchmark_started = nowNs(client.endpoint.io);
+    for (latencies, 0..) |*latency, iteration| {
+        const offset = std.math.mul(
+            u64,
+            iteration,
+            echo_payload_bytes,
+        ) catch return error.InvalidEchoPayload;
+        const started = nowNs(client.endpoint.io);
+        const frame = netz.quic.Frame{ .stream = .{
+            .stream_id = 0,
+            .offset = offset,
+            .data = &payload,
+            .fin = false,
+        } };
+        if (iteration == 0) {
+            try client.send(&.{frame});
+        } else {
+            // Each request carries the ACK for the preceding response, just
+            // as the server response carries the ACK for this request.
+            try client.sendWithPendingAck(&.{frame}, 0);
+        }
+        try server.servicePacket();
+        const request = server.availableReceivedStream(0) orelse
+            return error.MissingEchoPayload;
+        if (request.len != echo_payload_bytes or
+            !std.mem.eql(u8, request, &payload))
+        {
+            return error.InvalidEchoPayload;
+        }
+        try server.sendWithPendingAck(&.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = offset,
+            .data = request,
+            .fin = false,
+        } }}, 0);
+        try server.releaseReceivedCapacity(0, request.len);
+
+        try client.servicePacket();
+        const echoed = client.availableReceivedStream(0) orelse
+            return error.MissingEchoPayload;
+        if (echoed.len != echo_payload_bytes or
+            !std.mem.eql(u8, echoed, &payload))
+        {
+            return error.InvalidEchoPayload;
+        }
+        latency.* = nowNs(client.endpoint.io) -| started;
+        try client.releaseReceivedCapacity(0, echoed.len);
+    }
+    const elapsed = nowNs(client.endpoint.io) -| benchmark_started;
+    std.mem.sort(u64, latencies, {}, lessThanU64);
+    const roundtrips_per_second: f64 = if (elapsed == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(iterations)) *
+            @as(f64, @floatFromInt(std.time.ns_per_s)) /
+            @as(f64, @floatFromInt(elapsed));
+    const verified = std.math.mul(
+        usize,
+        iterations,
+        echo_payload_bytes,
+    ) catch return error.InvalidEchoPayload;
+    std.debug.print(
+        "QUIC real TLS 1.3 STREAM echo benchmark\n" ++
+            "  iterations: {d}\n" ++
+            "  payload bytes/roundtrip: {d}\n" ++
+            "  roundtrips/s: {d:.1}\n" ++
+            "  p50 ns: {d}\n" ++
+            "  p99 ns: {d}\n" ++
+            "  p99.9 ns: {d}\n" ++
+            "  payload bytes verified: {d}\n",
+        .{
+            iterations,
+            echo_payload_bytes,
+            roundtrips_per_second,
+            percentile(latencies, 50, 100),
+            percentile(latencies, 99, 100),
+            percentile(latencies, 999, 1000),
+            verified,
+        },
+    );
+    return .{
+        .elapsed_ns = elapsed,
+        .payload_bytes_received = verified,
+    };
 }
 
 fn sendTransfer(
@@ -670,15 +809,19 @@ fn parseArgs(
     _ = args.next();
 
     var config: Config = .{};
+    var iterations_set = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--mode=upload")) {
             config.mode = .upload;
         } else if (std.mem.eql(u8, arg, "--mode=handshake")) {
             config.mode = .handshake;
+        } else if (std.mem.eql(u8, arg, "--mode=echo")) {
+            config.mode = .echo;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
             );
+            iterations_set = true;
         } else if (std.mem.startsWith(u8, arg, "--transfer-bytes=")) {
             config.transfer_bytes = try parsePositiveUsize(
                 arg["--transfer-bytes=".len..],
@@ -703,6 +846,11 @@ fn parseArgs(
             return error.InvalidArgument;
         }
     }
+    if (config.mode == .echo and !iterations_set) {
+        config.iterations = default_echo_iterations;
+    }
+    if (config.mode == .echo) config.transfer_bytes =
+        config.iterations *| echo_payload_bytes;
     if (config.streams > max_streams or
         config.batch_packets > max_packet_batch_size or
         config.streams > config.transfer_bytes)
@@ -710,6 +858,29 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn runEchoBenchmark(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
+) !void {
+    const result = try runIteration(
+        allocator,
+        io,
+        config,
+        0,
+        server_key,
+    );
+    const expected = std.math.mul(
+        usize,
+        config.iterations,
+        echo_payload_bytes,
+    ) catch return error.InvalidEchoPayload;
+    if (result.payload_bytes_received != expected) {
+        return error.InvalidEchoPayload;
+    }
 }
 
 fn runHandshakeBenchmark(

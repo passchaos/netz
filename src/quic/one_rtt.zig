@@ -2921,6 +2921,47 @@ pub const Connection = struct {
         self.ackDelaySent();
     }
 
+    /// Send application frames together with the cumulative ACK currently
+    /// pending for received packets.
+    ///
+    /// Echo/RPC-style protocols naturally produce a response immediately after
+    /// reading a request. Combining the ACK with that response avoids an extra
+    /// protected UDP datagram and syscall while preserving the ordinary ACK
+    /// range, recovery, congestion, and delayed-ACK bookkeeping. If sending
+    /// fails, `ackDelaySent` is not called and the ACK remains pending.
+    pub fn sendWithPendingAck(
+        self: *Connection,
+        frames: []const quic.Frame,
+        ack_delay: u64,
+    ) Error!void {
+        if (frames.len == 0) return self.sendAck(ack_delay);
+        var stack_ranges: [
+            quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity
+        ]quic.AckRange = undefined;
+        var heap_ranges: ?[]quic.AckRange = null;
+        defer if (heap_ranges) |ranges| self.endpoint.allocator.free(ranges);
+        const ack = try self.ackFrameForSend(
+            ack_delay,
+            &stack_ranges,
+            &heap_ranges,
+        );
+        const combined_len = std.math.add(usize, frames.len, 1) catch
+            return error.OutOfMemory;
+        var stack_frames: [8]quic.Frame = undefined;
+        const heap_frames = if (combined_len > stack_frames.len)
+            try self.endpoint.allocator.alloc(quic.Frame, combined_len)
+        else
+            null;
+        defer if (heap_frames) |allocated| {
+            self.endpoint.allocator.free(allocated);
+        };
+        const combined = heap_frames orelse stack_frames[0..combined_len];
+        @memcpy(combined[0..frames.len], frames);
+        combined[frames.len] = .{ .ack = ack };
+        try self.send(combined);
+        self.ackDelaySent();
+    }
+
     pub fn sendAckWithEcn(self: *Connection, ack_delay: u64, ecn_counts: quic.EcnCounts) Error!void {
         var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
         var heap_ranges: ?[]quic.AckRange = null;
@@ -4997,6 +5038,9 @@ pub const Connection = struct {
                         self.rtt_stats.smoothedOrInitial(),
                     );
                     self.congestion.endAck();
+                    if (acked.largest_acknowledged_sent) |acknowledged| {
+                        self.received.pruneAckedRanges(acknowledged);
+                    }
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
                         self.recordPacketsLost(lost.packets);

@@ -876,6 +876,42 @@ original captured 638.0 conn/s sample, the current 824.1-830.7 conn/s pair is
 CertificateVerify validation, so this is an internal improvement rather than
 a cross-stack superiority claim.
 
+### Raw QUIC real-handshake 1 KiB echo latency
+
+Captured on 2026-08-20 with one real authenticated handshake followed by 5,000
+ordered 1 KiB STREAM round trips on stream 0. Both endpoints run sequentially
+on CPU 0, ACKs are piggybacked on the next request/response, and every returned
+payload byte is checked before its latency sample is accepted:
+
+```sh
+taskset -c 0 zig build bench-quic-handshake-stream \
+  -Doptimize=ReleaseFast -- --mode=echo
+taskset -c 0 /tmp/quicz-echo-only
+```
+
+Three consecutive pinned runs:
+
+```text
+netz:
+  p50:   20.65-20.71 us
+  p99:   30.53-31.97 us
+  p99.9: 38.74-47.98 us
+  rate:  47,780-47,995 round trips/s
+
+quicz:
+  p50:   10.4-10.5 us
+  p99:   16.1-16.4 us
+  p99.9: 205.4-212.9 us
+```
+
+The netz implementation has a slower median and p99 but a 4.3-5.5x lower
+p99.9 tail in this controlled run. This is not a whole-stack superiority
+claim. The new `sendWithPendingAck` transport API combines an application
+response with its cumulative ACK, and receiving an ACK-of-ACK now prunes old
+received packet-number ranges. A 5,000-round `--stats` run made 159 total
+allocations, ended with zero live bytes, and verified all 5,120,000 echoed
+payload bytes.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary
