@@ -30,8 +30,10 @@ const multi_stream_paced_body_chunk_bytes: usize = 3000;
 const large_multi_stream_body_bytes: usize = 64 * 1024 * 1024;
 const large_multi_stream_paced_body_chunk_bytes: usize = 6000;
 // Both endpoints run in this process while the host caps UDP receive buffers
-// at 212,992 bytes. Preserve the old per-round drain opportunity after moving
-// response scheduling into the runtime; production sessions default to zero.
+// at 212,992 bytes. Let the client drain after a small, fixed packet budget.
+// Counting socket-visible packets avoids the old 64KiB interval becoming
+// eleven large packets and phase-locking badly with ACK/recovery.
+const multi_stream_response_packets_per_delay: usize = 3;
 const multi_stream_response_batch_delay_ns: u64 = 50_000;
 const upload_trace_initial_window: usize = 256 * 1024;
 
@@ -90,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
         \\  mode: {s}
         \\  streams: {d}
         \\  response scheduler: {s}
+        \\  response yield packets: {d}
         \\  body batch: {}
         \\  GRO receive: {}
         \\  1-RTT datagram bytes: {d}
@@ -103,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", responseSchedulerDelayPackets(config), config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -212,7 +215,7 @@ fn runIteration(
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
-                .response_scheduler_batch_delay_bytes = if (config.mode == .download and config.streams > 1) round_robin_chunk_bytes else 0,
+                .response_scheduler_batch_delay_packets = responseSchedulerDelayPackets(config),
                 .response_scheduler_batch_delay_ns = if (config.mode == .download and config.streams > 1) multi_stream_response_batch_delay_ns else 0,
                 .response_scheduler_max_batch_packets = if (config.enable_body_batch) max_streams else 1,
                 .max_concurrent_request_streams = max_streams,
@@ -875,6 +878,11 @@ fn transferPacedBodyChunkBytes(config: Config) usize {
 fn transferRoundRobinChunkBytes(config: Config) usize {
     return config.round_robin_chunk_bytes orelse
         if (config.streams == 1) single_stream_round_robin_chunk_bytes else default_round_robin_chunk_bytes;
+}
+
+fn responseSchedulerDelayPackets(config: Config) usize {
+    if (config.mode != .download or config.streams == 1) return 0;
+    return multi_stream_response_packets_per_delay;
 }
 
 fn transferStreamBufferBytes(config: Config) usize {

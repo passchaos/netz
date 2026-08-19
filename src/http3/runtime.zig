@@ -2124,6 +2124,12 @@ pub const HandshakeSessionOptions = struct {
     /// datagrams may set them so the peer thread periodically drains a small
     /// kernel receive queue without delaying every packet-sized scheduler pass.
     response_scheduler_batch_delay_bytes: usize = 0,
+    /// Optional delay after this many socket-visible response DATA packets.
+    ///
+    /// Packet-count pacing is preferable for same-process benchmarks because
+    /// it stays stable when the DATA chunk size changes. Either threshold may
+    /// be enabled; reaching the first one resets both counters.
+    response_scheduler_batch_delay_packets: usize = 0,
     response_scheduler_batch_delay_ns: u64 = 0,
     /// Maximum number of independently prioritized response streams submitted
     /// in one transport batch. One preserves sequential UDP writes while still
@@ -2717,7 +2723,7 @@ pub const HandshakeServerSession = struct {
             quic.one_rtt.max_batch_packets,
         );
         var next_stream: usize = 0;
-        var bytes_since_delay: usize = 0;
+        var delay_budget = response_scheduler.DelayBudget{};
         while (remaining_responses != 0) {
             self.refreshResponseCandidates(
                 responses,
@@ -2779,6 +2785,7 @@ pub const HandshakeServerSession = struct {
                 },
                 else => return err,
             };
+            var sent_body_bytes: usize = 0;
             for (chunks[0..sent_count]) |chunk| {
                 const index = response_index.get(chunk.stream_id) orelse
                     return error.UnexpectedStream;
@@ -2786,12 +2793,14 @@ pub const HandshakeServerSession = struct {
                 if (offsets[index] == responses[index].data.len) {
                     remaining_responses -= 1;
                 }
-                bytes_since_delay +|= chunk.data.len;
+                sent_body_bytes +|= chunk.data.len;
             }
-            if (self.options.response_scheduler_batch_delay_bytes != 0 and
-                self.options.response_scheduler_batch_delay_ns != 0 and
-                bytes_since_delay >=
-                    self.options.response_scheduler_batch_delay_bytes)
+            delay_budget.record(sent_body_bytes, sent_count);
+            if (self.options.response_scheduler_batch_delay_ns != 0 and
+                delay_budget.due(
+                    self.options.response_scheduler_batch_delay_bytes,
+                    self.options.response_scheduler_batch_delay_packets,
+                ))
             {
                 const delay_ns = std.math.cast(
                     i64,
@@ -2802,7 +2811,7 @@ pub const HandshakeServerSession = struct {
                     .fromNanoseconds(delay_ns),
                     .awake,
                 );
-                bytes_since_delay = 0;
+                delay_budget.reset();
             }
             if (selection.exclusive_index == null) {
                 // Rotate only incremental passes. An exclusive stream retains

@@ -81,6 +81,37 @@ pub const Iterator = struct {
     }
 };
 
+/// Socket-visible progress accumulated toward an optional cooperative yield.
+///
+/// Keeping both dimensions lets applications retain a byte-oriented policy
+/// while benchmarks use packet cadence that is independent of DATA chunk size.
+pub const DelayBudget = struct {
+    bytes: usize = 0,
+    packets: usize = 0,
+
+    pub fn record(
+        self: *DelayBudget,
+        body_bytes: usize,
+        packet_count: usize,
+    ) void {
+        self.bytes +|= body_bytes;
+        self.packets +|= packet_count;
+    }
+
+    pub fn due(
+        self: DelayBudget,
+        byte_limit: usize,
+        packet_limit: usize,
+    ) bool {
+        return (byte_limit != 0 and self.bytes >= byte_limit) or
+            (packet_limit != 0 and self.packets >= packet_limit);
+    }
+
+    pub fn reset(self: *DelayBudget) void {
+        self.* = .{};
+    }
+};
+
 /// Clamp an application batch preference to the transport's fixed packet
 /// scratch capacity. A zero preference means sequential submission rather
 /// than disabling response progress.
@@ -255,4 +286,17 @@ test "HTTP/3 scheduler iterator visits selected responses circularly" {
     try std.testing.expectEqual(@as(?usize, 2), iterator.next());
     try std.testing.expectEqual(@as(?usize, 0), iterator.next());
     try std.testing.expectEqual(@as(?usize, null), iterator.next());
+}
+
+test "HTTP/3 scheduler delay budget supports bytes or packets" {
+    var budget = DelayBudget{};
+    budget.record(3000, 1);
+    try std.testing.expect(!budget.due(6000, 3));
+    budget.record(3000, 1);
+    try std.testing.expect(budget.due(6000, 3));
+    try std.testing.expect(!budget.due(0, 3));
+    budget.record(3000, 1);
+    try std.testing.expect(budget.due(0, 3));
+    budget.reset();
+    try std.testing.expect(!budget.due(1, 1));
 }
