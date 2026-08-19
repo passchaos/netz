@@ -83,6 +83,8 @@ pub const StreamingHead = struct {
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     batch_encoded: std.ArrayList(u8) = .empty,
+    batch_parts: std.ArrayList([]const u8) = .empty,
+    batch_part_descriptors: std.ArrayList(BatchPart) = .empty,
     headers: std.ArrayList(http1.Header) = .empty,
     request_headers: std.ArrayList(http1.Header) = .empty,
     trailer_headers: std.ArrayList(http1.Header) = .empty,
@@ -106,6 +108,8 @@ pub const Scratch = struct {
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         self.encoded.deinit(allocator);
         self.batch_encoded.deinit(allocator);
+        self.batch_parts.deinit(allocator);
+        self.batch_part_descriptors.deinit(allocator);
         self.headers.deinit(allocator);
         self.request_headers.deinit(allocator);
         self.trailer_headers.deinit(allocator);
@@ -115,6 +119,11 @@ pub const Scratch = struct {
         self.streaming_parts.deinit(allocator);
         self.* = undefined;
     }
+};
+
+const BatchPart = union(enum) {
+    encoded: struct { start: usize, len: usize },
+    borrowed: []const u8,
 };
 
 pub const MessageParts = struct {
@@ -555,13 +564,23 @@ pub fn prepareResponse(
     return .{ .header = scratch.encoded.items, .body = options.body };
 }
 
-/// Encode a complete response pipeline before the caller performs any I/O.
-pub fn prepareResponses(
+/// Validate a complete response pipeline and prepare borrowed write slices.
+///
+/// Heads and chunked messages are retained in `batch_encoded`; ordinary
+/// fixed bodies remain borrowed. Descriptors use offsets while encoded storage
+/// grows, then resolve to stable slices only after every response validates.
+pub fn prepareResponseParts(
     allocator: std.mem.Allocator,
     responses: []const ResponseOptions,
     scratch: *Scratch,
-) Error![]const u8 {
+) Error![]const []const u8 {
     scratch.batch_encoded.clearRetainingCapacity();
+    scratch.batch_parts.clearRetainingCapacity();
+    scratch.batch_part_descriptors.clearRetainingCapacity();
+    try scratch.batch_part_descriptors.ensureTotalCapacity(
+        allocator,
+        responses.len *| 2,
+    );
     for (responses) |response| {
         scratch.encoded.clearRetainingCapacity();
         scratch.headers.clearRetainingCapacity();
@@ -574,8 +593,20 @@ pub fn prepareResponses(
             scratch,
         );
         try encodeResponseHead(allocator, response, scratch);
+        const head_start = scratch.batch_encoded.items.len;
+        try scratch.batch_encoded.appendSlice(
+            allocator,
+            scratch.encoded.items,
+        );
+        scratch.batch_part_descriptors.appendAssumeCapacity(.{
+            .encoded = .{
+                .start = head_start,
+                .len = scratch.encoded.items.len,
+            },
+        });
         if (!framing.suppress_body) {
             if (framing.use_chunked) {
+                scratch.encoded.clearRetainingCapacity();
                 const chunks = [_][]const u8{response.body};
                 try encodeChunked(
                     &scratch.encoded,
@@ -583,19 +614,35 @@ pub fn prepareResponses(
                     &chunks,
                     response.trailers,
                 );
-            } else {
-                try scratch.encoded.appendSlice(
+                const chunk_start = scratch.batch_encoded.items.len;
+                try scratch.batch_encoded.appendSlice(
                     allocator,
-                    response.body,
+                    scratch.encoded.items,
                 );
+                scratch.batch_part_descriptors.appendAssumeCapacity(.{
+                    .encoded = .{
+                        .start = chunk_start,
+                        .len = scratch.encoded.items.len,
+                    },
+                });
+            } else {
+                scratch.batch_part_descriptors.appendAssumeCapacity(.{
+                    .borrowed = response.body,
+                });
             }
         }
-        try scratch.batch_encoded.appendSlice(
-            allocator,
-            scratch.encoded.items,
-        );
     }
-    return scratch.batch_encoded.items;
+    try scratch.batch_parts.ensureTotalCapacity(
+        allocator,
+        scratch.batch_part_descriptors.items.len,
+    );
+    for (scratch.batch_part_descriptors.items) |descriptor| {
+        scratch.batch_parts.appendAssumeCapacity(switch (descriptor) {
+            .encoded => |range| scratch.batch_encoded.items[range.start .. range.start + range.len],
+            .borrowed => |body| body,
+        });
+    }
+    return scratch.batch_parts.items;
 }
 
 const ResponseFraming = struct {

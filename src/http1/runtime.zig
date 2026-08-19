@@ -2119,12 +2119,48 @@ fn writeResponsesToTransportScratch(
     responses: []const ResponseOptions,
     scratch: *WriteScratch,
 ) Error!void {
-    const batch = try runtime_write.prepareResponses(
+    if (responseBatchBodyBytes(responses) > response_batch_borrow_threshold) {
+        const parts = try runtime_write.prepareResponseParts(
+            allocator,
+            responses,
+            scratch,
+        );
+        try transport.writeAllSlices(parts);
+        return;
+    }
+    try writeResponsesCoalesced(
+        allocator,
+        transport,
+        responses,
+        scratch,
+    );
+}
+
+const response_batch_borrow_threshold: usize = 16 * 1024;
+
+fn responseBatchBodyBytes(responses: []const ResponseOptions) usize {
+    var total: usize = 0;
+    for (responses) |response| total +|= response.body.len;
+    return total;
+}
+
+fn writeResponsesCoalesced(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    responses: []const ResponseOptions,
+    scratch: *WriteScratch,
+) Error!void {
+    const parts = try runtime_write.prepareResponseParts(
         allocator,
         responses,
         scratch,
     );
-    try transport.writeAll(batch);
+    scratch.encoded.clearRetainingCapacity();
+    var total: usize = 0;
+    for (parts) |part| total +|= part.len;
+    try scratch.encoded.ensureTotalCapacity(allocator, total);
+    for (parts) |part| scratch.encoded.appendSliceAssumeCapacity(part);
+    try transport.writeAll(scratch.encoded.items);
 }
 
 const ServeLoopResponse = struct {
@@ -2592,6 +2628,69 @@ test "HTTP/1 response batch validation is transactional" {
     );
     // The invalid batch never reaches the transport. Scratch content itself is
     // internal and may be reused/partially encoded for the next attempt.
+}
+
+test "HTTP/1 response batch borrows fixed bodies after validation" {
+    const allocator = std.testing.allocator;
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+
+    var first_body = [_]u8{ 'f', 'i', 'r', 's', 't' };
+    var second_body = [_]u8{ 's', 'e', 'c', 'o', 'n', 'd' };
+    const responses = [_]ResponseOptions{
+        .{ .body = &first_body },
+        .{ .body = &second_body },
+    };
+    const parts = try runtime_write.prepareResponseParts(
+        allocator,
+        &responses,
+        &scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 4), parts.len);
+    try std.testing.expect(parts[1].ptr == first_body[0..].ptr);
+    try std.testing.expect(parts[3].ptr == second_body[0..].ptr);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        parts[0],
+        "HTTP/1.1 200 OK\r\n",
+    ));
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        parts[2],
+        "HTTP/1.1 200 OK\r\n",
+    ));
+
+    // Borrowing is observable: mutation after validation changes the body
+    // slice that would be submitted, while encoded heads remain stable.
+    first_body[0] = 'F';
+    try std.testing.expectEqualStrings("First", parts[1]);
+}
+
+test "HTTP/1 response batch retains chunk framing beside borrowed bodies" {
+    const allocator = std.testing.allocator;
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    const responses = [_]ResponseOptions{
+        .{ .body = "fixed" },
+        .{
+            .headers = &.{.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            }},
+            .body = "chunk",
+        },
+    };
+    const parts = try runtime_write.prepareResponseParts(
+        allocator,
+        &responses,
+        &scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 4), parts.len);
+    try std.testing.expectEqualStrings("fixed", parts[1]);
+    try std.testing.expectEqualStrings(
+        "5\r\nchunk\r\n0\r\n\r\n",
+        parts[3],
+    );
 }
 
 fn maybeWriteContinue(transport: RuntimeTransport, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {

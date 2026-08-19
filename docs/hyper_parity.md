@@ -60,6 +60,10 @@ benchmark response:
   (or one TLS flush) instead of copied into a temporary whole-message buffer;
 - `Connection.writeResponses` validates and flushes a response pipeline in one
   transport write, matching Hyper's `pipeline_flush` scheduling shape;
+- small response pipelines remain coalesced for minimal syscall/iovec overhead,
+  while pipelines above 16 KiB validate every response first, retain only
+  encoded heads/chunk framing, and borrow fixed bodies into one writev instead
+  of copying the entire batch;
 - `Connection.readRequestBatchInto` parses request heads and bodies into caller
   storage, borrows one receive buffer and consumes its prefix once per batch;
 - borrowed head parsing scans CRLF-delimited lines once instead of first
@@ -68,6 +72,12 @@ benchmark response:
 The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the
 general path.
+
+The pipeline benchmark accepts `--large-body` (16 × 64 KiB responses) to cover
+the borrowed-body branch. Three CPU-0-pinned ReleaseFast runs completed at
+10.66–10.79 us/request versus 15.43 us/request with the former whole-batch
+copy, a 1.43–1.45x local improvement. The default same-shape Hyper 13-byte
+benchmark remains coalesced and measured 0.742 us/request after this change.
 
 ## HTTP/1 bidirectional 1-MiB streaming bodies
 

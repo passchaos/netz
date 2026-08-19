@@ -591,7 +591,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 
 - HTTP/1 borrowed request-head parsing versus owned full request parsing,
 - HTTP/1 persistent 16-request pipeline round trips with caller-storage batch
-  parsing and one-flush response batches, matching Hyper's `hello_world_16`
+  parsing, small-response coalescing, and transactional large fixed-body
+  vectored batches that borrow payloads, matching Hyper's `hello_world_16`
   benchmark shape,
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/2 persistent h2c round trips matching Hyper's consecutive empty,

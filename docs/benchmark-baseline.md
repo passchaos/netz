@@ -84,6 +84,13 @@ a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
 
+The same executable now accepts `--large-body`. With sixteen 64-KiB fixed
+responses, the runtime validates the whole pipeline but borrows bodies into a
+single writev rather than building a 1-MiB concatenation. Three CPU-0 samples
+were 10.66–10.79 us/request, down from a captured 15.43 us/request on the old
+copying path (1.43–1.45x faster). This is an internal branch comparison rather
+than an equal-shape Hyper result.
+
 ### HTTP/1 persistent bidirectional 1-MiB bodies
 
 Captured on 2026-08-19 against the checked-in same-shape Hyper harness under

@@ -8,7 +8,8 @@ const request =
     "GET / HTTP/1.1\r\n" ++
     "Host: localhost\r\n" ++
     "\r\n";
-const response_body = "Hello, World!";
+const default_response_body_bytes: usize = "Hello, World!".len;
+const large_response_body_bytes: usize = 64 * 1024;
 // Hyper's HTTP/1 server automatically adds a 29-byte IMF-fixdate. Keep the
 // exact 89-byte response wire size in this same-shape benchmark rather than
 // giving netz a smaller 52-byte response workload.
@@ -17,17 +18,28 @@ const response_headers = [_]netz.http1.Header{.{
     .name = "date",
     .value = response_date,
 }};
-const response_bytes: usize =
-    "HTTP/1.1 200 OK\r\n".len +
-    "Content-Length: 13\r\n".len +
-    "date: ".len +
-    response_date.len +
-    "\r\n".len +
-    "\r\n".len +
-    response_body.len;
-
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const response_body_bytes = parseResponseBodyBytes(init) catch
+        return error.InvalidArgument;
+    const response_body = try allocator.alloc(u8, response_body_bytes);
+    defer allocator.free(response_body);
+    @memset(response_body, 'x');
+    var content_length_buffer: [32]u8 = undefined;
+    const content_length = try std.fmt.bufPrint(
+        &content_length_buffer,
+        "{}",
+        .{response_body_bytes},
+    );
+    const response_bytes: usize =
+        "HTTP/1.1 200 OK\r\n".len +
+        "Content-Length: \r\n".len +
+        content_length.len +
+        "date: ".len +
+        response_date.len +
+        "\r\n".len +
+        "\r\n".len +
+        response_body.len;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -43,19 +55,20 @@ pub fn main() !void {
     const Shared = struct {
         server: *netz.http1.runtime.Server,
         failed: *std.atomic.Value(bool),
+        response_body: []const u8,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
+            runFallible(shared) catch |err| {
                 shared.err = err;
                 shared.failed.store(true, .release);
             };
         }
 
         fn runFallible(
-            server_ptr: *netz.http1.runtime.Server,
+            shared: *@This(),
         ) !void {
-            var connection = try server_ptr.accept();
+            var connection = try shared.server.accept();
             defer connection.close();
             var responses: [pipelined_requests]netz.http1.runtime.ResponseOptions = undefined;
             var heads: [pipelined_requests]netz.http1.RequestHead = undefined;
@@ -76,7 +89,7 @@ pub fn main() !void {
                     if (body.len != 0) return error.UnexpectedRequestBody;
                     response_options.* = .{
                         .headers = &response_headers,
-                        .body = response_body,
+                        .body = shared.response_body,
                         .request_method = head.method,
                     };
                 }
@@ -87,7 +100,11 @@ pub fn main() !void {
     };
 
     var failed = std.atomic.Value(bool).init(false);
-    var shared = Shared{ .server = &server, .failed = &failed };
+    var shared = Shared{
+        .server = &server,
+        .failed = &failed,
+        .response_body = response_body,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try server.address().connect(io, .{ .mode = .stream });
@@ -135,6 +152,7 @@ pub fn main() !void {
         \\  pipeline depth: {d}
         \\  warmup iterations: {d}
         \\  iterations: {d}
+        \\  response body bytes: {d}
         \\  requests: {d}
         \\  ns/request: {d}
         \\  requests/s: {d}
@@ -144,11 +162,30 @@ pub fn main() !void {
         pipelined_requests,
         warmup_iterations,
         iterations,
+        response_body_bytes,
         request_count,
         elapsed / request_count,
         requests_per_second,
         checksum,
     });
+}
+
+fn parseResponseBodyBytes(init: std.process.Init) !usize {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var value = default_response_body_bytes;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--large-body")) {
+            value = large_response_body_bytes;
+        } else if (std.mem.startsWith(u8, arg, "--body-bytes=")) {
+            value = try std.fmt.parseInt(
+                usize,
+                arg["--body-bytes=".len..],
+                10,
+            );
+        } else return error.InvalidArgument;
+    }
+    if (value == 0) return error.InvalidArgument;
+    return value;
 }
 
 fn exchangeBatch(
