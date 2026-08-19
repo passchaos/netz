@@ -2078,6 +2078,64 @@ test "QUIC 1-RTT connection reuses protected send storage" {
     try std.testing.expectEqual(@as(usize, 0), connection.send_packet_buffer.items.len);
 }
 
+test "QUIC 1-RTT STREAM send keeps rollback credit on stack" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    var local_endpoint = try quic.runtime.Endpoint.bind(
+        counting.allocator(),
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer local_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x4a} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .max_datagram_size = 4096,
+    });
+    defer connection.deinit();
+    try connection.sendAt(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = &.{},
+    } }}, 50);
+    try connection.sent.packets.ensureTotalCapacity(counting.allocator(), 4);
+    try connection.sendAt(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = &.{},
+    } }}, 75);
+    // Two acknowledged-style sends populate the cache's bounded free stack,
+    // so the guarded send below exercises rollback metadata rather than a
+    // first-use recovery allocation.
+    _ = try connection.recovery.applyAck(.{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+    });
+    counting.fail_index = counting.alloc_index;
+
+    try connection.sendAt(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = &.{},
+    } }}, 100);
+    try std.testing.expect(!counting.has_induced_failure);
+}
+
 test "QUIC 1-RTT pacing gates in-flight packets transactionally" {
     const allocator = std.testing.allocator;
 

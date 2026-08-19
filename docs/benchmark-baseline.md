@@ -650,6 +650,15 @@ allocation-free teardown. The 16 MiB/four-stream smoke remained at 275.41
 MiB/s with 9,551 allocations, while cumulative allocation fell from the prior
 24.4-25.6 MB range to 24,085,274 bytes in the captured run.
 
+Stack sampling then identified the dominant steady-state 144-byte allocation
+at `sendWithEcnAtRaw`: every STREAM packet built a temporary rollback-credit
+ArrayList even though ordinary packets touch one stream. That journal now uses
+16 fixed entries and spills only unusually wide packets. Against the prior
+9,519-9,585 range, three identical 16 MiB/four-stream runs used only
+2,525-2,532 allocations (73.4-73.6% fewer) while sustaining 241.94-272.26
+MiB/s. A failing-allocator STREAM send test proves warmed recovery/sent storage
+no longer hides a rollback-journal allocation.
+
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 
 ```text

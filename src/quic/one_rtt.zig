@@ -1408,8 +1408,13 @@ pub const Connection = struct {
         }
 
         var reserved_connection: u64 = 0;
-        var reserved_streams: std.ArrayList(ReservedStreamCredit) = .empty;
-        defer reserved_streams.deinit(self.endpoint.allocator);
+        var stack_reserved_streams: [16]ReservedStreamCredit = undefined;
+        var reserved_streams: std.ArrayList(ReservedStreamCredit) =
+            .initBuffer(&stack_reserved_streams);
+        var reserved_streams_allocated = false;
+        defer if (reserved_streams_allocated) {
+            reserved_streams.deinit(self.endpoint.allocator);
+        };
         errdefer {
             for (reserved_streams.items) |reserved| {
                 if (self.findSendStreamEntry(reserved.stream_id)) |entry| {
@@ -1429,7 +1434,7 @@ pub const Connection = struct {
             // Record a zero-sized reservation before mutating stream flow so an
             // allocator failure cannot leave `entry.flow.used` inflated.  Once
             // reserve succeeds, update the rollback byte count in place.
-            try reserved_streams.append(self.endpoint.allocator, .{
+            try appendReservedStreamCredit(&reserved_streams, &reserved_streams_allocated, self.endpoint.allocator, .{
                 .stream_id = credit.stream_id,
                 .bytes = 0,
             });
@@ -6618,6 +6623,31 @@ fn addReservedStreamCredit(
         .stream_id = stream_id,
         .bytes = bytes,
     });
+}
+
+fn appendReservedStreamCredit(
+    credits: *std.ArrayList(ReservedStreamCredit),
+    allocated: *bool,
+    allocator: std.mem.Allocator,
+    credit: ReservedStreamCredit,
+) Error!void {
+    if (!allocated.*) {
+        if (credits.items.len < credits.capacity) {
+            credits.appendAssumeCapacity(credit);
+            return;
+        }
+        // A normal packet touches one stream. Keep rollback metadata on the
+        // stack and spill only unusually wide packets without ever asking an
+        // allocator to grow caller-owned stack storage.
+        var grown = try std.ArrayList(ReservedStreamCredit).initCapacity(
+            allocator,
+            credits.capacity * 2,
+        );
+        grown.appendSliceAssumeCapacity(credits.items);
+        credits.* = grown;
+        allocated.* = true;
+    }
+    try credits.append(allocator, credit);
 }
 
 fn reservedStreamBytes(
