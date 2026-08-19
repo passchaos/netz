@@ -108,8 +108,8 @@ pub fn main(init: std.process.Init) !void {
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
                 shared.err = err;
+                shared.finished.set(shared.io);
             };
-            shared.finished.set(shared.io);
         }
 
         fn runFallible(shared: *@This()) !void {
@@ -169,6 +169,10 @@ pub fn main(init: std.process.Init) !void {
             {
                 return error.IncompleteTransfer;
             }
+            // Application completion precedes session teardown. The client
+            // progress future below is canceled only after this point, so all
+            // terminal FIN/reset packets have already been validated.
+            shared.finished.set(shared.io);
         }
     };
 
@@ -280,8 +284,19 @@ pub fn main(init: std.process.Init) !void {
             try client.finishStream(stream_id);
         }
     }
+    const Progress = struct {
+        fn run(session: *netz.webtransport.runtime.HandshakeClientSession) ?anyerror {
+            while (true) session.serviceTransport() catch |err| return err;
+        }
+    };
+    var progress = try std.Io.concurrent(io, Progress.run, .{&client});
     shared.finished.waitUncancelable(io);
     const elapsed_ns = nowNs(io) -| started_ns;
+    const progress_result = progress.cancel(io);
+    if (progress_result) |err| switch (err) {
+        error.Canceled => {},
+        else => return err,
+    };
     thread.join();
     if (shared.err) |err| return err;
     const total_bytes = expectedReceivedBytes(config);

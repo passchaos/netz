@@ -176,9 +176,12 @@ lightweight protected transport does not own a stateful recovery connection.
    and validates every reset code/direction alongside FIN/data checksums. A
    64-stream smoke reset 32 streams after 256 bytes while the other 32 delivered
    16 KiB each: 532,480 verified bytes, 350 read events, and complete terminal
-   coverage. `--loss-pct=5` now enables a fixed-seed endpoint interceptor only
-   after the authenticated CONNECT; five 16-stream runs each considered 80
-   server datagrams, dropped the same 7, delivered all eight RESET_STREAM and
-   eight FIN terminal events, and verified 133,120 bytes/checksum 16,972,800.
-   The remaining gap is larger repeated churn distributions rather than basic
-   recovery of cancellation under loss.
+   coverage. `--loss-pct=5` enables a fixed-seed endpoint interceptor only
+   after the authenticated CONNECT. A cancelable client transport-progress
+   future now keeps ACK/loss/PTO processing live after the last local FIN/reset
+   until the server validates completion, fixing the prior large-stream
+   teardown deadlock. Five 64-stream runs each considered 320 server datagrams,
+   dropped the same 21, delivered all 32 RESET_STREAM and 32 FIN terminal
+   events, and verified 532,480 bytes/checksum 67,891,200. The remaining gap is
+   external wtransport/browser interop rather than basic cancellation recovery
+   at the benchmark's maximum stream count.

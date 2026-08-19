@@ -895,6 +895,18 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Drive one timer-aware QUIC receive without consuming WebTransport data.
+    ///
+    /// Event loops waiting on a peer-side terminal condition still need to
+    /// process ACK, loss and PTO state after their final local FIN/reset. This
+    /// method is cancelable through the caller's `std.Io` future and keeps the
+    /// underlying HTTP/3 connection encapsulated.
+    pub fn serviceTransport(
+        self: *HandshakeClientSession,
+    ) Error!void {
+        try self.h3.established.connection.servicePacketServicingTimers();
+    }
+
     pub fn resetStream(
         self: *HandshakeClientSession,
         stream_id: u62,

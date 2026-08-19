@@ -1311,12 +1311,17 @@ zig build bench-webtransport-stream -Doptimize=ReleaseFast -- \
   --reset-every=2 --reset-after-bytes=256 --loss-pct=5
 ```
 
-considered 80 server datagrams and dropped the same 7 in every run. All eight
-reset streams reported application code 42 after their 256-byte prefix, all
-eight non-reset streams reached FIN, and every run verified 133,120 bytes, 56
-read events, and checksum 16,972,800. Elapsed time ranged 1.486-1.784 ms
-(71-85 MiB/s). This is deterministic cancellation/recovery evidence, not an
-equal-wire wtransport throughput comparison.
+The benchmark now keeps a cancelable client receive future alive after its last
+FIN/reset so ACK, loss and PTO state continue progressing until the server has
+validated every terminal event. This removes the prior large-stream teardown
+deadlock. Five 64-stream runs considered 320 server datagrams and dropped the
+same 21 every time. All 32 reset streams reported application code 42 after
+their 256-byte prefix, all 32 non-reset streams reached FIN, and every run
+verified 532,480 bytes and checksum 67,891,200. Elapsed time ranged
+10.656-14.923 ms (34-47 MiB/s); read-event fragmentation varied independently
+from the exact terminal/byte result. This is deterministic
+cancellation/recovery evidence, not an equal-wire wtransport throughput
+comparison.
 
 ## Reference context from `~/Work`
 
