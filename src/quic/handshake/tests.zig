@@ -772,7 +772,7 @@ test "QUIC integrated client rejects mismatched Version Information after VN" {
 
             var client_initial = try receiveClientInitialForTest(shared.endpoint, 0, 4096, &.{}, .version_2);
             defer client_initial.deinit(shared.endpoint.allocator);
-            var parsed_client = try quic.tls_client_hello.parseClientHello(shared.endpoint.allocator, client_initial.crypto_data);
+            var parsed_client = try quic.tls_client_hello.parseClientHello(client_initial.crypto_data);
             defer parsed_client.deinit(shared.endpoint.allocator);
 
             const server_public = try quic.tls_client_hello.x25519PublicKey(shared.server_secret_key);

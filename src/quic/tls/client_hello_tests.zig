@@ -48,12 +48,20 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
         .transport_parameters = tp.items,
     });
 
-    var parsed = try target.parseClientHello(allocator, hello.items);
+    var parsed = try target.parseClientHello(hello.items);
     defer parsed.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &random, &parsed.random);
     try std.testing.expectEqualStrings("example.com", parsed.server_name.?);
-    try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
-    try std.testing.expectEqualStrings("h3-29", parsed.alpn_protocols[1]);
+    try std.testing.expectEqualStrings("h3", parsed.alpnProtocols()[0]);
+    try std.testing.expectEqualStrings("h3-29", parsed.alpnProtocols()[1]);
+    // The protocol slice list is now stored inline in ParsedClientHello; its
+    // deinit is allocation-free even when handed a rejecting allocator.
+    var parsed_again = try target.parseClientHello(hello.items);
+    defer parsed_again.deinit(std.testing.failing_allocator);
+    try std.testing.expectEqualStrings(
+        "h3-29",
+        parsed_again.alpnProtocols()[1],
+    );
     try std.testing.expectEqualSlices(u8, &key, parsed.x25519_public_key);
     try std.testing.expect(parsed.supports_ed25519);
     try std.testing.expect(parsed.supports_ecdsa_p256_sha256);
@@ -72,7 +80,7 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     var duplicate_transport_parameters = try hello.clone(allocator);
     defer duplicate_transport_parameters.deinit(allocator);
     try appendClientHelloExtensionForTest(&duplicate_transport_parameters, allocator, ext_quic_transport_parameters_for_test, &.{});
-    try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(allocator, duplicate_transport_parameters.items));
+    try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(duplicate_transport_parameters.items));
 
     const offsets = try clientHelloOffsetsForTest(hello.items);
     var aes256_first = try hello.clone(allocator);
@@ -84,7 +92,6 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
         .big,
     );
     var aes256_parsed = try target.parseClientHello(
-        allocator,
         aes256_first.items,
     );
     defer aes256_parsed.deinit(allocator);
@@ -118,7 +125,6 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
         .big,
     );
     var no_shared_parsed = try target.parseClientHello(
-        allocator,
         no_shared_cipher.items,
     );
     defer no_shared_parsed.deinit(allocator);
@@ -134,7 +140,7 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     var non_null_compression = try hello.clone(allocator);
     defer non_null_compression.deinit(allocator);
     non_null_compression.items[offsets.compression_start] = 1;
-    try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(allocator, non_null_compression.items));
+    try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(non_null_compression.items));
 
     // Real TLS 1.3 clients commonly send a version preference vector instead of
     // the one-element vector produced by this minimal writer. QUIC still requires
@@ -144,7 +150,7 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     var multi_version_hello = try hello.clone(allocator);
     defer multi_version_hello.deinit(allocator);
     try replaceClientHelloExtensionForTest(&multi_version_hello, allocator, ext_supported_versions_for_test, &multi_version_payload);
-    var multi_version_parsed = try target.parseClientHello(allocator, multi_version_hello.items);
+    var multi_version_parsed = try target.parseClientHello(multi_version_hello.items);
     defer multi_version_parsed.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &key, multi_version_parsed.x25519_public_key);
 
@@ -160,7 +166,7 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
         var malformed_version_hello = try hello.clone(allocator);
         defer malformed_version_hello.deinit(allocator);
         try replaceClientHelloExtensionForTest(&malformed_version_hello, allocator, ext_supported_versions_for_test, payload);
-        try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(allocator, malformed_version_hello.items));
+        try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(malformed_version_hello.items));
     }
 
     const huge_transport_parameters = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
@@ -417,10 +423,10 @@ test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
 
     var received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, secrets.client, 0, 4096);
     defer received.deinit(allocator);
-    var parsed = try target.parseClientHello(allocator, received.crypto_data);
+    var parsed = try target.parseClientHello(received.crypto_data);
     defer parsed.deinit(allocator);
     try std.testing.expectEqualStrings("localhost", parsed.server_name.?);
-    try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
+    try std.testing.expectEqualStrings("h3", parsed.alpnProtocols()[0]);
 }
 
 test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
@@ -439,7 +445,7 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
         .transport_parameters = &.{},
     });
 
-    var parsed_client = try target.parseClientHello(allocator, encoded_client_hello.items);
+    var parsed_client = try target.parseClientHello(encoded_client_hello.items);
     defer parsed_client.deinit(allocator);
     const server_shared = try target.x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
 
@@ -495,7 +501,6 @@ test "QUIC TLS ClientHello offers X25519 and P-256 and server selects P-256" {
         .transport_parameters = &.{},
     });
     var parsed_client = try target.parseClientHello(
-        allocator,
         client_hello.items,
     );
     defer parsed_client.deinit(allocator);
@@ -681,7 +686,7 @@ test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packe
 
     var server_received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, initial_secrets.client, 0, 4096);
     defer server_received.deinit(allocator);
-    var parsed_client = try target.parseClientHello(allocator, server_received.crypto_data);
+    var parsed_client = try target.parseClientHello(server_received.crypto_data);
     defer parsed_client.deinit(allocator);
     const server_shared = try target.x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
 
@@ -796,7 +801,7 @@ test "QUIC TLS server handshake flight travels over Handshake packet" {
 
     var server_received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, initial_secrets.client, 0, 4096);
     defer server_received.deinit(allocator);
-    var parsed_client = try target.parseClientHello(allocator, server_received.crypto_data);
+    var parsed_client = try target.parseClientHello(server_received.crypto_data);
     defer parsed_client.deinit(allocator);
     const server_shared = try target.x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
 

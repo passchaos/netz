@@ -641,6 +641,14 @@ frame on each stream. The same 16 MiB/four-stream shape fell from
 allocation fell from 25.8-27.1 MB to 24.4-25.6 MB. Three smoke runs measured
 237.49-275.42 MiB/s. Caller-storage, cross-stream overlap, and heap-spill tests
 cover both the common fixed-capacity path and packets exceeding it.
+The benchmark allocator now also reports the most frequent exact allocation
+sizes, which identified the remaining 144-byte hot bucket as short-lived
+runtime work rather than retained body ownership. ClientHello ALPN parsing was
+one confirmed contributor and now stores up to 16 offered protocol views inline
+without an auxiliary allocation; parser tests cover multi-ALPN round trips and
+allocation-free teardown. The 16 MiB/four-stream smoke remained at 275.41
+MiB/s with 9,551 allocations, while cumulative allocation fell from the prior
+24.4-25.6 MB range to 24,085,274 bytes in the captured run.
 
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 

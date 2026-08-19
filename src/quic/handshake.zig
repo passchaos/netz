@@ -1393,7 +1393,9 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         effective_options,
     );
 
-    var parsed_client = try quic.tls_client_hello.parseClientHello(endpoint.allocator, client_initial.crypto_data);
+    var parsed_client = try quic.tls_client_hello.parseClientHello(
+        client_initial.crypto_data,
+    );
     defer parsed_client.deinit(endpoint.allocator);
     var automatic_psk_lease: ?quic.resumption.ticket.store.Lease = null;
     defer if (automatic_psk_lease) |*lease| lease.deinit();
@@ -1421,7 +1423,10 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             }
         }
     }
-    const alpn = try chooseAlpn(options.alpn_protocol, parsed_client.alpn_protocols);
+    const alpn = try chooseAlpn(
+        options.alpn_protocol,
+        parsed_client.alpnProtocols(),
+    );
     const cipher_suite = try quic.tls_client_hello.selectCipherSuite(
         parsed_client.cipher_suites,
         options.cipher_suites,

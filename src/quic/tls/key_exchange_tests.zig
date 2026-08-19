@@ -28,7 +28,6 @@ test "QUIC TLS secp384r1 key shares round-trip without truncation" {
         .transport_parameters = &.{},
     });
     var parsed_client = try target.parseClientHello(
-        allocator,
         client_hello.items,
     );
     defer parsed_client.deinit(allocator);
@@ -52,7 +51,7 @@ test "QUIC TLS secp384r1 key shares round-trip without truncation" {
     invalid_client_hello.items[client_public_offset] = 0x02;
     try std.testing.expectError(
         error.InvalidClientHello,
-        target.parseClientHello(allocator, invalid_client_hello.items),
+        target.parseClientHello(invalid_client_hello.items),
     );
 
     var server_hello: std.ArrayList(u8) = .empty;
@@ -165,7 +164,6 @@ test "QUIC TLS X25519MLKEM768 codecs enforce asymmetric share lengths" {
         .transport_parameters = &.{},
     });
     var parsed_client = try target.parseClientHello(
-        allocator,
         client_hello.items,
     );
     defer parsed_client.deinit(allocator);
@@ -238,7 +236,7 @@ test "QUIC TLS X25519MLKEM768 codecs enforce asymmetric share lengths" {
     );
     try std.testing.expectError(
         error.InvalidClientHello,
-        target.parseClientHello(allocator, malformed_client.items),
+        target.parseClientHello(malformed_client.items),
     );
 
     var malformed_server = try server_hello.clone(allocator);
@@ -320,7 +318,6 @@ fn testNistHybridCodecs(
         .transport_parameters = &.{},
     });
     var parsed_client = try target.parseClientHello(
-        allocator,
         client_hello.items,
     );
     defer parsed_client.deinit(allocator);
@@ -395,7 +392,7 @@ fn testNistHybridCodecs(
     );
     try std.testing.expectError(
         error.InvalidClientHello,
-        target.parseClientHello(allocator, malformed_client.items),
+        target.parseClientHello(malformed_client.items),
     );
 
     var malformed_server = try server_hello.clone(allocator);
@@ -426,7 +423,7 @@ fn testNistHybridCodecs(
     invalid_sec1_client.items[invalid_client_offset] = 0x02;
     try std.testing.expectError(
         error.InvalidClientHello,
-        target.parseClientHello(allocator, invalid_sec1_client.items),
+        target.parseClientHello(invalid_sec1_client.items),
     );
 
     var invalid_sec1_server = try server_hello.clone(allocator);

@@ -138,9 +138,15 @@ pub const ClientHelloOptions = struct {
 };
 
 pub const ParsedClientHello = struct {
+    // ALPN protocol names are one-byte length-prefixed. Sixteen inline views
+    // cover normal HTTP/3 negotiation without heap ownership while keeping the
+    // parser value compact; pathological lists are rejected as malformed.
+    pub const max_alpn_protocols: usize = 16;
+
     random: [32]u8,
     server_name: ?[]const u8,
-    alpn_protocols: [][]const u8,
+    alpn_storage: [max_alpn_protocols][]const u8 = undefined,
+    alpn_len: u8,
     x25519_public_key: []const u8,
     secp256r1_public_key: ?[]const u8 = null,
     secp384r1_public_key: ?[]const u8 = null,
@@ -183,8 +189,12 @@ pub const ParsedClientHello = struct {
         };
     }
 
+    pub fn alpnProtocols(self: *const ParsedClientHello) []const []const u8 {
+        return self.alpn_storage[0..self.alpn_len];
+    }
+
     pub fn deinit(self: *ParsedClientHello, allocator: std.mem.Allocator) void {
-        allocator.free(self.alpn_protocols);
+        _ = allocator;
         self.* = undefined;
     }
 };
@@ -387,7 +397,7 @@ pub fn writeFinished(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ver
     try writeFinishedBytes(list, allocator, &verify_data);
 }
 
-pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedClientHello {
+pub fn parseClientHello(bytes: []const u8) Error!ParsedClientHello {
     var cursor = wire.Cursor.init(bytes);
     if (try cursor.readByte() != handshake_type_client_hello) return error.InvalidClientHello;
     const body_len = try readU24(&cursor);
@@ -436,8 +446,9 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var supports_rsa_pss_pss_sha256 = false;
     var supports_rsa_pss_pss_sha384 = false;
     var supports_rsa_pss_pss_sha512 = false;
-    var alpn_list: std.ArrayList([]const u8) = .empty;
-    errdefer alpn_list.deinit(allocator);
+    var alpn_storage: [ParsedClientHello.max_alpn_protocols][]const u8 =
+        undefined;
+    var alpn_len: usize = 0;
     var seen_extensions = SeenExtensions{};
 
     var ext_cursor = wire.Cursor.init(extensions);
@@ -460,7 +471,11 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                     groups.secp384r1_mlkem1024;
                 saw_supported_groups = true;
             },
-            ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
+            ext_alpn => try parseAlpn(
+                &alpn_storage,
+                &alpn_len,
+                payload,
+            ),
             ext_supported_versions => {
                 try validateClientSupportedVersions(payload);
                 saw_supported_versions = true;
@@ -554,7 +569,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         return error.InvalidClientHello;
     }
     if (transport_parameters == null) return error.MissingTransportParameters;
-    if (alpn_list.items.len == 0) return error.MissingAlpn;
+    if (alpn_len == 0) return error.MissingAlpn;
     const psk_offer = quic.resumption.tls_psk.parseClientOffer(bytes) catch |err| switch (err) {
         error.MissingPskOffer => null,
         else => return error.InvalidClientHello,
@@ -563,7 +578,8 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     return .{
         .random = random,
         .server_name = server_name,
-        .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
+        .alpn_storage = alpn_storage,
+        .alpn_len = @intCast(alpn_len),
         .x25519_public_key = x25519 orelse &.{},
         .secp256r1_public_key = secp256r1,
         .secp384r1_public_key = secp384r1,
@@ -1348,16 +1364,22 @@ fn parseSupportedGroups(
     return result;
 }
 
-fn parseAlpn(allocator: std.mem.Allocator, out: *std.ArrayList([]const u8), payload: []const u8) Error!void {
+fn parseAlpn(
+    out: *[ParsedClientHello.max_alpn_protocols][]const u8,
+    len: *usize,
+    payload: []const u8,
+) Error!void {
     var cursor = wire.Cursor.init(payload);
     const list_len = try cursor.readInt(u16, .big);
     const list = try cursor.readSlice(list_len);
     if (!cursor.eof()) return error.InvalidClientHello;
     var list_cursor = wire.Cursor.init(list);
     while (!list_cursor.eof()) {
-        const len = try list_cursor.readByte();
-        if (len == 0) return error.InvalidClientHello;
-        try out.append(allocator, try list_cursor.readSlice(len));
+        const protocol_len = try list_cursor.readByte();
+        if (protocol_len == 0) return error.InvalidClientHello;
+        if (len.* == out.len) return error.InvalidClientHello;
+        out[len.*] = try list_cursor.readSlice(protocol_len);
+        len.* += 1;
     }
 }
 
