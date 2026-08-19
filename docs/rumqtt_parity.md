@@ -111,7 +111,7 @@ The finite example restores that snapshot before accepting clients and saves
 again after all configured connections exit. `--no-restore` starts from an
 empty in-memory state but still writes the final snapshot.
 
-Run the same driver against any broker address:
+Run the same sequential (window-one) driver against any broker address:
 
 ```sh
 zig build bench-mqtt-broker -Doptimize=ReleaseFast -- \
@@ -119,7 +119,7 @@ zig build bench-mqtt-broker -Doptimize=ReleaseFast -- \
   --warmup-messages=1000 --messages=20000 --payload-bytes=256
 ```
 
-2026-08-18 same-host `ReleaseFast` validation:
+2026-08-18 same-host `ReleaseFast` window-one validation:
 
 ```text
 broker      publishes/s   deliveries/s   checksum
@@ -157,6 +157,10 @@ queue tombstone for every outgoing packet. Saturating hole accounting covers
 the first problem. Plain TCP now defaults TCP_NODELAY on both accepted and
 connected sockets (with an explicit opt-out), while each Session retains a
 queue-head cursor and resets its logical storage when the live queue empties.
+Online Session Expiry zero clients now also use the live connection's inflight
+table and one shared Publication instead of deep-cloning every QoS 1/2 fanout
+into durable Session storage; persistent/offline Sessions retain the owned
+retransmission path.
 
 On 2026-08-20, three consecutive same-host `ReleaseFast` runs used four
 publishers, four subscribers, 1,000 warmups, 20,000 measured 256-byte QoS 1
@@ -168,15 +172,15 @@ driver was alive; the table reports the median of each three-run metric:
 
 ```text
 broker    pub/s    deliveries/s   p50 ms   p99 ms   p99.9 ms   client allocs   client peak B   broker peak RSS KiB
-netz      39,381        157,527    2.712    6.631       9.022         504,105         504,161                11,292
+netz      53,905        215,622    1.819    3.804       4.228         504,105         504,170                 9,344
 rumqttd    6,902         27,609    1.335   41.100      41.800         672,121         504,436                17,632
 ```
 
 Every run completed 80,000 measured deliveries with checksum 20,580,000. In
-this bounded windowed shape, netz delivered 5.71x rumqttd's median throughput,
-used 25.0% fewer client allocation calls and 36.0% less broker peak RSS. Netz's
-median completion was 2.03x slower, but its p99 and p99.9 were respectively
-6.20x and 4.63x lower. Client cumulative allocation was 120,171,264 bytes for
+this bounded windowed shape, netz delivered 7.81x rumqttd's median throughput,
+used 25.0% fewer client allocation calls and 47.0% less broker peak RSS. Netz's
+median completion was 1.36x slower, but its p99 and p99.9 were respectively
+10.80x and 9.89x lower. Client cumulative allocation was 120,171,264 bytes for
 netz versus a median 133,108,088 bytes for rumqttd. These are equal-driver
 results for this workload, not a persistence, QoS 2, crash-safety or broad
 conformance verdict.
@@ -185,8 +189,18 @@ The queue cursor was selected from measurement rather than assumption. Before
 the change, `perf record -F 997 -g` attributed about 50-53% of broker cycle
 samples to `Broker.flushSlotLocked`; annotation placed 43% of the atom-core
 samples on the null test while scanning the consumed queue prefix. After the
-cursor change the same symbol accounted for 4.9% of atom-core samples, and the
-unprofiled three-run throughput range rose to 37,098-40,021 publishes/s.
+cursor change the same symbol accounted for 4.9% of atom-core samples. The
+transient-session fast path then raised the unprofiled three-run range from
+37,098-40,021 to 53,843-54,197 publishes/s.
+
+The same shape was also run three times against a release build of audited
+Mosquitto `5cd25465`, configured with 64 inflight and 1,024 queued messages.
+Its per-metric medians were 7,025 publishes/s, 28,100 deliveries/s, 4.922 ms
+p50, 44.307 ms p99, 46.752 ms p99.9, 672,109 client allocations, 504,223
+client peak bytes, and 3,868 KiB broker peak RSS. Netz therefore delivered
+7.67x its throughput with 2.71x lower p50 and 11.65x lower p99, but used 2.42x
+the broker RSS in this eight-client run. Mosquitto's smaller RSS remains a
+clear memory target rather than being hidden by the throughput result.
 
 ## MQTT 3.1.1/5 broker interoperability
 

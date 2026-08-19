@@ -1165,11 +1165,11 @@ completed 20,000 publishes and 80,000 deliveries with checksum 20,580,000.
 Three consecutive runs gave:
 
 ```text
-netz publishes/s:     37,098 / 39,381 / 40,021
-netz p50 ms:           2.860 /  2.712 /  2.676
-netz p99 ms:           6.865 /  6.631 /  6.551
-netz p99.9 ms:         9.538 /  8.020 /  9.022
-netz broker peak KiB: 11,944 / 11,292 / 10,836
+netz publishes/s:     53,843 / 54,197 / 53,905
+netz p50 ms:           1.808 /  1.819 /  1.852
+netz p99 ms:           3.712 /  3.804 /  3.975
+netz p99.9 ms:         4.228 /  4.186 /  4.785
+netz broker peak KiB:  9,316 /  9,344 /  9,464
 
 rumqttd publishes/s:   7,218 /  6,902 /  6,642
 rumqttd p50 ms:        1.335 /  1.277 /  1.340
@@ -1185,12 +1185,15 @@ Rumqttd required 672,117-672,129 calls and 133,107,836-133,108,592 bytes.
 Client peak-live remained approximately 504 KiB for both. Broker RSS was
 sampled from `/proc/PID/status` every 2 ms while the load driver was alive.
 
-The netz result includes TCP_NODELAY by default for ordinary MQTT TCP and a
-Session queue-head cursor. Before the cursor, a 40,000-publish profile assigned
-50-53% of broker cycles to `Broker.flushSlotLocked`, with the consumed-prefix
-null scan dominating its annotation. Afterward that symbol fell to 4.9% in the
-matching atom-core report. This comparison is specific to the bounded QoS 1
-shape and is not a broad broker or persistence verdict.
+The netz result includes TCP_NODELAY by default for ordinary MQTT TCP, a
+Session queue-head cursor, and a shared-Publication fast path for online
+Session Expiry zero clients. Before the cursor, a 40,000-publish profile
+assigned 50-53% of broker cycles to `Broker.flushSlotLocked`, with the
+consumed-prefix null scan dominating its annotation. The cursor reduced that
+symbol to 4.9% in the matching atom-core report. Avoiding durable deep copies
+for transient online Sessions then raised the three-run range from
+37,098-40,021 to 53,843-54,197 publishes/s. This comparison is specific to the
+bounded QoS 1 shape and is not a broad broker or persistence verdict.
 
 ## MQTT shared-subscription router
 

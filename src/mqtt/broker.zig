@@ -116,6 +116,13 @@ const ClientSlot = struct {
     will_handle: ?will_mod.Handle = null,
     session_handle: ?session_mod.Handle = null,
     session_present: bool = false,
+    /// Whether Server Session State survives loss of this Network Connection.
+    ///
+    /// Transient sessions still use a stable route while connected, but live
+    /// QoS 1/2 fanout can use the connection-local inflight state and one
+    /// shared Publication. Durable sessions must instead deep-own each queued
+    /// message so reconnect retransmission remains possible.
+    session_persistent: bool = false,
     assigned_client_id_len: u8 = 0,
     assigned_client_id: [client_id_mod.max_len]u8 = undefined,
     graceful_disconnect: bool = false,
@@ -593,6 +600,7 @@ pub const Broker = struct {
         slot.will_handle = null;
         slot.session_handle = null;
         slot.session_present = false;
+        slot.session_persistent = false;
         slot.assigned_client_id_len = 0;
         slot.graceful_disconnect = false;
         // The configured queue count is also the memory bound. Reserve it once
@@ -669,6 +677,9 @@ pub const Broker = struct {
         }
         slot.session_handle = opened_session.handle;
         slot.session_present = opened_session.session_present;
+        slot.session_persistent = (try self.sessions.stats(
+            opened_session.handle,
+        )).expiry_interval != 0;
         self.session_owners.putAssumeCapacityNoClobber(
             opened_session.route_id,
             id,
@@ -784,6 +795,7 @@ pub const Broker = struct {
             return;
         }
         owner.session_handle = null;
+        owner.session_persistent = false;
         // Wake its reader without closing the descriptor under it. The task
         // remains the owning closer and sees its invalidated Session handle.
         if (owner.connection) |*connection| {
@@ -840,6 +852,7 @@ pub const Broker = struct {
         slot.connection = null;
         slot.session_handle = null;
         slot.session_present = false;
+        slot.session_persistent = false;
         slot.will_handle = null;
         self.state_mutex.unlock(self.io);
         self.will_driver.notify(self.io);
@@ -991,6 +1004,7 @@ pub const Broker = struct {
         slot.will_handle = null;
         slot.session_handle = null;
         slot.session_present = false;
+        slot.session_persistent = false;
     }
 
     fn handleDisconnect(
@@ -1477,36 +1491,39 @@ pub const Broker = struct {
                     publish.qos,
                     match.subscription.qos,
                 );
-                if (delivery_qos == .at_most_once) {
+                const owner_id = self.session_owners.get(route_id);
+                const destination_index = if (owner_id) |id|
+                    subscriberIndex(id, self.slots.len)
+                else
+                    null;
+                const destination = if (destination_index) |index|
+                    &self.slots[index]
+                else
+                    null;
+                const online = if (destination) |slot|
+                    self.slotOwnsSessionRoute(
+                        destination_index.?,
+                        slot,
+                        owner_id.?,
+                        route_id,
+                    )
+                else
+                    false;
+                if (delivery_qos == .at_most_once or
+                    (online and !destination.?.session_persistent))
+                {
                     // Mosquitto delivers QoS 0 directly to an online
                     // persistent client, but drops it while that client is
                     // offline unless its non-default queue_qos0 option is
-                    // enabled. Resolve the stable Session route to the current
-                    // slot only for this lightweight, connection-local path.
-                    const owner_id = self.session_owners.get(
-                        route_id,
-                    ) orelse {
-                        match.subscriber_id = 0;
-                        continue;
-                    };
-                    const destination_index = subscriberIndex(
-                        owner_id,
-                        self.slots.len,
-                    ) orelse {
-                        match.subscriber_id = 0;
-                        continue;
-                    };
-                    const destination = &self.slots[destination_index];
-                    if (!self.slotOwnsSessionRoute(
-                        destination_index,
-                        destination,
-                        owner_id,
-                        route_id,
-                    )) {
+                    // enabled. QoS 1/2 can take the same shared-Publication
+                    // path when Session Expiry is zero: the runtime keeps the
+                    // Packet Identifier state until ACK, and no payload is
+                    // allowed to survive this Network Connection.
+                    if (!online) {
                         match.subscriber_id = 0;
                         continue;
                     }
-                    match.subscriber_id = owner_id;
+                    match.subscriber_id = owner_id.?;
                     continue;
                 }
                 try self.enqueueSessionDeliveryLocked(
@@ -1520,26 +1537,9 @@ pub const Broker = struct {
                     publish,
                     now,
                 );
-                const owner_id = self.session_owners.get(
-                    route_id,
-                ) orelse {
+                if (!online) {
                     match.subscriber_id = 0;
                     continue;
-                };
-                const destination_index = subscriberIndex(
-                    owner_id,
-                    self.slots.len,
-                ) orelse {
-                    match.subscriber_id = 0;
-                    continue;
-                };
-                if (!self.slotOwnsSessionRoute(
-                    destination_index,
-                    &self.slots[destination_index],
-                    owner_id,
-                    route_id,
-                )) {
-                    match.subscriber_id = 0;
                 }
                 continue;
             }

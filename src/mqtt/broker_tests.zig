@@ -196,6 +196,85 @@ test "broker routes QoS 1 across live TCP clients" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "transient Session fanout does not consume durable queue bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            // The payload below intentionally exceeds this per-Session owned
+            // byte limit. Expiry-zero clients must deliver it from the shared
+            // live Publication rather than cloning it into durable storage.
+            .session = .{ .max_session_bytes = 64 },
+            .accept = .{ .max_outgoing_inflight = 64 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "transient-sub",
+        &.{},
+    );
+    defer subscriber.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "transient-pub",
+        &.{},
+    );
+    defer publisher.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "transient/value",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var payload: [256]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
+    try publisher.publish(
+        "transient/value",
+        &payload,
+        .{ .qos = .at_least_once },
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &payload,
+        delivered.publish.payload,
+    );
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker applies No Local and returns MQTT 5 no-match PUBACK" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
