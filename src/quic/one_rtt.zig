@@ -5097,11 +5097,17 @@ pub const Connection = struct {
         var recv_streams: std.ArrayList(RecvStreamPreflightEntry) =
             .initBuffer(&stack_recv_streams);
         var recv_streams_allocated = false;
+        var stack_stream_frames: [16]quic.StreamFrame = undefined;
+        var stream_frames = quic.stream_state.RecvState.PreflightFrames.init(
+            self.endpoint.allocator,
+            &stack_stream_frames,
+        );
         defer {
             for (recv_streams.items) |*entry| entry.deinit();
             if (recv_streams_allocated) {
                 recv_streams.deinit(self.endpoint.allocator);
             }
+            stream_frames.deinit();
         }
         var peer_connection_ids = self.peer_connection_ids;
         var local_connection_ids = self.local_connection_ids;
@@ -5142,8 +5148,8 @@ pub const Connection = struct {
                     // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
                 },
-                .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &recv_data_total),
-                .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &recv_data_total),
+                .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
+                .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
                 .stream_data_blocked => |blocked| try self.validateStreamReceiveFrameId(blocked.stream_id),
                 .max_stream_data => |max_stream_data| try self.validateStreamSendControlId(max_stream_data.stream_id),
                 .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
@@ -5262,12 +5268,14 @@ pub const Connection = struct {
         stream: quic.StreamFrame,
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
         recv_streams_allocated: *bool,
+        stream_frames: *quic.stream_state.RecvState.PreflightFrames,
         recv_data_total: *u64,
     ) Error!void {
         try self.validateStreamReceiveFrameId(stream.stream_id);
         const recv_stream = try self.preflightRecvStreamEntry(
             recv_streams,
             recv_streams_allocated,
+            stream_frames,
             stream.stream_id,
         );
         const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
@@ -5285,12 +5293,14 @@ pub const Connection = struct {
         reset: quic.ResetStreamFrame,
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
         recv_streams_allocated: *bool,
+        stream_frames: *quic.stream_state.RecvState.PreflightFrames,
         recv_data_total: *u64,
     ) Error!void {
         try self.validateStreamReceiveFrameId(reset.stream_id);
         const recv_stream = try self.preflightRecvStreamEntry(
             recv_streams,
             recv_streams_allocated,
+            stream_frames,
             reset.stream_id,
         );
         try preflightApplyFinalSize(recv_stream, reset.final_size, true);
@@ -5305,6 +5315,7 @@ pub const Connection = struct {
         self: *Connection,
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
         recv_streams_allocated: *bool,
+        stream_frames: *quic.stream_state.RecvState.PreflightFrames,
         stream_id: u64,
     ) Error!*RecvStreamPreflightEntry {
         for (recv_streams.items) |*entry| {
@@ -5314,6 +5325,7 @@ pub const Connection = struct {
         if (self.findRecvStreamEntry(stream_id)) |existing| {
             var recv_state = quic.stream_state.RecvState.Preflight.init(
                 &existing.recv_state,
+                stream_frames,
             );
             var appended = false;
             errdefer if (!appended) recv_state.deinit();
@@ -5340,6 +5352,7 @@ pub const Connection = struct {
                     self.endpoint.allocator,
                     stream_id,
                     maxBufferedForLimit(max_buffered),
+                    stream_frames,
                 ),
             });
         }

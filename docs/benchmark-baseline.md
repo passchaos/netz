@@ -634,6 +634,14 @@ connection-reuse tests verify borrowed lifetime and storage reuse; GRO remains
 on its owning batch API because one kernel receive may outlive a single packet
 callback.
 
+The next receive-preflight step shares one packet-local STREAM-frame shadow
+across every distinct stream instead of allocating an ArrayList for the first
+frame on each stream. The same 16 MiB/four-stream shape fell from
+15,210-15,268 to 9,519-9,585 allocation calls (37.2-37.4%); cumulative
+allocation fell from 25.8-27.1 MB to 24.4-25.6 MB. Three smoke runs measured
+237.49-275.42 MiB/s. Caller-storage, cross-stream overlap, and heap-spill tests
+cover both the common fixed-capacity path and packets exceeding it.
+
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 
 ```text

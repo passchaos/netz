@@ -308,8 +308,55 @@ pub const RecvState = struct {
     /// batch quadratic in buffered STREAM bytes. This shadow instead borrows
     /// the existing bytes and retains only the packet's small frame metadata;
     /// overlap checks consult both sources without copying payload data.
-    pub const Preflight = struct {
+    pub const PreflightFrames = struct {
         allocator: std.mem.Allocator,
+        storage: []quic.StreamFrame,
+        len: usize = 0,
+        allocated: bool = false,
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            storage: []quic.StreamFrame,
+        ) PreflightFrames {
+            return .{ .allocator = allocator, .storage = storage };
+        }
+
+        pub fn deinit(self: *PreflightFrames) void {
+            if (self.allocated) self.allocator.free(self.storage);
+            self.* = undefined;
+        }
+
+        fn items(self: *const PreflightFrames) []const quic.StreamFrame {
+            return self.storage[0..self.len];
+        }
+
+        fn append(
+            self: *PreflightFrames,
+            frame: quic.StreamFrame,
+        ) std.mem.Allocator.Error!void {
+            if (self.len == self.storage.len) {
+                const new_capacity = @max(@as(usize, 1), self.storage.len * 2);
+                if (self.allocated) {
+                    self.storage = try self.allocator.realloc(
+                        self.storage,
+                        new_capacity,
+                    );
+                } else {
+                    const grown = try self.allocator.alloc(
+                        quic.StreamFrame,
+                        new_capacity,
+                    );
+                    @memcpy(grown[0..self.len], self.storage[0..self.len]);
+                    self.storage = grown;
+                    self.allocated = true;
+                }
+            }
+            self.storage[self.len] = frame;
+            self.len += 1;
+        }
+    };
+
+    pub const Preflight = struct {
         stream_id: u64,
         storage_offset: usize,
         buffer: []const u8,
@@ -318,11 +365,13 @@ pub const RecvState = struct {
         received_total: u64,
         highest_received_end: usize,
         max_buffered: usize,
-        pending: std.ArrayList(quic.StreamFrame) = .empty,
+        pending: *PreflightFrames,
 
-        pub fn init(state: *const RecvState) Preflight {
+        pub fn init(
+            state: *const RecvState,
+            pending: *PreflightFrames,
+        ) Preflight {
             return .{
-                .allocator = state.allocator,
                 .stream_id = state.stream_id,
                 .storage_offset = state.storage_offset,
                 .buffer = state.buffer.items,
@@ -331,6 +380,7 @@ pub const RecvState = struct {
                 .received_total = state.received_total,
                 .highest_received_end = state.highest_received_end,
                 .max_buffered = state.max_buffered,
+                .pending = pending,
             };
         }
 
@@ -338,9 +388,10 @@ pub const RecvState = struct {
             allocator: std.mem.Allocator,
             stream_id: u64,
             max_buffered: usize,
+            pending: *PreflightFrames,
         ) Preflight {
+            _ = allocator;
             return .{
-                .allocator = allocator,
                 .stream_id = stream_id,
                 .storage_offset = 0,
                 .buffer = &.{},
@@ -349,11 +400,11 @@ pub const RecvState = struct {
                 .received_total = 0,
                 .highest_received_end = 0,
                 .max_buffered = max_buffered,
+                .pending = pending,
             };
         }
 
         pub fn deinit(self: *Preflight) void {
-            self.pending.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -435,7 +486,8 @@ pub const RecvState = struct {
                 }
 
                 var covered_by_pending = false;
-                for (self.pending.items) |prior| {
+                for (self.pending.items()) |prior| {
+                    if (prior.stream_id != self.stream_id) continue;
                     const prior_offset = std.math.cast(
                         usize,
                         prior.offset,
@@ -463,7 +515,7 @@ pub const RecvState = struct {
             if (frame.fin and absolute_end < self.highest_received_end) {
                 return error.FinalSizeMismatch;
             }
-            try self.pending.append(self.allocator, frame);
+            try self.pending.append(frame);
             self.received_total = std.math.add(
                 u64,
                 self.received_total,
@@ -683,7 +735,10 @@ test "QUIC receive stream preflight validates without copying retained body" {
     });
     try recv.consume(4);
 
-    var preflight = RecvState.Preflight.init(&recv);
+    var pending_storage: [4]quic.StreamFrame = undefined;
+    var pending = RecvState.PreflightFrames.init(allocator, &pending_storage);
+    defer pending.deinit();
+    var preflight = RecvState.Preflight.init(&recv, &pending);
     defer preflight.deinit();
     try std.testing.expectEqual(
         @intFromPtr(recv.buffer.items.ptr),
@@ -702,7 +757,15 @@ test "QUIC receive stream preflight validates without copying retained body" {
 
 test "QUIC receive stream preflight checks packet-local overlap and FIN" {
     const allocator = std.testing.allocator;
-    var preflight = RecvState.Preflight.initEmpty(allocator, 4, 32);
+    var pending_storage: [4]quic.StreamFrame = undefined;
+    var pending = RecvState.PreflightFrames.init(allocator, &pending_storage);
+    defer pending.deinit();
+    var preflight = RecvState.Preflight.initEmpty(
+        allocator,
+        4,
+        32,
+        &pending,
+    );
     defer preflight.deinit();
 
     try std.testing.expectEqual(@as(u64, 6), try preflight.insertTracked(.{
@@ -740,6 +803,66 @@ test "QUIC receive stream preflight checks packet-local overlap and FIN" {
             .data = "i",
         }),
     );
+}
+
+test "QUIC receive preflight frames use caller storage and spill safely" {
+    const allocator = std.testing.allocator;
+    var stack: [1]quic.StreamFrame = undefined;
+    var frames = RecvState.PreflightFrames.init(allocator, &stack);
+    defer frames.deinit();
+    try frames.append(.{ .stream_id = 0, .data = "a" });
+    try std.testing.expect(!frames.allocated);
+    try std.testing.expectEqual(@intFromPtr(&stack), @intFromPtr(frames.storage.ptr));
+
+    try frames.append(.{ .stream_id = 4, .data = "b" });
+    try std.testing.expect(frames.allocated);
+    try std.testing.expectEqual(@as(usize, 2), frames.items().len);
+    try std.testing.expectEqualStrings("a", frames.items()[0].data);
+    try std.testing.expectEqualStrings("b", frames.items()[1].data);
+}
+
+test "QUIC receive preflight shares packet frames across stream shadows" {
+    const allocator = std.testing.allocator;
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    var pending_storage: [4]quic.StreamFrame = undefined;
+    var pending = RecvState.PreflightFrames.init(
+        no_alloc.allocator(),
+        &pending_storage,
+    );
+    defer pending.deinit();
+    var first = RecvState.Preflight.initEmpty(
+        no_alloc.allocator(),
+        0,
+        32,
+        &pending,
+    );
+    var second = RecvState.Preflight.initEmpty(
+        no_alloc.allocator(),
+        4,
+        32,
+        &pending,
+    );
+
+    try std.testing.expectEqual(@as(u64, 2), try first.insertTracked(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "ab",
+    }));
+    try std.testing.expectEqual(@as(u64, 2), try second.insertTracked(.{
+        .stream_id = 4,
+        .offset = 0,
+        .data = "xy",
+    }));
+    try std.testing.expectEqual(@as(u64, 2), try first.insertTracked(.{
+        .stream_id = 0,
+        .offset = 2,
+        .data = "cd",
+    }));
+    try std.testing.expectEqual(@as(usize, 3), pending.items().len);
+    try std.testing.expectEqual(@as(usize, 0), no_alloc.alloc_index);
 }
 
 test "QUIC receive stream advances through sparse tail after gap fill" {
