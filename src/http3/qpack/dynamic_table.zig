@@ -27,8 +27,7 @@ pub const DynamicEntry = struct {
     }
 
     fn deinit(self: *DynamicEntry, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.value);
+        allocator.free(self.name.ptr[0 .. self.name.len + self.value.len]);
         self.* = undefined;
     }
 };
@@ -121,10 +120,12 @@ pub const DynamicTable = struct {
         errdefer if (!exact_slot.found_existing) {
             _ = self.latest_exact.remove(exact_key);
         };
-        const name_copy = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(name_copy);
-        const value_copy = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(value_copy);
+        const string_len = std.math.add(usize, name.len, value.len) catch
+            return error.QpackEncoderStreamError;
+        const strings = try self.allocator.alloc(u8, string_len);
+        errdefer self.allocator.free(strings);
+        @memcpy(strings[0..name.len], name);
+        @memcpy(strings[name.len..], value);
         const absolute_index = self.insert_count;
         // A capacity eviction below may retire the previous latest entry for
         // this name/exact key. Point the index at the new absolute index before
@@ -136,8 +137,8 @@ pub const DynamicTable = struct {
 
         self.entries.appendAssumeCapacity(.{
             .absolute_index = absolute_index,
-            .name = name_copy,
-            .value = value_copy,
+            .name = strings[0..name.len],
+            .value = strings[name.len..],
             .name_hash = name_hash,
             .value_hash = value_hash,
         });

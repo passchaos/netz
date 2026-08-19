@@ -607,6 +607,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
+- HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
   permessage-deflate throughput and wire-size reporting,

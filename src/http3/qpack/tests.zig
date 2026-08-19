@@ -384,6 +384,20 @@ test "HTTP/3 QPACK lookup indexes remain coherent across eviction and clear" {
     try std.testing.expectEqual(@as(?u64, 4), table.findExact("n", "v"));
 }
 
+test "HTTP/3 QPACK dynamic entry stores name and value contiguously" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-contiguous", "value");
+    const entry = table.relative(0).?;
+    try std.testing.expect(
+        entry.value.ptr == entry.name.ptr + entry.name.len,
+    );
+    try std.testing.expectEqualStrings("x-contiguous", entry.name);
+    try std.testing.expectEqualStrings("value", entry.value);
+}
+
 fn checkDynamicQpackIndexAllocationFailure(
     allocator: std.mem.Allocator,
 ) !void {

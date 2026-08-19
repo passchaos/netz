@@ -4,6 +4,7 @@ const netz = @import("netz");
 const table_entries: usize = 512;
 const fields_per_block: usize = 32;
 const iterations: usize = 100_000;
+const churn_iterations: usize = 100_000;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -83,12 +84,14 @@ pub fn main() !void {
         reference_total +|= references.items.len;
     }
     const elapsed = nowNs(io) -| started;
+    const churn_ns = try measureDynamicTableChurn(allocator, io);
 
     std.debug.print(
         \\HTTP/3 QPACK dynamic encode benchmark
         \\  iterations: {d}, table entries: {d}, fields/block: {d}
         \\  encoded bytes/block: {d}, references/block: {d}
         \\  ns/block: {d}, ns/field: {d}
+        \\  dynamic table churn: {d} ns/insert
         \\  checksum: {d}
         \\
     , .{
@@ -99,8 +102,35 @@ pub fn main() !void {
         references_len,
         elapsed / iterations,
         elapsed / (iterations * fields_per_block),
+        churn_ns / churn_iterations,
         encoded_total +| reference_total,
     });
+}
+
+fn measureDynamicTableChurn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !u64 {
+    var table = netz.http3.Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+    var name_buf: [32]u8 = undefined;
+    var value_buf: [32]u8 = undefined;
+    const started = nowNs(io);
+    for (0..churn_iterations) |index| {
+        const name = try std.fmt.bufPrint(
+            &name_buf,
+            "x-qpack-churn-{d:0>5}",
+            .{index},
+        );
+        const value = try std.fmt.bufPrint(
+            &value_buf,
+            "value-{d:0>8}",
+            .{index},
+        );
+        _ = try table.insert(name, value);
+    }
+    return nowNs(io) -| started;
 }
 
 fn nowNs(io: std.Io) u64 {
