@@ -138,6 +138,15 @@ not benchmark the QoS 2 path or claim netz exceeds Mosquitto or rumqttd in
 persistence, offline sessions, Will integration, tail latency, memory use, or
 broader conformance.
 
+The broker hot path now retains each connection's encoded PUBLISH output
+buffer after first use; repeated delivery allocates only the stateless codec's
+temporary variable section rather than a second output buffer. A failing-
+allocator socket test proves that no second allocation occurs after warmup.
+Plan flushing also removed quadratic prefix searches for overlapping
+subscriptions: the first visit drains the slot queue and later matches are
+constant-work empty checks, keeping the pass O(matches). The external workload
+accepts `--overlapping-subscriptions=1..3` for exact/+/# stress shapes.
+
 ## MQTT 3.1.1/5 broker interoperability
 
 The live TCP listener now follows Mosquitto's version negotiation model: the

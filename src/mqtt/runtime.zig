@@ -549,6 +549,7 @@ pub const Connection = struct {
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     assigned_client_id: ?[]u8 = null,
     authentication: auth_runtime.State = .{},
+    write_scratch: std.ArrayList(u8) = .empty,
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -657,6 +658,7 @@ pub const Connection = struct {
             self.allocator.free(client_id);
         }
         self.authentication.deinit(self.allocator);
+        self.write_scratch.deinit(self.allocator);
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -990,16 +992,15 @@ pub const Connection = struct {
         const packet_id = if (options.qos == .at_most_once) null else try self.reserveOutgoingPublish(options.qos);
         errdefer if (packet_id) |id| self.releaseOutgoingPublish(id, options.qos);
 
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try mqtt.writePublish(&encoded, self.allocator, self.protocol, topic, payload, .{
+        self.write_scratch.clearRetainingCapacity();
+        try mqtt.writePublish(&self.write_scratch, self.allocator, self.protocol, topic, payload, .{
             .qos = options.qos,
             .retain = options.retain,
             .dup = options.dup,
             .packet_id = packet_id,
             .properties = options.properties,
         });
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
         try self.rememberOutgoingTopicAlias(topic, options.properties);
         return packet_id;
     }
@@ -2681,8 +2682,57 @@ test "MQTT connection enforces negotiated maximum packet size" {
         .protocol = .v5,
         .peer_max_packet_size = 8,
     };
+    defer connection.write_scratch.deinit(std.testing.allocator);
 
     try std.testing.expectError(error.OutgoingPacketTooLarge, connection.publish("limited/topic", "payload too large", .{}));
+}
+
+test "MQTT publish encoding reuses connection scratch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+    };
+    defer connection.write_scratch.deinit(allocator);
+
+    _ = try connection.writePublish("scratch/topic", "payload", .{});
+    const storage = connection.write_scratch.allocatedSlice().ptr;
+    var drain: [128]u8 = undefined;
+    var buffers = [_][]u8{&drain};
+    _ = try io.vtable.netRead(
+        io.userdata,
+        server_stream.socket.handle,
+        &buffers,
+    );
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    // The stateless codec still needs one temporary variable-header buffer.
+    // Permit that allocation but fail a second one: retained connection output
+    // must not allocate again after warmup.
+    failing.fail_index = failing.alloc_index + 1;
+    connection.allocator = failing.allocator();
+    _ = try connection.writePublish("scratch/topic", "payload", .{});
+    try std.testing.expectEqual(
+        storage,
+        connection.write_scratch.allocatedSlice().ptr,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 test "MQTT runtime enforces incoming maximum packet size on full frame" {

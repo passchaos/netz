@@ -1798,45 +1798,26 @@ pub const Broker = struct {
         self: *Broker,
         plan: RoutePlan,
     ) Error!void {
-        for (plan.deliveries, 0..) |match, plan_index| {
-            // Overlapping subscriptions can enqueue multiple copies for one
-            // client. Flush that slot once; the slot loop drains every copy.
-            var already_flushed = false;
-            for (plan.deliveries[0..plan_index]) |previous| {
-                if (previous.subscriber_id == match.subscriber_id) {
-                    already_flushed = true;
-                    break;
-                }
-            }
-            if (already_flushed) continue;
+        // A slot flush drains its entire queue. Overlapping subscriptions can
+        // therefore appear more than once, but revisiting that slot only sees
+        // an empty queue. This O(matches) walk avoids the former O(matches²)
+        // prefix searches and remains safe when concurrent publish plans
+        // interleave outside the broker state mutex.
+        try self.flushMatches(plan.deliveries);
+        try self.flushMatches(plan.session_targets);
+    }
+
+    fn flushMatches(
+        self: *Broker,
+        matches: []const router_mod.Match,
+    ) Error!void {
+        for (matches) |match| {
             const slot_index = subscriberIndex(
                 match.subscriber_id,
                 self.slots.len,
             ) orelse continue;
-            try self.flushSlot(slot_index, &self.slots[slot_index]);
-        }
-        for (plan.session_targets, 0..) |match, target_index| {
-            var already_flushed = false;
-            for (plan.deliveries) |previous| {
-                if (previous.subscriber_id == match.subscriber_id) {
-                    already_flushed = true;
-                    break;
-                }
-            }
-            if (!already_flushed) {
-                for (plan.session_targets[0..target_index]) |previous| {
-                    if (previous.subscriber_id == match.subscriber_id) {
-                        already_flushed = true;
-                        break;
-                    }
-                }
-            }
-            if (already_flushed) continue;
-            const slot_index = subscriberIndex(
-                match.subscriber_id,
-                self.slots.len,
-            ) orelse continue;
-            try self.flushSlot(slot_index, &self.slots[slot_index]);
+            const slot = &self.slots[slot_index];
+            try self.flushSlot(slot_index, slot);
         }
     }
 

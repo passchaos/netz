@@ -16,6 +16,7 @@ const Config = struct {
     warmup_messages: usize = default_warmup_messages,
     messages: usize = default_messages,
     payload_bytes: usize = default_payload_bytes,
+    overlapping_subscriptions: usize = 1,
 };
 
 const Worker = struct {
@@ -112,16 +113,23 @@ pub fn main(init: std.process.Init) !void {
             client_id,
         );
         subscribers_connected += 1;
-        var suback = try subscriber.subscribe(
-            &.{.{ .topic_filter = topic, .qos = .at_least_once }},
-            .{},
-        );
-        defer suback.deinit(allocator);
-        if (suback.suback.reason_codes.len != 1 or
-            suback.suback.reason_codes[0] !=
-                @intFromEnum(netz.mqtt.QoS.at_least_once))
-        {
-            return error.SubscriptionRefused;
+        for (0..config.overlapping_subscriptions) |overlap| {
+            var filter_buffer: [64]u8 = undefined;
+            const filter = overlapFilter(overlap, &filter_buffer);
+            var suback = try subscriber.subscribe(
+                &.{.{
+                    .topic_filter = filter,
+                    .qos = .at_least_once,
+                }},
+                .{},
+            );
+            defer suback.deinit(allocator);
+            if (suback.suback.reason_codes.len != 1 or
+                suback.suback.reason_codes[0] !=
+                    @intFromEnum(netz.mqtt.QoS.at_least_once))
+            {
+                return error.SubscriptionRefused;
+            }
         }
     }
 
@@ -278,6 +286,7 @@ pub fn main(init: std.process.Init) !void {
         \\  endpoint: {f}
         \\  publishers: {d}
         \\  subscribers: {d}
+        \\  overlapping subscriptions/client: {d}
         \\  warmup publishes: {d}
         \\  measured publishes: {d}
         \\  measured deliveries: {d}
@@ -291,6 +300,7 @@ pub fn main(init: std.process.Init) !void {
         config.address,
         config.publishers,
         config.subscribers,
+        config.overlapping_subscriptions,
         config.warmup_messages,
         config.messages,
         measured_deliveries,
@@ -382,6 +392,17 @@ fn parseArgs(
             config.payload_bytes = try parsePositiveUsize(
                 arg["--payload-bytes=".len..],
             );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--overlapping-subscriptions=",
+        )) {
+            config.overlapping_subscriptions = try parsePositiveUsize(
+                arg["--overlapping-subscriptions=".len..],
+            );
+            if (config.overlapping_subscriptions > 3) {
+                return error.InvalidArgument;
+            }
         } else {
             return error.InvalidArgument;
         }
@@ -390,6 +411,16 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn overlapFilter(index: usize, storage: []u8) []const u8 {
+    return switch (index) {
+        0 => topic,
+        1 => "bench/fanout/+",
+        2 => "bench/#",
+        else => std.fmt.bufPrint(storage, "unused/{d}", .{index}) catch
+            unreachable,
+    };
 }
 
 fn parsePositiveUsize(raw: []const u8) !usize {

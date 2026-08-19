@@ -614,7 +614,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - WebSocket persistent 4 KiB binary echo over one real upgraded connection,
   using caller-buffer receive and explicit in-place client masking,
 - MQTT subscription-router combined ordinary/shared count+emit trie matching
-  versus a linear filter scan,
+  versus a linear filter scan, retained connection PUBLISH encoding scratch,
+  and linear-time overlapping-subscription broker flush plans,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
   caller-provided storage versus the allocating convenience wrapper,
 - QUIC long PADDING run parsing for Initial padding and PMTUD/probe payloads,
