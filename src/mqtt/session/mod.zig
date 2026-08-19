@@ -1337,9 +1337,9 @@ pub const Store = struct {
             self.allocator,
             @intCast(available),
         );
-        const append_needed = @max(
-            available - countNullSlots(Inflight, session.inflight.items),
-            0,
+        const append_needed = available -| countNullSlots(
+            Inflight,
+            session.inflight.items,
         );
         try session.inflight.ensureUnusedCapacity(
             self.allocator,

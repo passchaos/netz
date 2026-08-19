@@ -17,6 +17,7 @@ const Config = struct {
     messages: usize = default_messages,
     payload_bytes: usize = default_payload_bytes,
     overlapping_subscriptions: usize = 1,
+    publisher_window: usize = 1,
 };
 
 const Worker = struct {
@@ -81,8 +82,9 @@ const Worker = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
-    const config = try parseArgs(init, allocator);
+    var stats_allocator = CountingAllocator.init(std.heap.smp_allocator);
+    const config = try parseArgs(init, std.heap.smp_allocator);
+    const allocator = stats_allocator.allocator();
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
@@ -111,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
             io,
             config.address,
             client_id,
+            config.publisher_window,
         );
         subscribers_connected += 1;
         for (0..config.overlapping_subscriptions) |overlap| {
@@ -154,9 +157,12 @@ pub fn main(init: std.process.Init) !void {
             io,
             config.address,
             client_id,
+            config.publisher_window,
         );
         publishers_connected += 1;
     }
+    const latency_samples = try allocator.alloc(u64, config.messages);
+    defer allocator.free(latency_samples);
 
     var ready = std.atomic.Value(usize).init(0);
     var warmup_complete = std.atomic.Value(usize).init(0);
@@ -220,16 +226,16 @@ pub fn main(init: std.process.Init) !void {
         byte.* = @truncate(index *% 17 +% 3);
     }
 
-    for (0..config.warmup_messages) |message_index| {
-        const publisher = &publishers[
-            message_index % config.publishers
-        ];
-        try publisher.publish(
-            topic,
-            payload,
-            .{ .qos = .at_least_once },
-        );
-    }
+    try publishWindowed(
+        publishers,
+        topic,
+        payload,
+        config.warmup_messages,
+        config.publisher_window,
+        io,
+        allocator,
+        null,
+    );
 
     while (warmup_complete.load(.acquire) != config.subscribers) {
         if (failed.load(.acquire)) break;
@@ -238,16 +244,16 @@ pub fn main(init: std.process.Init) !void {
     if (failed.load(.acquire)) return firstWorkerError(errors);
     const started_ns = nowNs(io);
     measured_start.set(io);
-    for (0..config.messages) |message_index| {
-        const publisher = &publishers[
-            message_index % config.publishers
-        ];
-        try publisher.publish(
-            topic,
-            payload,
-            .{ .qos = .at_least_once },
-        );
-    }
+    try publishWindowed(
+        publishers,
+        topic,
+        payload,
+        config.messages,
+        config.publisher_window,
+        io,
+        allocator,
+        latency_samples,
+    );
     for (workers) |worker| worker.join();
     workers_joined = true;
     for (errors) |maybe_err| {
@@ -274,6 +280,10 @@ pub fn main(init: std.process.Init) !void {
         measured_deliveries,
         elapsed_ns,
     );
+    std.mem.sort(u64, latency_samples, {}, lessThanU64);
+    const latency_p50 = percentile(latency_samples, 50, 100);
+    const latency_p99 = percentile(latency_samples, 99, 100);
+    const latency_p999 = percentile(latency_samples, 999, 1000);
 
     // DISCONNECT is sent only after all worker readers have drained the wire,
     // making this driver suitable for finite netz broker runs as well as
@@ -287,6 +297,7 @@ pub fn main(init: std.process.Init) !void {
         \\  publishers: {d}
         \\  subscribers: {d}
         \\  overlapping subscriptions/client: {d}
+        \\  publisher window: {d}
         \\  warmup publishes: {d}
         \\  measured publishes: {d}
         \\  measured deliveries: {d}
@@ -294,6 +305,12 @@ pub fn main(init: std.process.Init) !void {
         \\  elapsed ns: {d}
         \\  publishes/s: {d}
         \\  deliveries/s: {d}
+        \\  publish completion p50 ns: {d}
+        \\  publish completion p99 ns: {d}
+        \\  publish completion p99.9 ns: {d}
+        \\  client allocation calls: {d}
+        \\  client cumulative allocated bytes: {d}
+        \\  client peak live bytes: {d}
         \\  checksum: {d}
         \\
     , .{
@@ -301,6 +318,7 @@ pub fn main(init: std.process.Init) !void {
         config.publishers,
         config.subscribers,
         config.overlapping_subscriptions,
+        config.publisher_window,
         config.warmup_messages,
         config.messages,
         measured_deliveries,
@@ -308,6 +326,12 @@ pub fn main(init: std.process.Init) !void {
         elapsed_ns,
         publishes_per_second,
         deliveries_per_second,
+        latency_p50,
+        latency_p99,
+        latency_p999,
+        stats_allocator.alloc_count.load(.monotonic),
+        stats_allocator.total_allocated.load(.monotonic),
+        stats_allocator.peak_bytes.load(.monotonic),
         checksum,
     });
 }
@@ -317,6 +341,7 @@ fn connect(
     io: std.Io,
     address: std.Io.net.IpAddress,
     client_id: []const u8,
+    max_outgoing_inflight: usize,
 ) !netz.mqtt.runtime.Connection {
     return netz.mqtt.runtime.Client.connect(
         allocator,
@@ -325,7 +350,7 @@ fn connect(
         .{
             .protocol = .v5,
             .client_id = client_id,
-            .max_outgoing_inflight = 1,
+            .max_outgoing_inflight = @intCast(max_outgoing_inflight),
         },
     );
 }
@@ -403,6 +428,17 @@ fn parseArgs(
             if (config.overlapping_subscriptions > 3) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--publisher-window=",
+        )) {
+            config.publisher_window = try parsePositiveUsize(
+                arg["--publisher-window=".len..],
+            );
+            if (config.publisher_window > std.math.maxInt(u16)) {
+                return error.InvalidArgument;
+            }
         } else {
             return error.InvalidArgument;
         }
@@ -411,6 +447,74 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn publishWindowed(
+    publishers: []netz.mqtt.runtime.Connection,
+    publish_topic: []const u8,
+    payload: []const u8,
+    message_count: usize,
+    window: usize,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    latency_samples: ?[]u64,
+) !void {
+    if (message_count == 0) return;
+    const total_window = std.math.mul(
+        usize,
+        window,
+        publishers.len,
+    ) catch return error.InvalidArgument;
+    const packet_ids = try allocator.alloc(u16, total_window);
+    defer allocator.free(packet_ids);
+    const sent_ns = try allocator.alloc(u64, total_window);
+    defer allocator.free(sent_ns);
+    var offset: usize = 0;
+    while (offset < message_count) {
+        const count = @min(total_window, message_count - offset);
+        for (0..count) |index| {
+            // Keep each publisher's outstanding count within the configured
+            // window. A single global batch may be wider because it is spread
+            // over independent connections.
+            const publisher_index = index % publishers.len;
+            packet_ids[index] = (try publishers[publisher_index]
+                .writePublish(
+                publish_topic,
+                payload,
+                .{ .qos = .at_least_once },
+            )).?;
+            sent_ns[index] = nowNs(io);
+        }
+        for (0..count) |index| {
+            const publisher_index = index % publishers.len;
+            try publishers[publisher_index].completePublish(
+                packet_ids[index],
+                .at_least_once,
+            );
+            if (latency_samples) |samples| {
+                samples[offset + index] = nowNs(io) -| sent_ns[index];
+            }
+        }
+        offset += count;
+    }
+}
+
+fn percentile(
+    sorted: []const u64,
+    numerator: usize,
+    denominator: usize,
+) u64 {
+    if (sorted.len == 0) return 0;
+    const rank = std.math.divCeil(
+        usize,
+        sorted.len * numerator,
+        denominator,
+    ) catch unreachable;
+    return sorted[@min(sorted.len - 1, rank -| 1)];
+}
+
+fn lessThanU64(_: void, a: u64, b: u64) bool {
+    return a < b;
 }
 
 fn overlapFilter(index: usize, storage: []u8) []const u8 {
@@ -447,3 +551,76 @@ fn nowNs(io: std.Io) u64 {
     return std.math.cast(u64, timestamp) orelse
         std.math.maxInt(u64);
 }
+
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    current_bytes: std.atomic.Value(usize) = .init(0),
+    peak_bytes: std.atomic.Value(usize) = .init(0),
+    total_allocated: std.atomic.Value(usize) = .init(0),
+    alloc_count: std.atomic.Value(usize) = .init(0),
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn init(backing: std.mem.Allocator) CountingAllocator {
+        return .{ .backing = backing };
+    }
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse
+            return null;
+        _ = self.alloc_count.fetchAdd(1, .monotonic);
+        _ = self.total_allocated.fetchAdd(len, .monotonic);
+        const current = self.current_bytes.fetchAdd(len, .monotonic) + len;
+        _ = self.peak_bytes.fetchMax(current, .monotonic);
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) {
+            return false;
+        }
+        self.recordResize(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawRemap(
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        ) orelse return null;
+        self.recordResize(memory.len, new_len);
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        _ = self.current_bytes.fetchSub(memory.len, .monotonic);
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+
+    fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
+        if (new_len > old_len) {
+            const delta = new_len - old_len;
+            _ = self.total_allocated.fetchAdd(delta, .monotonic);
+            const current = self.current_bytes.fetchAdd(delta, .monotonic) +
+                delta;
+            _ = self.peak_bytes.fetchMax(current, .monotonic);
+        } else {
+            _ = self.current_bytes.fetchSub(old_len - new_len, .monotonic);
+        }
+    }
+};

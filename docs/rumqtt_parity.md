@@ -147,6 +147,17 @@ subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
 accepts `--overlapping-subscriptions=1..3` for exact/+/# stress shapes.
 
+The same equal-wire driver now accepts `--publisher-window=N`: each publisher
+submits up to N QoS 1 PUBLISH packets before reading the corresponding PUBACKs.
+It reports publish-completion p50/p99/p99.9 plus client-side allocation calls,
+cumulative allocated bytes and peak live bytes. A two-publisher/two-subscriber
+100-message window-4 smoke completed all 200 deliveries with checksum 12,720;
+the intentionally small run measured 291 us p50 and 41.96 ms p99 while exposing
+1,377 client allocation calls and 169,854 peak live bytes. These values validate
+the new evidence surface, not a cross-broker performance verdict. The window
+smoke also exposed an inflight-hole unsigned-subtraction panic in Session drain;
+saturating hole accounting and a focused regression test now cover it.
+
 ## MQTT 3.1.1/5 broker interoperability
 
 The live TCP listener now follows Mosquitto's version negotiation model: the
@@ -675,8 +686,9 @@ rumqttd.
 
 1. Add incremental autosave or a replicated commitlog for crash windows between
    quiescent snapshots.
-2. Extend the equal-wire driver with concurrent publisher windows, latency
-   percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
-   comparison.
+2. Run the new publisher-window, latency-percentile and allocation/peak-live
+   driver modes against Mosquitto and rumqttd at production-scale message
+   counts; the evidence surface exists, but the smoke above is not a cross-
+   broker result. Add process RSS alongside client allocator peak-live.
 3. Run Mosquitto's protocol/conformance and interoperability suites against
    netz in addition to in-repository codec/runtime tests.

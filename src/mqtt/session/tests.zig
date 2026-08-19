@@ -481,6 +481,57 @@ test "session reconnect honors a lower Receive Maximum" {
     );
 }
 
+test "session drain reuses more inflight holes than newly available slots" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("inflight-holes", false, 60, .zero);
+    for (0..3) |index| {
+        var topic: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&topic, "holes/{d}", .{index});
+        _ = try store.enqueuePublish(opened.handle, name, "value", .{
+            .qos = .at_least_once,
+            .now = .zero,
+        });
+    }
+    var output: [3]Transmission = undefined;
+    const first = try store.drainInto(
+        opened.handle,
+        .zero,
+        3,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 3), first.len);
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(
+            opened.handle,
+            .puback,
+            first[0].publish.packet_id,
+            0,
+        ),
+    );
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(
+            opened.handle,
+            .puback,
+            first[1].publish.packet_id,
+            0,
+        ),
+    );
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "holes/next",
+        "value",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try store.drainInto(opened.handle, .zero, 2, &output)).len,
+    );
+}
+
 test "session message expiry skips queued and publish retransmit" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});
