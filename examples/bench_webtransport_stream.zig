@@ -7,6 +7,7 @@ const max_streams: usize = 64;
 const read_buffer_bytes: usize = 16 * 1024;
 const default_stream_window: u64 = 64 * 1024;
 const default_one_rtt_datagram_size: usize = 4096;
+const cancellation_code: u32 = 42;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -45,6 +46,9 @@ pub fn main(init: std.process.Init) !void {
                 .random = [_]u8{0xc3} ** 32,
                 .x25519_secret_key = [_]u8{0xc4} ** 32,
             },
+            .session = .{
+                .local_settings = webTransportSettings(config),
+            },
         },
     );
     defer server.deinit();
@@ -56,6 +60,8 @@ pub fn main(init: std.process.Init) !void {
         events: usize = 0,
         checksum: u64 = 0,
         streams: usize,
+        reset_streams: usize,
+        expected_bytes: usize,
         io: std.Io,
         started: std.Io.Event = .unset,
         finished: std.Io.Event = .unset,
@@ -72,6 +78,8 @@ pub fn main(init: std.process.Init) !void {
             defer session.deinit();
             var buffer: [read_buffer_bytes]u8 = undefined;
             var finished_streams: usize = 0;
+            var reset_streams: usize = 0;
+            var terminal: [max_streams]bool = .{false} ** max_streams;
             while (finished_streams < shared.streams) {
                 shared.started.set(shared.io);
                 const event = try session.readStream(&buffer);
@@ -87,10 +95,40 @@ pub fn main(init: std.process.Init) !void {
                         }
                         shared.received += data.bytes;
                         shared.events += 1;
-                        if (data.fin) finished_streams += 1;
+                        if (data.fin) {
+                            const index = streamIndex(data.stream_id) orelse
+                                return error.UnexpectedStream;
+                            if (index >= shared.streams or terminal[index]) {
+                                return error.UnexpectedStreamEvent;
+                            }
+                            terminal[index] = true;
+                            finished_streams += 1;
+                        }
                     },
-                    else => return error.UnexpectedStreamEvent,
+                    .reset => |reset| {
+                        if (reset.direction != .bidirectional or
+                            reset.locally_initiated or
+                            reset.error_info.application_code !=
+                                cancellation_code)
+                        {
+                            return error.UnexpectedStreamEvent;
+                        }
+                        const index = streamIndex(reset.stream_id) orelse
+                            return error.UnexpectedStream;
+                        if (index >= shared.streams or terminal[index]) {
+                            return error.UnexpectedStreamEvent;
+                        }
+                        terminal[index] = true;
+                        reset_streams += 1;
+                        finished_streams += 1;
+                    },
+                    .stopped => return error.UnexpectedStreamEvent,
                 }
+            }
+            if (shared.received != shared.expected_bytes or
+                reset_streams != shared.reset_streams)
+            {
+                return error.IncompleteTransfer;
             }
         }
     };
@@ -98,6 +136,8 @@ pub fn main(init: std.process.Init) !void {
     var shared = Shared{
         .server = &server,
         .streams = config.streams,
+        .reset_streams = resetStreamCount(config),
+        .expected_bytes = expectedReceivedBytes(config),
         .io = io,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
@@ -132,6 +172,9 @@ pub fn main(init: std.process.Init) !void {
                     .random = [_]u8{0xc1} ** 32,
                     .x25519_secret_key = [_]u8{0xc2} ** 32,
                 },
+                .session = .{
+                    .local_settings = webTransportSettings(config),
+                },
             },
         },
     );
@@ -148,6 +191,22 @@ pub fn main(init: std.process.Init) !void {
     const offsets = try allocator.alloc(usize, config.streams);
     defer allocator.free(offsets);
     @memset(offsets, 0);
+    const reset_prefix_bytes = @min(
+        config.reset_after_bytes,
+        payload.len,
+    );
+    for (stream_ids, offsets, 0..) |stream_id, *offset, index| {
+        if (!streamShouldReset(config, index)) continue;
+        if (reset_prefix_bytes != 0) {
+            try client.sendStream(
+                stream_id,
+                payload[0..reset_prefix_bytes],
+                false,
+            );
+        }
+        try client.resetStream(stream_id, cancellation_code);
+        offset.* = payload.len;
+    }
     const writes = try allocator.alloc(
         netz.webtransport.runtime.StreamWrite,
         config.streams,
@@ -155,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(writes);
     const counts = try allocator.alloc(usize, config.streams);
     defer allocator.free(counts);
-    var remaining = config.streams;
+    var remaining = config.streams - resetStreamCount(config);
     while (remaining != 0) {
         for (writes, stream_ids, offsets) |*item, stream_id, offset| {
             item.* = .{
@@ -173,12 +232,16 @@ pub fn main(init: std.process.Init) !void {
             if (offset.* == payload.len) remaining -= 1;
         }
     }
-    for (stream_ids) |stream_id| try client.finishStream(stream_id);
+    for (stream_ids, 0..) |stream_id, index| {
+        if (!streamShouldReset(config, index)) {
+            try client.finishStream(stream_id);
+        }
+    }
     shared.finished.waitUncancelable(io);
     const elapsed_ns = nowNs(io) -| started_ns;
     thread.join();
     if (shared.err) |err| return err;
-    const total_bytes = payload.len * config.streams;
+    const total_bytes = expectedReceivedBytes(config);
     if (shared.received != total_bytes) return error.IncompleteTransfer;
 
     const mib_per_second = if (elapsed_ns == 0)
@@ -192,6 +255,9 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes per stream: {d}
         \\  total transfer bytes: {d}
         \\  receive window: {d}
+        \\  reset every N streams: {d}
+        \\  reset streams: {d}
+        \\  bytes before reset: {d}
         \\  caller buffer: {d}
         \\  partial writes: {d}
         \\  read events: {d}
@@ -204,6 +270,9 @@ pub fn main(init: std.process.Init) !void {
         payload.len,
         total_bytes,
         config.stream_window,
+        config.reset_every,
+        resetStreamCount(config),
+        reset_prefix_bytes,
         read_buffer_bytes,
         write_calls,
         shared.events,
@@ -219,6 +288,8 @@ const Config = struct {
     stream_window: u64 = default_stream_window,
     one_rtt_datagram_size: usize = default_one_rtt_datagram_size,
     enable_pacing: bool = true,
+    reset_every: usize = 0,
+    reset_after_bytes: usize = 1024,
 };
 
 fn parseArgs(
@@ -251,10 +322,45 @@ fn parseArgs(
             );
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
             config.enable_pacing = false;
+        } else if (std.mem.startsWith(u8, arg, "--reset-every=")) {
+            config.reset_every = try parsePositiveUsize(
+                arg["--reset-every=".len..],
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--reset-after-bytes=",
+        )) {
+            config.reset_after_bytes = try std.fmt.parseInt(
+                usize,
+                arg["--reset-after-bytes=".len..],
+                10,
+            );
         } else return error.InvalidArgument;
     }
     if (config.streams > max_streams) return error.InvalidArgument;
     return config;
+}
+
+fn streamShouldReset(config: Config, index: usize) bool {
+    return config.reset_every != 0 and
+        (index + 1) % config.reset_every == 0;
+}
+
+fn resetStreamCount(config: Config) usize {
+    if (config.reset_every == 0) return 0;
+    return config.streams / config.reset_every;
+}
+
+fn expectedReceivedBytes(config: Config) usize {
+    const resets = resetStreamCount(config);
+    return (config.streams - resets) * config.transfer_bytes +
+        resets * @min(config.reset_after_bytes, config.transfer_bytes);
+}
+
+fn streamIndex(stream_id: u62) ?usize {
+    if (stream_id < 4 or (stream_id - 4) % 4 != 0) return null;
+    return @intCast((stream_id - 4) / 4);
 }
 
 fn parsePositiveU64(raw: []const u8) !u64 {
@@ -275,7 +381,16 @@ fn transportParameters(config: Config) netz.quic.TransportParameters {
     parameters.initial_max_stream_data_bidi_local = config.stream_window;
     parameters.initial_max_stream_data_bidi_remote = config.stream_window;
     parameters.initial_max_stream_data_uni = config.stream_window;
+    parameters.initial_max_streams_bidi = @intCast(config.streams + 4);
+    parameters.initial_max_streams_uni = @intCast(config.streams + 4);
     return parameters;
+}
+
+fn webTransportSettings(config: Config) netz.http3.Settings {
+    return .{
+        .webtransport_initial_max_streams_bidi = config.streams + 4,
+        .webtransport_initial_max_streams_uni = config.streams + 4,
+    };
 }
 
 fn payloadByte(index: usize) u8 {

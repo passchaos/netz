@@ -169,4 +169,11 @@ lightweight protected transport does not own a stateful recovery connection.
 2. Add external `wtransport` client/server interoperability runs and browser
    WebTransport evidence.
 3. Add larger stream-churn and cancellation-under-loss benchmarks; concurrent
-   packet-batched stream throughput now has a real-handshake baseline.
+   packet-batched stream throughput now has a real-handshake baseline. The
+   same benchmark now accepts `--reset-every` and `--reset-after-bytes`, raises
+   both QUIC and WebTransport negotiated stream limits to the requested shape,
+   and validates every reset code/direction alongside FIN/data checksums. A
+   64-stream smoke reset 32 streams after 256 bytes while the other 32 delivered
+   16 KiB each: 532,480 verified bytes, 350 read events, and complete terminal
+   coverage. The remaining gap is injecting packet loss and measuring repeated
+   churn distributions rather than functional cancellation at scale.
