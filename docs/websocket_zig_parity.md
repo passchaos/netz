@@ -209,7 +209,13 @@ these counts explain submission shape but are not timing samples.
    compressed connections used 106 allocations and 1,139,720 peak live bytes,
    dominated by sixteen retained 64-KiB codec windows. Add equal telemetry to
    the websocket.zig harness and extend beyond 16 mostly-idle connections before
-   making a memory ratio.
+   making a memory ratio. The fixed 16-connection benchmark bookkeeping has
+   since been replaced by bounded dynamic arrays and the cap raised to 256. A
+   32-connection cleartext smoke completed 6,400 measured round trips with 423
+   allocations and 425,312 peak live bytes (about 13.0 KiB/connection including
+   both client and server runtime state plus benchmark coordination). A 64-
+   connection run exceeded the practical duration of this same-process smoke
+   on the current host, so it is not counted as passing evidence.
 3. Add Autobahn/WebSocket protocol-suite evidence for both implementations
    rather than relying only on in-repository tests.
 4. Add an equal-wire compressed echo comparison if the reference re-enables

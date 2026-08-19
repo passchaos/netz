@@ -12,7 +12,7 @@ const warmup_iterations: usize = 20;
 const iterations: usize = 200;
 const max_message_bytes: usize = payload_bytes;
 const default_connections: usize = 1;
-const max_connections: usize = 16;
+const max_connections: usize = 256;
 
 pub fn main(init: std.process.Init) !void {
     const options = try parseOptions(init);
@@ -41,8 +41,7 @@ pub fn main(init: std.process.Init) !void {
     const Shared = struct {
         server: *netz.websocket.runtime.Server,
         result: ?netz.websocket.runtime.ConcurrentServeResult = null,
-        errors: [max_connections]?anyerror =
-            .{null} ** max_connections,
+        accept_error: ?anyerror = null,
         expected_exchanges: usize,
         connection_count: usize,
         compression: bool,
@@ -55,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
                 shared.connection_count,
                 .{ .enable_permessage_deflate = shared.compression },
             ) catch |err| {
-                shared.errors[0] = err;
+                shared.accept_error = err;
                 return;
             };
         }
@@ -117,13 +116,17 @@ pub fn main(init: std.process.Init) !void {
     var ready = std.atomic.Value(usize).init(0);
     var failed = std.atomic.Value(bool).init(false);
     var start: std.Io.Event = .unset;
-    var worker_errors: [max_connections]?anyerror =
-        .{null} ** max_connections;
-    var finished_ns: [max_connections]u64 =
-        .{0} ** max_connections;
-    var checksums: [max_connections]u64 =
-        .{0} ** max_connections;
-    var workers: [max_connections]std.Thread = undefined;
+    const worker_errors = try allocator.alloc(?anyerror, connections);
+    defer allocator.free(worker_errors);
+    @memset(worker_errors, null);
+    const finished_ns = try allocator.alloc(u64, connections);
+    defer allocator.free(finished_ns);
+    @memset(finished_ns, 0);
+    const checksums = try allocator.alloc(u64, connections);
+    defer allocator.free(checksums);
+    @memset(checksums, 0);
+    const workers = try allocator.alloc(std.Thread, connections);
+    defer allocator.free(workers);
     const Worker = struct {
         client: *netz.websocket.runtime.Connection,
         io: std.Io,
@@ -165,7 +168,8 @@ pub fn main(init: std.process.Init) !void {
             worker.finished_ns.* = nowNs(worker.io);
         }
     };
-    var worker_contexts: [max_connections]Worker = undefined;
+    const worker_contexts = try allocator.alloc(Worker, connections);
+    defer allocator.free(worker_contexts);
     for (0..connections) |index| {
         worker_contexts[index] = .{
             .client = &clients[index],
@@ -191,12 +195,12 @@ pub fn main(init: std.process.Init) !void {
     const started = nowNs(io);
     start.set(io);
     for (workers[0..connections]) |worker| worker.join();
-    for (worker_errors[0..connections]) |maybe_err| {
+    for (worker_errors) |maybe_err| {
         if (maybe_err) |err| return err;
     }
     var finished = started;
     var checksum: u64 = 0;
-    for (finished_ns[0..connections], checksums[0..connections]) |
+    for (finished_ns, checksums) |
         worker_finished,
         worker_checksum,
     | {
@@ -206,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
     const elapsed = finished -| started;
 
     server_thread.join();
-    if (shared.errors[0]) |err| return err;
+    if (shared.accept_error) |err| return err;
     var serve_result = shared.result orelse return error.ServerFailed;
     defer serve_result.deinit();
     if (serve_result.firstError()) |err| return err;
