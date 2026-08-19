@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const payload_bytes: usize = 4096;
 // websocket.zig's client submits mask/header and payload separately, which can
@@ -13,8 +15,12 @@ const default_connections: usize = 1;
 const max_connections: usize = 16;
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
     const options = try parseOptions(init);
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
     const connections = options.connections;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -248,11 +254,13 @@ pub fn main(init: std.process.Init) !void {
         )) / (1024.0 * 1024.0),
         checksum,
     });
+    if (options.stats) counting.snapshot().print();
 }
 
 const Options = struct {
     connections: usize = default_connections,
     compression: bool = false,
+    stats: bool = false,
 };
 
 fn parseOptions(init: std.process.Init) !Options {
@@ -272,6 +280,8 @@ fn parseOptions(init: std.process.Init) !Options {
             );
         } else if (std.mem.eql(u8, arg, "--compression")) {
             options.compression = true;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
         } else {
             return error.InvalidArgument;
         }

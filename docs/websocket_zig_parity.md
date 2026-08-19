@@ -201,7 +201,15 @@ these counts explain submission shape but are not timing samples.
 1. Extend the now-equal-shape 1/4-connection benchmark to mixed payload
    distributions and higher connection counts.
 2. Compare buffer-pool behavior and peak memory under many mostly-idle
-   connections; the reference exposes explicit small/large buffer pools.
+   connections; the reference exposes explicit small/large buffer pools. The
+   netz echo benchmark now accepts `--stats` and reports thread-safe allocation
+   counts, cumulative bytes, peak live bytes and size buckets. Four cleartext
+   connections used 54 allocations and 52,784 peak live bytes in the captured
+   smoke; one connection used 15 allocations and 13,196 peak live bytes. Four
+   compressed connections used 106 allocations and 1,139,720 peak live bytes,
+   dominated by sixteen retained 64-KiB codec windows. Add equal telemetry to
+   the websocket.zig harness and extend beyond 16 mostly-idle connections before
+   making a memory ratio.
 3. Add Autobahn/WebSocket protocol-suite evidence for both implementations
    rather than relying only on in-repository tests.
 4. Add an equal-wire compressed echo comparison if the reference re-enables
