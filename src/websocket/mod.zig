@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
+const vort = @import("vort");
 
 pub const runtime = @import("runtime.zig");
 
@@ -888,6 +889,33 @@ pub fn compressMessageInto(
 
     try removeCompressionTail(&allocating);
     return allocating.written();
+}
+
+pub fn compressMessageVortInto(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+) Error![]const u8 {
+    output.clearRetainingCapacity();
+    _ = vort.encodeRawFixedSyncFlushAppend(
+        allocator,
+        output,
+        payload,
+        .{
+            .parser = .hash,
+            .lz77_options = .{
+                .window_len = 16 * 1024,
+                .max_chain = 4,
+                .nice_len = 32,
+            },
+        },
+    ) catch return error.WriteFailed;
+    const tail = "\x00\x00\xff\xff";
+    if (!std.mem.endsWith(u8, output.items, tail)) {
+        return error.WriteFailed;
+    }
+    output.items.len -= tail.len;
+    return output.items;
 }
 
 /// Encode fragmented RFC 7692 input without first joining plaintext.

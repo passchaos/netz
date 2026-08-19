@@ -360,6 +360,28 @@ test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
     try std.testing.expect(!failing.has_induced_failure);
 }
 
+test "WebSocket vort sync flush interoperates with std flate decoder" {
+    const allocator = std.testing.allocator;
+    const payload = "vort websocket sync flush payload " ** 64;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const compressed = try websocket.compressMessageVortInto(
+        &encoded,
+        allocator,
+        payload,
+    );
+    try std.testing.expect(
+        !std.mem.endsWith(u8, compressed, "\x00\x00\xff\xff"),
+    );
+    const decoded = try websocket.decompressMessage(
+        allocator,
+        compressed,
+        payload.len,
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(payload, decoded);
+}
+
 test "WebSocket fragmented compression preserves split UTF-8 without plaintext scratch" {
     const allocator = std.testing.allocator;
     const fragments = [_][]const u8{

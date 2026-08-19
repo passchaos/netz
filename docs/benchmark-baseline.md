@@ -1161,8 +1161,12 @@ reference `sendmsg` plus 892 `writev` calls. These counts include warmup and
 handshake/shutdown traffic; tracing overhead is excluded from timing evidence.
 
 With `--compression`, the real persistent WebSocket echo benchmark negotiates
-permessage-deflate. Three CPU-0 samples were 144.6-147.5 us/roundtrip and
-52.95-54.02 logical payload MiB/s. Four concurrent connections reached 45.96
+permessage-deflate. Five CPU-0 samples after moving complete-message compression
+to vort's native raw fixed-DEFLATE sync-flush path were 29.44-31.14
+us/roundtrip and 250.91-265.34 logical payload MiB/s. This is 4.6-5.0x lower
+latency than the previous Zig-flate 144.6-147.5 us range; the new path avoids
+clearing roughly 224 KiB of compressor state per no-context-takeover message.
+Four concurrent connections previously reached 45.96
 us aggregate/roundtrip and 169.98 logical MiB/s on CPUs 0-7.
 
 ## MQTT 5 windowed QoS 1 broker fanout

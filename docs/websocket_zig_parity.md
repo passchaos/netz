@@ -64,8 +64,10 @@ and uses one vectored network write for header + borrowed payload. Masked
 clients copy and mask in one SIMD pass through a fixed 16 KiB stack scratch,
 so payload size no longer drives heap allocation.
 
-The same command now also measures one 4 KiB repeated telemetry-like message
-through the retained no-context-takeover compressor:
+The same command also measures one 4 KiB repeated telemetry-like message
+through no-context-takeover compression. Complete messages now use the
+project-local vort fixed-DEFLATE sync-flush encoder, whose small-input hash path
+avoids clearing Zig flate's roughly 224 KiB compressor state per message.
 
 ```text
 permessage-deflate: 50.94-51.08 us/message
@@ -90,8 +92,9 @@ io_uring adapter.
 
 The same executable accepts `--compression`, negotiating permessage-deflate on
 both endpoints and exercising retained send/receive scratch plus direct caller-
-buffer inflation over a real upgraded connection. Three CPU-0 runs measured
-144.6-147.5 us/roundtrip (52.95-54.02 logical payload MiB/s); four concurrent
+buffer inflation over a real upgraded connection. Five 2026-08-20 CPU-0 runs
+measured 29.44-31.14 us/roundtrip (250.91-265.34 logical payload MiB/s),
+4.6-5.0x lower latency than the previous 144.6-147.5 us range; four concurrent
 connections on CPUs 0-7 measured 45.96 us aggregate/roundtrip and 169.98
 logical MiB/s. These are internal compressed-runtime baselines because the
 audited websocket.zig outbound compressor remains disabled.
@@ -106,8 +109,9 @@ leaves caller storage masked, matching websocket.zig's mutable-input contract,
 while the latter assembles fragments and handles control frames without a
 message allocation. With permessage-deflate, the decompressed message lands
 directly in the caller buffer. TCP and RFC 8441 connections retain bounded
-compressed-wire scratch plus independent reusable 64 KiB send/receive DEFLATE
-history windows. The send path performs a true raw-DEFLATE streaming flush,
+compressed-wire scratch plus reusable receive and fragmented-send DEFLATE
+history windows. Complete sends use vort's native raw fixed-block sync flush;
+fragmented sends retain the standard streaming compressor. Both paths
 removes the RFC 7692 suffix, and sets RSV1 only when the wire payload is
 strictly smaller; incompressible/small input is sent unchanged rather than
 paying expansion, and payloads below 32 bytes skip compressor setup entirely.

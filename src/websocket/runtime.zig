@@ -1273,10 +1273,9 @@ pub const Connection = struct {
             self.allocator,
             payload.len,
         );
-        return websocket.compressMessageInto(
+        return websocket.compressMessageVortInto(
             &self.compression_send.payload,
             self.allocator,
-            self.compression_send.flate_window.?,
             payload,
         );
     }
@@ -1691,10 +1690,9 @@ pub const H2Connection = struct {
             self.allocator,
             payload.len,
         );
-        return websocket.compressMessageInto(
+        return websocket.compressMessageVortInto(
             &self.compression_send.payload,
             self.allocator,
-            self.compression_send.flate_window.?,
             payload,
         );
     }
