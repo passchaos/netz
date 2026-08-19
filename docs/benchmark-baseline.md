@@ -858,7 +858,7 @@ handshake/shutdown traffic; tracing overhead is excluded from timing evidence.
 
 ## MQTT shared-subscription router
 
-Captured on 2026-08-17 with:
+Captured on 2026-08-19 with:
 
 ```sh
 zig build bench-mqtt-router -Doptimize=ReleaseFast
@@ -867,20 +867,22 @@ zig build bench-mqtt-router -Doptimize=ReleaseFast
 Three-run ranges:
 
 ```text
-4098-filter trie match:            328-338 ns/op
-4098-filter linear scan:           109-111 us/op
-trie speedup:                      327-333x
-64-member shared RoundRobin:       267-271 ns/op
-64-member shared Sticky:           290-294 ns/op
-64-member shared Random:           282-286 ns/op
-64-member shared Rendezvous hash:  1.25-1.34 us/op
+4098-filter trie match:            191-205 ns/op
+4098-filter linear scan:           102-103 us/op
+trie speedup:                      499-540x
+64-member shared RoundRobin:       160-166 ns/op
+64-member shared Sticky:           173-178 ns/op
+64-member shared Random:           166-169 ns/op
+64-member shared Rendezvous hash:  1.23-1.24 us/op
 ```
 
 RoundRobin, Random and Sticky match rumqttd's configurable shared-subscription
 strategies. Netz additionally supports stable Rendezvous hashing for
 topic-affine assignment with low remapping when group membership changes.
 Strategy state is per `{ShareName, TopicFilter}` and only advances after output
-capacity preflight succeeds.
+capacity preflight succeeds. Ordinary/shared routes are counted together and
+emitted together, so a publish traverses the topic trie twice rather than four
+times while retaining ordinary-before-shared output ordering.
 
 `~/Work/rumqtt/benchmarks/router/routernxn.rs` is commented out in the audited
 checkout, so these numbers are recorded as a netz baseline rather than a direct

@@ -297,29 +297,42 @@ pub const Router = struct {
         out: []Match,
     ) Error![]Match {
         try mqtt.validateTopicName(topic);
-        const normal_count = self.matchNormalTrie(topic, publisher_id, null) orelse
+        const trie_counts = self.matchTrie(topic, publisher_id, null, null);
+        const normal_count = if (trie_counts) |counts|
+            counts.normal
+        else
             self.matchNormalLinear(topic, publisher_id, null);
-        const shared_count_from_trie = self.matchSharedTrie(topic, null);
-        const shared_group_count = shared_count_from_trie orelse
+        const shared_group_count = if (trie_counts) |counts|
+            counts.shared
+        else
             self.matchSharedLinear(topic, null);
         const required = std.math.add(usize, normal_count, shared_group_count) catch return error.MatchBufferTooSmall;
         if (out.len < required) return error.MatchBufferTooSmall;
 
-        const normal_written = self.matchNormalTrie(topic, publisher_id, out[0..normal_count]) orelse
-            self.matchNormalLinear(topic, publisher_id, out[0..normal_count]);
-        std.debug.assert(normal_written == normal_count);
-        const shared_written = if (shared_count_from_trie != null)
-            // The active-node frontier is deterministic for a given topic and
-            // router snapshot.  A successful count pass therefore guarantees
-            // the emitting pass will not need the linear fallback after it has
-            // advanced shared-subscription cursors.
-            self.matchSharedTrie(
+        if (trie_counts != null) {
+            // A successful count pass guarantees this combined emitting pass
+            // cannot fail after it advances shared-subscription cursors.
+            const written = self.matchTrie(
                 topic,
-                out[normal_written..required],
-            ) orelse unreachable
-        else
-            self.matchSharedLinear(topic, out[normal_written..required]);
-        std.debug.assert(shared_written == shared_group_count);
+                publisher_id,
+                out[0..normal_count],
+                out[normal_count..required],
+            ) orelse unreachable;
+            std.debug.assert(written.normal == normal_count);
+            std.debug.assert(written.shared == shared_group_count);
+        } else {
+            const normal_written = self.matchNormalLinear(
+                topic,
+                publisher_id,
+                out[0..normal_count],
+            );
+            std.debug.assert(normal_written == normal_count);
+            const shared_written = self.matchSharedLinear(
+                topic,
+                out[normal_count..required],
+            );
+            std.debug.assert(shared_written == shared_group_count);
+        }
         return out[0..required];
     }
 
@@ -358,19 +371,26 @@ pub const Router = struct {
         return exact;
     }
 
-    /// Returns null when the fixed active-node frontier is too small; callers
-    /// then use the exact linear fallback rather than dropping matches.
-    fn matchNormalTrie(
-        self: Router,
+    const MatchCounts = struct {
+        normal: usize = 0,
+        shared: usize = 0,
+    };
+
+    /// Traverse the topic trie once for both ordinary and shared routes.
+    /// Separate output slices preserve ordinary-before-shared ordering while
+    /// halving both count-pass and emit-pass trie traversal work.
+    fn matchTrie(
+        self: *Router,
         topic: []const u8,
         publisher_id: ?SubscriberId,
-        out: ?[]Match,
-    ) ?usize {
+        normal_out: ?[]Match,
+        shared_out: ?[]Match,
+    ) ?MatchCounts {
         var current: [128]usize = undefined;
         var next: [128]usize = undefined;
         current[0] = 0;
         var current_count: usize = 1;
-        var written: usize = 0;
+        var counts = MatchCounts{};
         var depth: usize = 0;
         var it = std.mem.splitScalar(u8, topic, '/');
         while (it.next()) |level| {
@@ -378,7 +398,18 @@ pub const Router = struct {
             for (current[0..current_count]) |node_index| {
                 const node = &self.nodes.items[node_index];
                 if (!(depth == 0 and topic[0] == '$')) {
-                    written = self.emitNormalEntries(node.multi_wildcard_entries.items, publisher_id, out, written);
+                    counts.normal = self.emitNormalEntries(
+                        node.multi_wildcard_entries.items,
+                        publisher_id,
+                        normal_out,
+                        counts.normal,
+                    );
+                    counts.shared = self.emitSharedEntries(
+                        topic,
+                        node.multi_wildcard_entries.items,
+                        shared_out,
+                        counts.shared,
+                    );
                 }
                 if (depth == 0 and std.mem.startsWith(u8, topic, "$")) {
                     if (findLiteralChild(node.*, level)) |child| {
@@ -395,15 +426,37 @@ pub const Router = struct {
             }
             @memcpy(current[0..next_count], next[0..next_count]);
             current_count = next_count;
-            if (current_count == 0) return written;
+            if (current_count == 0) return counts;
             depth += 1;
         }
         for (current[0..current_count]) |node_index| {
             const node = &self.nodes.items[node_index];
-            written = self.emitNormalEntries(node.terminal_entries.items, publisher_id, out, written);
-            written = self.emitNormalEntries(node.multi_wildcard_entries.items, publisher_id, out, written);
+            counts.normal = self.emitNormalEntries(
+                node.terminal_entries.items,
+                publisher_id,
+                normal_out,
+                counts.normal,
+            );
+            counts.shared = self.emitSharedEntries(
+                topic,
+                node.terminal_entries.items,
+                shared_out,
+                counts.shared,
+            );
+            counts.normal = self.emitNormalEntries(
+                node.multi_wildcard_entries.items,
+                publisher_id,
+                normal_out,
+                counts.normal,
+            );
+            counts.shared = self.emitSharedEntries(
+                topic,
+                node.multi_wildcard_entries.items,
+                shared_out,
+                counts.shared,
+            );
         }
-        return written;
+        return counts;
     }
 
     fn matchNormalLinear(
@@ -437,73 +490,6 @@ pub const Router = struct {
             if (publisher_id != null and entry.subscription.no_local and entry.subscriber_id == publisher_id.?) continue;
             if (out) |storage| storage[written] = entryMatch(entry);
             written += 1;
-        }
-        return written;
-    }
-
-    /// Match shared subscriptions through the same topic-filter trie as normal
-    /// subscriptions.  Each shared group/filter contributes one representative
-    /// entry to the route; the representative is only a lookup key, while
-    /// `nextLiveGroupEntry` applies the group's round-robin cursor at emit
-    /// time.  This avoids the old O(total shared groups) scan for every
-    /// publish and keeps capacity preflight cursor-neutral by doing a count
-    /// pass before the emitting pass.
-    fn matchSharedTrie(
-        self: *Router,
-        topic: []const u8,
-        out: ?[]Match,
-    ) ?usize {
-        var current: [128]usize = undefined;
-        var next: [128]usize = undefined;
-        current[0] = 0;
-        var current_count: usize = 1;
-        var written: usize = 0;
-        var depth: usize = 0;
-        var it = std.mem.splitScalar(u8, topic, '/');
-        while (it.next()) |level| {
-            var next_count: usize = 0;
-            for (current[0..current_count]) |node_index| {
-                const node = &self.nodes.items[node_index];
-                if (!(depth == 0 and topic[0] == '$')) {
-                    written = self.emitSharedEntries(
-                        topic,
-                        node.multi_wildcard_entries.items,
-                        out,
-                        written,
-                    );
-                }
-                if (depth == 0 and std.mem.startsWith(u8, topic, "$")) {
-                    if (findLiteralChild(node.*, level)) |child| {
-                        if (!appendUniqueNode(&next, &next_count, child)) return null;
-                    }
-                    continue;
-                }
-                if (findLiteralChild(node.*, level)) |child| {
-                    if (!appendUniqueNode(&next, &next_count, child)) return null;
-                }
-                if (node.single_wildcard_child) |child| {
-                    if (!appendUniqueNode(&next, &next_count, child)) return null;
-                }
-            }
-            @memcpy(current[0..next_count], next[0..next_count]);
-            current_count = next_count;
-            if (current_count == 0) return written;
-            depth += 1;
-        }
-        for (current[0..current_count]) |node_index| {
-            const node = &self.nodes.items[node_index];
-            written = self.emitSharedEntries(
-                topic,
-                node.terminal_entries.items,
-                out,
-                written,
-            );
-            written = self.emitSharedEntries(
-                topic,
-                node.multi_wildcard_entries.items,
-                out,
-                written,
-            );
         }
         return written;
     }
@@ -936,6 +922,35 @@ test "MQTT router matches literal and wildcard subscriptions" {
     const system = try router.matchInto("$SYS/uptime", &storage);
     try std.testing.expectEqual(@as(usize, 1), system.len);
     try std.testing.expectEqual(@as(SubscriberId, 5), system[0].subscriber_id);
+}
+
+test "MQTT router combined trie preserves normal and shared ordering" {
+    const allocator = std.testing.allocator;
+    var router = try Router.init(allocator);
+    defer router.deinit();
+    try router.subscribe(1, .{ .topic_filter = "devices/+/state" });
+    try router.subscribe(2, .{ .topic_filter = "devices/#" });
+    try router.subscribe(10, .{
+        .topic_filter = "$share/work/devices/+/state",
+    });
+    try router.subscribe(11, .{
+        .topic_filter = "$share/work/devices/+/state",
+    });
+
+    var storage: [3]Match = undefined;
+    const first = try router.matchInto("devices/a/state", &storage);
+    try std.testing.expectEqual(@as(usize, 3), first.len);
+    try std.testing.expectEqual(@as(SubscriberId, 2), first[0].subscriber_id);
+    try std.testing.expectEqual(@as(SubscriberId, 1), first[1].subscriber_id);
+    try std.testing.expectEqual(@as(SubscriberId, 10), first[2].subscriber_id);
+
+    try std.testing.expectError(
+        error.MatchBufferTooSmall,
+        router.matchInto("devices/b/state", storage[0..2]),
+    );
+    const second = try router.matchInto("devices/b/state", &storage);
+    // Capacity preflight is cursor-neutral despite sharing the trie pass.
+    try std.testing.expectEqual(@as(SubscriberId, 11), second[2].subscriber_id);
 }
 
 test "MQTT router shared subscriptions round robin per filter" {

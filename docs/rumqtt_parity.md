@@ -365,20 +365,23 @@ Run:
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 ```
 
-2026-08-17 same-host `ReleaseFast` ranges over three runs:
+2026-08-19 same-host `ReleaseFast` ranges over three runs after combining
+ordinary/shared count and emit work into two total trie traversals:
 
 ```text
-4098-filter indexed match:        328-338 ns/op
-4098-filter linear scan:          109-111 us/op
-indexed speedup:                  327-333x
+4098-filter indexed match:        191-205 ns/op
+4098-filter linear scan:          102-103 us/op
+indexed speedup:                  499-540x
 
-64-member RoundRobin selection:   267-271 ns/op
-64-member Sticky selection:       290-294 ns/op
-64-member Random selection:       282-286 ns/op
-64-member Rendezvous selection:   1.25-1.34 us/op
+64-member RoundRobin selection:   160-166 ns/op
+64-member Sticky selection:       173-178 ns/op
+64-member Random selection:       166-169 ns/op
+64-member Rendezvous selection:   1.23-1.24 us/op
 ```
 
-Every selection path uses the same topic-filter trie; the strategy work is
+Ordinary and shared subscriptions now share the same count traversal and the
+same emit traversal instead of independently walking the topic levels. Every
+selection path uses that topic-filter trie; the strategy work is
 only paid after a shared group matches. Count-only preflight never advances a
 RoundRobin cursor or Random PRNG, so `MatchBufferTooSmall` is transactional.
 Random state and the precomputed Rendezvous seed are scoped to each
