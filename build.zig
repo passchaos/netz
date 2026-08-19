@@ -75,6 +75,26 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_mtls_interop_step.dependOn(&mqtt_mtls_openssl.step);
 
+    const mqtt_vectors_broker = b.addExecutable(.{
+        .name = "netz-mqtt-vector-broker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mqtt_broker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_vectors = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_mosquitto_vectors.py",
+    });
+    mqtt_vectors.addArtifactArg(mqtt_vectors_broker);
+    const mqtt_vectors_step = b.step(
+        "interop-mqtt-mosquitto-vectors",
+        "Run selected Mosquitto MQTT 5 wire vectors against netz",
+    );
+    mqtt_vectors_step.dependOn(&mqtt_vectors.step);
+
     const example_specs = [_]struct {
         exe_name: []const u8,
         path: []const u8,

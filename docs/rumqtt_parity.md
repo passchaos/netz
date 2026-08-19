@@ -766,10 +766,23 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs two
+raw MQTT 5 scenarios derived directly from Mosquitto `5cd25465`'s packet
+generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
+(including retained-tree creation) and subscription-identifier replacement
+with exact forwarded PUBLISH bytes. The gate builds a finite netz broker,
+imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
+packets; both scenarios pass. This is deliberately described as a selected
+wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
+broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
+or plugins, so passing these vectors is not proxy evidence for the entire suite.
+
 1. Add incremental autosave or a replicated commitlog for crash windows between
    quiescent snapshots.
 2. Extend the production-scale publisher-window, latency, allocation and RSS
    comparison above to Mosquitto and additional concurrency/fanout shapes;
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
-3. Run Mosquitto's protocol/conformance and interoperability suites against
-   netz in addition to in-repository codec/runtime tests.
+3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
+   process adapter capable of preserving the upstream harness's config/reload/
+   persistence semantics. Two passing packet-vector scenarios do not yet cover
+   the full protocol/conformance suite.
