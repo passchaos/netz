@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const default_body_bytes: usize = 1024 * 1024;
 const default_chunk_bytes: usize = 16 * 1024;
@@ -22,6 +24,7 @@ const Options = struct {
     chunk_bytes: usize = default_chunk_bytes,
     warmup_iterations: usize = default_warmup_iterations,
     iterations: usize = default_iterations,
+    stats: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -31,7 +34,11 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidArguments;
     }
-    const allocator = std.heap.smp_allocator;
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
     const payload = try allocator.alloc(u8, options.body_bytes);
     defer allocator.free(payload);
     @memset(payload, 'x');
@@ -201,6 +208,7 @@ pub fn main(init: std.process.Init) !void {
         mebibytes_per_second,
         checksum,
     });
+    if (options.stats) counting.snapshot().print();
 }
 
 fn exchange(
@@ -287,6 +295,8 @@ fn parseOptions(init: std.process.Init) !Options {
                 arg["--iterations=".len..],
                 10,
             );
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
         } else {
             return error.InvalidArguments;
         }

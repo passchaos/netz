@@ -133,6 +133,14 @@ parser still invokes the callback at each wire-chunk boundary and commits only
 the current message. This removes repeated exact-boundary reads without
 aggregating a whole body. Both modes demonstrate an advantage in these named
 loopback workloads; neither establishes whole-library superiority.
+`bench-http1-body --stats` now adds the same thread-safe allocator telemetry as
+the H2/WebSocket benchmarks. A short 1-MiB smoke used 37 allocations and
+1,063,364 peak live bytes for fixed framing, versus 45 allocations and
+1,288,250 peak live bytes for 64 x 16-KiB chunked framing. In both cases the
+1-MiB application payload dominates live memory; retained chunk/vector scratch
+adds roughly 225 KiB for chunked framing and allocation counts stay constant
+across body bytes after warmup. Equal Hyper allocator instrumentation is still
+required for a memory ratio.
 
 ## HTTP/2 consecutive and parallel round trips
 
