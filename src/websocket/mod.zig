@@ -886,6 +886,53 @@ pub fn compressMessageInto(
     try compressor.writer.writeAll(payload);
     try compressor.writer.flush();
 
+    try removeCompressionTail(&allocating);
+    return allocating.written();
+}
+
+/// Encode fragmented RFC 7692 input without first joining plaintext.
+///
+/// Fragment boundaries do not reset DEFLATE state: all slices are streamed
+/// through one compressor and the caller decides how to split the resulting
+/// wire payload into WebSocket continuation frames.
+pub fn compressMessageFragmentsInto(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    flate_window: []u8,
+    fragments: []const []const u8,
+) Error![]const u8 {
+    if (flate_window.len < std.compress.flate.max_window_len) {
+        return error.BufferTooShort;
+    }
+    var total: usize = 0;
+    for (fragments) |fragment| {
+        total = std.math.add(usize, total, fragment.len) catch
+            return error.PayloadTooLarge;
+    }
+    output.clearRetainingCapacity();
+    var allocating = std.Io.Writer.Allocating.fromArrayList(
+        allocator,
+        output,
+    );
+    defer output.* = allocating.toArrayList();
+    try allocating.ensureTotalCapacity(total +| 64);
+    var compressor = try std.compress.flate.Compress.init(
+        &allocating.writer,
+        flate_window[0..std.compress.flate.max_window_len],
+        .raw,
+        .fastest,
+    );
+    for (fragments) |fragment| {
+        try compressor.writer.writeAll(fragment);
+    }
+    try compressor.writer.flush();
+    try removeCompressionTail(&allocating);
+    return allocating.written();
+}
+
+fn removeCompressionTail(
+    allocating: *std.Io.Writer.Allocating,
+) Error!void {
     const sync_flush_tail = "\x00\x00\xff\xff";
     const encoded = allocating.written();
     if (std.mem.endsWith(u8, encoded, sync_flush_tail)) {
@@ -898,7 +945,6 @@ pub fn compressMessageInto(
         // bytes are restored by the decoder.
         try allocating.writer.writeByte(0x00);
     }
-    return allocating.written();
 }
 
 pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {

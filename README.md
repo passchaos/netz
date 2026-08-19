@@ -388,7 +388,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode, retained
   independent send/receive codec scratch, actual LZ77/Huffman wire compression
   with uncompressed fallback when compression expands the message, plus quoted window-bit parsing and rejection of
-  unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
+  unsupported extension parameters/window sizes, framed 101 upgrade responses,
+  compressed fragmented sends that stream discontiguous plaintext directly
+  into DEFLATE with constant-space cross-fragment UTF-8 validation, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
   Host/port synthesis, shared verified TLS client transport plus opt-in

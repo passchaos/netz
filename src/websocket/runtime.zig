@@ -976,18 +976,23 @@ pub const Connection = struct {
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.io);
             defer self.send_mutex.unlock(self.io);
-            const plain = try self.compression_send.joinFragments(
-                self.allocator,
-                fragments,
-            );
-            if (opcode == .text and
-                !std.unicode.utf8ValidateSlice(plain))
-            {
+            const plain_len = try fragmentedPayloadLen(fragments);
+            if (opcode == .text and !fragmentedTextIsValid(fragments)) {
                 return error.InvalidUtf8;
             }
-            if (plain.len >= compression_min_payload_len) {
-                const compressed = try self.compressMessageLocked(plain);
-                if (compressed.len < plain.len) {
+            if (plain_len >= compression_min_payload_len) {
+                try self.compression_send.prepare(
+                    self.allocator,
+                    plain_len,
+                );
+                const compressed = try websocket
+                    .compressMessageFragmentsInto(
+                    &self.compression_send.payload,
+                    self.allocator,
+                    self.compression_send.flate_window.?,
+                    fragments,
+                );
+                if (compressed.len < plain_len) {
                     try self.writeCompressedFragmentsLocked(
                         opcode,
                         compressed,
@@ -1472,18 +1477,23 @@ pub const H2Connection = struct {
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.tunnel.connection.io);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
-            const plain = try self.compression_send.joinFragments(
-                self.allocator,
-                fragments,
-            );
-            if (opcode == .text and
-                !std.unicode.utf8ValidateSlice(plain))
-            {
+            const plain_len = try fragmentedPayloadLen(fragments);
+            if (opcode == .text and !fragmentedTextIsValid(fragments)) {
                 return error.InvalidUtf8;
             }
-            if (plain.len >= compression_min_payload_len) {
-                const compressed = try self.compressMessageLocked(plain);
-                if (compressed.len < plain.len) {
+            if (plain_len >= compression_min_payload_len) {
+                try self.compression_send.prepare(
+                    self.allocator,
+                    plain_len,
+                );
+                const compressed = try websocket
+                    .compressMessageFragmentsInto(
+                    &self.compression_send.payload,
+                    self.allocator,
+                    self.compression_send.flate_window.?,
+                    fragments,
+                );
+                if (compressed.len < plain_len) {
                     try self.writeCompressedFragmentsLocked(
                         opcode,
                         compressed,
@@ -1921,23 +1931,45 @@ fn finishIncomingMessage(
     return .{ .opcode = message.opcode, .payload = payload };
 }
 
-fn validateOutgoingFragmentedText(allocator: std.mem.Allocator, fragments: []const []const u8) Error!void {
-    const bytes = try joinFragments(allocator, fragments);
-    defer allocator.free(bytes);
-    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+fn validateOutgoingFragmentedText(
+    allocator: std.mem.Allocator,
+    fragments: []const []const u8,
+) Error!void {
+    _ = allocator;
+    if (!fragmentedTextIsValid(fragments)) return error.InvalidUtf8;
 }
 
-fn joinFragments(allocator: std.mem.Allocator, fragments: []const []const u8) Error![]u8 {
+fn fragmentedPayloadLen(fragments: []const []const u8) Error!usize {
     var total: usize = 0;
-    for (fragments) |fragment| total = std.math.add(usize, total, fragment.len) catch return error.PayloadTooLarge;
-    const bytes = try allocator.alloc(u8, total);
-    errdefer allocator.free(bytes);
-    var offset: usize = 0;
     for (fragments) |fragment| {
-        @memcpy(bytes[offset..][0..fragment.len], fragment);
-        offset += fragment.len;
+        total = std.math.add(usize, total, fragment.len) catch
+            return error.PayloadTooLarge;
     }
-    return bytes;
+    return total;
+}
+
+/// Validate UTF-8 over discontiguous fragments without assembling a copy.
+fn fragmentedTextIsValid(fragments: []const []const u8) bool {
+    var sequence: [4]u8 = undefined;
+    var sequence_len: usize = 0;
+    var expected_len: usize = 0;
+    for (fragments) |fragment| {
+        for (fragment) |byte| {
+            if (sequence_len == 0) {
+                expected_len = std.unicode.utf8ByteSequenceLength(byte) catch
+                    return false;
+            }
+            sequence[sequence_len] = byte;
+            sequence_len += 1;
+            if (sequence_len == expected_len) {
+                _ = std.unicode.utf8Decode(
+                    sequence[0..expected_len],
+                ) catch return false;
+                sequence_len = 0;
+            }
+        }
+    }
+    return sequence_len == 0;
 }
 
 const FragmentRange = struct { start: usize, end: usize };

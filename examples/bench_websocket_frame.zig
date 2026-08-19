@@ -4,6 +4,7 @@ const netz = @import("netz");
 const iterations: usize = 200_000;
 const payload_len: usize = 4096;
 const compression_iterations: usize = 20_000;
+const compression_fragments: usize = 16;
 const mask_key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
 
 pub fn main() !void {
@@ -105,6 +106,26 @@ pub fn main() !void {
     }
     const compression_ns = nowNs(io) -| compression_started;
 
+    var fragment_storage: [compression_fragments][]const u8 = undefined;
+    for (&fragment_storage, 0..) |*fragment, index| {
+        const start = index * payload_len / compression_fragments;
+        const end = (index + 1) * payload_len / compression_fragments;
+        fragment.* = compressible[start..end];
+    }
+    const fragmented_started = nowNs(io);
+    var fragmented_checksum: u64 = 0;
+    for (0..compression_iterations) |_| {
+        const compressed = try netz.websocket
+            .compressMessageFragmentsInto(
+            &compression_output,
+            allocator,
+            compression_window,
+            &fragment_storage,
+        );
+        fragmented_checksum +%= checksum(compressed);
+    }
+    const fragmented_ns = nowNs(io) -| fragmented_started;
+
     const caller_speedup_x100 = ratioTimes100(
         allocating_ns,
         caller_buffer_ns,
@@ -122,6 +143,7 @@ pub fn main() !void {
         \\  caller-buffer speedup: {d}.{d:0>2}x
         \\  header-only speedup: {d}.{d:0>2}x
         \\  permessage-deflate: {d} ns/message, {d} -> {d} wire bytes
+        \\  fragmented deflate ({d} slices): {d} ns/message, no plaintext join
         \\  checksum: {d}
         \\
     , .{
@@ -138,10 +160,13 @@ pub fn main() !void {
         compression_ns / compression_iterations,
         compressible.len,
         compressed_bytes,
+        compression_fragments,
+        fragmented_ns / compression_iterations,
         allocating_checksum +%
             caller_buffer_checksum +%
             header_checksum +%
-            compression_checksum,
+            compression_checksum +%
+            fragmented_checksum,
     });
 }
 

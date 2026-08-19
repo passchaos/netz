@@ -329,14 +329,12 @@ test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
     const payload = fragments[0] ++ fragments[1];
     var scratch: compression_scratch.SendScratch = .{};
     defer scratch.deinit(allocator);
-    const joined = try scratch.joinFragments(allocator, &fragments);
-    try std.testing.expectEqualStrings(payload, joined);
     try scratch.prepare(allocator, payload.len);
-    const first = try websocket.compressMessageInto(
+    const first = try websocket.compressMessageFragmentsInto(
         &scratch.payload,
         allocator,
         scratch.flate_window.?,
-        payload,
+        &fragments,
     );
     try std.testing.expect(first.len < payload.len / 4);
     try std.testing.expect(!std.mem.endsWith(
@@ -344,32 +342,53 @@ test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
         first,
         "\x00\x00\xff\xff",
     ));
-    const plaintext_ptr = scratch.plaintext.allocatedSlice().ptr;
     const payload_ptr = scratch.payload.allocatedSlice().ptr;
     const window_ptr = scratch.flate_window.?.ptr;
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     failing.fail_index = failing.alloc_index;
-    const joined_again = try scratch.joinFragments(
-        failing.allocator(),
-        &fragments,
-    );
-    try std.testing.expectEqualStrings(payload, joined_again);
     try scratch.prepare(failing.allocator(), payload.len);
-    const second = try websocket.compressMessageInto(
+    const second = try websocket.compressMessageFragmentsInto(
         &scratch.payload,
         failing.allocator(),
         scratch.flate_window.?,
-        payload,
+        &fragments,
     );
     try std.testing.expectEqual(first.len, second.len);
-    try std.testing.expectEqual(
-        plaintext_ptr,
-        scratch.plaintext.allocatedSlice().ptr,
-    );
     try std.testing.expectEqual(payload_ptr, scratch.payload.allocatedSlice().ptr);
     try std.testing.expectEqual(window_ptr, scratch.flate_window.?.ptr);
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "WebSocket fragmented compression preserves split UTF-8 without plaintext scratch" {
+    const allocator = std.testing.allocator;
+    const fragments = [_][]const u8{
+        "fragmented ",
+        "\xe2",
+        "\x82",
+        "\xac payload fragmented payload",
+    };
+    const plain = "fragmented \xe2\x82\xac payload fragmented payload";
+    var scratch: compression_scratch.SendScratch = .{};
+    defer scratch.deinit(allocator);
+    try scratch.prepare(allocator, plain.len);
+    const compressed = try websocket.compressMessageFragmentsInto(
+        &scratch.payload,
+        allocator,
+        scratch.flate_window.?,
+        &fragments,
+    );
+    const decoded = try websocket.decompressMessage(
+        allocator,
+        compressed,
+        plain.len,
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(plain, decoded);
+    try std.testing.expect(!@hasField(
+        compression_scratch.SendScratch,
+        "plaintext",
+    ));
 }
 
 test "WebSocket compressed sender uses RSV1 only when wire payload shrinks" {

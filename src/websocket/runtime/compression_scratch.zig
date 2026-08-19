@@ -48,7 +48,6 @@ pub const Scratch = struct {
 };
 
 pub const SendScratch = struct {
-    plaintext: std.ArrayList(u8) = .empty,
     payload: std.ArrayList(u8) = .empty,
     flate_window: ?[]u8 = null,
 
@@ -56,7 +55,6 @@ pub const SendScratch = struct {
         self: *SendScratch,
         allocator: std.mem.Allocator,
     ) void {
-        self.plaintext.deinit(allocator);
         self.payload.deinit(allocator);
         if (self.flate_window) |window| allocator.free(window);
         self.* = undefined;
@@ -81,26 +79,5 @@ pub const SendScratch = struct {
                 std.compress.flate.max_window_len,
             );
         }
-    }
-
-    pub fn joinFragments(
-        self: *SendScratch,
-        allocator: std.mem.Allocator,
-        fragments: []const []const u8,
-    ) ![]const u8 {
-        var total: usize = 0;
-        for (fragments) |fragment| {
-            total = std.math.add(
-                usize,
-                total,
-                fragment.len,
-            ) catch return error.PayloadTooLarge;
-        }
-        try self.plaintext.ensureTotalCapacity(allocator, total);
-        self.plaintext.clearRetainingCapacity();
-        for (fragments) |fragment| {
-            self.plaintext.appendSliceAssumeCapacity(fragment);
-        }
-        return self.plaintext.items;
     }
 };

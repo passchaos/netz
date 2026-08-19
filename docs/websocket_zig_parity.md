@@ -70,6 +70,7 @@ through the retained no-context-takeover compressor:
 ```text
 permessage-deflate: 50.94-51.08 us/message
 wire payload:       4096 -> 54 bytes
+16-slice streaming: 51.10 us/message, no 4096-byte plaintext join
 ```
 
 These are three CPU-0-pinned `ReleaseFast` runs on 2026-08-19. This is an
@@ -101,6 +102,9 @@ No-context-takeover resets codec state for every message
 while retaining allocations. TCP compressed send and receive allocate nothing
 after first-use warmup; the H2 adapter still owns tunnel-frame/message scratch
 but avoids separate compression-output/decompressed-message allocations.
+Fragmented compressed sends no longer concatenate plaintext first: each caller
+slice feeds the same DEFLATE stream directly, UTF-8 is validated across slice
+boundaries with four bytes of state, and only compressed wire scratch remains.
 Tests cover a zlib-generated dynamic-DEFLATE fixture, fragmented compressed
 text with interleaved PING, send/receive scratch reuse under failing allocators,
 actual wire shrink plus RSV1, expansion fallback without RSV1, output overflow,
