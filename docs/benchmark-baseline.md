@@ -733,6 +733,13 @@ caller-buffer masked frame:    71-82 ns/op
 header-only stream preparation: 0.54-0.56 ns/op
 ```
 
+The same command now includes a retained RFC 7692 no-context-takeover
+compressor case. Three CPU-0-pinned 2026-08-19 runs encoded a repeated 4 KiB
+telemetry-like message in 50.94-51.08 us and reduced its wire payload from
+4,096 to 54 bytes. This is an internal baseline rather than a reference ratio:
+the audited websocket.zig 0.16 outbound compression paths currently force
+`compressed = false`.
+
 The caller-buffer path copies and masks in one SIMD pass and preserves the
 caller's `[]const u8`. The header-only path is what unmasked server sends use:
 the runtime emits the stack-resident header and borrowed payload with one

@@ -385,7 +385,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   that accept the same post-send mutation contract as websocket.zig,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation with strict client response selection, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
-  no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus quoted window-bit parsing and rejection of
+  no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode, retained
+  independent send/receive codec scratch, actual LZ77/Huffman wire compression
+  with uncompressed fallback when compression expands the message, plus quoted window-bit parsing and rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
@@ -602,7 +604,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   CONNECT-stream extension payloads,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
-  header-only streaming paths,
+  header-only streaming paths, plus retained no-context-takeover
+  permessage-deflate throughput and wire-size reporting,
 - WebSocket persistent 4 KiB binary echo over one real upgraded connection,
   using caller-buffer receive and explicit in-place client masking,
 - MQTT subscription-router trie matching versus a linear filter scan,

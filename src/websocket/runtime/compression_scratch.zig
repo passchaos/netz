@@ -1,9 +1,9 @@
-//! Reusable receive storage for no-context-takeover WebSocket compression.
+//! Reusable no-context-takeover WebSocket compression storage.
 //!
-//! The DEFLATE history window is 64 KiB in Zig 0.16. Keeping it per
-//! connection avoids allocating that window for every compressed message,
-//! while the payload scratch bounds compressed wire bytes independently from
-//! the caller-owned decompressed output.
+//! Zig 0.16's compressor and decompressor each require a 64 KiB history
+//! window. Keeping separate send/receive windows per connection avoids an
+//! allocation for every compressed message and allows concurrent readers and
+//! serialized writers to operate without sharing mutable codec state.
 
 const std = @import("std");
 
@@ -44,5 +44,63 @@ pub const Scratch = struct {
                 std.compress.flate.max_window_len,
             );
         }
+    }
+};
+
+pub const SendScratch = struct {
+    plaintext: std.ArrayList(u8) = .empty,
+    payload: std.ArrayList(u8) = .empty,
+    flate_window: ?[]u8 = null,
+
+    pub fn deinit(
+        self: *SendScratch,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.plaintext.deinit(allocator);
+        self.payload.deinit(allocator);
+        if (self.flate_window) |window| allocator.free(window);
+        self.* = undefined;
+    }
+
+    pub fn prepare(
+        self: *SendScratch,
+        allocator: std.mem.Allocator,
+        input_len: usize,
+    ) !void {
+        // Incompressible input may grow by a small DEFLATE framing overhead.
+        // Reserving this common bound keeps the allocating writer on retained
+        // storage without making correctness depend on the estimate.
+        try self.payload.ensureTotalCapacity(
+            allocator,
+            input_len +| 64,
+        );
+        self.payload.clearRetainingCapacity();
+        if (self.flate_window == null) {
+            self.flate_window = try allocator.alloc(
+                u8,
+                std.compress.flate.max_window_len,
+            );
+        }
+    }
+
+    pub fn joinFragments(
+        self: *SendScratch,
+        allocator: std.mem.Allocator,
+        fragments: []const []const u8,
+    ) ![]const u8 {
+        var total: usize = 0;
+        for (fragments) |fragment| {
+            total = std.math.add(
+                usize,
+                total,
+                fragment.len,
+            ) catch return error.PayloadTooLarge;
+        }
+        try self.plaintext.ensureTotalCapacity(allocator, total);
+        self.plaintext.clearRetainingCapacity();
+        for (fragments) |fragment| {
+            self.plaintext.appendSliceAssumeCapacity(fragment);
+        }
+        return self.plaintext.items;
     }
 };

@@ -17,6 +17,10 @@ const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
 
 const net = std.Io.net;
+// Raw DEFLATE framing cannot profitably encode very small messages, and
+// initializing its 64 KiB history would dominate their latency. Larger input
+// is still measured and falls back transactionally when compression expands.
+const compression_min_payload_len: usize = 32;
 const masked_write_scratch_len: usize = 16 * 1024;
 // A 4 KiB application payload occupies 4104 bytes on the masked wire. The old
 // 4096-byte read scratch therefore forced two socket reads for this common
@@ -832,6 +836,7 @@ pub const Connection = struct {
     close_received: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
 
     /// Verified TLS client chain for WSS server connections. Anonymous,
@@ -858,6 +863,7 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
+        self.compression_send.deinit(self.allocator);
         self.compression_receive.deinit(self.allocator);
         self.transport().close();
         self.* = undefined;
@@ -945,13 +951,21 @@ pub const Connection = struct {
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
 
-        if (self.permessage_deflate and payload.len != 0) {
-            const compressed = try websocket.compressMessage(self.allocator, payload);
-            defer self.allocator.free(compressed);
-            try self.writeFrameLockedExtended(opcode, compressed, true, .{ .rsv1 = true });
-        } else {
-            try self.writeFrameLocked(opcode, payload, true);
+        if (self.permessage_deflate and
+            payload.len >= compression_min_payload_len)
+        {
+            const compressed = try self.compressMessageLocked(payload);
+            if (compressed.len < payload.len) {
+                try self.writeFrameLockedExtended(
+                    opcode,
+                    compressed,
+                    true,
+                    .{ .rsv1 = true },
+                );
+                return;
+            }
         }
+        try self.writeFrameLocked(opcode, payload, true);
     }
 
     pub fn sendFragmented(self: *Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
@@ -960,16 +974,37 @@ pub const Connection = struct {
         if (fragments.len == 0) return error.InvalidFrame;
 
         if (self.permessage_deflate) {
-            const plain = try joinFragments(self.allocator, fragments);
-            defer self.allocator.free(plain);
-            if (opcode == .text and !std.unicode.utf8ValidateSlice(plain)) return error.InvalidUtf8;
-
-            const compressed = try websocket.compressMessage(self.allocator, plain);
-            defer self.allocator.free(compressed);
-
             self.send_mutex.lockUncancelable(self.io);
             defer self.send_mutex.unlock(self.io);
-            try self.writeCompressedFragmentsLocked(opcode, compressed, fragments.len);
+            const plain = try self.compression_send.joinFragments(
+                self.allocator,
+                fragments,
+            );
+            if (opcode == .text and
+                !std.unicode.utf8ValidateSlice(plain))
+            {
+                return error.InvalidUtf8;
+            }
+            if (plain.len >= compression_min_payload_len) {
+                const compressed = try self.compressMessageLocked(plain);
+                if (compressed.len < plain.len) {
+                    try self.writeCompressedFragmentsLocked(
+                        opcode,
+                        compressed,
+                        fragments.len,
+                    );
+                    return;
+                }
+            }
+            for (fragments, 0..) |fragment, index| {
+                const frame_opcode: websocket.Opcode =
+                    if (index == 0) opcode else .continuation;
+                try self.writeFrameLocked(
+                    frame_opcode,
+                    fragment,
+                    index + 1 == fragments.len,
+                );
+            }
             return;
         }
 
@@ -1225,6 +1260,22 @@ pub const Connection = struct {
         );
     }
 
+    fn compressMessageLocked(
+        self: *Connection,
+        payload: []const u8,
+    ) Error![]const u8 {
+        try self.compression_send.prepare(
+            self.allocator,
+            payload.len,
+        );
+        return websocket.compressMessageInto(
+            &self.compression_send.payload,
+            self.allocator,
+            self.compression_send.flate_window.?,
+            payload,
+        );
+    }
+
     fn writeFrameLocked(self: *Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
         try self.writeFrameLockedExtended(opcode, payload, fin, .{});
     }
@@ -1315,6 +1366,7 @@ pub const H2Connection = struct {
     permessage_deflate: bool = false,
     send_frame_buffer: std.ArrayList(u8) = .empty,
     message_buffer: std.ArrayList(u8) = .empty,
+    compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
 
     fn init(
@@ -1340,6 +1392,7 @@ pub const H2Connection = struct {
         self.inbuf.deinit(self.allocator);
         self.send_frame_buffer.deinit(self.allocator);
         self.message_buffer.deinit(self.allocator);
+        self.compression_send.deinit(self.allocator);
         self.compression_receive.deinit(self.allocator);
         self.* = undefined;
     }
@@ -1394,13 +1447,21 @@ pub const H2Connection = struct {
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
 
-        if (self.permessage_deflate and payload.len != 0) {
-            const compressed = try websocket.compressMessage(self.allocator, payload);
-            defer self.allocator.free(compressed);
-            try self.writeFrameLockedExtended(opcode, compressed, true, .{ .rsv1 = true });
-        } else {
-            try self.writeFrameLocked(opcode, payload, true);
+        if (self.permessage_deflate and
+            payload.len >= compression_min_payload_len)
+        {
+            const compressed = try self.compressMessageLocked(payload);
+            if (compressed.len < payload.len) {
+                try self.writeFrameLockedExtended(
+                    opcode,
+                    compressed,
+                    true,
+                    .{ .rsv1 = true },
+                );
+                return;
+            }
         }
+        try self.writeFrameLocked(opcode, payload, true);
     }
 
     pub fn sendFragmented(self: *H2Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
@@ -1409,16 +1470,37 @@ pub const H2Connection = struct {
         if (fragments.len == 0) return error.InvalidFrame;
 
         if (self.permessage_deflate) {
-            const plain = try joinFragments(self.allocator, fragments);
-            defer self.allocator.free(plain);
-            if (opcode == .text and !std.unicode.utf8ValidateSlice(plain)) return error.InvalidUtf8;
-
-            const compressed = try websocket.compressMessage(self.allocator, plain);
-            defer self.allocator.free(compressed);
-
             self.send_mutex.lockUncancelable(self.tunnel.connection.io);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
-            try self.writeCompressedFragmentsLocked(opcode, compressed, fragments.len);
+            const plain = try self.compression_send.joinFragments(
+                self.allocator,
+                fragments,
+            );
+            if (opcode == .text and
+                !std.unicode.utf8ValidateSlice(plain))
+            {
+                return error.InvalidUtf8;
+            }
+            if (plain.len >= compression_min_payload_len) {
+                const compressed = try self.compressMessageLocked(plain);
+                if (compressed.len < plain.len) {
+                    try self.writeCompressedFragmentsLocked(
+                        opcode,
+                        compressed,
+                        fragments.len,
+                    );
+                    return;
+                }
+            }
+            for (fragments, 0..) |fragment, index| {
+                const frame_opcode: websocket.Opcode =
+                    if (index == 0) opcode else .continuation;
+                try self.writeFrameLocked(
+                    frame_opcode,
+                    fragment,
+                    index + 1 == fragments.len,
+                );
+            }
             return;
         }
 
@@ -1588,6 +1670,22 @@ pub const H2Connection = struct {
         try self.compression_receive.prepare(
             self.allocator,
             self.limits.max_message_bytes,
+        );
+    }
+
+    fn compressMessageLocked(
+        self: *H2Connection,
+        payload: []const u8,
+    ) Error![]const u8 {
+        try self.compression_send.prepare(
+            self.allocator,
+            payload.len,
+        );
+        return websocket.compressMessageInto(
+            &self.compression_send.payload,
+            self.allocator,
+            self.compression_send.flate_window.?,
+            payload,
         );
     }
 

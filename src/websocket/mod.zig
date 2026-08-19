@@ -829,32 +829,76 @@ pub const MessageAssembler = struct {
     }
 };
 
-pub fn compressMessage(allocator: std.mem.Allocator, payload: []const u8) Error![]u8 {
-    var out = try std.ArrayList(u8).initCapacity(allocator, payload.len + 6);
-    errdefer out.deinit(allocator);
+pub fn compressMessage(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+) Error![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    const flate_window = try allocator.alloc(
+        u8,
+        std.compress.flate.max_window_len,
+    );
+    defer allocator.free(flate_window);
+    _ = try compressMessageInto(
+        &output,
+        allocator,
+        flate_window,
+        payload,
+    );
+    return output.toOwnedSlice(allocator);
+}
 
-    var offset: usize = 0;
-    while (offset < payload.len) {
-        const end = @min(payload.len, offset + std.math.maxInt(u16));
-        const len: u16 = @intCast(end - offset);
-        // RFC 7692 peers expect the message payload to be a raw DEFLATE stream
-        // after Z_SYNC_FLUSH with the trailing 00 00 ff ff removed.  Zig 0.16's
-        // flate writer does not expose sync-flush, so emit legal uncompressed
-        // DEFLATE blocks (BFINAL=0, BTYPE=00) and finish with the first byte of
-        // the empty sync-flush stored block.  Receivers restore the remaining
-        // four octets before inflating.  This favors interoperability over
-        // compression ratio until std exposes a streaming sync-flush encoder.
-        try out.append(allocator, 0x00);
-        try wire.appendInt(&out, allocator, u16, len, .little);
-        try wire.appendInt(&out, allocator, u16, ~len, .little);
-        try out.appendSlice(allocator, payload[offset..end]);
-        offset = end;
+/// Encode one RFC 7692 no-context-takeover message into reusable storage.
+///
+/// Zig 0.16's flate writer exposes a true streaming flush. Depending on the
+/// current bit alignment it may finish with either zlib's canonical empty
+/// stored block or one or more empty fixed blocks. RFC 7692 requires the
+/// canonical `00 00 ff ff` suffix to be omitted on the wire, so the latter
+/// case appends the first byte of a fresh empty stored block; the receiver's
+/// normal four-byte suffix restoration then reconstructs that block exactly.
+pub fn compressMessageInto(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    flate_window: []u8,
+    payload: []const u8,
+) Error![]const u8 {
+    if (flate_window.len < std.compress.flate.max_window_len) {
+        return error.BufferTooShort;
     }
+    output.clearRetainingCapacity();
+    var allocating = std.Io.Writer.Allocating.fromArrayList(
+        allocator,
+        output,
+    );
+    defer output.* = allocating.toArrayList();
+    // Keep enough direct output capacity for the common compressible path.
+    // The allocating writer remains the correctness fallback for an
+    // incompressible message; the runtime will send the original bytes unless
+    // the resulting wire payload is strictly smaller.
+    try allocating.ensureTotalCapacity(payload.len +| 64);
+    var compressor = try std.compress.flate.Compress.init(
+        &allocating.writer,
+        flate_window[0..std.compress.flate.max_window_len],
+        .raw,
+        .fastest,
+    );
+    try compressor.writer.writeAll(payload);
+    try compressor.writer.flush();
 
-    // Z_SYNC_FLUSH appends an empty non-final stored block: 00 00 00 ff ff.
-    // RFC 7692 removes the final four octets on the wire, leaving this marker.
-    try out.append(allocator, 0x00);
-    return out.toOwnedSlice(allocator);
+    const sync_flush_tail = "\x00\x00\xff\xff";
+    const encoded = allocating.written();
+    if (std.mem.endsWith(u8, encoded, sync_flush_tail)) {
+        allocating.shrinkRetainingCapacity(
+            encoded.len - sync_flush_tail.len,
+        );
+    } else {
+        // At this point the flate writer is byte-aligned. This zero is the
+        // BFINAL=0/BTYPE=00 header of the empty stored block whose LEN/NLEN
+        // bytes are restored by the decoder.
+        try allocating.writer.writeByte(0x00);
+    }
+    return allocating.written();
 }
 
 pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {
@@ -1376,7 +1420,7 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     const payload = "compress me compress me compress me compress me";
     const compressed = try compressMessage(allocator, payload);
     defer allocator.free(compressed);
-    try std.testing.expect(std.mem.endsWith(u8, compressed, "\x00"));
+    try std.testing.expect(compressed.len < payload.len);
     try std.testing.expect(!std.mem.endsWith(u8, compressed, "\x00\x00\xff\xff"));
     const decoded = try decompressMessage(allocator, compressed, 1024);
     defer allocator.free(decoded);

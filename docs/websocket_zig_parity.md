@@ -12,7 +12,7 @@ superiority.
 | HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, strict duplicate critical-header checks and upgrade-body rejection | Covered with configurable handshake parsing and handler callbacks |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
-| permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover | Server-side support exists; the audited 0.16 client explicitly rejects compression configuration |
+| permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto` and `receiveMessageInto` use caller storage, including permessage-deflate output with reusable connection scratch; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies | Handler callbacks and automatic default control replies |
@@ -64,6 +64,19 @@ and uses one vectored network write for header + borrowed payload. Masked
 clients copy and mask in one SIMD pass through a fixed 16 KiB stack scratch,
 so payload size no longer drives heap allocation.
 
+The same command now also measures one 4 KiB repeated telemetry-like message
+through the retained no-context-takeover compressor:
+
+```text
+permessage-deflate: 50.94-51.08 us/message
+wire payload:       4096 -> 54 bytes
+```
+
+These are three CPU-0-pinned `ReleaseFast` runs on 2026-08-19. This is an
+internal encoder baseline and compression-ratio example, not a cross-library
+speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
+`compressed = false`, so no equal compressed-send workload exists there.
+
 ## Persistent echo evidence
 
 The end-to-end benchmark uses one real HTTP/1 upgraded connection, 20 untimed
@@ -79,13 +92,19 @@ leaves caller storage masked, matching websocket.zig's mutable-input contract,
 while the latter assembles fragments and handles control frames without a
 message allocation. With permessage-deflate, the decompressed message lands
 directly in the caller buffer. TCP and RFC 8441 connections retain bounded
-compressed-wire scratch plus one reusable 64 KiB DEFLATE history window. TCP
-compressed receives allocate nothing after first-use warmup; the H2 adapter
-still owns tunnel-frame/message scratch but avoids a separate decompressed
-message allocation. Tests cover a zlib-generated dynamic-DEFLATE fixture,
-fragmented compressed text with interleaved PING, two-message TCP scratch reuse
-under a failing allocator, output overflow, and H2 compressed caller storage in
-both directions.
+compressed-wire scratch plus independent reusable 64 KiB send/receive DEFLATE
+history windows. The send path performs a true raw-DEFLATE streaming flush,
+removes the RFC 7692 suffix, and sets RSV1 only when the wire payload is
+strictly smaller; incompressible/small input is sent unchanged rather than
+paying expansion, and payloads below 32 bytes skip compressor setup entirely.
+No-context-takeover resets codec state for every message
+while retaining allocations. TCP compressed send and receive allocate nothing
+after first-use warmup; the H2 adapter still owns tunnel-frame/message scratch
+but avoids separate compression-output/decompressed-message allocations.
+Tests cover a zlib-generated dynamic-DEFLATE fixture, fragmented compressed
+text with interleaved PING, send/receive scratch reuse under failing allocators,
+actual wire shrink plus RSV1, expansion fallback without RSV1, output overflow,
+and H2 compressed caller storage in both directions.
 
 ```sh
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
@@ -168,5 +187,6 @@ these counts explain submission shape but are not timing samples.
    connections; the reference exposes explicit small/large buffer pools.
 3. Add Autobahn/WebSocket protocol-suite evidence for both implementations
    rather than relying only on in-repository tests.
-4. Measure compressed workloads once a truly compressing streaming encoder is
-   available; netz currently prioritizes RFC 7692 interoperability over ratio.
+4. Add an equal-wire compressed echo comparison if the reference re-enables
+   its currently disabled outbound compressor; until then the netz timing is
+   only an internal baseline.

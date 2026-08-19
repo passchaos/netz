@@ -1,6 +1,7 @@
 const std = @import("std");
 const websocket = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const compression_scratch = @import("compression_scratch.zig");
 
 const Server = runtime.Server;
 const Client = runtime.Client;
@@ -319,6 +320,159 @@ test "WebSocket permessage-deflate decodes into caller storage" {
         external_plain,
         external_decoded,
     );
+}
+
+test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
+    const allocator = std.testing.allocator;
+    const fragment = "repeated wire payload repeated wire payload ";
+    const fragments = [_][]const u8{ fragment ** 8, fragment ** 8 };
+    const payload = fragments[0] ++ fragments[1];
+    var scratch: compression_scratch.SendScratch = .{};
+    defer scratch.deinit(allocator);
+    const joined = try scratch.joinFragments(allocator, &fragments);
+    try std.testing.expectEqualStrings(payload, joined);
+    try scratch.prepare(allocator, payload.len);
+    const first = try websocket.compressMessageInto(
+        &scratch.payload,
+        allocator,
+        scratch.flate_window.?,
+        payload,
+    );
+    try std.testing.expect(first.len < payload.len / 4);
+    try std.testing.expect(!std.mem.endsWith(
+        u8,
+        first,
+        "\x00\x00\xff\xff",
+    ));
+    const plaintext_ptr = scratch.plaintext.allocatedSlice().ptr;
+    const payload_ptr = scratch.payload.allocatedSlice().ptr;
+    const window_ptr = scratch.flate_window.?.ptr;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    failing.fail_index = failing.alloc_index;
+    const joined_again = try scratch.joinFragments(
+        failing.allocator(),
+        &fragments,
+    );
+    try std.testing.expectEqualStrings(payload, joined_again);
+    try scratch.prepare(failing.allocator(), payload.len);
+    const second = try websocket.compressMessageInto(
+        &scratch.payload,
+        failing.allocator(),
+        scratch.flate_window.?,
+        payload,
+    );
+    try std.testing.expectEqual(first.len, second.len);
+    try std.testing.expectEqual(
+        plaintext_ptr,
+        scratch.plaintext.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(payload_ptr, scratch.payload.allocatedSlice().ptr);
+    try std.testing.expectEqual(window_ptr, scratch.flate_window.?.ptr);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "WebSocket compressed sender uses RSV1 only when wire payload shrinks" {
+    const allocator = std.testing.allocator;
+    const compressible = "compressible-wire-" ** 64;
+    const incompressible = [_]u8{
+        0x8d, 0x23, 0xf1, 0x5a, 0xc7, 0x04, 0xb9, 0x6e,
+        0x17, 0xda, 0x42, 0x95, 0x2c, 0xe3, 0x78, 0x01,
+        0xaf, 0x56, 0xcd, 0x30, 0x7b, 0xe8, 0x14, 0x93,
+        0x49, 0xb2, 0x05, 0xdc, 0x67, 0x1e, 0xf5, 0x88,
+        0x3d, 0xa6, 0x70, 0x0b, 0xd1, 0x4c, 0x92, 0x27,
+        0xfe, 0x65, 0x18, 0xab, 0x34, 0xc9, 0x72, 0x0d,
+        0xb6, 0x41, 0xec, 0x59, 0x03, 0x9a, 0x75, 0x2f,
+        0xc4, 0x1b, 0xe2, 0x68, 0x96, 0x0f, 0xbd, 0x53,
+    };
+    const attempted = try websocket.compressMessage(
+        allocator,
+        &incompressible,
+    );
+    defer allocator.free(attempted);
+    try std.testing.expect(attempted.len >= incompressible.len);
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = compressible.len,
+            .max_message_bytes = compressible.len,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        compressed_len: usize = 0,
+        compressed_rsv1: bool = false,
+        fallback_rsv1: bool = true,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept(.{
+                .enable_permessage_deflate = true,
+            });
+            defer connection.close();
+            var first = try connection.receiveFrame();
+            defer first.deinit(shared.server.http.allocator);
+            shared.compressed_len = first.payload.len;
+            shared.compressed_rsv1 = first.header.rsv1;
+            const decoded = try websocket.decompressMessage(
+                shared.server.http.allocator,
+                first.payload,
+                compressible.len,
+            );
+            defer shared.server.http.allocator.free(decoded);
+            try std.testing.expectEqualStrings(compressible, decoded);
+
+            var second = try connection.receiveFrame();
+            defer second.deinit(shared.server.http.allocator);
+            shared.fallback_rsv1 = second.header.rsv1;
+            try std.testing.expectEqualSlices(
+                u8,
+                &incompressible,
+                second.payload,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .host = "127.0.0.1",
+            .target = "/compressed-wire-shape",
+            .enable_permessage_deflate = true,
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = compressible.len,
+                .max_message_bytes = compressible.len,
+            },
+        },
+    );
+    defer client.close();
+    try client.sendBinary(compressible);
+    try client.sendBinary(&incompressible);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.compressed_rsv1);
+    try std.testing.expect(shared.compressed_len < compressible.len / 4);
+    try std.testing.expect(!shared.fallback_rsv1);
 }
 
 test "WebSocket permessage-deflate reuses receive scratch" {
