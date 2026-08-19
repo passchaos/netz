@@ -912,6 +912,32 @@ received packet-number ranges. A 5,000-round `--stats` run made 159 total
 allocations, ended with zero live bytes, and verified all 5,120,000 echoed
 payload bytes.
 
+### Raw QUIC stream-open rate
+
+Captured on 2026-08-20 after one real handshake. Like quicz's stream-churn
+case, the timed region reserves 100,000 locally initiated bidirectional stream
+IDs without transmitting STREAM frames:
+
+```sh
+taskset -c 0 zig build bench-quic-handshake-stream \
+  -Doptimize=ReleaseFast -- --mode=stream-churn
+taskset -c 0 /tmp/quicz-stream-churn-only
+```
+
+```text
+netz:   680.2M, 778.0M, 777.7M streams/s
+quicz:   48.1M,  52.0M,  51.7M streams/s
+```
+
+This controlled artifact puts netz at 13.1-16.2x the quicz stream-open rate.
+The new transport API enforces negotiated bidi/uni stream limits, returns the
+RFC stream-ID sequences for both endpoint roles, and creates stream flow state
+lazily on first use. A 100,000-stream `--stats` run made no allocations in the
+timed loop: the whole real-handshake process made 92 allocations, ended with
+zero live bytes, and returned the expected final ID 399,996 and checksum
+19,999,800,000. This is a stream-reservation microbenchmark, not evidence for
+wire-level open/close throughput.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary

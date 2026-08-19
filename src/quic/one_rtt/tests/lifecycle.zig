@@ -759,6 +759,67 @@ test "QUIC 1-RTT response piggybacks pending ACK" {
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
 }
 
+test "QUIC 1-RTT opens local stream ids without eager state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb3} ** quic.protection.secret_len,
+    );
+
+    var client = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .initial_send_max_streams_bidi = 2,
+        .initial_send_max_streams_uni = 1,
+    });
+    defer client.deinit();
+    try std.testing.expectEqual(@as(u64, 0), try client.openStream());
+    try std.testing.expectEqual(@as(u64, 4), try client.openStream());
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try client.openUnidirectionalStream(),
+    );
+    try std.testing.expect(client.getSendStreamStats(0) == null);
+    try std.testing.expect(client.getSendStreamStats(4) == null);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        client.stats().outgoing_streams_created,
+    );
+    try std.testing.expectError(error.StreamLimitExceeded, client.openStream());
+    try std.testing.expectError(
+        error.StreamLimitExceeded,
+        client.openUnidirectionalStream(),
+    );
+
+    var server = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+        .initial_send_max_streams_bidi = 1,
+        .initial_send_max_streams_uni = 1,
+    });
+    defer server.deinit();
+    try std.testing.expectEqual(@as(u64, 1), try server.openStream());
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        try server.openUnidirectionalStream(),
+    );
+}
+
 test "QUIC 1-RTT ACK of ACK prunes received packet history" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

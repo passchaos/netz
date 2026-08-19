@@ -10,6 +10,8 @@ const default_transfer_bytes: usize = 64 * 1024 * 1024;
 const default_streams: usize = 1;
 const default_echo_iterations: usize = 5000;
 const echo_payload_bytes: usize = 1024;
+const default_stream_churn_iterations: usize = 100_000;
+const stream_churn_credit: u64 = 1_048_576;
 const max_streams: usize = 64;
 const max_datagram_size: usize = 8900;
 const stream_payload_size: usize = max_datagram_size - 128;
@@ -48,7 +50,7 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake, echo };
+const Mode = enum { upload, handshake, echo, stream_churn };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
@@ -70,6 +72,11 @@ pub fn main(init: std.process.Init) !void {
     }
     if (config.mode == .echo) {
         try runEchoBenchmark(allocator, io, config, server_key);
+        if (config.stats) counting.snapshot().print();
+        return;
+    }
+    if (config.mode == .stream_churn) {
+        try runStreamChurnBenchmark(allocator, io, config, server_key);
         if (config.stats) counting.snapshot().print();
         return;
     }
@@ -338,7 +345,8 @@ fn runIteration(
         .cancelled = &cancelled,
         .bytes_received = &bytes_received,
         .verbose = config.verbose,
-        .handshake_only = config.mode == .handshake,
+        .handshake_only = config.mode == .handshake or
+            config.mode == .stream_churn,
         .echo_only = config.mode == .echo,
         .echo_connection = &echo_connection,
         .server_key = server_key,
@@ -415,6 +423,21 @@ fn runIteration(
             .client_stats = established.connection.stats(),
             .gso_enabled = client_endpoint.gsoSendEnabled(),
             .payload_bytes_received = 0,
+        };
+    }
+    if (config.mode == .stream_churn) {
+        const result = try measureStreamChurn(
+            &established.connection,
+            config.iterations,
+        );
+        server_future.await(io);
+        joined = true;
+        if (shared.err) |err| return err;
+        return .{
+            .elapsed_ns = result.elapsed_ns,
+            .client_stats = established.connection.stats(),
+            .gso_enabled = client_endpoint.gsoSendEnabled(),
+            .payload_bytes_received = result.opened,
         };
     }
     if (config.mode == .echo) {
@@ -588,6 +611,48 @@ fn runEchoRounds(
         .elapsed_ns = elapsed,
         .payload_bytes_received = verified,
     };
+}
+
+const StreamChurnResult = struct { elapsed_ns: u64, opened: usize };
+
+fn measureStreamChurn(
+    connection: *netz.quic.one_rtt.Connection,
+    iterations: usize,
+) !StreamChurnResult {
+    var checksum: u64 = 0;
+    const started = nowNs(connection.endpoint.io);
+    for (0..iterations) |_| {
+        const stream_id = try connection.openStream();
+        checksum +%= stream_id;
+        // Keep every state transition observable to the optimizer, matching
+        // benchmark harness black-box semantics rather than timing a folded
+        // arithmetic series.
+        std.mem.doNotOptimizeAway(stream_id);
+    }
+    const elapsed = nowNs(connection.endpoint.io) -| started;
+    std.mem.doNotOptimizeAway(checksum);
+    const streams_per_second: f64 = if (elapsed == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(iterations)) *
+            @as(f64, @floatFromInt(std.time.ns_per_s)) /
+            @as(f64, @floatFromInt(elapsed));
+    std.debug.print(
+        "QUIC real TLS 1.3 stream open benchmark\n" ++
+            "  streams opened: {d}\n" ++
+            "  elapsed ns: {d}\n" ++
+            "  streams/s: {d:.0}\n" ++
+            "  last stream id: {d}\n" ++
+            "  checksum: {d}\n",
+        .{
+            iterations,
+            elapsed,
+            streams_per_second,
+            (iterations - 1) * 4,
+            checksum,
+        },
+    );
+    return .{ .elapsed_ns = elapsed, .opened = iterations };
 }
 
 fn sendTransfer(
@@ -791,7 +856,10 @@ fn transferTransportParameters(config: Config) netz.quic.TransportParameters {
     params.initial_max_stream_data_bidi_local = credit;
     params.initial_max_stream_data_bidi_remote = credit;
     params.initial_max_stream_data_uni = credit;
-    params.initial_max_streams_bidi = max_streams;
+    params.initial_max_streams_bidi = if (config.mode == .stream_churn)
+        stream_churn_credit
+    else
+        max_streams;
     params.initial_max_streams_uni = max_streams;
     params.max_udp_payload_size = max_datagram_size;
     return params;
@@ -817,6 +885,8 @@ fn parseArgs(
             config.mode = .handshake;
         } else if (std.mem.eql(u8, arg, "--mode=echo")) {
             config.mode = .echo;
+        } else if (std.mem.eql(u8, arg, "--mode=stream-churn")) {
+            config.mode = .stream_churn;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
@@ -849,8 +919,16 @@ fn parseArgs(
     if (config.mode == .echo and !iterations_set) {
         config.iterations = default_echo_iterations;
     }
+    if (config.mode == .stream_churn and !iterations_set) {
+        config.iterations = default_stream_churn_iterations;
+    }
     if (config.mode == .echo) config.transfer_bytes =
         config.iterations *| echo_payload_bytes;
+    if (config.mode == .stream_churn and
+        config.iterations > stream_churn_credit)
+    {
+        return error.InvalidArgument;
+    }
     if (config.streams > max_streams or
         config.batch_packets > max_packet_batch_size or
         config.streams > config.transfer_bytes)
@@ -880,6 +958,24 @@ fn runEchoBenchmark(
     ) catch return error.InvalidEchoPayload;
     if (result.payload_bytes_received != expected) {
         return error.InvalidEchoPayload;
+    }
+}
+
+fn runStreamChurnBenchmark(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
+) !void {
+    const result = try runIteration(
+        allocator,
+        io,
+        config,
+        0,
+        server_key,
+    );
+    if (result.payload_bytes_received != config.iterations) {
+        return error.InvalidStreamCount;
     }
 }
 

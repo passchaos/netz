@@ -597,6 +597,8 @@ pub const Connection = struct {
     streams_blocked_uni_at: ?u64 = null,
     recv_max_streams_bidi: u64,
     recv_max_streams_uni: u64,
+    next_local_bidi_stream_id: u64,
+    next_local_uni_stream_id: u64,
     spin_bit_value: bool = false,
     fixed_bit_generator: fixed_bit.Generator = .{},
     last_activity_ms: ?u64 = null,
@@ -684,6 +686,14 @@ pub const Connection = struct {
             .peer_max_streams_uni = config.initial_send_max_streams_uni,
             .recv_max_streams_bidi = config.initial_receive_max_streams_bidi,
             .recv_max_streams_uni = config.initial_receive_max_streams_uni,
+            .next_local_bidi_stream_id = switch (config.local_endpoint) {
+                .client => 0,
+                .server => 1,
+            },
+            .next_local_uni_stream_id = switch (config.local_endpoint) {
+                .client => 2,
+                .server => 3,
+            },
         };
         errdefer connection.deinit();
         connection.fixed_bit_generator = try .init(
@@ -1593,6 +1603,51 @@ pub const Connection = struct {
 
     pub fn getSendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
         return self.sendStreamStats(stream_id);
+    }
+
+    /// Reserve the next locally initiated stream ID without allocating stream
+    /// transport state. State is created lazily by the first STREAM/control
+    /// operation, matching QUIC's rule that opening a stream is not visible on
+    /// the wire until it is used.
+    pub fn openStream(self: *Connection) Error!u64 {
+        return self.openLocalStream(.bidirectional);
+    }
+
+    pub fn openUnidirectionalStream(self: *Connection) Error!u64 {
+        return self.openLocalStream(.unidirectional);
+    }
+
+    /// Short alias matching common QUIC APIs.
+    pub fn openUniStream(self: *Connection) Error!u64 {
+        return self.openUnidirectionalStream();
+    }
+
+    fn openLocalStream(
+        self: *Connection,
+        direction: StreamDirection,
+    ) Error!u64 {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        const next, const limit = switch (direction) {
+            .bidirectional => .{
+                &self.next_local_bidi_stream_id,
+                self.peer_max_streams_bidi,
+            },
+            .unidirectional => .{
+                &self.next_local_uni_stream_id,
+                self.peer_max_streams_uni,
+            },
+        };
+        const stream_id = next.*;
+        if (streamCountForId(stream_id) > limit) {
+            try self.sendStreamsBlocked(direction);
+            return error.StreamLimitExceeded;
+        }
+        next.* = std.math.add(u64, stream_id, 4) catch
+            return error.StreamLimitExceeded;
+        self.outgoing_streams_created_count +|= 1;
+        return stream_id;
     }
 
     /// Snapshot the immediately usable application STREAM credit.
@@ -6006,6 +6061,22 @@ pub const Connection = struct {
         if (self.findSendStreamEntry(stream_id)) |entry| return entry;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             try self.validateLocalStreamCount(stream_id);
+            // Preserve the historical direct-STREAM API: using a local ID can
+            // implicitly reserve it and all lower IDs in that stream-number
+            // space. Explicit `openStream` calls already advanced `next`, so
+            // they do not increment observability a second time here.
+            const next = if (streamDirection(stream_id) == .bidirectional)
+                &self.next_local_bidi_stream_id
+            else
+                &self.next_local_uni_stream_id;
+            const requested_count = streamCountForId(stream_id);
+            const reserved_count = next.* >> 2;
+            if (requested_count > reserved_count) {
+                next.* = std.math.add(u64, stream_id, 4) catch
+                    return error.StreamLimitExceeded;
+                self.outgoing_streams_created_count +|=
+                    requested_count - reserved_count;
+            }
         }
         const slot = try self.stream_send_index.getOrPut(
             self.endpoint.allocator,
@@ -6022,9 +6093,6 @@ pub const Connection = struct {
         });
         slot.value_ptr.* = index;
         self.last_send_stream_index = index;
-        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
-            self.outgoing_streams_created_count +|= 1;
-        }
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
 
