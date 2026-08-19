@@ -172,15 +172,15 @@ driver was alive; the table reports the median of each three-run metric:
 
 ```text
 broker    pub/s    deliveries/s   p50 ms   p99 ms   p99.9 ms   client allocs   client peak B   broker peak RSS KiB
-netz      53,905        215,622    1.819    3.804       4.228         504,105         504,170                 9,344
+netz      55,162        220,651    1.789    3.956       4.476         504,105         504,170                 8,496
 rumqttd    6,902         27,609    1.335   41.100      41.800         672,121         504,436                17,632
 ```
 
 Every run completed 80,000 measured deliveries with checksum 20,580,000. In
-this bounded windowed shape, netz delivered 7.81x rumqttd's median throughput,
-used 25.0% fewer client allocation calls and 47.0% less broker peak RSS. Netz's
-median completion was 1.36x slower, but its p99 and p99.9 were respectively
-10.80x and 9.89x lower. Client cumulative allocation was 120,171,264 bytes for
+this bounded windowed shape, netz delivered 7.99x rumqttd's median throughput,
+used 25.0% fewer client allocation calls and 51.8% less broker peak RSS. Netz's
+median completion was 1.34x slower, but its p99 and p99.9 were respectively
+10.39x and 9.34x lower. Client cumulative allocation was 120,171,264 bytes for
 netz versus a median 133,108,088 bytes for rumqttd. These are equal-driver
 results for this workload, not a persistence, QoS 2, crash-safety or broad
 conformance verdict.
@@ -191,14 +191,19 @@ samples to `Broker.flushSlotLocked`; annotation placed 43% of the atom-core
 samples on the null test while scanning the consumed queue prefix. After the
 cursor change the same symbol accounted for 4.9% of atom-core samples. The
 transient-session fast path then raised the unprofiled three-run range from
-37,098-40,021 to 53,843-54,197 publishes/s.
+37,098-40,021 to 53,843-54,197 publishes/s. Finally, moving the large runtime
+Connection into its stable broker slot before constructing the async client
+task removed a redundant closure/worker-stack copy. The task now owns only the
+compact CONNECT parse tree, and attach-time errors follow the normal unregister
+cleanup path. Median broker peak RSS fell from 9,344 to 8,496 KiB while the
+three-run range remained 54,655-55,781 publishes/s.
 
 The same shape was also run three times against a release build of audited
 Mosquitto `5cd25465`, configured with 64 inflight and 1,024 queued messages.
 Its per-metric medians were 7,025 publishes/s, 28,100 deliveries/s, 4.922 ms
 p50, 44.307 ms p99, 46.752 ms p99.9, 672,109 client allocations, 504,223
 client peak bytes, and 3,868 KiB broker peak RSS. Netz therefore delivered
-7.67x its throughput with 2.71x lower p50 and 11.65x lower p99, but used 2.42x
+7.85x its throughput with 2.75x lower p50 and 11.20x lower p99, but used 2.20x
 the broker RSS in this eight-client run. Mosquitto's smaller RSS remains a
 clear memory target rather than being hidden by the throughput result.
 

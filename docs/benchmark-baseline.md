@@ -1169,11 +1169,11 @@ completed 20,000 publishes and 80,000 deliveries with checksum 20,580,000.
 Three consecutive runs gave:
 
 ```text
-netz publishes/s:     53,843 / 54,197 / 53,905
-netz p50 ms:           1.808 /  1.819 /  1.852
-netz p99 ms:           3.712 /  3.804 /  3.975
-netz p99.9 ms:         4.228 /  4.186 /  4.785
-netz broker peak KiB:  9,316 /  9,344 /  9,464
+netz publishes/s:     55,781 / 54,655 / 55,162
+netz p50 ms:           1.786 /  1.813 /  1.789
+netz p99 ms:           4.037 /  3.822 /  3.956
+netz p99.9 ms:         4.476 /  4.222 /  4.636
+netz broker peak KiB:  8,668 /  8,496 /  8,236
 
 rumqttd publishes/s:   7,218 /  6,902 /  6,642
 rumqttd p50 ms:        1.335 /  1.277 /  1.340
@@ -1196,8 +1196,12 @@ assigned 50-53% of broker cycles to `Broker.flushSlotLocked`, with the
 consumed-prefix null scan dominating its annotation. The cursor reduced that
 symbol to 4.9% in the matching atom-core report. Avoiding durable deep copies
 for transient online Sessions then raised the three-run range from
-37,098-40,021 to 53,843-54,197 publishes/s. This comparison is specific to the
-bounded QoS 1 shape and is not a broad broker or persistence verdict.
+37,098-40,021 to 53,843-54,197 publishes/s. The broker task closure now carries
+only the owned CONNECT parse tree after moving its much larger runtime
+Connection into the stable slot; this removed a redundant per-worker stack
+copy and reduced median broker peak RSS from 9,344 to 8,496 KiB while retaining
+54,655-55,781 publishes/s. This comparison is specific to the bounded QoS 1
+shape and is not a broad broker or persistence verdict.
 
 ## MQTT shared-subscription router
 

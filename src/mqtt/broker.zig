@@ -557,21 +557,38 @@ pub const Broker = struct {
                 self.abortRegistration(index, subscriber_id);
                 return err;
             };
-            errdefer accepted.deinit(self.allocator);
+            var accepted_owns_connection = true;
+            errdefer if (accepted_owns_connection) {
+                accepted.deinit(self.allocator);
+            };
             self.attachConnection(
                 index,
                 subscriber_id,
                 &accepted.connection,
             );
+            accepted_owns_connection = false;
+            errdefer accepted.connect.deinit(self.allocator);
+            // From this point the slot owns the connection. Setup failures
+            // must follow normal unregister cleanup rather than the transient
+            // AcceptedClient errdefer, whose connection was moved above.
+            errdefer self.unregister(
+                index,
+                subscriber_id,
+            ) catch {};
             try self.flushSlot(index, &self.slots[index]);
             const task = ClientTask{
                 .broker = self,
                 .slot_index = index,
                 .subscriber_id = subscriber_id,
-                .accepted = accepted,
+                .connect = accepted.connect,
                 .result = result,
             };
             group.async(self.io, ClientTask.run, .{task});
+            // The task now owns only the compact CONNECT parse tree. Keeping
+            // the moved Connection out of the async closure avoids copying
+            // its large inflight bitsets through every worker stack.
+            accepted.connect = undefined;
+            accepted.connection = undefined;
             clients_started += 1;
         }
         group.await(self.io) catch {};
@@ -2056,14 +2073,12 @@ const ClientTask = struct {
     broker: *Broker,
     slot_index: usize,
     subscriber_id: router_mod.SubscriberId,
-    accepted: runtime.AcceptedClient,
+    connect: runtime.OwnedConnect,
     result: *?anyerror,
 
     fn run(task: ClientTask) std.Io.Cancelable!void {
-        var accepted = task.accepted;
-        // `register` moved the connection into the stable broker slot.
-        accepted.connect.deinit(task.broker.allocator);
-        accepted.connection = undefined;
+        var connect = task.connect;
+        defer connect.deinit(task.broker.allocator);
         const slot = &task.broker.slots[task.slot_index];
         const connection = &slot.connection.?;
 
