@@ -355,47 +355,28 @@ pub const Queue = struct {
 
     pub fn applyAck(self: *Queue, ack: quic.AckFrame) Error!usize {
         if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
-
-        const range_count = std.math.add(usize, ack.ranges.len, 1) catch
-            return error.InvalidAckFrame;
-        var stack_ranges: [32]AckedRange = undefined;
-        const acked_ranges = if (range_count <= stack_ranges.len)
-            stack_ranges[0..range_count]
-        else
-            try self.allocator.alloc(AckedRange, range_count);
-        defer if (range_count > stack_ranges.len) {
-            self.allocator.free(acked_ranges);
-        };
-
-        var start = ack.largest_acknowledged - ack.first_ack_range;
-        var end = ack.largest_acknowledged;
-        acked_ranges[0] = .{ .start = start, .end = end };
-
-        for (ack.ranges, 1..) |range, range_index| {
-            const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
-            if (start < skipped) return error.InvalidAckFrame;
-            end = start - skipped;
-            if (end < range.ack_range_length) return error.InvalidAckFrame;
-            start = end - range.ack_range_length;
-            acked_ranges[range_index] = .{ .start = start, .end = end };
+        // Validate the entire descending range chain before mutating recovery
+        // ownership. This preserves transactional rejection without building
+        // a temporary decoded-range array.
+        var smallest = ack.largest_acknowledged - ack.first_ack_range;
+        for (ack.ranges) |range| {
+            const skipped = std.math.add(u64, range.gap, 2) catch
+                return error.InvalidAckFrame;
+            if (smallest < skipped) return error.InvalidAckFrame;
+            const range_end = smallest - skipped;
+            if (range_end < range.ack_range_length) {
+                return error.InvalidAckFrame;
+            }
+            smallest = range_end - range.ack_range_length;
         }
-
-        return self.retainUnacknowledgedRanges(acked_ranges);
+        return self.retainUnacknowledgedAck(ack);
     }
 
-    const AckedRange = struct {
-        start: u64,
-        end: u64,
-    };
-
-    fn retainUnacknowledgedRanges(
-        self: *Queue,
-        acked_ranges: []const AckedRange,
-    ) usize {
+    fn retainUnacknowledgedAck(self: *Queue, ack: quic.AckFrame) usize {
         var write_index: usize = 0;
         var removed: usize = 0;
         for (self.pending.items, 0..) |entry, read_index| {
-            if (entryContainsAnyRange(entry, acked_ranges)) {
+            if (entryAcked(entry, ack)) {
                 var removed_entry = entry;
                 self.removeEntryStats(removed_entry);
                 self.recycleEntry(&removed_entry);
@@ -413,12 +394,17 @@ pub const Queue = struct {
         return removed;
     }
 
-    fn entryContainsAnyRange(
+    fn entryAcked(
         entry: PendingDatagram,
-        ranges: []const AckedRange,
+        ack: quic.AckFrame,
     ) bool {
-        for (ranges) |range| {
-            if (entry.containsRange(range.start, range.end)) return true;
+        var end = ack.largest_acknowledged;
+        var start = end - ack.first_ack_range;
+        if (entry.containsRange(start, end)) return true;
+        for (ack.ranges) |range| {
+            end = start - (range.gap + 2);
+            start = end - range.ack_range_length;
+            if (entry.containsRange(start, end)) return true;
         }
         return false;
     }
@@ -847,6 +833,58 @@ test "QUIC recovery queue applies large ACK range sets in one pass" {
             entry.newestPacketNumber(),
         );
     }
+}
+
+test "QUIC recovery applies large ACK range sets without allocation" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = failing.allocator();
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    for (0..81) |packet_number| {
+        _ = try queue.trackSent(@intCast(packet_number), "x");
+    }
+    const ranges = [_]quic.AckRange{
+        .{ .gap = 0, .ack_range_length = 0 },
+    } ** 40;
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 80,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+
+    // Payload recycling and index rebuilding retain their existing capacity.
+    // Once tracking is complete, even an ACK with more than the historical
+    // 32-range stack threshold must not consult the allocator.
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(@as(usize, 41), try queue.applyAck(ack));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "QUIC recovery rejects invalid large ACK transactionally" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+    _ = try queue.trackSent(1, "one");
+    _ = try queue.trackSent(5, "five");
+
+    const invalid = quic.AckFrame{
+        .largest_acknowledged = 80,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &.{.{
+            .gap = std.math.maxInt(u64),
+            .ack_range_length = 0,
+        }},
+    };
+    try std.testing.expectError(error.InvalidAckFrame, queue.applyAck(invalid));
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingCount());
+    try std.testing.expect(queue.packetNumberCandidate(1) != null);
+    try std.testing.expect(queue.packetNumberCandidate(5) != null);
 }
 
 test "QUIC recovery queue schedules packet-threshold loss once per newest copy" {

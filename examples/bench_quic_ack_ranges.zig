@@ -5,6 +5,8 @@ const iterations: usize = 500_000;
 const tracked_ranges: usize = netz.quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity;
 const packet_number_base: u64 = 10_000;
 const sent_packets: usize = 4096;
+const recovery_packets: usize = 128;
+const recovery_iterations: usize = 5_000;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -39,6 +41,10 @@ pub fn main() !void {
         allocator,
         io,
     );
+    const recovery_ns, const recovery_checksum = try measureRecoveryAckRanges(
+        allocator,
+        io,
+    );
     const speedup_x100 = ratioTimes100(allocating_ns, stack_ns);
 
     std.debug.print(
@@ -49,6 +55,7 @@ pub fn main() !void {
         \\  caller-storage speedup:   {d}.{d:0>2}x
         \\  stale wouldRecordFresh:   {d} ns/op
         \\  sent ACK validation ({d} packets): {d} ns/op
+        \\  recovery ACK cycle ({d} packets, {d} ranges): {d} ns/cycle
         \\  checksum: {d}
         \\
     , .{
@@ -62,8 +69,53 @@ pub fn main() !void {
         stale_ns / iterations,
         sent_packets,
         sent_validate_ns / iterations,
-        allocating_checksum +% stack_checksum +% stale_checksum +% sent_validate_checksum,
+        recovery_packets,
+        recovery_packets / 2,
+        recovery_ns / recovery_iterations,
+        allocating_checksum +% stack_checksum +% stale_checksum +%
+            sent_validate_checksum +% recovery_checksum,
     });
+}
+
+fn measureRecoveryAckRanges(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !struct { u64, u64 } {
+    var queue = netz.quic.recovery.Queue.init(allocator);
+    defer queue.deinit();
+    const extra_range_count = recovery_packets / 2 - 1;
+    var ranges = [_]netz.quic.AckRange{.{
+        .gap = 0,
+        .ack_range_length = 0,
+    }} ** extra_range_count;
+    const even_ack = netz.quic.AckFrame{
+        .largest_acknowledged = recovery_packets - 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+    const odd_ack = netz.quic.AckFrame{
+        .largest_acknowledged = recovery_packets - 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+    var checksum: u64 = 0;
+    const started = nowNs(io);
+    for (0..recovery_iterations) |iteration| {
+        const base = @as(u64, @intCast(iteration * recovery_packets));
+        for (0..recovery_packets) |packet_index| {
+            _ = try queue.trackSent(base + packet_index, "x");
+        }
+        var current_even = even_ack;
+        current_even.largest_acknowledged += base;
+        var current_odd = odd_ack;
+        current_odd.largest_acknowledged += base;
+        checksum +%= try queue.applyAck(current_even);
+        checksum +%= try queue.applyAck(current_odd);
+        if (queue.pendingCount() != 0) return error.UnexpectedPendingPacket;
+    }
+    return .{ nowNs(io) -| started, checksum };
 }
 
 fn measureAllocating(

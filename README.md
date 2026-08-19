@@ -631,7 +631,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - end-to-end QUIC 1-RTT UDP_GRO owning-batch cursor receive versus per-packet receive,
   including decryption, frame parsing, state application, and cleanup.
 - QUIC ACK range generation with allocating ownership versus caller-provided
-  stack storage for the 1-RTT ACK send hot path,
+  stack storage, plus allocation-free transactional recovery application
+  directly from arbitrary wire-range counts,
 - bounded QUIC receive-stream compaction across long absolute offsets, including
   retained-memory reduction versus the previous absolute-offset buffer model.
 

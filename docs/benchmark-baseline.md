@@ -291,6 +291,19 @@ QUIC 1-RTT receive benchmark
   total packets/path: 54000
 ```
 
+### QUIC recovery ACK range application
+
+`bench-quic-ack-ranges` now includes a complete recovery cycle that tracks 128
+payload groups and retires them with two 64-range ACK frames. Recovery validates
+the descending range chain before mutation, then matches directly from wire
+ranges instead of allocating a second decoded-range array. The ReleaseFast
+baseline is 8.9 us/cycle on this host. Failing-allocator and malformed-range
+tests prove allocation-free application and transactional rejection.
+
+The audited quicz frame decoder allocates `AckRange[range_count]` for every ACK.
+Netz still owns ranges at its generic parser boundary, but its recovery queue no
+longer performs another allocation/copy.
+
 ### QUIC UDP batch send / receive
 
 ```text
