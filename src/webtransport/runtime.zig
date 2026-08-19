@@ -8,6 +8,7 @@ const datagram_stack_capacity: usize = 4096;
 const session_control = @import("runtime/session_control.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
+const stream_batch = @import("runtime/stream_batch.zig");
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidConnect,
@@ -473,6 +474,23 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Submit one packet-sized slice per sendable stream in a QUIC packet
+    /// batch. Counts commit only the socket-visible prefix.
+    pub fn writeStreams(
+        self: *AcceptedHandshakeSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+    ) Error!StreamWriteResult {
+        try self.control.ensureOpen();
+        return stream_batch.write(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            writes,
+            counts,
+        );
+    }
+
     pub fn finishStream(
         self: *AcceptedHandshakeSession,
         stream_id: u62,
@@ -819,6 +837,23 @@ pub const HandshakeClientSession = struct {
             self.session_id,
             stream_id,
             payload,
+        );
+    }
+
+    /// Submit one packet-sized slice per sendable stream in a QUIC packet
+    /// batch. Counts commit only the socket-visible prefix.
+    pub fn writeStreams(
+        self: *HandshakeClientSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+    ) Error!StreamWriteResult {
+        try self.control.ensureOpen();
+        return stream_batch.write(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            writes,
+            counts,
         );
     }
 
@@ -1454,6 +1489,8 @@ const handshake_stream = @import("runtime/stream.zig");
 const incremental_stream = @import("runtime/stream_incremental.zig");
 pub const OwnedHandshakeStream = handshake_stream.OwnedHandshakeStream;
 pub const StreamRead = incremental_stream.Read;
+pub const StreamWrite = stream_batch.Write;
+pub const StreamWriteResult = stream_batch.Result;
 pub const SessionEvent = session_control.Event;
 const initHandshakeStreamRegistry = handshake_stream.initRegistry;
 const sendHandshakeSessionStream = handshake_stream.send;

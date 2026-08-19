@@ -63,13 +63,18 @@ Session-ID-only prefix with an ordinary HTTP/3 DATA/HEADERS frame.
 ## Incremental stream and cancellation evidence
 
 `HandshakeClientSession` and `AcceptedHandshakeSession` expose `readStream`,
-`writeStream`, `finishStream`, `resetStream`, and `stopStream`. `readStream`
+`writeStream`, `writeStreams`, `finishStream`, `resetStream`, and `stopStream`.
+`readStream`
 copies only the next contiguous prefix into caller storage, releases it to QUIC
 flow control immediately, and returns data/FIN, RESET_STREAM, or STOP_SENDING
 events. `writeStream` waits for positive transport credit but submits at most
 one packet-sized application prefix and returns its actual length, allowing
 callers to round-robin many active streams; `finishStream` submits FIN
-independently. The runtime maps
+independently. `writeStreams` stages one fair packet-sized slice per sendable
+stream through QUIC's stateful packet batch and commits registry/caller offsets
+only for the socket-visible prefix. This provides allocation-free concurrent
+stream progress without hiding flow control behind per-stream write-all tasks.
+The runtime maps
 WebTransport's 32-bit application error space into HTTP/3 codes while skipping
 reserved codepoints and exposes both mapped and raw values on receive.
 
@@ -94,6 +99,13 @@ three consecutive 2026-08-18 same-host `ReleaseFast` runs after switching the
 benchmark to one-packet partial writes. This deliberately prioritizes
 caller-controlled fairness over the write-all helper's throughput; it is an
 internal baseline and no equal-wire wtransport/quicz ratio is claimed.
+
+The benchmark now also accepts `--streams` and `--transfer-bytes`. A four-stream
+1 MiB-per-stream real-handshake run completed at 70 MiB/s aggregate with 3971
+socket-visible partial writes, exercising the batch API rather than four
+sequential write loops. The local `wtransport` API exposes independent async
+stream writes but no one-call cross-stream packet batch or visible-prefix
+commit result.
 
 ## Session drain and close lifecycle
 
@@ -148,6 +160,5 @@ lightweight protected transport does not own a stateful recovery connection.
    owner.
 2. Add external `wtransport` client/server interoperability runs and browser
    WebTransport evidence.
-3. Add larger concurrent stream, stream-churn and cancellation-under-loss
-   benchmarks;
-   sustained incremental stream throughput now has a real-handshake baseline.
+3. Add larger stream-churn and cancellation-under-loss benchmarks; concurrent
+   packet-batched stream throughput now has a real-handshake baseline.

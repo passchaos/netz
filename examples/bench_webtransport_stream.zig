@@ -1,19 +1,22 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const transfer_bytes: usize = 4 * 1024 * 1024;
+const default_transfer_bytes: usize = 4 * 1024 * 1024;
+const default_streams: usize = 1;
+const max_streams: usize = 64;
 const read_buffer_bytes: usize = 16 * 1024;
 const stream_window: u64 = 64 * 1024;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const io = init.io;
+    const config = try parseArgs(init, allocator);
     const original_dcid =
         [_]u8{ 0x57, 0x54, 0x42, 0x01, 0x57, 0x54, 0x42, 0x02 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x42, 0x03 };
     const server_cid = [_]u8{ 0x57, 0x54, 0x42, 0x04 };
 
-    const payload = try allocator.alloc(u8, transfer_bytes);
+    const payload = try allocator.alloc(u8, config.transfer_bytes);
     defer allocator.free(payload);
     for (payload, 0..) |*byte, index| byte.* = payloadByte(index);
 
@@ -49,6 +52,7 @@ pub fn main(init: std.process.Init) !void {
         received: usize = 0,
         events: usize = 0,
         checksum: u64 = 0,
+        streams: usize,
         io: std.Io,
         started: std.Io.Event = .unset,
         finished: std.Io.Event = .unset,
@@ -64,7 +68,8 @@ pub fn main(init: std.process.Init) !void {
             var session = try shared.server.accept();
             defer session.deinit();
             var buffer: [read_buffer_bytes]u8 = undefined;
-            while (true) {
+            var finished_streams: usize = 0;
+            while (finished_streams < shared.streams) {
                 shared.started.set(shared.io);
                 const event = try session.readStream(&buffer);
                 switch (event) {
@@ -79,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
                         }
                         shared.received += data.bytes;
                         shared.events += 1;
-                        if (data.fin) break;
+                        if (data.fin) finished_streams += 1;
                     },
                     else => return error.UnexpectedStreamEvent,
                 }
@@ -87,7 +92,11 @@ pub fn main(init: std.process.Init) !void {
         }
     };
 
-    var shared = Shared{ .server = &server, .io = io };
+    var shared = Shared{
+        .server = &server,
+        .streams = config.streams,
+        .io = io,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
@@ -124,32 +133,59 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     shared.started.waitUncancelable(io);
-    const stream_id = try client.openBidirectionalStream();
+    const stream_ids = try allocator.alloc(u62, config.streams);
+    defer allocator.free(stream_ids);
+    for (stream_ids) |*stream_id| {
+        stream_id.* = try client.openBidirectionalStream();
+    }
     const started_ns = nowNs(io);
     var write_calls: usize = 0;
-    var written: usize = 0;
-    while (written < payload.len) {
-        written += try client.writeStream(
-            stream_id,
-            payload[written..],
-        );
-        write_calls += 1;
+    const offsets = try allocator.alloc(usize, config.streams);
+    defer allocator.free(offsets);
+    @memset(offsets, 0);
+    const writes = try allocator.alloc(
+        netz.webtransport.runtime.StreamWrite,
+        config.streams,
+    );
+    defer allocator.free(writes);
+    const counts = try allocator.alloc(usize, config.streams);
+    defer allocator.free(counts);
+    var remaining = config.streams;
+    while (remaining != 0) {
+        for (writes, stream_ids, offsets) |*item, stream_id, offset| {
+            item.* = .{
+                .stream_id = stream_id,
+                .data = payload[offset..],
+            };
+        }
+        const result = try client.writeStreams(writes, counts);
+        if (result.send_error) |err| return err;
+        if (result.progressed == 0) return error.IncompleteTransfer;
+        write_calls += result.progressed;
+        for (offsets, counts) |*offset, count| {
+            if (offset.* == payload.len) continue;
+            offset.* += count;
+            if (offset.* == payload.len) remaining -= 1;
+        }
     }
-    try client.finishStream(stream_id);
+    for (stream_ids) |stream_id| try client.finishStream(stream_id);
     shared.finished.waitUncancelable(io);
     const elapsed_ns = nowNs(io) -| started_ns;
     thread.join();
     if (shared.err) |err| return err;
-    if (shared.received != payload.len) return error.IncompleteTransfer;
+    const total_bytes = payload.len * config.streams;
+    if (shared.received != total_bytes) return error.IncompleteTransfer;
 
     const mib_per_second = if (elapsed_ns == 0)
         0
     else
-        (@as(u64, payload.len) *| std.time.ns_per_s) /
+        (@as(u64, total_bytes) *| std.time.ns_per_s) /
             (elapsed_ns *| 1024 * 1024);
     std.debug.print(
         \\WebTransport incremental stream benchmark
-        \\  transfer bytes: {d}
+        \\  streams: {d}
+        \\  bytes per stream: {d}
+        \\  total transfer bytes: {d}
         \\  receive window: {d}
         \\  caller buffer: {d}
         \\  partial writes: {d}
@@ -159,7 +195,9 @@ pub fn main(init: std.process.Init) !void {
         \\  throughput MiB/s: {d}
         \\
     , .{
+        config.streams,
         payload.len,
+        total_bytes,
         stream_window,
         read_buffer_bytes,
         write_calls,
@@ -168,6 +206,43 @@ pub fn main(init: std.process.Init) !void {
         elapsed_ns,
         mib_per_second,
     });
+}
+
+const Config = struct {
+    transfer_bytes: usize = default_transfer_bytes,
+    streams: usize = default_streams,
+};
+
+fn parseArgs(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !Config {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var config = Config{};
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--transfer-bytes=")) {
+            config.transfer_bytes = try parsePositiveUsize(
+                arg["--transfer-bytes=".len..],
+            );
+        } else if (std.mem.startsWith(u8, arg, "--streams=")) {
+            config.streams = try parsePositiveUsize(
+                arg["--streams=".len..],
+            );
+        } else return error.InvalidArgument;
+    }
+    if (config.streams > max_streams) return error.InvalidArgument;
+    return config;
+}
+
+fn parsePositiveUsize(raw: []const u8) !usize {
+    const value = try std.fmt.parseInt(usize, raw, 10);
+    if (value == 0) return error.InvalidArgument;
+    return value;
 }
 
 fn smallWindowTransportParameters() netz.quic.TransportParameters {

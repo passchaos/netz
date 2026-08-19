@@ -98,19 +98,7 @@ pub fn write(
     stream_id: u62,
     payload: []const u8,
 ) Error!usize {
-    const stream = registry.get(stream_id) orelse
-        return error.UnknownStream;
-    if (stream.direction == .unidirectional and
-        !stream.locally_initiated)
-    {
-        return error.InvalidStreamState;
-    }
-    if (stream.send_reset != null or
-        stream.stopped != null or
-        stream.local_fin)
-    {
-        return error.InvalidStreamState;
-    }
+    const stream = try writableStream(registry, stream_id);
     if (payload.len == 0) return 0;
 
     while (true) {
@@ -140,11 +128,12 @@ pub fn write(
             .fin = false,
         } }};
         connection.send(&frames) catch |err| switch (err) {
-            error.FlowControlBlocked,
-            error.CongestionLimited,
-            error.PacingLimited,
-            => {
+            error.FlowControlBlocked, error.CongestionLimited => {
                 try receiveSendProgress(connection);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
                 continue;
             },
             else => return err,
@@ -165,19 +154,7 @@ pub fn finish(
     session_id: webtransport.SessionId,
     stream_id: u62,
 ) Error!void {
-    const stream = registry.get(stream_id) orelse
-        return error.UnknownStream;
-    if (stream.direction == .unidirectional and
-        !stream.locally_initiated)
-    {
-        return error.InvalidStreamState;
-    }
-    if (stream.send_reset != null or
-        stream.stopped != null or
-        stream.local_fin)
-    {
-        return error.InvalidStreamState;
-    }
+    const stream = try writableStream(registry, stream_id);
     try sendPrefixIfNeeded(
         connection,
         stream,
@@ -192,11 +169,12 @@ pub fn finish(
             .fin = true,
         } }};
         connection.send(&frames) catch |err| switch (err) {
-            error.FlowControlBlocked,
-            error.CongestionLimited,
-            error.PacingLimited,
-            => {
+            error.FlowControlBlocked, error.CongestionLimited => {
                 try receiveSendProgress(connection);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
                 continue;
             },
             else => return err,
@@ -204,6 +182,39 @@ pub fn finish(
         try registry.recordSent(stream_id, 0, true);
         return;
     }
+}
+
+/// Validate a local send direction and transmit its association prefix.
+/// Batch writers call this before staging application DATA transactionally.
+pub fn prepare(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+) Error!*webtransport.StreamState {
+    const stream = try writableStream(registry, stream_id);
+    try sendPrefixIfNeeded(connection, stream, session_id, stream_id);
+    return stream;
+}
+
+fn writableStream(
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+) Error!*webtransport.StreamState {
+    const stream = registry.get(stream_id) orelse
+        return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        !stream.locally_initiated)
+    {
+        return error.InvalidStreamState;
+    }
+    if (stream.send_reset != null or
+        stream.stopped != null or
+        stream.local_fin)
+    {
+        return error.InvalidStreamState;
+    }
+    return stream;
 }
 
 fn sendPrefixIfNeeded(
@@ -233,11 +244,12 @@ fn sendPrefixIfNeeded(
             .fin = false,
         } }};
         connection.send(&frames) catch |err| switch (err) {
-            error.FlowControlBlocked,
-            error.CongestionLimited,
-            error.PacingLimited,
-            => {
+            error.FlowControlBlocked, error.CongestionLimited => {
                 try receiveSendProgress(connection);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
                 continue;
             },
             else => return err,
@@ -252,7 +264,7 @@ fn sendPrefixIfNeeded(
     }
 }
 
-fn receiveSendProgress(
+pub fn receiveSendProgress(
     connection: *quic.one_rtt.Connection,
 ) Error!void {
     var packet = try connection.receivePacketServicingTimers();

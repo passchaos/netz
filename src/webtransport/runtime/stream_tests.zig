@@ -460,6 +460,148 @@ test "WebTransport partial writes interleave streams and finish independently" {
     if (shared.err) |err| return err;
 }
 
+test "WebTransport batched writes commit concurrent stream progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x42, 0x11, 0x57, 0x54, 0x42, 0x12 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x42, 0x13 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x42, 0x14 };
+    const first_payload = [_]u8{0xc3} ** (32 * 1024);
+    const second_payload = [_]u8{0x3c} ** (32 * 1024);
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .local_transport_parameters = smallWindowTransportParameters(),
+            .initial_one_rtt_config = .{
+                .stream_receive_window = stream_window,
+                .enable_pacing = false,
+            },
+            .random = [_]u8{0xd3} ** 32,
+            .x25519_secret_key = [_]u8{0xd4} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        first: []const u8,
+        second: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var session = try shared.server.accept();
+            defer session.deinit();
+            var buffer: [4096]u8 = undefined;
+            var received = [_]usize{ 0, 0 };
+            var finished = [_]bool{ false, false };
+            while (!finished[0] or !finished[1]) {
+                const event = try session.readStream(&buffer);
+                if (event != .data) return error.UnexpectedStreamEvent;
+                const data = event.data;
+                const index: usize = if (data.stream_id == 4)
+                    0
+                else if (data.stream_id == 8)
+                    1
+                else
+                    return error.UnexpectedStream;
+                const expected = if (index == 0)
+                    shared.first
+                else
+                    shared.second;
+                try std.testing.expectEqualSlices(
+                    u8,
+                    expected[received[index]..][0..data.bytes],
+                    buffer[0..data.bytes],
+                );
+                received[index] += data.bytes;
+                if (data.fin) finished[index] = true;
+            }
+            try std.testing.expectEqual(shared.first.len, received[0]);
+            try std.testing.expectEqual(shared.second.len, received[1]);
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .first = &first_payload,
+        .second = &second_payload,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-batch",
+            .limits = .{ .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+            } } },
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .local_transport_parameters = smallWindowTransportParameters(),
+                .initial_one_rtt_config = .{
+                    .stream_receive_window = stream_window,
+                    .enable_pacing = false,
+                },
+                .server_name = "localhost",
+                .random = [_]u8{0xd1} ** 32,
+                .x25519_secret_key = [_]u8{0xd2} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+
+    const first = try client.openBidirectionalStream();
+    const second = try client.openBidirectionalStream();
+    var offsets = [_]usize{ 0, 0 };
+    var saw_two_packet_batch = false;
+    while (offsets[0] < first_payload.len or
+        offsets[1] < second_payload.len)
+    {
+        const writes = [_]runtime.StreamWrite{
+            .{ .stream_id = first, .data = first_payload[offsets[0]..] },
+            .{ .stream_id = second, .data = second_payload[offsets[1]..] },
+        };
+        var counts: [2]usize = undefined;
+        const result = try client.writeStreams(&writes, &counts);
+        if (result.send_error) |err| return err;
+        try std.testing.expect(result.progressed != 0);
+        saw_two_packet_batch = saw_two_packet_batch or
+            result.progressed == 2;
+        offsets[0] += counts[0];
+        offsets[1] += counts[1];
+    }
+    try std.testing.expect(saw_two_packet_batch);
+    try client.finishStream(first);
+    try client.finishStream(second);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 fn smallWindowTransportParameters() quic.TransportParameters {
     var parameters = quic.practical_transport_parameters;
     parameters.initial_max_data = stream_window * 2;
