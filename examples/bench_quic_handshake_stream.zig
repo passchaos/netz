@@ -15,6 +15,9 @@ const stream_payload_size: usize = max_datagram_size - 128;
 const max_packet_batch_size: usize = netz.quic.one_rtt.max_batch_packets;
 const flow_control_floor: u64 = 256 * 1024 * 1024;
 const transfer_timeout_ns: u64 = 30 * std.time.ns_per_s;
+const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+const Mode = enum { upload, handshake };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -23,6 +26,10 @@ pub fn main(init: std.process.Init) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+
+    if (config.mode == .handshake) {
+        return runHandshakeBenchmark(allocator, io, config);
+    }
 
     const samples = try allocator.alloc(f64, config.iterations);
     defer allocator.free(samples);
@@ -80,6 +87,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const Config = struct {
+    mode: Mode = .upload,
     iterations: usize = default_iterations,
     transfer_bytes: usize = default_transfer_bytes,
     streams: usize = default_streams,
@@ -123,6 +131,13 @@ fn runIteration(
     config: Config,
     iteration: usize,
 ) !IterationResult {
+    // Identity setup is intentionally per connection and outside the latency
+    // sample. It remains inside the aggregate rate timer, matching quicz's
+    // measureOneHandshakeNs lifecycle for both reported measurements.
+    const server_key = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x55} ** 32,
+    );
+    const server_public = server_key.public_key.toUncompressedSec1();
     const transport_parameters = transferTransportParameters(config);
     const endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = max_datagram_size,
@@ -174,6 +189,9 @@ fn runIteration(
         cancelled: *std.atomic.Value(bool),
         bytes_received: *std.atomic.Value(usize),
         verbose: bool,
+        handshake_only: bool,
+        server_key: EcdsaP256Sha256.KeyPair,
+        server_public: *const [65]u8,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -196,11 +214,26 @@ fn runIteration(
                     .initial_one_rtt_config = shared.one_rtt_config,
                     .random = [_]u8{0x61} ** 32,
                     .x25519_secret_key = [_]u8{0x62} ** 32,
+                    .key_exchange_groups = &.{.x25519},
+                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    // Exercise the authenticated TLS 1.3 path just like the
+                    // quicz handshake workload: send Certificate and create
+                    // a P-256 CertificateVerify signature on every sample.
+                    .identity = .{
+                        .certificate_chain = &.{shared.server_public},
+                        .signer = .{ .ecdsa_p256_sha256 = .{
+                            .key_pair = shared.server_key,
+                        } },
+                    },
                     .max_crypto_buffer = 64 * 1024,
                 },
             );
             defer established.deinit();
             shared.ready.store(true, .release);
+            if (shared.handshake_only) {
+                shared.finished.store(true, .release);
+                return;
+            }
 
             var packets_since_ack: usize = 0;
             while (shared.bytes_received.load(.acquire) <
@@ -256,6 +289,9 @@ fn runIteration(
         .cancelled = &cancelled,
         .bytes_received = &bytes_received,
         .verbose = config.verbose,
+        .handshake_only = config.mode == .handshake,
+        .server_key = server_key,
+        .server_public = &server_public,
     };
     const server_thread = try std.Thread.spawn(
         .{},
@@ -279,6 +315,10 @@ fn runIteration(
     var client_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &original_dcid);
     try std.Io.randomSecure(io, &client_cid);
+    // Keep the latency sample focused on the live TLS/QUIC exchange. Endpoint
+    // construction and connection teardown remain inside the outer rate timer,
+    // matching quicz's split between handshake latency and new-connection rate.
+    const handshake_started_ns = nowNs(io);
     var established = try netz.quic.handshake.connect(
         &client_endpoint,
         server_endpoint.address(),
@@ -287,6 +327,17 @@ fn runIteration(
             .local_connection_id = &client_cid,
             .server_name = "localhost",
             .alpn_protocols = &.{"netz-quic-bench"},
+            // quicz's reference benchmark negotiates X25519 and
+            // TLS_AES_128_GCM_SHA256. Pinning both avoids accidentally timing
+            // netz's default post-quantum hybrid offer in this comparison.
+            .key_exchange_groups = &.{.x25519},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            // A raw SEC1 public key is valid for this benchmark's pinned-key
+            // identity and avoids making certificate-chain policy part of the
+            // transport handshake measurement.
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = server_public,
+            },
             .local_transport_parameters = transport_parameters,
             .initial_one_rtt_config = one_rtt_config,
             .max_crypto_buffer = 64 * 1024,
@@ -303,6 +354,18 @@ fn runIteration(
     while (!ready.load(.acquire)) {
         if (failed.load(.acquire)) return shared.err orelse error.ServerFailed;
         std.Thread.yield() catch {};
+    }
+    if (config.mode == .handshake) {
+        const elapsed_ns = nowNs(io) -| handshake_started_ns;
+        server_thread.join();
+        joined = true;
+        if (shared.err) |err| return err;
+        return .{
+            .elapsed_ns = elapsed_ns,
+            .client_stats = established.connection.stats(),
+            .gso_enabled = client_endpoint.gsoSendEnabled(),
+            .payload_bytes_received = 0,
+        };
     }
 
     const started_ns = nowNs(io);
@@ -577,7 +640,11 @@ fn parseArgs(
 
     var config: Config = .{};
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--iterations=")) {
+        if (std.mem.eql(u8, arg, "--mode=upload")) {
+            config.mode = .upload;
+        } else if (std.mem.eql(u8, arg, "--mode=handshake")) {
+            config.mode = .handshake;
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
             );
@@ -610,6 +677,71 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn runHandshakeBenchmark(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+) !void {
+    const latencies = try allocator.alloc(u64, config.iterations);
+    defer allocator.free(latencies);
+    const started = nowNs(io);
+    for (latencies, 0..) |*latency, iteration| {
+        const result = try runIteration(allocator, io, config, iteration);
+        latency.* = result.elapsed_ns;
+        if (config.verbose) {
+            std.debug.print(
+                "  [iter {d}] {d} ns\n",
+                .{ iteration, latency.* },
+            );
+        }
+    }
+    const elapsed = nowNs(io) -| started;
+    std.mem.sort(u64, latencies, {}, lessThanU64);
+    const connections_per_second: f64 = if (elapsed == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(config.iterations)) *
+            @as(f64, @floatFromInt(std.time.ns_per_s)) /
+            @as(f64, @floatFromInt(elapsed));
+    std.debug.print("QUIC real TLS 1.3 handshake benchmark\n" ++
+        "  iterations: {d}\n" ++
+        "  total elapsed ns: {d}\n" ++
+        "  connections/s: {d:.1}\n" ++
+        "  p50 ns: {d}\n" ++
+        "  p99 ns: {d}\n" ++
+        "  p99.9 ns: {d}\n", .{
+        config.iterations,
+        elapsed,
+        connections_per_second,
+        percentile(latencies, 50, 100),
+        percentile(latencies, 99, 100),
+        percentile(latencies, 999, 1000),
+    });
+}
+
+fn percentile(
+    sorted: []const u64,
+    numerator: usize,
+    denominator: usize,
+) u64 {
+    std.debug.assert(sorted.len != 0);
+    std.debug.assert(denominator != 0 and numerator <= denominator);
+    // quicz selects sorted[len * percentile / 100]. Using the same zero-based
+    // convention makes the reported tails directly comparable rather than
+    // introducing a one-sample shift for the 200-iteration latency workload.
+    const scaled_index =
+        @as(u128, sorted.len) * @as(u128, numerator) / denominator;
+    const index: usize = @intCast(@min(
+        scaled_index,
+        @as(u128, sorted.len - 1),
+    ));
+    return sorted[index];
+}
+
+fn lessThanU64(_: void, a: u64, b: u64) bool {
+    return a < b;
 }
 
 fn parsePositiveUsize(raw: []const u8) !usize {
