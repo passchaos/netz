@@ -81,7 +81,11 @@ CPU-0-pinned three-run comparison measured netz at P50 10.44-10.57 us, P99
 P99 16.0-19.5 us, and P99.9 206.3-211.2 us. Netz is therefore effectively
 tied at p50, faster at p99, and substantially stronger at p99.9. The measured
 step came from retaining the first unresolved sent-packet index so cumulative
-ACK and loss scans no longer grow with connection lifetime.
+ACK and loss scans no longer grow with connection lifetime. A following
+compaction step retires contiguous acknowledged metadata in 256-packet batches
+while retaining interval validation for duplicate cumulative ACKs. A 50,000
+round CPU-0 run kept 149 allocations/685,276 cumulative bytes and 560,036 peak
+live bytes, ended at zero, and measured 10.659/15.583/18.106 us p50/p99/p99.9.
 
 The stream-open rows are a CPU-0-pinned, same-shape reservation microbenchmark
 after a real handshake. Netz returns the complete expected ID sequence with no

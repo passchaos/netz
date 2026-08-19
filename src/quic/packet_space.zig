@@ -374,6 +374,8 @@ pub const SentPacketStats = struct {
 };
 
 pub const SentPacketTracker = struct {
+    const compact_acknowledged_threshold: usize = 256;
+
     allocator: std.mem.Allocator,
     packets: std.ArrayList(SentPacket) = .empty,
     packets_sorted_ascending: bool = true,
@@ -389,6 +391,11 @@ pub const SentPacketTracker = struct {
     /// connection lifetime. The packet array remains intact for duplicate ACK
     /// validation and diagnostics; hot ACK/loss scans start at this cursor.
     first_unacknowledged_index: usize = 0,
+    /// Contiguous sent packet-number prefix whose metadata was compacted after
+    /// acknowledgement. Retaining the exact inclusive bounds lets duplicate
+    /// cumulative ACKs remain valid without keeping one record per packet.
+    retired_acknowledged_start: ?u64 = null,
+    retired_acknowledged_through: ?u64 = null,
     /// PTO scheduling needs the newest still-in-flight ack-eliciting packet on
     /// every timer query.  Keep its packet-list index cached, mirroring the
     /// last-ack-eliciting timestamp maintained by production QUIC recovery
@@ -706,7 +713,11 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
-        if (self.packets.items.len == 0) return error.InvalidAckFrame;
+        if (self.packets.items.len == 0 and
+            self.retired_acknowledged_through == null)
+        {
+            return error.InvalidAckFrame;
+        }
         var stack_ranges: [32]AckedRange = undefined;
         const decoded = try decodeAckRanges(self.allocator, ack, &stack_ranges);
         defer decoded.deinit(self.allocator);
@@ -738,6 +749,7 @@ pub const SentPacketTracker = struct {
                 self.ecn_validation_failed = true;
             }
         }
+        self.compactAcknowledgedPrefix();
         return acked;
     }
 
@@ -1060,10 +1072,14 @@ pub const SentPacketTracker = struct {
         sorted_packets: bool,
     ) Error!AckPrecheck {
         if (ranges.len == 1 and ranges[0].start == ranges[0].end) {
-            const packet = self.findSentPacket(ranges[0].start) orelse
-                return error.InvalidAckFrame;
             var precheck: AckPrecheck = .{ .total_span = 1 };
-            precheck.observeSentPacket(packet);
+            if (self.findSentPacket(ranges[0].start)) |packet| {
+                precheck.observeSentPacket(packet);
+            } else if (self.retiredContains(ranges[0].start)) {
+                precheck.sent_packets = 1;
+            } else {
+                return error.InvalidAckFrame;
+            }
             return precheck;
         }
         var precheck: AckPrecheck = .{};
@@ -1074,12 +1090,14 @@ pub const SentPacketTracker = struct {
                 range.end - range.start + 1,
             ) catch return error.InvalidAckFrame;
         }
-        if (precheck.total_span > self.packets.items.len) {
+        const retired_count = self.retiredAcknowledgedCount();
+        if (precheck.total_span > self.packets.items.len +| retired_count) {
             return error.InvalidAckFrame;
         }
 
         if (sorted_packets) {
             for (ranges) |range| {
+                precheck.sent_packets += self.retiredIntersectionLen(range);
                 const range_start = self.lowerBoundPacketIndex(range.start);
                 const range_end = self.upperBoundPacketIndex(range.end);
                 precheck.sent_packets += range_end - range_start;
@@ -1382,6 +1400,79 @@ pub const SentPacketTracker = struct {
             }
         }
         return low;
+    }
+
+    fn retiredContains(self: SentPacketTracker, packet_number: u64) bool {
+        const start = self.retired_acknowledged_start orelse return false;
+        const end = self.retired_acknowledged_through orelse return false;
+        return packet_number >= start and packet_number <= end;
+    }
+
+    fn retiredAcknowledgedCount(self: SentPacketTracker) usize {
+        const start = self.retired_acknowledged_start orelse return 0;
+        const end = self.retired_acknowledged_through orelse return 0;
+        return std.math.cast(usize, end - start + 1) orelse
+            std.math.maxInt(usize);
+    }
+
+    fn retiredIntersectionLen(
+        self: SentPacketTracker,
+        range: AckedRange,
+    ) u64 {
+        const start = self.retired_acknowledged_start orelse return 0;
+        const end = self.retired_acknowledged_through orelse return 0;
+        const intersection_start = @max(start, range.start);
+        const intersection_end = @min(end, range.end);
+        if (intersection_start > intersection_end) return 0;
+        return intersection_end - intersection_start + 1;
+    }
+
+    fn compactAcknowledgedPrefix(self: *SentPacketTracker) void {
+        if (!self.packetsSortedAscending() or
+            self.first_unacknowledged_index <
+                compact_acknowledged_threshold)
+        {
+            return;
+        }
+
+        const expected_start = if (self.retired_acknowledged_through) |end|
+            end +| 1
+        else
+            self.packets.items[0].packet_number;
+        var compact_count: usize = 0;
+        var expected = expected_start;
+        while (compact_count < self.first_unacknowledged_index) {
+            const packet = self.packets.items[compact_count];
+            if (!packet.acknowledged or packet.packet_number != expected) {
+                break;
+            }
+            compact_count += 1;
+            expected +|= 1;
+        }
+        if (compact_count < compact_acknowledged_threshold) return;
+
+        const first = self.packets.items[0].packet_number;
+        const last = self.packets.items[compact_count - 1].packet_number;
+        if (self.retired_acknowledged_start == null) {
+            self.retired_acknowledged_start = first;
+        }
+        self.retired_acknowledged_through = last;
+        for (self.packets.items[0..compact_count]) |packet| {
+            _ = self.packet_index.remove(packet.packet_number);
+        }
+        const remaining = self.packets.items.len - compact_count;
+        std.mem.copyForwards(
+            SentPacket,
+            self.packets.items[0..remaining],
+            self.packets.items[compact_count..],
+        );
+        self.packets.items.len = remaining;
+        self.first_unacknowledged_index -= compact_count;
+        if (self.latest_ack_eliciting_in_flight_index) |index| {
+            self.latest_ack_eliciting_in_flight_index =
+                if (index < compact_count) null else index - compact_count;
+        }
+        self.refreshPacketIndexFrom(0);
     }
 
     fn advanceFirstUnacknowledged(self: *SentPacketTracker) void {
@@ -1845,6 +1936,51 @@ test "QUIC cumulative ACK cursor skips resolved packet prefix" {
         @as(usize, 6),
         sent.first_unacknowledged_index,
     );
+}
+
+test "QUIC sent packet tracker compacts cumulative ACK metadata" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    const count = SentPacketTracker.compact_acknowledged_threshold + 44;
+    for (0..count) |packet_number| {
+        try sent.sent(packet_number, true, 100);
+    }
+    const ack = quic.AckFrame{
+        .largest_acknowledged = count - 1,
+        .ack_delay = 0,
+        .first_ack_range = count - 1,
+    };
+    const result = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(count, result.packets);
+    try std.testing.expectEqual(@as(usize, 0), sent.packets.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), sent.retired_acknowledged_start);
+    try std.testing.expectEqual(
+        @as(?u64, count - 1),
+        sent.retired_acknowledged_through,
+    );
+
+    // Duplicate cumulative ACKs stay valid after detailed records are gone.
+    const duplicate = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(@as(usize, 0), duplicate.packets);
+    const unsent = quic.AckFrame{
+        .largest_acknowledged = count,
+        .ack_delay = 0,
+        .first_ack_range = count,
+    };
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        sent.applyAckDetailed(unsent),
+    );
+
+    try sent.sent(count, true, 100);
+    const next = try sent.applyAckDetailed(.{
+        .largest_acknowledged = count,
+        .ack_delay = 0,
+        .first_ack_range = count,
+    });
+    try std.testing.expectEqual(@as(usize, 1), next.packets);
 }
 
 test "QUIC sent packet tracker skips packet-threshold scan before first packet" {

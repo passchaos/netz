@@ -937,6 +937,15 @@ scans at the unresolved suffix. A 5,000-round `--stats` run made 159 total
 allocations, ended with zero live bytes, and verified all 5,120,000 echoed
 payload bytes.
 
+Sent-packet metadata now also compacts acknowledged contiguous prefixes in
+256-packet batches. The tracker retains the retired packet-number interval for
+duplicate cumulative ACK validation, while unresolved/lost packets keep full
+RTT, ECN, PMTU and recovery fields. A CPU-0 50,000-round `--stats` run sustained
+92,374.6 round trips/s at p50/p99/p99.9 10.659/15.583/18.106 us, made 149
+allocations, allocated 685,276 cumulative bytes, peaked at 560,036 live bytes,
+and ended at zero. Metadata is therefore bounded by unresolved work rather than
+connection lifetime without regressing the ACK-cursor latency result.
+
 ### Raw QUIC stream-open rate
 
 Captured on 2026-08-20 after one real handshake. Like quicz's stream-churn
