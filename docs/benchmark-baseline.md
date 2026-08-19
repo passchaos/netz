@@ -885,6 +885,11 @@ One traced run showed approximately 1,768 netz `sendmsg` calls, versus 1,772
 reference `sendmsg` plus 892 `writev` calls. These counts include warmup and
 handshake/shutdown traffic; tracing overhead is excluded from timing evidence.
 
+With `--compression`, the real persistent WebSocket echo benchmark negotiates
+permessage-deflate. Three CPU-0 samples were 144.6-147.5 us/roundtrip and
+52.95-54.02 logical payload MiB/s. Four concurrent connections reached 45.96
+us aggregate/roundtrip and 169.98 logical MiB/s on CPUs 0-7.
+
 ## MQTT shared-subscription router
 
 Captured on 2026-08-19 with:

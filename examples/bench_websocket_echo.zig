@@ -14,7 +14,8 @@ const max_connections: usize = 16;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const connections = try parseConnections(init);
+    const options = try parseOptions(init);
+    const connections = options.connections;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -38,6 +39,7 @@ pub fn main(init: std.process.Init) !void {
             .{null} ** max_connections,
         expected_exchanges: usize,
         connection_count: usize,
+        compression: bool,
 
         fn run(shared: *@This()) void {
             shared.result = shared.server.serveConcurrent(
@@ -45,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
                 shared,
                 handle,
                 shared.connection_count,
-                .{},
+                .{ .enable_permessage_deflate = shared.compression },
             ) catch |err| {
                 shared.errors[0] = err;
                 return;
@@ -72,6 +74,7 @@ pub fn main(init: std.process.Init) !void {
         .server = &server,
         .expected_exchanges = warmup_iterations + iterations,
         .connection_count = connections,
+        .compression = options.compression,
     };
     const server_thread = try std.Thread.spawn(
         .{},
@@ -94,6 +97,7 @@ pub fn main(init: std.process.Init) !void {
             .{
                 .host = "127.0.0.1",
                 .target = "/echo-bench",
+                .enable_permessage_deflate = options.compression,
                 .limits = .{
                     .max_head_bytes = 4096,
                     .max_frame_bytes = max_message_bytes,
@@ -200,29 +204,30 @@ pub fn main(init: std.process.Init) !void {
     var serve_result = shared.result orelse return error.ServerFailed;
     defer serve_result.deinit();
     if (serve_result.firstError()) |err| return err;
-    const roundtrip_wire_bytes =
+    const uncompressed_roundtrip_wire_bytes =
         // Client frame: 2-byte base + 2-byte extended length + 4-byte mask.
         (2 + 2 + 4 + payload_bytes) +
         // Server frame: 2-byte base + 2-byte extended length.
         (2 + 2 + payload_bytes);
+    const logical_roundtrip_bytes = payload_bytes * 2;
     const measured_roundtrips = iterations * connections;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
         (@as(u128, measured_roundtrips) * std.time.ns_per_s) /
             elapsed;
-    const wire_bytes_per_second =
-        roundtrips_per_second * roundtrip_wire_bytes;
     std.debug.print(
         \\WebSocket persistent echo benchmark
         \\  connections: {d}
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
         \\  payload bytes: {d}
-        \\  wire bytes/roundtrip: {d}
+        \\  permessage-deflate: {}
+        \\  uncompressed-equivalent wire bytes/roundtrip: {d}
         \\  aggregate ns/roundtrip: {d}
         \\  roundtrips/s: {d}
-        \\  wire MiB/s: {d:.2}
+        \\  uncompressed-equivalent wire MiB/s: {d:.2}
+        \\  logical payload MiB/s: {d:.2}
         \\  checksum: {d}
         \\
     , .{
@@ -230,38 +235,51 @@ pub fn main(init: std.process.Init) !void {
         warmup_iterations,
         iterations,
         payload_bytes,
-        roundtrip_wire_bytes,
+        options.compression,
+        uncompressed_roundtrip_wire_bytes,
         elapsed / measured_roundtrips,
         roundtrips_per_second,
-        @as(f64, @floatFromInt(wire_bytes_per_second)) /
+        @as(f64, @floatFromInt(
+            roundtrips_per_second * uncompressed_roundtrip_wire_bytes,
+        )) /
             (1024.0 * 1024.0),
+        @as(f64, @floatFromInt(
+            roundtrips_per_second * logical_roundtrip_bytes,
+        )) / (1024.0 * 1024.0),
         checksum,
     });
 }
 
-fn parseConnections(init: std.process.Init) !usize {
+const Options = struct {
+    connections: usize = default_connections,
+    compression: bool = false,
+};
+
+fn parseOptions(init: std.process.Init) !Options {
     var args = try std.process.Args.Iterator.initAllocator(
         init.minimal.args,
         std.heap.smp_allocator,
     );
     defer args.deinit();
     _ = args.next();
-    var connections = default_connections;
+    var options = Options{};
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--connections=")) {
-            connections = try std.fmt.parseInt(
+            options.connections = try std.fmt.parseInt(
                 usize,
                 arg["--connections=".len..],
                 10,
             );
+        } else if (std.mem.eql(u8, arg, "--compression")) {
+            options.compression = true;
         } else {
             return error.InvalidArgument;
         }
     }
-    if (connections == 0 or connections > max_connections) {
+    if (options.connections == 0 or options.connections > max_connections) {
         return error.InvalidArgument;
     }
-    return connections;
+    return options;
 }
 
 fn exchange(
@@ -269,7 +287,11 @@ fn exchange(
     payload: *[payload_bytes]u8,
     response_storage: *[payload_bytes]u8,
 ) !u64 {
-    try client.sendBinaryInPlace(payload);
+    if (client.permessage_deflate) {
+        try client.sendBinary(payload);
+    } else {
+        try client.sendBinaryInPlace(payload);
+    }
     const response = try client.receiveMessageInto(response_storage);
     if (response.opcode != .binary or
         response.payload.len != payload_bytes)

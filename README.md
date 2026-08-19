@@ -612,7 +612,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   header-only streaming paths, plus retained no-context-takeover
   permessage-deflate throughput and wire-size reporting,
 - WebSocket persistent 4 KiB binary echo over one real upgraded connection,
-  using caller-buffer receive and explicit in-place client masking,
+  using caller-buffer receive and explicit in-place client masking, plus a
+  negotiated permessage-deflate mode with logical-throughput reporting,
 - MQTT subscription-router combined ordinary/shared count+emit trie matching
   versus a linear filter scan, retained connection PUBLISH encoding scratch,
   and linear-time overlapping-subscription broker flush plans,

@@ -543,6 +543,44 @@ test "WebSocket permessage-deflate reuses receive scratch" {
     connection.allocator = allocator;
 }
 
+test "WebSocket compressed caller receive copies first frame only once" {
+    const allocator = std.testing.allocator;
+    const payload = "copy accounting compressed payload " ** 8;
+    const compressed = try websocket.compressMessage(allocator, payload);
+    defer allocator.free(compressed);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try websocket.writeFrameExtended(
+        &encoded,
+        allocator,
+        .binary,
+        compressed,
+        .{ .rsv1 = true },
+    );
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .permessage_deflate = true,
+        .limits = .{
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    };
+    defer connection.inbuf.deinit(allocator);
+    defer connection.compression_receive.deinit(allocator);
+    try connection.inbuf.appendSlice(allocator, encoded.items);
+    var output: [payload.len]u8 = undefined;
+    const message = try connection.receiveMessageInto(&output);
+    try std.testing.expectEqualStrings(payload, message.payload);
+    try std.testing.expectEqualSlices(
+        u8,
+        compressed,
+        connection.compression_receive.payload.items[0..compressed.len],
+    );
+}
+
 test "WebSocket compressed fragmented messages use caller storage" {
     const allocator = std.testing.allocator;
     const max_message_bytes = 512;

@@ -88,6 +88,19 @@ back into their mutable send buffer before the next round. Handshake time is
 excluded. This evidence covers the ordinary TCP runtime, not the separate
 io_uring adapter.
 
+The same executable accepts `--compression`, negotiating permessage-deflate on
+both endpoints and exercising retained send/receive scratch plus direct caller-
+buffer inflation over a real upgraded connection. Three CPU-0 runs measured
+144.6-147.5 us/roundtrip (52.95-54.02 logical payload MiB/s); four concurrent
+connections on CPUs 0-7 measured 45.96 us aggregate/roundtrip and 169.98
+logical MiB/s. These are internal compressed-runtime baselines because the
+audited websocket.zig outbound compressor remains disabled.
+
+The first compressed frame is copied once from the transport/caller frame
+buffer into retained compressed scratch. This is intentional: Zig's raw
+inflater may overwrite output before consuming aliased input. A regression test
+checks that scratch holds the exact wire payload before caller-buffer inflate.
+
 Netz uses `sendBinaryInPlace` and `receiveMessageInto`; the former deliberately
 leaves caller storage masked, matching websocket.zig's mutable-input contract,
 while the latter assembles fragments and handles control frames without a
