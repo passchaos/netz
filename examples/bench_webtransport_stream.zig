@@ -5,7 +5,8 @@ const default_transfer_bytes: usize = 4 * 1024 * 1024;
 const default_streams: usize = 1;
 const max_streams: usize = 64;
 const read_buffer_bytes: usize = 16 * 1024;
-const stream_window: u64 = 64 * 1024;
+const default_stream_window: u64 = 64 * 1024;
+const default_one_rtt_datagram_size: usize = 4096;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -27,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             .http3 = .{
                 .quic = .{
-                    .max_datagram_size = 4096,
+                    .max_datagram_size = config.one_rtt_datagram_size,
                     .max_frames_per_datagram = 8,
                 },
             },
@@ -35,9 +36,11 @@ pub fn main(init: std.process.Init) !void {
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
-                .local_transport_parameters = smallWindowTransportParameters(),
+                .local_transport_parameters = transportParameters(config),
                 .initial_one_rtt_config = .{
-                    .stream_receive_window = stream_window,
+                    .stream_receive_window = config.stream_window,
+                    .max_datagram_size = config.one_rtt_datagram_size,
+                    .enable_pacing = config.enable_pacing,
                 },
                 .random = [_]u8{0xc3} ** 32,
                 .x25519_secret_key = [_]u8{0xc4} ** 32,
@@ -110,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
             .limits = .{
                 .http3 = .{
                     .quic = .{
-                        .max_datagram_size = 4096,
+                        .max_datagram_size = config.one_rtt_datagram_size,
                         .max_frames_per_datagram = 8,
                     },
                 },
@@ -119,9 +122,11 @@ pub fn main(init: std.process.Init) !void {
                 .handshake = .{
                     .original_destination_connection_id = &original_dcid,
                     .local_connection_id = &client_cid,
-                    .local_transport_parameters = smallWindowTransportParameters(),
+                    .local_transport_parameters = transportParameters(config),
                     .initial_one_rtt_config = .{
-                        .stream_receive_window = stream_window,
+                        .stream_receive_window = config.stream_window,
+                        .max_datagram_size = config.one_rtt_datagram_size,
+                        .enable_pacing = config.enable_pacing,
                     },
                     .server_name = "localhost",
                     .random = [_]u8{0xc1} ** 32,
@@ -198,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
         config.streams,
         payload.len,
         total_bytes,
-        stream_window,
+        config.stream_window,
         read_buffer_bytes,
         write_calls,
         shared.events,
@@ -211,6 +216,9 @@ pub fn main(init: std.process.Init) !void {
 const Config = struct {
     transfer_bytes: usize = default_transfer_bytes,
     streams: usize = default_streams,
+    stream_window: u64 = default_stream_window,
+    one_rtt_datagram_size: usize = default_one_rtt_datagram_size,
+    enable_pacing: bool = true,
 };
 
 fn parseArgs(
@@ -233,10 +241,26 @@ fn parseArgs(
             config.streams = try parsePositiveUsize(
                 arg["--streams=".len..],
             );
+        } else if (std.mem.startsWith(u8, arg, "--stream-window=")) {
+            config.stream_window = try parsePositiveU64(
+                arg["--stream-window=".len..],
+            );
+        } else if (std.mem.startsWith(u8, arg, "--one-rtt-datagram-size=")) {
+            config.one_rtt_datagram_size = try parsePositiveUsize(
+                arg["--one-rtt-datagram-size=".len..],
+            );
+        } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
+            config.enable_pacing = false;
         } else return error.InvalidArgument;
     }
     if (config.streams > max_streams) return error.InvalidArgument;
     return config;
+}
+
+fn parsePositiveU64(raw: []const u8) !u64 {
+    const value = try std.fmt.parseInt(u64, raw, 10);
+    if (value == 0) return error.InvalidArgument;
+    return value;
 }
 
 fn parsePositiveUsize(raw: []const u8) !usize {
@@ -245,12 +269,12 @@ fn parsePositiveUsize(raw: []const u8) !usize {
     return value;
 }
 
-fn smallWindowTransportParameters() netz.quic.TransportParameters {
+fn transportParameters(config: Config) netz.quic.TransportParameters {
     var parameters = netz.quic.practical_transport_parameters;
-    parameters.initial_max_data = stream_window * 2;
-    parameters.initial_max_stream_data_bidi_local = stream_window;
-    parameters.initial_max_stream_data_bidi_remote = stream_window;
-    parameters.initial_max_stream_data_uni = stream_window;
+    parameters.initial_max_data = config.stream_window *| config.streams;
+    parameters.initial_max_stream_data_bidi_local = config.stream_window;
+    parameters.initial_max_stream_data_bidi_remote = config.stream_window;
+    parameters.initial_max_stream_data_uni = config.stream_window;
     return parameters;
 }
 

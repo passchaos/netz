@@ -107,6 +107,14 @@ sequential write loops. The local `wtransport` API exposes independent async
 stream writes but no one-call cross-stream packet batch or visible-prefix
 commit result.
 
+The benchmark also accepts `--stream-window`, `--one-rtt-datagram-size`, and
+`--disable-pacing`. Connection receive credit scales with stream count instead
+of the former fixed two-window cap. Three real-handshake runs with four 4-MiB
+streams, 1-MiB per-stream windows and 8-KiB datagrams measured 188-195 MiB/s
+aggregate, versus the obsolete 26 MiB/s result from the 128-KiB connection-
+credit/4-KiB-datagram configuration. Batch validation occurs before any
+association prefix is sent, so a bad later stream cannot expose a partial batch.
+
 ## Session drain and close lifecycle
 
 Handshake sessions now keep their Extended CONNECT request/response stream open

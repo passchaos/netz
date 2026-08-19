@@ -460,7 +460,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   WebTransport payload-size accounting, batch receive helpers, modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with
-  per-session limits, transactional cross-stream packet-batch writes that
+  per-session limits, prevalidated transactional cross-stream packet-batch writes that
   commit only the socket-visible prefix, shared HTTP/3/WT stream-ID allocation, and
   WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
   counters

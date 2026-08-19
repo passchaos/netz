@@ -946,6 +946,12 @@ data, >1-packet stream fragmentation, per-session stream credit and shared
 HTTP/3/WebTransport stream-ID allocation. The DATAGRAM number remains a netz
 baseline; no equivalent same-command quicz/wtransport result was captured.
 
+The multi-stream benchmark now scales connection credit with stream count and
+exposes stream-window/datagram/pacing controls. Four 4-MiB streams with 1-MiB
+stream windows and 8-KiB datagrams completed at 188-195 MiB/s aggregate across
+three ReleaseFast runs. This replaces the earlier 26 MiB/s result whose fixed
+128-KiB connection window unintentionally serialized four streams.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

@@ -16,6 +16,36 @@ pub const Write = struct {
     data: []const u8,
 };
 
+/// Validate each stream id once before prefix transmission or packet staging.
+///
+/// Keeping this separate makes duplicate/error rejection transactional: a bad
+/// later item cannot leave an earlier stream's association prefix on the wire.
+pub fn validate(
+    registry: *webtransport.StreamRegistry,
+    writes: []const Write,
+) Error!void {
+    for (writes, 0..) |item, index| {
+        if (item.data.len == 0) continue;
+        const stream = registry.get(item.stream_id) orelse
+            return error.UnknownStream;
+        if ((stream.direction == .unidirectional and
+            !stream.locally_initiated) or
+            stream.send_reset != null or
+            stream.stopped != null or
+            stream.local_fin)
+        {
+            return error.InvalidStreamState;
+        }
+        for (writes[0..index]) |previous| {
+            if (previous.data.len != 0 and
+                previous.stream_id == item.stream_id)
+            {
+                return error.DuplicateStream;
+            }
+        }
+    }
+}
+
 pub const Result = struct {
     /// Number of writes with a nonzero committed application prefix.
     progressed: usize,
@@ -38,6 +68,7 @@ pub fn write(
     if (counts.len < writes.len) return error.BufferTooShort;
     @memset(counts[0..writes.len], 0);
     if (writes.len == 0) return .{ .progressed = 0 };
+    try validate(registry, writes);
 
     const packet_limit = @min(writes.len, quic.one_rtt.max_batch_packets);
     var frames: [quic.one_rtt.max_batch_packets][1]quic.Frame = undefined;
@@ -51,13 +82,6 @@ pub fn write(
         for (writes, 0..) |item, input_index| {
             if (packet_count == packet_limit) break;
             if (item.data.len == 0) continue;
-            var previous: usize = 0;
-            while (previous < input_index) : (previous += 1) {
-                if (writes[previous].stream_id == item.stream_id) {
-                    return error.DuplicateStream;
-                }
-            }
-
             const stream = try stream_runtime.prepare(
                 connection,
                 registry,

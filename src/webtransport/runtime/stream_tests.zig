@@ -274,6 +274,28 @@ test "WebTransport stream direction guards reject invalid reset and stop" {
     );
 }
 
+test "WebTransport batch validation rejects duplicates before I/O" {
+    const allocator = std.testing.allocator;
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{},
+    );
+    defer registry.deinit();
+    const stream = try registry.openLocal(.bidirectional);
+    const writes = [_]runtime.StreamWrite{
+        .{ .stream_id = stream.stream_id, .data = "one" },
+        .{ .stream_id = stream.stream_id, .data = "two" },
+    };
+    try std.testing.expectError(
+        error.DuplicateStream,
+        @import("stream_batch.zig").validate(&registry, &writes),
+    );
+    try std.testing.expect(!stream.prefix_sent);
+    try std.testing.expectEqual(@as(u64, 0), stream.send_offset);
+}
+
 test "WebTransport stream registry rolls back peer association" {
     const allocator = std.testing.allocator;
     var registry = try webtransport.StreamRegistry.init(
