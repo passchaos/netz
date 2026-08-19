@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const default_parallel: usize = 10;
 const default_body_bytes: usize = 1024 * 1024;
@@ -21,6 +23,7 @@ const Options = struct {
     warmups: usize = default_warmups,
     iterations: usize = default_iterations,
     priority: bool = false,
+    stats: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -33,7 +36,11 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArguments;
     }
 
-    const allocator = std.heap.smp_allocator;
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
     const response_body = try allocator.alloc(u8, options.body_bytes);
     defer allocator.free(response_body);
     @memset(response_body, 'x');
@@ -219,6 +226,7 @@ pub fn main(init: std.process.Init) !void {
         mebibytes_per_second,
         checksum,
     });
+    if (options.stats) counting.snapshot().print();
 }
 
 fn exchange(
@@ -301,6 +309,8 @@ fn parseOptions(init: std.process.Init) !Options {
             );
         } else if (std.mem.eql(u8, argument, "--priority")) {
             options.priority = true;
+        } else if (std.mem.eql(u8, argument, "--stats")) {
+            options.stats = true;
         } else {
             return error.InvalidArguments;
         }

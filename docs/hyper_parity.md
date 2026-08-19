@@ -423,7 +423,13 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
 1. Add a cancellation-race benchmark that combines reset timing with the
    priority-aware flow scheduler; reset behavior currently has end-to-end tests
    but no same-shape timing evidence.
-2. Measure allocation count and peak memory, not only elapsed time.
+2. Run the new `bench-http2-flow --stats` allocator telemetry on the full
+   netz/Hyper comparison matrix. The netz benchmark now reports allocation
+   calls, cumulative allocated/freed bytes, live bytes, peak live bytes and
+   size buckets through a shared thread-safe benchmark allocator; a two-stream
+   64-KiB/8-KiB-window smoke observed 293 allocations and 288,461 peak live
+   bytes. Equal instrumentation is still needed on the Hyper harness before
+   making a memory ratio.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.

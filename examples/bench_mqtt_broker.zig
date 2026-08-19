@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const default_publishers: usize = 4;
 const default_subscribers: usize = 4;
@@ -329,9 +331,9 @@ pub fn main(init: std.process.Init) !void {
         latency_p50,
         latency_p99,
         latency_p999,
-        stats_allocator.alloc_count.load(.monotonic),
-        stats_allocator.total_allocated.load(.monotonic),
-        stats_allocator.peak_bytes.load(.monotonic),
+        stats_allocator.snapshot().alloc_count,
+        stats_allocator.snapshot().total_allocated,
+        stats_allocator.snapshot().peak_bytes,
         checksum,
     });
 }
@@ -551,76 +553,3 @@ fn nowNs(io: std.Io) u64 {
     return std.math.cast(u64, timestamp) orelse
         std.math.maxInt(u64);
 }
-
-const CountingAllocator = struct {
-    backing: std.mem.Allocator,
-    current_bytes: std.atomic.Value(usize) = .init(0),
-    peak_bytes: std.atomic.Value(usize) = .init(0),
-    total_allocated: std.atomic.Value(usize) = .init(0),
-    alloc_count: std.atomic.Value(usize) = .init(0),
-
-    const vtable: std.mem.Allocator.VTable = .{
-        .alloc = alloc,
-        .resize = resize,
-        .remap = remap,
-        .free = free,
-    };
-
-    fn init(backing: std.mem.Allocator) CountingAllocator {
-        return .{ .backing = backing };
-    }
-
-    fn allocator(self: *CountingAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse
-            return null;
-        _ = self.alloc_count.fetchAdd(1, .monotonic);
-        _ = self.total_allocated.fetchAdd(len, .monotonic);
-        const current = self.current_bytes.fetchAdd(len, .monotonic) + len;
-        _ = self.peak_bytes.fetchMax(current, .monotonic);
-        return ptr;
-    }
-
-    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) {
-            return false;
-        }
-        self.recordResize(memory.len, new_len);
-        return true;
-    }
-
-    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        const ptr = self.backing.rawRemap(
-            memory,
-            alignment,
-            new_len,
-            ret_addr,
-        ) orelse return null;
-        self.recordResize(memory.len, new_len);
-        return ptr;
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        _ = self.current_bytes.fetchSub(memory.len, .monotonic);
-        self.backing.rawFree(memory, alignment, ret_addr);
-    }
-
-    fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
-        if (new_len > old_len) {
-            const delta = new_len - old_len;
-            _ = self.total_allocated.fetchAdd(delta, .monotonic);
-            const current = self.current_bytes.fetchAdd(delta, .monotonic) +
-                delta;
-            _ = self.peak_bytes.fetchMax(current, .monotonic);
-        } else {
-            _ = self.current_bytes.fetchSub(old_len - new_len, .monotonic);
-        }
-    }
-};
