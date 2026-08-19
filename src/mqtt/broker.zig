@@ -2105,7 +2105,7 @@ const ClientTask = struct {
         connection: *runtime.Connection,
     ) !void {
         while (true) {
-            var event = connection.readBrokerEvent() catch |err| {
+            var event = connection.readBrokerEventWithKeepAlive() catch |err| {
                 return err;
             };
             defer event.deinit(task.broker.allocator);
@@ -2267,6 +2267,7 @@ fn ungracefulTransportClose(err: anyerror) bool {
         error.ConnectionResetByPeer,
         error.ConnectionAborted,
         error.SocketUnconnected,
+        error.Timeout,
         => true,
         else => false,
     };

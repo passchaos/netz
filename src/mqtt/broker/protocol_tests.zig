@@ -48,6 +48,45 @@ fn waitForPeerClose(
     }
 }
 
+test "broker Keep Alive zero disables inactivity timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{
+            .protocol = .v5,
+            .client_id = "keep-alive-disabled",
+            .keep_alive_seconds = 0,
+        },
+    );
+    defer client.close();
+    // A one-second Keep Alive would expire at 1.5 seconds. Remaining usable
+    // beyond that boundary proves zero is treated as disabled, not as an
+    // immediate deadline.
+    try std.Io.sleep(io, .fromMilliseconds(1700), .awake);
+    try client.ping();
+
+    try client.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker auto-detects MQTT 3.1.1 and MQTT 5 on one listener" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

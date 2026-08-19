@@ -951,6 +951,13 @@ pub const Connection = struct {
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try self.writePacket(encoded.items);
         if (self.protocol == .v5) {
+            // Server Keep Alive replaces the CONNECT value for both peers.
+            // Updating the accepting endpoint here is essential now that the
+            // broker enforces inactivity rather than merely advertising the
+            // value to the client.
+            self.keep_alive_seconds = mqtt.serverKeepAlive(
+                properties.items,
+            ) orelse self.keep_alive_seconds;
             self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
             self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(properties.items) orelse self.incoming_topic_alias_maximum;
             self.local_maximum_qos = mqtt.maximumQoS(properties.items) orelse options.maximum_qos orelse .exactly_once;
@@ -1511,7 +1518,32 @@ pub const Connection = struct {
     /// Read one broker-facing packet while preserving transport-independent
     /// connection validation and inflight state.
     pub fn readBrokerEvent(self: *Connection) Error!BrokerEvent {
-        var packet = try self.readPacket();
+        return self.readBrokerEventInternal(null);
+    }
+
+    /// Read one broker event with MQTT Keep Alive inactivity enforcement.
+    ///
+    /// A CONNECT Keep Alive of zero disables this timeout. Otherwise the
+    /// Server must close the Network Connection after one-and-a-half times the
+    /// negotiated interval without a complete packet. The transport mirrors
+    /// Mosquitto's large-packet progress exception while keeping one deadline
+    /// across ordinary packet fragments.
+    pub fn readBrokerEventWithKeepAlive(
+        self: *Connection,
+    ) Error!BrokerEvent {
+        return self.readBrokerEventInternal(
+            keepAliveTimeout(self.keep_alive_seconds),
+        );
+    }
+
+    fn readBrokerEventInternal(
+        self: *Connection,
+        inactivity_timeout: ?std.Io.Clock.Duration,
+    ) Error!BrokerEvent {
+        var packet = if (inactivity_timeout) |timeout|
+            try self.readPacketWithInactivityTimeout(timeout)
+        else
+            try self.readPacket();
         errdefer packet.deinit(self.allocator);
         return switch (packet.fixed.packet_type) {
             .auth => blk: {
@@ -1778,6 +1810,25 @@ pub const Connection = struct {
             self.allocator,
             self.limits.max_packet_size,
         );
+        return self.finishReadPacket(packet);
+    }
+
+    fn readPacketWithInactivityTimeout(
+        self: *Connection,
+        timeout: std.Io.Clock.Duration,
+    ) Error!OwnedPacket {
+        const packet = try self.transport.readPacketWithInactivityTimeout(
+            self.allocator,
+            self.limits.max_packet_size,
+            timeout,
+        );
+        return self.finishReadPacket(packet);
+    }
+
+    fn finishReadPacket(
+        self: *Connection,
+        packet: packet_transport.OwnedPacket,
+    ) Error!OwnedPacket {
         errdefer self.allocator.free(packet.bytes);
         self.authentication.ensurePacketAllowed(
             packet.fixed.packet_type,
@@ -1850,6 +1901,38 @@ pub const Connection = struct {
         self.outgoing_inflight -= 1;
     }
 };
+
+fn keepAliveTimeout(
+    keep_alive_seconds: u16,
+) ?std.Io.Clock.Duration {
+    if (keep_alive_seconds == 0) return null;
+    // Multiplication precedes division so odd values retain the half-second
+    // precision required by MQTT instead of being rounded down to seconds.
+    const nanoseconds = @divExact(
+        @as(i96, keep_alive_seconds) * 3 * std.time.ns_per_s,
+        2,
+    );
+    return .{
+        .raw = .fromNanoseconds(nanoseconds),
+        .clock = .awake,
+    };
+}
+
+test "MQTT Keep Alive timeout preserves half-second precision" {
+    try std.testing.expect(keepAliveTimeout(0) == null);
+    try std.testing.expectEqual(
+        @as(i96, 1500 * std.time.ns_per_ms),
+        keepAliveTimeout(1).?.raw.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(i96, 3 * std.time.ns_per_s),
+        keepAliveTimeout(2).?.raw.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(i96, 98_302_500 * std.time.ns_per_ms),
+        keepAliveTimeout(std.math.maxInt(u16)).?.raw.nanoseconds,
+    );
+}
 
 fn validateUnsubAckResponse(protocol: mqtt.ProtocolVersion, unsuback: mqtt.UnsubAck, packet_id: u16, topic_filter_count: usize) Error!void {
     if (unsuback.packet_id != packet_id) return error.UnexpectedPacket;
@@ -2071,7 +2154,7 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(@as(?u16, 4), mqtt.topicAliasMaximum(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(u16, 2), accepted.connection.max_outgoing_inflight);
             try std.testing.expectEqual(@as(usize, 4096), accepted.connection.peer_max_packet_size);
-            try std.testing.expectEqual(@as(u16, 30), accepted.connection.keep_alive_seconds);
+            try std.testing.expectEqual(@as(u16, 7), accepted.connection.keep_alive_seconds);
 
             var client_auth = try accepted.connection.readAuth();
             defer client_auth.deinit(server_ptr.allocator);

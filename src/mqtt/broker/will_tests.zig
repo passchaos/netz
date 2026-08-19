@@ -98,6 +98,77 @@ test "broker routes immediate Will on ungraceful close" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker Keep Alive timeout routes Will and closes idle client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "keep-alive-will-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "will/#", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var source = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{
+            .protocol = .v5,
+            .client_id = "keep-alive-will-source",
+            .keep_alive_seconds = 1,
+            .will = will(0, false),
+        },
+    );
+    defer source.close();
+
+    const started = std.Io.Clock.awake.now(io);
+    var publish = try subscriber.readPublish();
+    defer publish.deinit(allocator);
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    // Keep Alive=1 has an exact 1.5-second broker timeout. Allow scheduling
+    // jitter without weakening this into the old whole-second truncation.
+    try std.testing.expect(
+        elapsed.nanoseconds >= 1400 * std.time.ns_per_ms,
+    );
+    try std.testing.expect(
+        elapsed.nanoseconds < 4 * std.time.ns_per_s,
+    );
+    try std.testing.expectEqualStrings(
+        "will/status",
+        publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "offline",
+        publish.publish.payload,
+    );
+    try subscriber.writePubAck(publish.publish.packet_id.?, 0);
+
+    try subscriber.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker normal DISCONNECT cancels Will" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

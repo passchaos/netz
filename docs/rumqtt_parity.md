@@ -21,6 +21,7 @@ and equal-wire broker results are kept separate.
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
 | Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
+| Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5 |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
@@ -196,6 +197,34 @@ successful CONNACK, active multi-step re-authentication, traffic gating, return
 to PING, plus bad-method Protocol Error. The runtime deliberately supplies
 protocol orchestration and policy hooks, not a built-in SCRAM or credential
 database.
+
+## Broker Keep Alive enforcement
+
+The broker now turns the Keep Alive parsed from CONNECT into an enforced
+inbound inactivity deadline instead of retaining it as informational state:
+
+- a non-zero interval closes the TCP Network Connection after exactly 1.5x the
+  negotiated value, preserving the half second for odd values rather than
+  truncating to whole seconds;
+- MQTT 5 Server Keep Alive replaces the CONNECT value on both sides of the
+  accepted connection, so the advertised override is the value the broker
+  enforces;
+- Keep Alive zero disables the deadline as required by MQTT;
+- one deadline covers an ordinary complete Control Packet, so a peer cannot
+  evade Keep Alive by trickling a small packet. As in Mosquitto, progress on a
+  large packet renews the budget only while more than 1,000 bytes remain;
+- timeout is an ungraceful disconnect and follows the existing Session and
+  Will paths. An immediate Will is routed, while durable Session State is
+  retained according to its Session Expiry policy.
+
+Mosquitto's audited `src/keepalive.c` schedules clients at
+`last_msg_in + keepalive*3/2`, while `lib/packet_mosq.c` refreshes progress for
+large partial packets. Netz preserves those semantics without a timer task per
+client by applying Zig 0.16 timed socket reads directly in each already-owned
+broker reader. Tests cover exact timeout arithmetic including the maximum
+u16 value, byte-progress renewal beyond one whole timeout, post-timeout Will
+routing, and a live Keep Alive zero connection remaining usable past the
+one-second expiry boundary.
 
 ## Live retained-message integration
 

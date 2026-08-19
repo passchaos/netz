@@ -3,6 +3,7 @@ const mqtt = @import("../mod.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
 const tls_stream = @import("../../tls/mod.zig").stream;
+const keep_alive_reader = @import("keep_alive_reader.zig");
 
 const net = std.Io.net;
 
@@ -11,7 +12,9 @@ pub const Error = mqtt.Error || websocket_runtime.Error ||
     ConnectionClosed,
     InvalidWebSocketMessage,
     PacketTooLarge,
-} || net.Stream.Reader.Error || net.Stream.Writer.Error;
+    TimedReadUnsupported,
+} || net.Stream.Reader.Error || net.Stream.Writer.Error ||
+    keep_alive_reader.Error;
 
 const WebSocketTransport = struct {
     connection: websocket_runtime.Connection,
@@ -158,6 +161,32 @@ pub const Transport = union(enum) {
             ),
         };
     }
+
+    /// Read one packet within the peer's MQTT Keep Alive budget.
+    ///
+    /// One deadline covers a complete ordinary Control Packet, preventing a
+    /// slow peer from retaining broker resources by trickling a small packet.
+    /// As in Mosquitto, a progressing large payload renews the budget only
+    /// while more than 1,000 bytes remain. Only the broker's byte-stream TCP
+    /// transport currently uses this operation; adapters with their own
+    /// buffering must add equivalent deadline-aware reads before opting in.
+    pub fn readPacketWithInactivityTimeout(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        timeout: std.Io.Clock.Duration,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |tcp| readTcpPacketWithInactivityTimeout(
+                allocator,
+                tcp.io,
+                tcp.stream,
+                max_packet_size,
+                timeout,
+            ),
+            .tls, .tls_vail, .tls_server, .websocket => error.TimedReadUnsupported,
+        };
+    }
 };
 
 fn readStreamPacket(
@@ -230,20 +259,57 @@ fn readTcpPacket(
     stream: net.Stream,
     max_packet_size: usize,
 ) Error!OwnedPacket {
+    return readTcpPacketInternal(
+        allocator,
+        io,
+        stream,
+        max_packet_size,
+        null,
+    );
+}
+
+fn readTcpPacketWithInactivityTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    max_packet_size: usize,
+    timeout: std.Io.Clock.Duration,
+) Error!OwnedPacket {
+    std.debug.assert(timeout.raw.nanoseconds > 0);
+    return readTcpPacketInternal(
+        allocator,
+        io,
+        stream,
+        max_packet_size,
+        timeout,
+    );
+}
+
+fn readTcpPacketInternal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    max_packet_size: usize,
+    inactivity_timeout: ?std.Io.Clock.Duration,
+) Error!OwnedPacket {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
+    var reader = keep_alive_reader.Reader.init(
+        io,
+        stream,
+        inactivity_timeout,
+    );
 
     var first: [1]u8 = undefined;
-    try readExact(io, stream, &first);
+    try reader.readExact(&first, false);
     try encoded.append(allocator, first[0]);
 
     var remaining_bytes: [4]u8 = undefined;
     var remaining_len_len: usize = 0;
     while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
-        try readExact(
-            io,
-            stream,
+        try reader.readExact(
             remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            false,
         );
         try encoded.append(
             allocator,
@@ -269,7 +335,7 @@ fn readTcpPacket(
     // not just the Remaining Length payload. Enforce it before allocation.
     if (packet_len > max_packet_size) return error.PacketTooLarge;
     try encoded.resize(allocator, packet_len);
-    try readExact(io, stream, encoded.items[payload_start..]);
+    try reader.readExact(encoded.items[payload_start..], true);
 
     const bytes = try encoded.toOwnedSlice(allocator);
     errdefer allocator.free(bytes);
@@ -356,24 +422,6 @@ fn discardPacketPrefix(
         );
     }
     input.items.len = remaining;
-}
-
-fn readExact(
-    io: std.Io,
-    stream: net.Stream,
-    buffer: []u8,
-) Error!void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        var bufs = [_][]u8{buffer[offset..]};
-        const n = try io.vtable.netRead(
-            io.userdata,
-            stream.socket.handle,
-            &bufs,
-        );
-        if (n == 0) return error.ConnectionClosed;
-        offset += n;
-    }
 }
 
 fn readExactTls(

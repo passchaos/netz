@@ -424,7 +424,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, plus an indexed Will
   Delay scheduler with Session-end deadlines, reconnect cancellation, Clean
-  Start takeover and DISCONNECT 0x00/0x04 handling, plus a blocking TCP
+  Start takeover and DISCONNECT 0x00/0x04 handling, plus exact broker-side
+  Keep Alive enforcement with 1.5x inbound inactivity deadlines, zero-disable
+  semantics, bounded large-packet progress renewal and ungraceful Will/Session
+  cleanup, plus a blocking TCP
   client/server runtime with a
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
   system or caller-provided CA roots, hostname verification, and optional
