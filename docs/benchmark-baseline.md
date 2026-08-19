@@ -610,6 +610,18 @@ That is 8.5% fewer allocation calls, 16.9% fewer cumulative allocated bytes,
 and 11.2% lower peak live memory in the captured pair, without measurable
 throughput loss.
 
+Receive preflight no longer clones the heap-backed path-validation state for
+every authenticated packet, and its distinct-stream shadow starts in fixed
+packet-local storage. A same-command 16 MiB/four-stream upload A/B against
+commit `1757907` reduced allocation calls from 34,980 to 29,223-29,300
+(16.2-16.5%), while cumulative allocated bytes fell from 102,829,311 to
+100,431,864-100,595,813 (2.2-2.3%). The three post-change samples measured
+270.48-274.31 MiB/s versus the captured 191.95 MiB/s baseline sample; the
+allocation delta is the stable conclusion, while the large single-run
+throughput swing should be treated as promising rather than a final ratio.
+Failing-allocator and duplicate-PATH_RESPONSE tests cover the new no-path
+fast path and packet-local transactional response tracking.
+
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 
 ```text

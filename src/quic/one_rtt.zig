@@ -5005,15 +5005,43 @@ pub const Connection = struct {
 
     fn validateReceivedFramePreconditions(self: *Connection, frames: []const quic.Frame, packet_destination_connection_id: ?[]const u8) Error!void {
         var recv_data_total = self.recv_data_total;
-        var recv_streams: std.ArrayList(RecvStreamPreflightEntry) = .empty;
+        var stack_recv_streams: [16]RecvStreamPreflightEntry = undefined;
+        var recv_streams: std.ArrayList(RecvStreamPreflightEntry) =
+            .initBuffer(&stack_recv_streams);
+        var recv_streams_allocated = false;
         defer {
             for (recv_streams.items) |*entry| entry.deinit();
-            recv_streams.deinit(self.endpoint.allocator);
+            if (recv_streams_allocated) {
+                recv_streams.deinit(self.endpoint.allocator);
+            }
         }
         var peer_connection_ids = self.peer_connection_ids;
         var local_connection_ids = self.local_connection_ids;
-        var path_validation = try self.path_validation.clone(self.endpoint.allocator);
-        defer path_validation.deinit();
+        var stack_path_challenges: [16][8]u8 = undefined;
+        var stack_path_responses: [16][8]u8 = undefined;
+        const path_challenge_count = countPathChallenges(frames);
+        const path_response_count = countPathResponses(frames);
+        const path_challenges = if (path_challenge_count <=
+            stack_path_challenges.len)
+            stack_path_challenges[0..path_challenge_count]
+        else
+            try self.endpoint.allocator.alloc([8]u8, path_challenge_count);
+        defer if (path_challenges.ptr != stack_path_challenges[0..].ptr) {
+            self.endpoint.allocator.free(path_challenges);
+        };
+        const path_responses = if (path_response_count <=
+            stack_path_responses.len)
+            stack_path_responses[0..path_response_count]
+        else
+            try self.endpoint.allocator.alloc([8]u8, path_response_count);
+        defer if (path_responses.ptr != stack_path_responses[0..].ptr) {
+            self.endpoint.allocator.free(path_responses);
+        };
+        var path_validation = quic.path_validation.State.ReceivePreflight.init(
+            &self.path_validation,
+            path_challenges,
+            path_responses,
+        );
 
         for (frames) |frame| {
             switch (frame) {
@@ -5026,8 +5054,8 @@ pub const Connection = struct {
                     // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
                 },
-                .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_data_total),
-                .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_data_total),
+                .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &recv_data_total),
+                .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &recv_data_total),
                 .stream_data_blocked => |blocked| try self.validateStreamReceiveFrameId(blocked.stream_id),
                 .max_stream_data => |max_stream_data| try self.validateStreamSendControlId(max_stream_data.stream_id),
                 .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
@@ -5046,8 +5074,8 @@ pub const Connection = struct {
                     );
                 },
                 .retire_connection_id => |retire| try local_connection_ids.retireExceptPacketDestination(retire.sequence_number, packet_destination_connection_id),
-                .path_challenge => |path_challenge| _ = try path_validation.receiveChallenge(path_challenge.data),
-                .path_response => |path_response| try path_validation.receiveResponse(path_response.data),
+                .path_challenge => |path_challenge| try path_validation.receiveChallenge(path_challenge.data),
+                .path_response => |path_response| try path_validation.recordResponse(path_response.data),
                 .new_token => |new_token| {
                     if (self.config.local_endpoint == .server) return error.InvalidFrame;
                     if (new_token.token.len == 0) return error.InvalidFrame;
@@ -5060,6 +5088,7 @@ pub const Connection = struct {
                 else => {},
             }
         }
+        try path_validation.prepare();
     }
 
     fn classifySemanticCloseError(self: Connection, frames: []const quic.Frame, err: anyerror) ?quic.FramePayloadCloseError {
@@ -5144,10 +5173,15 @@ pub const Connection = struct {
         self: *Connection,
         stream: quic.StreamFrame,
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_streams_allocated: *bool,
         recv_data_total: *u64,
     ) Error!void {
         try self.validateStreamReceiveFrameId(stream.stream_id);
-        const recv_stream = try self.preflightRecvStreamEntry(recv_streams, stream.stream_id);
+        const recv_stream = try self.preflightRecvStreamEntry(
+            recv_streams,
+            recv_streams_allocated,
+            stream.stream_id,
+        );
         const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
         const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
 
@@ -5162,10 +5196,15 @@ pub const Connection = struct {
         self: *Connection,
         reset: quic.ResetStreamFrame,
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_streams_allocated: *bool,
         recv_data_total: *u64,
     ) Error!void {
         try self.validateStreamReceiveFrameId(reset.stream_id);
-        const recv_stream = try self.preflightRecvStreamEntry(recv_streams, reset.stream_id);
+        const recv_stream = try self.preflightRecvStreamEntry(
+            recv_streams,
+            recv_streams_allocated,
+            reset.stream_id,
+        );
         try preflightApplyFinalSize(recv_stream, reset.final_size, true);
         if (reset.final_size > recv_stream.flow_limit) return error.FlowControlViolation;
         const received = recv_stream.recv_state.receivedByteCount();
@@ -5177,6 +5216,7 @@ pub const Connection = struct {
     fn preflightRecvStreamEntry(
         self: *Connection,
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_streams_allocated: *bool,
         stream_id: u64,
     ) Error!*RecvStreamPreflightEntry {
         for (recv_streams.items) |*entry| {
@@ -5189,7 +5229,7 @@ pub const Connection = struct {
             );
             var appended = false;
             errdefer if (!appended) recv_state.deinit();
-            try recv_streams.append(self.endpoint.allocator, .{
+            try appendRecvStreamPreflight(recv_streams, recv_streams_allocated, self.endpoint.allocator, .{
                 .stream_id = stream_id,
                 .flow_limit = existing.flow.limit,
                 .recv_state = recv_state,
@@ -5205,7 +5245,7 @@ pub const Connection = struct {
                 self.config.max_stream_receive_window orelse
                     self.config.stream_receive_window,
             );
-            try recv_streams.append(self.endpoint.allocator, .{
+            try appendRecvStreamPreflight(recv_streams, recv_streams_allocated, self.endpoint.allocator, .{
                 .stream_id = stream_id,
                 .flow_limit = flow_limit,
                 .recv_state = quic.stream_state.RecvState.Preflight.initEmpty(
@@ -5228,6 +5268,29 @@ pub const Connection = struct {
         const next_total = std.math.add(u64, recv_data_total.*, newly_received) catch return error.FlowControlViolation;
         if (next_total > self.recv_flow.limit) return error.FlowControlViolation;
         recv_data_total.* = next_total;
+    }
+
+    fn appendRecvStreamPreflight(
+        entries: *std.ArrayList(RecvStreamPreflightEntry),
+        allocated: *bool,
+        allocator: std.mem.Allocator,
+        entry: RecvStreamPreflightEntry,
+    ) Error!void {
+        if (!allocated.*) {
+            if (entries.items.len < entries.capacity) {
+                entries.appendAssumeCapacity(entry);
+                return;
+            }
+            // ArrayList.initBuffer cannot grow with an allocator because its
+            // stack storage is not allocator-owned. Spill only the rare packet
+            // touching more distinct streams than the common fixed capacity.
+            var grown = try std.ArrayList(RecvStreamPreflightEntry)
+                .initCapacity(allocator, entries.capacity * 2);
+            grown.appendSliceAssumeCapacity(entries.items);
+            entries.* = grown;
+            allocated.* = true;
+        }
+        try entries.append(allocator, entry);
     }
 
     fn preflightApplyFinalSize(recv_stream: *RecvStreamPreflightEntry, final_size: u64, final: bool) Error!void {
@@ -6058,6 +6121,14 @@ fn countPathChallenges(frames: []const quic.Frame) usize {
     var count: usize = 0;
     for (frames) |frame| {
         if (frame == .path_challenge) count += 1;
+    }
+    return count;
+}
+
+fn countPathResponses(frames: []const quic.Frame) usize {
+    var count: usize = 0;
+    for (frames) |frame| {
+        if (frame == .path_response) count += 1;
     }
     return count;
 }

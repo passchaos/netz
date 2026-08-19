@@ -131,6 +131,87 @@ pub const State = struct {
         return out;
     }
 
+    /// Validate one PATH_CHALLENGE against a packet-local shadow queue.
+    ///
+    /// Receive preflight needs only duplicate suppression and queue-capacity
+    /// checks; cloning every heap-backed queue and hash index for ordinary
+    /// STREAM packets made transactional validation allocate even when a
+    /// packet contained no path-validation frame. The fixed-size shadow holds
+    /// at most one entry per QUIC frame in the packet and consults live state
+    /// without mutating it.
+    pub const ReceivePreflight = struct {
+        state: *State,
+        pending_challenges: [][8]u8,
+        pending_challenge_len: usize = 0,
+        received_responses: [][8]u8,
+        received_response_len: usize = 0,
+
+        pub fn init(
+            state: *State,
+            pending_challenges: [][8]u8,
+            received_responses: [][8]u8,
+        ) ReceivePreflight {
+            return .{
+                .state = state,
+                .pending_challenges = pending_challenges,
+                .received_responses = received_responses,
+            };
+        }
+
+        pub fn receiveChallenge(
+            self: *ReceivePreflight,
+            data: [8]u8,
+        ) Error!void {
+            if (self.state.pending_response_index.contains(data)) return;
+            for (self.pending_challenges[0..self.pending_challenge_len]) |queued| {
+                if (std.mem.eql(u8, &queued, &data)) return;
+            }
+            if (self.pending_challenge_len == self.pending_challenges.len) {
+                return error.OutOfMemory;
+            }
+            self.pending_challenges[self.pending_challenge_len] = data;
+            self.pending_challenge_len += 1;
+        }
+
+        pub fn recordResponse(
+            self: *ReceivePreflight,
+            data: [8]u8,
+        ) Error!void {
+            for (self.received_responses[0..self.received_response_len]) |received| {
+                if (std.mem.eql(u8, &received, &data)) {
+                    return error.UnknownPathResponse;
+                }
+            }
+            if (!self.state.outstanding_challenge_index.contains(data)) {
+                return error.UnknownPathResponse;
+            }
+            if (self.received_response_len == self.received_responses.len) {
+                return error.OutOfMemory;
+            }
+            self.received_responses[self.received_response_len] = data;
+            self.received_response_len += 1;
+        }
+
+        /// Reserve the exact live-state growth proved necessary above. Only
+        /// capacity may change here; the packet still has not committed any
+        /// observable path-validation state.
+        pub fn prepare(self: *ReceivePreflight) Error!void {
+            if (self.pending_challenge_len == 0) return;
+            try self.state.pending_responses.ensureUnusedCapacity(
+                self.state.allocator,
+                self.pending_challenge_len,
+            );
+            const additional = std.math.cast(
+                @TypeOf(self.state.pending_response_index).Size,
+                self.pending_challenge_len,
+            ) orelse return error.OutOfMemory;
+            try self.state.pending_response_index.ensureUnusedCapacity(
+                self.state.allocator,
+                additional,
+            );
+        }
+    };
+
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
         if (self.outstanding_challenge_index.count() != 0 and
             self.outstanding_challenge_index.contains(data)) return;
@@ -488,6 +569,53 @@ test "QUIC path validation pending queues pop FIFO without shifting" {
     try std.testing.expectEqual(@as(usize, 2), cloned.pendingChallengeCount());
     try std.testing.expectEqualSlices(u8, &b, &(try cloned.nextChallengeFrame()).path_challenge.data);
     try std.testing.expectEqualSlices(u8, &c, &(try cloned.nextChallengeFrame()).path_challenge.data);
+}
+
+test "QUIC path receive preflight avoids allocation without path frames" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    state.allocator = no_alloc.allocator();
+    var challenges: [1][8]u8 = undefined;
+    var responses: [1][8]u8 = undefined;
+    var preflight = State.ReceivePreflight.init(
+        &state,
+        &challenges,
+        &responses,
+    );
+
+    try preflight.prepare();
+    try std.testing.expectEqual(@as(usize, 0), no_alloc.alloc_index);
+}
+
+test "QUIC path receive preflight rejects duplicate response transactionally" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+    const challenge = [_]u8{0xa5} ** 8;
+    try state.queueChallenge(challenge);
+    _ = try state.nextChallengeFrame();
+    var challenges: [2][8]u8 = undefined;
+    var responses: [2][8]u8 = undefined;
+    var preflight = State.ReceivePreflight.init(
+        &state,
+        &challenges,
+        &responses,
+    );
+
+    try preflight.recordResponse(challenge);
+    try std.testing.expectError(
+        error.UnknownPathResponse,
+        preflight.recordResponse(challenge),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        state.outstandingChallengeCount(),
+    );
 }
 
 test "QUIC path validation drains response frames into caller storage" {
