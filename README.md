@@ -632,7 +632,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   reusable scratch, full recovery/flow accounting, and UDP GSO/sendmmsg
   submission,
 - end-to-end QUIC 1-RTT UDP_GRO owning-batch cursor receive versus per-packet receive,
-  including decryption, frame parsing, state application, and cleanup.
+  including decryption, frame parsing, state application, and cleanup, plus a
+  single-datagram in-place service path for state-only event loops.
 - QUIC ACK range generation with allocating ownership versus caller-provided
   stack storage, plus allocation-free transactional recovery application
   directly from arbitrary wire-range counts,

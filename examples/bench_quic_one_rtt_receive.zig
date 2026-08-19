@@ -22,6 +22,7 @@ pub fn main() !void {
         client_cid,
         server_cid,
         true,
+        false,
     ) catch |err| switch (err) {
         error.GroUnavailable => null,
         else => |e| return e,
@@ -33,6 +34,16 @@ pub fn main() !void {
         client_cid,
         server_cid,
         false,
+        false,
+    );
+    const service_ns = try measure(
+        allocator,
+        io,
+        keys,
+        client_cid,
+        server_cid,
+        false,
+        true,
     );
     const total_packets = iterations * batch_size;
     if (gro_ns) |gro| {
@@ -42,6 +53,7 @@ pub fn main() !void {
             \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    {d} ns/batch, {d} ns/packet
             \\  plain packet: {d} ns/batch, {d} ns/packet
+            \\  in-place service: {d} ns/batch, {d} ns/packet
             \\  GRO relative packet throughput: {d}.{d:0>2}x
             \\  total packets/path: {d}
             \\
@@ -53,6 +65,8 @@ pub fn main() !void {
             gro / total_packets,
             plain_ns / iterations,
             plain_ns / total_packets,
+            service_ns / iterations,
+            service_ns / total_packets,
             ratio_x100 / 100,
             ratio_x100 % 100,
             total_packets,
@@ -63,6 +77,7 @@ pub fn main() !void {
             \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    unavailable on this endpoint
             \\  plain packet: {d} ns/batch, {d} ns/packet
+            \\  in-place service: {d} ns/batch, {d} ns/packet
             \\  total packets/path: {d}
             \\
         , .{
@@ -71,6 +86,8 @@ pub fn main() !void {
             payload_size,
             plain_ns / iterations,
             plain_ns / total_packets,
+            service_ns / iterations,
+            service_ns / total_packets,
             total_packets,
         });
     }
@@ -83,6 +100,7 @@ fn measure(
     client_cid: [4]u8,
     server_cid: [4]u8,
     enable_gro: bool,
+    service_in_place: bool,
 ) !u64 {
     var server_endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -142,6 +160,10 @@ fn measure(
             }
             if (consumed != batch_size) {
                 return error.UnexpectedPacketCount;
+            }
+        } else if (service_in_place) {
+            for (0..batch_size) |_| {
+                try server.servicePacketAt(started);
             }
         } else {
             for (0..batch_size) |_| {

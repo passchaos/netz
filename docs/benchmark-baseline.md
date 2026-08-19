@@ -300,6 +300,14 @@ QUIC 1-RTT receive benchmark
   total packets/path: 54000
 ```
 
+Ordinary non-GRO event loops can now call `Connection.servicePacket` to apply
+one datagram without returning owned decrypt/frame diagnostics. It uses the
+same current-key in-place path and retained frame array as GRO service, with an
+owning fallback only for key-phase transitions. Three ReleaseFast runs measured
+1.50-1.64 us/packet versus 1.92-2.07 us/packet for owning `receivePacket`, a
+1.17-1.38x packet-throughput improvement. The audited quicz short-packet open
+path allocates plaintext and connection-id ownership per packet.
+
 ### QUIC recovery ACK range application
 
 `bench-quic-ack-ranges` now includes a complete recovery cycle that tracks 128

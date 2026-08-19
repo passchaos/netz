@@ -4198,6 +4198,61 @@ pub const Connection = struct {
         return self.servicePacketBatchAt(self.monotonicNowNs());
     }
 
+    /// Receive one ordinary UDP datagram and apply it without returning owned
+    /// packet/frame diagnostics.
+    ///
+    /// Event loops that only consume connection state should prefer this to
+    /// `receivePacket`: the current-key phase decrypts in endpoint receive
+    /// storage and reuses the connection frame array. Key updates retain the
+    /// owning fallback because a failed in-place AEAD trial destroys input.
+    pub fn servicePacket(self: *Connection) Error!void {
+        return self.servicePacketAt(self.monotonicNowNs());
+    }
+
+    pub fn servicePacketAt(
+        self: *Connection,
+        now_ns: ?u64,
+    ) Error!void {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        var datagram = try self.endpoint.receiveBytes();
+        defer datagram.deinit(self.endpoint.allocator);
+        const keys = self.receive_key_phase.keyUpdateKeys();
+        const key_phase = quic.protection.peekShortPacketKeyPhaseForPolicy(
+            keys.current.hp,
+            datagram.bytes,
+            self.config.local_connection_id.len,
+            self.config.accept_zero_fixed_bit,
+        ) catch |err| {
+            if (err == error.AuthenticationFailed) {
+                try self.recordAuthenticationFailureAt(now_ns);
+            }
+            return err;
+        };
+        if (key_phase == keys.current_key_phase) {
+            return self.processReceivedBytesInPlaceAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                now_ns,
+                keys.current,
+            ) catch |err| {
+                if (err == error.AuthenticationFailed) {
+                    try self.recordAuthenticationFailureAt(now_ns);
+                }
+                return err;
+            };
+        }
+        var packet = try self.processReceivedBytesAt(
+            datagram.from,
+            datagram.bytes,
+            datagram.ecn,
+            now_ns,
+        );
+        packet.deinit(self.endpoint.allocator);
+    }
+
     pub fn servicePacketBatchAt(self: *Connection, now_ns: ?u64) Error!usize {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var datagrams = try self.endpoint.receiveBytesBatch();
