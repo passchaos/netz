@@ -122,20 +122,20 @@ pub fn batchPacketLimit(preferred: usize, transport_limit: usize) usize {
 
 pub fn select(candidates: []const Candidate) ?Selection {
     var selected_urgency: ?u3 = null;
-    for (candidates) |candidate| {
+    var exclusive_index: ?usize = null;
+    for (candidates, 0..) |candidate, index| {
         if (!candidate.eligible()) continue;
         if (selected_urgency == null or
             candidate.priority.urgency < selected_urgency.?)
         {
             selected_urgency = candidate.priority.urgency;
+            exclusive_index = if (candidate.priority.incremental)
+                null
+            else
+                index;
+            continue;
         }
-    }
-    const urgency = selected_urgency orelse return null;
-
-    var exclusive_index: ?usize = null;
-    for (candidates, 0..) |candidate, index| {
-        if (!candidate.eligible() or
-            candidate.priority.urgency != urgency or
+        if (candidate.priority.urgency != selected_urgency.? or
             candidate.priority.incremental)
         {
             continue;
@@ -147,6 +147,7 @@ pub fn select(candidates: []const Candidate) ?Selection {
             exclusive_index = index;
         }
     }
+    const urgency = selected_urgency orelse return null;
     return .{
         .urgency = urgency,
         .exclusive_index = exclusive_index,
@@ -286,6 +287,32 @@ test "HTTP/3 scheduler iterator visits selected responses circularly" {
     try std.testing.expectEqual(@as(?usize, 2), iterator.next());
     try std.testing.expectEqual(@as(?usize, 0), iterator.next());
     try std.testing.expectEqual(@as(?usize, null), iterator.next());
+}
+
+test "HTTP/3 scheduler single pass replaces exclusive urgency" {
+    const candidates = [_]Candidate{
+        .{
+            .stream_id = 8,
+            .remaining = 1,
+            .send_capacity = 1,
+            .priority = .{ .urgency = 6 },
+        },
+        .{
+            .stream_id = 4,
+            .remaining = 1,
+            .send_capacity = 1,
+            .priority = .{ .urgency = 1 },
+        },
+        .{
+            .stream_id = 0,
+            .remaining = 1,
+            .send_capacity = 1,
+            .priority = .{ .urgency = 1 },
+        },
+    };
+    const selection = select(&candidates).?;
+    try std.testing.expectEqual(@as(u3, 1), selection.urgency);
+    try std.testing.expectEqual(@as(?usize, 2), selection.exclusive_index);
 }
 
 test "HTTP/3 scheduler delay budget supports bytes or packets" {

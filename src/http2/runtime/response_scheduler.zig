@@ -45,20 +45,20 @@ pub const Selection = struct {
 
 pub fn select(candidates: []const Candidate) ?Selection {
     var selected_urgency: ?u3 = null;
-    for (candidates) |candidate| {
+    var exclusive_index: ?usize = null;
+    for (candidates, 0..) |candidate, index| {
         if (!candidate.eligible()) continue;
         if (selected_urgency == null or
             candidate.priority.urgency < selected_urgency.?)
         {
             selected_urgency = candidate.priority.urgency;
+            exclusive_index = if (candidate.priority.incremental)
+                null
+            else
+                index;
+            continue;
         }
-    }
-    const urgency = selected_urgency orelse return null;
-
-    var exclusive_index: ?usize = null;
-    for (candidates, 0..) |candidate, index| {
-        if (!candidate.eligible() or
-            candidate.priority.urgency != urgency or
+        if (candidate.priority.urgency != selected_urgency.? or
             candidate.priority.incremental)
         {
             continue;
@@ -70,6 +70,7 @@ pub fn select(candidates: []const Candidate) ?Selection {
             exclusive_index = index;
         }
     }
+    const urgency = selected_urgency orelse return null;
     return .{
         .urgency = urgency,
         .exclusive_index = exclusive_index,
@@ -176,4 +177,30 @@ test "scheduler returns null without a sendable stream" {
             .priority = .{},
         },
     }) == null);
+}
+
+test "scheduler single pass replaces exclusive stream on lower urgency" {
+    const candidates = [_]Candidate{
+        .{
+            .stream_id = 9,
+            .remaining = 1,
+            .send_capacity = 1,
+            .priority = .{ .urgency = 5 },
+        },
+        .{
+            .stream_id = 7,
+            .remaining = 1,
+            .send_capacity = 1,
+            .priority = .{ .urgency = 1 },
+        },
+        .{
+            .stream_id = 3,
+            .remaining = 1,
+            .send_capacity = 1,
+            .priority = .{ .urgency = 1 },
+        },
+    };
+    const selection = select(&candidates).?;
+    try std.testing.expectEqual(@as(u3, 1), selection.urgency);
+    try std.testing.expectEqual(@as(?usize, 2), selection.exclusive_index);
 }

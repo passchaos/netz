@@ -412,6 +412,12 @@ connection credit while a more urgent stream has no stream credit.
 | HTTP/2 parallel x10 × 1-MiB responses | 1.663-1.671 ms/batch pinned | 2.957-3.035 ms/batch pinned |
 | HTTP/2 parallel x10 × 1-MiB responses, 8-KiB stream window | 7.367-7.447 ms/batch pinned | 10.192-10.379 ms/batch pinned |
 
+RFC 9218 scheduling now selects urgency and the lowest-ID exclusive
+non-incremental stream in one candidate scan rather than two. The priority-aware
+10-stream/1-MiB/8-KiB-window benchmark measured 7.79–7.96 ms/batch and
+1.26–1.28 GiB/s across three CPU-0 runs; the immediately preceding two-scan
+sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
+
 ## Remaining evidence
 
 1. Add a cancellation-race benchmark that combines reset timing with the

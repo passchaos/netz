@@ -214,6 +214,12 @@ do not establish whole-library HTTP/2 superiority.
 
 ### HTTP/2 flow-controlled parallel responses
 
+The RFC 9218 selector now chooses urgency and the lowest stream-ID
+non-incremental winner in one candidate pass. Three CPU-0-pinned priority-mode
+runs with ten 1-MiB responses and 8-KiB stream windows measured 7.79–7.96
+ms/batch (1.26–1.28 GiB/s), versus 8.03 ms/batch immediately before scan
+fusion.
+
 Captured on 2026-08-19 with ten bodyless requests and one 1-MiB response per
 stream. Both implementations use a persistent h2c connection, a 16-KiB maximum
 DATA frame size, an 8-KiB initial stream window, the RFC default 65,535-byte
