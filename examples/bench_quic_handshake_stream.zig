@@ -12,6 +12,8 @@ const default_echo_iterations: usize = 5000;
 const echo_payload_bytes: usize = 1024;
 const default_stream_churn_iterations: usize = 100_000;
 const stream_churn_credit: u64 = 1_048_576;
+const default_connections: usize = 4;
+const max_connections: usize = 64;
 const max_streams: usize = 64;
 const max_datagram_size: usize = 8900;
 const stream_payload_size: usize = max_datagram_size - 128;
@@ -50,10 +52,15 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake, echo, stream_churn };
+const Mode = enum { upload, handshake, echo, stream_churn, aggregate };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
+    const server_key = try makeBenchmarkServerKey();
+    if (config.mode == .aggregate) {
+        try runAggregateBenchmark(config, server_key);
+        return;
+    }
     var counting = CountingAllocator.init(std.heap.smp_allocator);
     const allocator = if (config.stats)
         counting.allocator()
@@ -63,7 +70,6 @@ pub fn main(init: std.process.Init) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const server_key = try makeBenchmarkServerKey();
 
     if (config.mode == .handshake) {
         try runHandshakeBenchmark(allocator, io, config, server_key);
@@ -80,7 +86,6 @@ pub fn main(init: std.process.Init) !void {
         if (config.stats) counting.snapshot().print();
         return;
     }
-
     const samples = try allocator.alloc(f64, config.iterations);
     defer allocator.free(samples);
 
@@ -148,6 +153,7 @@ const Config = struct {
     enable_hystart: bool = true,
     enable_pacing: bool = true,
     stats: bool = false,
+    connections: usize = default_connections,
 };
 
 const IterationResult = struct {
@@ -887,6 +893,8 @@ fn parseArgs(
             config.mode = .echo;
         } else if (std.mem.eql(u8, arg, "--mode=stream-churn")) {
             config.mode = .stream_churn;
+        } else if (std.mem.eql(u8, arg, "--mode=aggregate")) {
+            config.mode = .aggregate;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
@@ -903,6 +911,10 @@ fn parseArgs(
         } else if (std.mem.startsWith(u8, arg, "--batch-packets=")) {
             config.batch_packets = try parsePositiveUsize(
                 arg["--batch-packets=".len..],
+            );
+        } else if (std.mem.startsWith(u8, arg, "--connections=")) {
+            config.connections = try parsePositiveUsize(
+                arg["--connections=".len..],
             );
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
@@ -930,6 +942,7 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     if (config.streams > max_streams or
+        config.connections > max_connections or
         config.batch_packets > max_packet_batch_size or
         config.streams > config.transfer_bytes)
     {
@@ -976,6 +989,147 @@ fn runStreamChurnBenchmark(
     );
     if (result.payload_bytes_received != config.iterations) {
         return error.InvalidStreamCount;
+    }
+}
+
+fn runAggregateBenchmark(
+    config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
+) !void {
+    const workers = try std.heap.smp_allocator.alloc(
+        std.Thread,
+        config.connections,
+    );
+    defer std.heap.smp_allocator.free(workers);
+    const results = try std.heap.smp_allocator.alloc(
+        AggregateWorkerResult,
+        config.connections,
+    );
+    defer std.heap.smp_allocator.free(results);
+    @memset(results, .{});
+
+    var spawned: usize = 0;
+    var joined = false;
+    defer if (!joined) {
+        for (workers[0..spawned]) |worker| worker.join();
+    };
+
+    // Match quicz's reference shape: worker creation, per-connection std.Io,
+    // real handshake, transfer, and teardown all live inside the aggregate
+    // timer. No start barrier hides setup cost from the reported throughput.
+    const timer_io = std.Io.Threaded.global_single_threaded.io();
+    const benchmark_started = nowNs(timer_io);
+    for (workers, results, 0..) |*worker, *result, index| {
+        worker.* = try std.Thread.spawn(
+            .{},
+            aggregateWorker,
+            .{AggregateWorkerContext{
+                .index = index,
+                .config = config,
+                .server_key = server_key,
+                .result = result,
+            }},
+        );
+        spawned += 1;
+    }
+    for (workers) |worker| worker.join();
+    joined = true;
+    const elapsed = nowNs(timer_io) -| benchmark_started;
+
+    var total_received: usize = 0;
+    var total_allocations: usize = 0;
+    var total_allocated_bytes: usize = 0;
+    var peak_live_bytes: usize = 0;
+    for (results) |result| {
+        if (result.err) |err| return err;
+        if (result.bytes_received != config.transfer_bytes) {
+            return error.InvalidTransferSize;
+        }
+        total_received +|= result.bytes_received;
+        total_allocations +|= result.alloc_count;
+        total_allocated_bytes +|= result.total_allocated;
+        peak_live_bytes +|= result.peak_bytes;
+    }
+    const expected = std.math.mul(
+        usize,
+        config.connections,
+        config.transfer_bytes,
+    ) catch return error.InvalidTransferSize;
+    if (total_received != expected) return error.InvalidTransferSize;
+    std.debug.print(
+        "QUIC real TLS 1.3 aggregate connection benchmark\n" ++
+            "  connections: {d}\n" ++
+            "  transfer bytes/connection: {d}\n" ++
+            "  total payload bytes: {d}\n" ++
+            "  elapsed ns: {d}\n" ++
+            "  aggregate MiB/s: {d:.2}\n" ++
+            "  allocator stats enabled: {}\n" ++
+            "  allocation calls: {d}\n" ++
+            "  cumulative allocated bytes: {d}\n" ++
+            "  summed worker peak bytes: {d}\n",
+        .{
+            config.connections,
+            config.transfer_bytes,
+            total_received,
+            elapsed,
+            mibPerSecond(total_received, elapsed),
+            config.stats,
+            total_allocations,
+            total_allocated_bytes,
+            peak_live_bytes,
+        },
+    );
+}
+
+const AggregateWorkerResult = struct {
+    bytes_received: usize = 0,
+    alloc_count: usize = 0,
+    total_allocated: usize = 0,
+    peak_bytes: usize = 0,
+    err: ?anyerror = null,
+};
+
+const AggregateWorkerContext = struct {
+    index: usize,
+    config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
+    result: *AggregateWorkerResult,
+};
+
+fn aggregateWorker(context: AggregateWorkerContext) void {
+    aggregateWorkerFallible(context) catch |err| {
+        context.result.err = err;
+    };
+}
+
+fn aggregateWorkerFallible(context: AggregateWorkerContext) !void {
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (context.config.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var worker_config = context.config;
+    worker_config.mode = .upload;
+    worker_config.iterations = 1;
+    worker_config.streams = 1;
+    const result = try runIteration(
+        allocator,
+        io,
+        worker_config,
+        context.index,
+        context.server_key,
+    );
+    context.result.bytes_received = result.payload_bytes_received;
+    if (context.config.stats) {
+        const snapshot = counting.snapshot();
+        context.result.alloc_count = snapshot.alloc_count;
+        context.result.total_allocated = snapshot.total_allocated;
+        context.result.peak_bytes = snapshot.peak_bytes;
+        if (snapshot.current_bytes != 0) return error.MemoryLeak;
     }
 }
 

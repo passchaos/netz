@@ -938,6 +938,33 @@ zero live bytes, and returned the expected final ID 399,996 and checksum
 19,999,800,000. This is a stream-reservation microbenchmark, not evidence for
 wire-level open/close throughput.
 
+### Raw QUIC four-connection aggregate throughput
+
+Captured on 2026-08-20 with the same shape as quicz's thread-per-connection
+scaling case: four worker threads, one independent `std.Io` per worker, one
+real handshake and one 64 MiB upload per connection. The aggregate timer
+includes worker creation, handshakes, transfers and teardown:
+
+```sh
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=aggregate --connections=4 --transfer-bytes=67108864
+timeout 180 /tmp/quicz-aggregate-only
+```
+
+```text
+netz:  730.35, 790.22, 900.57 MiB/s
+quicz: 503.23, 513.22, 533.10 MB/s
+```
+
+The conservative cross-unit ratio (netz MiB/s divided by quicz MB/s without
+giving netz the 1.048576 unit conversion advantage) is 1.37-1.79x. Every netz
+worker must report exactly 64 MiB received before the result is accepted. A
+separate four-connection × 16 MiB `--stats` run verified 64 MiB aggregate,
+made 160,993 allocation calls, allocated 700,944,509 cumulative bytes and had
+8,473,284 summed worker peak bytes, with zero live bytes at worker teardown.
+This is connection-level parallel scaling evidence, not a single-connection or
+HTTP/3 claim.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary
