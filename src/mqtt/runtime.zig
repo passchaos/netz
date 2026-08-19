@@ -6,6 +6,7 @@ const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
 const auth_runtime = @import("runtime/auth.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
+const socket_options = @import("../internal/socket_options.zig");
 
 const net = std.Io.net;
 
@@ -22,6 +23,11 @@ pub const Error = packet_transport.Error || error{
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
+    /// MQTT exchanges many small PUBLISH/PUBACK packets. Disable Nagle by
+    /// default so a publisher window does not repeatedly fall onto the Linux
+    /// delayed-ACK cliff; callers can opt back into coalescing for WAN bulk
+    /// transports.
+    tcp_nodelay: bool = true,
 };
 
 const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
@@ -65,6 +71,10 @@ pub const Server = struct {
     ) Error!PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
         errdefer stream.close(self.io);
+        if (self.limits.tcp_nodelay) {
+            socket_options.setTcpNoDelay(stream) catch
+                return error.SocketOptionFailed;
+        }
 
         var connection = Connection{
             .allocator = self.allocator,
@@ -343,6 +353,10 @@ pub const Client = struct {
     pub fn connectAttempt(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectAttempt {
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
+        if (options.limits.tcp_nodelay) {
+            socket_options.setTcpNoDelay(stream) catch
+                return error.SocketOptionFailed;
+        }
 
         var connection = Connection{
             .allocator = allocator,

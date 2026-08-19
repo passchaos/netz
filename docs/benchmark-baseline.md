@@ -1149,6 +1149,49 @@ permessage-deflate. Three CPU-0 samples were 144.6-147.5 us/roundtrip and
 52.95-54.02 logical payload MiB/s. Four concurrent connections reached 45.96
 us aggregate/roundtrip and 169.98 logical MiB/s on CPUs 0-7.
 
+## MQTT 5 windowed QoS 1 broker fanout
+
+Captured on 2026-08-20 with one external client binary driving both brokers:
+
+```sh
+zig build bench-mqtt-broker -Doptimize=ReleaseFast -- \
+  --address=127.0.0.1:PORT --publishers=4 --subscribers=4 \
+  --warmup-messages=1000 --messages=20000 --payload-bytes=256 \
+  --publisher-window=64
+```
+
+Each measured PUBLISH fans out to all four QoS 1 subscribers. Every run
+completed 20,000 publishes and 80,000 deliveries with checksum 20,580,000.
+Three consecutive runs gave:
+
+```text
+netz publishes/s:     37,098 / 39,381 / 40,021
+netz p50 ms:           2.860 /  2.712 /  2.676
+netz p99 ms:           6.865 /  6.631 /  6.551
+netz p99.9 ms:         9.538 /  8.020 /  9.022
+netz broker peak KiB: 11,944 / 11,292 / 10,836
+
+rumqttd publishes/s:   7,218 /  6,902 /  6,642
+rumqttd p50 ms:        1.335 /  1.277 /  1.340
+rumqttd p99 ms:       41.154 / 41.047 / 41.100
+rumqttd p99.9 ms:     42.006 / 41.800 / 41.373
+rumqttd broker KiB:   17,716 / 17,576 / 17,632
+```
+
+The entries above remain in run order; the cross-broker summary in
+`docs/rumqtt_parity.md` computes medians per metric. Netz made 504,105 client
+allocation calls and allocated 120,171,264 cumulative bytes in every run.
+Rumqttd required 672,117-672,129 calls and 133,107,836-133,108,592 bytes.
+Client peak-live remained approximately 504 KiB for both. Broker RSS was
+sampled from `/proc/PID/status` every 2 ms while the load driver was alive.
+
+The netz result includes TCP_NODELAY by default for ordinary MQTT TCP and a
+Session queue-head cursor. Before the cursor, a 40,000-publish profile assigned
+50-53% of broker cycles to `Broker.flushSlotLocked`, with the consumed-prefix
+null scan dominating its annotation. Afterward that symbol fell to 4.9% in the
+matching atom-core report. This comparison is specific to the bounded QoS 1
+shape and is not a broad broker or persistence verdict.
+
 ## MQTT shared-subscription router
 
 Captured on 2026-08-19 with:

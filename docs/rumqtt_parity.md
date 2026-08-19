@@ -147,16 +147,46 @@ subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
 accepts `--overlapping-subscriptions=1..3` for exact/+/# stress shapes.
 
-The same equal-wire driver now accepts `--publisher-window=N`: each publisher
+The same equal-wire driver accepts `--publisher-window=N`: each publisher
 submits up to N QoS 1 PUBLISH packets before reading the corresponding PUBACKs.
 It reports publish-completion p50/p99/p99.9 plus client-side allocation calls,
-cumulative allocated bytes and peak live bytes. A two-publisher/two-subscriber
-100-message window-4 smoke completed all 200 deliveries with checksum 12,720;
-the intentionally small run measured 291 us p50 and 41.96 ms p99 while exposing
-1,377 client allocation calls and 169,854 peak live bytes. These values validate
-the new evidence surface, not a cross-broker performance verdict. The window
-smoke also exposed an inflight-hole unsigned-subtraction panic in Session drain;
-saturating hole accounting and a focused regression test now cover it.
+cumulative allocated bytes and peak live bytes. The window mode exposed both an
+inflight-hole unsigned-subtraction panic and two production hot-path problems:
+plain MQTT TCP retained Nagle, and Session draining rescanned every consumed
+queue tombstone for every outgoing packet. Saturating hole accounting covers
+the first problem. Plain TCP now defaults TCP_NODELAY on both accepted and
+connected sockets (with an explicit opt-out), while each Session retains a
+queue-head cursor and resets its logical storage when the live queue empties.
+
+On 2026-08-20, three consecutive same-host `ReleaseFast` runs used four
+publishers, four subscribers, 1,000 warmups, 20,000 measured 256-byte QoS 1
+publishes, fanout four, and a publisher window of 64. Rumqttd `e886a78` ran
+with one MQTT 5 listener, 1,024 router outgoing packets and 1,024 connection
+inflight packets. Both brokers received the exact same newly built netz client
+binary. Broker RSS was sampled from `/proc/PID/status` every 2 ms while the
+driver was alive; the table reports the median of each three-run metric:
+
+```text
+broker    pub/s    deliveries/s   p50 ms   p99 ms   p99.9 ms   client allocs   client peak B   broker peak RSS KiB
+netz      39,381        157,527    2.712    6.631       9.022         504,105         504,161                11,292
+rumqttd    6,902         27,609    1.335   41.100      41.800         672,121         504,436                17,632
+```
+
+Every run completed 80,000 measured deliveries with checksum 20,580,000. In
+this bounded windowed shape, netz delivered 5.71x rumqttd's median throughput,
+used 25.0% fewer client allocation calls and 36.0% less broker peak RSS. Netz's
+median completion was 2.03x slower, but its p99 and p99.9 were respectively
+6.20x and 4.63x lower. Client cumulative allocation was 120,171,264 bytes for
+netz versus a median 133,108,088 bytes for rumqttd. These are equal-driver
+results for this workload, not a persistence, QoS 2, crash-safety or broad
+conformance verdict.
+
+The queue cursor was selected from measurement rather than assumption. Before
+the change, `perf record -F 997 -g` attributed about 50-53% of broker cycle
+samples to `Broker.flushSlotLocked`; annotation placed 43% of the atom-core
+samples on the null test while scanning the consumed queue prefix. After the
+cursor change the same symbol accounted for 4.9% of atom-core samples, and the
+unprofiled three-run throughput range rose to 37,098-40,021 publishes/s.
 
 ## MQTT 3.1.1/5 broker interoperability
 
@@ -686,9 +716,8 @@ rumqttd.
 
 1. Add incremental autosave or a replicated commitlog for crash windows between
    quiescent snapshots.
-2. Run the new publisher-window, latency-percentile and allocation/peak-live
-   driver modes against Mosquitto and rumqttd at production-scale message
-   counts; the evidence surface exists, but the smoke above is not a cross-
-   broker result. Add process RSS alongside client allocator peak-live.
+2. Extend the production-scale publisher-window, latency, allocation and RSS
+   comparison above to Mosquitto and additional concurrency/fanout shapes;
+   the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Run Mosquitto's protocol/conformance and interoperability suites against
    netz in addition to in-repository codec/runtime tests.

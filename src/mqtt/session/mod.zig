@@ -231,6 +231,11 @@ const Session = struct {
     subscriptions: std.ArrayList(?OwnedSubscription) = .empty,
     subscription_count: usize = 0,
     queued: std.ArrayList(?OwnedPublish) = .empty,
+    /// First queue slot that can still contain a publication. Draining leaves
+    /// null tombstones so snapshot/inflight views remain stable; retaining a
+    /// cursor prevents every outgoing packet from rescanning the consumed
+    /// prefix. The storage is reset as soon as the logical queue is empty.
+    queued_head: usize = 0,
     queued_count: usize = 0,
     inflight: std.ArrayList(?Inflight) = .empty,
     inflight_count: usize = 0,
@@ -391,7 +396,7 @@ pub const Store = struct {
             }
 
             var queued_count: u32 = 0;
-            for (session.queued.items) |maybe_publish| {
+            for (session.queued.items[session.queued_head..]) |maybe_publish| {
                 const publish = maybe_publish orelse continue;
                 if (publishRemainingExpiryNs(
                     publish,
@@ -406,7 +411,7 @@ pub const Store = struct {
                 u32,
                 queued_count,
             );
-            for (session.queued.items) |maybe_publish| {
+            for (session.queued.items[session.queued_head..]) |maybe_publish| {
                 const publish = maybe_publish orelse continue;
                 const remaining_ns = publishRemainingExpiryNs(
                     publish,
@@ -1268,7 +1273,10 @@ pub const Store = struct {
         );
         errdefer publish.deinit(self.allocator);
         try self.ensureBytes(session, publish.allocation_bytes);
-        if (session.queued.items.len >=
+        if (session.queued_count == 0) {
+            session.queued.items.len = 0;
+            session.queued_head = 0;
+        } else if (session.queued.items.len >=
             self.options.max_queued_per_session)
         {
             compactQueue(session);
@@ -1346,7 +1354,7 @@ pub const Store = struct {
             append_needed,
         );
 
-        var queue_index: usize = 0;
+        var queue_index = session.queued_head;
         while (available != 0 and
             queue_index < session.queued.items.len)
         {
@@ -1386,6 +1394,8 @@ pub const Store = struct {
             }
             queue_index += 1;
         }
+        session.queued_head = queue_index;
+        advanceQueueHead(session);
         return out[0..written];
     }
 
@@ -1560,7 +1570,7 @@ pub const Store = struct {
         session: *Session,
         now_ns: i96,
     ) void {
-        for (session.queued.items) |*maybe_publish| {
+        for (session.queued.items[session.queued_head..]) |*maybe_publish| {
             if (maybe_publish.*) |publish| {
                 if (remainingExpiry(publish, now_ns) != 0) continue;
                 var removed = publish;
@@ -1571,6 +1581,7 @@ pub const Store = struct {
                 removed.deinit(self.allocator);
             }
         }
+        advanceQueueHead(session);
         var index: usize = 0;
         while (index < session.inflight.items.len) : (index += 1) {
             const inflight = session.inflight.items[index] orelse continue;
@@ -1840,13 +1851,29 @@ fn keepQueuedProperty(property: mqtt.Property) bool {
 
 fn compactQueue(session: *Session) void {
     var write_index: usize = 0;
-    for (session.queued.items) |maybe_publish| {
+    for (session.queued.items[session.queued_head..]) |maybe_publish| {
         const publish = maybe_publish orelse continue;
         session.queued.items[write_index] = publish;
         write_index += 1;
     }
     session.queued.items.len = write_index;
+    session.queued_head = 0;
     std.debug.assert(write_index == session.queued_count);
+}
+
+fn advanceQueueHead(session: *Session) void {
+    while (session.queued_head < session.queued.items.len and
+        session.queued.items[session.queued_head] == null)
+    {
+        session.queued_head += 1;
+    }
+    if (session.queued_count == 0) {
+        // Reusing the retained allocation at index zero keeps a sustained
+        // online Session bounded by its live backlog rather than by the total
+        // number of messages observed since CONNECT.
+        session.queued.items.len = 0;
+        session.queued_head = 0;
+    }
 }
 
 fn countSentPublishInflight(session: Session) usize {
@@ -1971,6 +1998,58 @@ fn countNullSlots(comptime T: type, items: []const ?T) usize {
     var count: usize = 0;
     for (items) |item| count += @intFromBool(item == null);
     return count;
+}
+
+test "Session queue cursor releases a fully consumed prefix" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("queue-cursor", false, 60, .zero);
+    for (0..3) |index| {
+        var topic_buffer: [32]u8 = undefined;
+        const topic = try std.fmt.bufPrint(
+            &topic_buffer,
+            "cursor/{d}",
+            .{index},
+        );
+        _ = try store.enqueuePublish(opened.handle, topic, "value", .{
+            .qos = .at_least_once,
+            .now = .zero,
+        });
+    }
+
+    var output: [1]Transmission = undefined;
+    const first = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    const session = try store.getSession(opened.handle);
+    try std.testing.expectEqual(@as(usize, 1), session.queued_head);
+    try std.testing.expectEqual(@as(usize, 2), session.queued_count);
+    _ = try store.handleAck(
+        opened.handle,
+        .puback,
+        first[0].publish.packet_id,
+        0,
+    );
+
+    for (0..2) |_| {
+        const next = try store.drainInto(
+            opened.handle,
+            .zero,
+            1,
+            &output,
+        );
+        _ = try store.handleAck(
+            opened.handle,
+            .puback,
+            next[0].publish.packet_id,
+            0,
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), session.queued_head);
+    try std.testing.expectEqual(@as(usize, 0), session.queued.items.len);
 }
 
 test {
