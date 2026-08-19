@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 // Match ~/Work/quicz/examples/quic_bench_hs.zig by default: each sample uses
 // a fresh real TLS 1.3 handshake, a 64 MiB aggregate upload, and CUBIC.
@@ -16,19 +18,53 @@ const max_packet_batch_size: usize = netz.quic.one_rtt.max_batch_packets;
 const flow_control_floor: u64 = 256 * 1024 * 1024;
 const transfer_timeout_ns: u64 = 30 * std.time.ns_per_s;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const benchmark_server_key_bytes = [32]u8{
+    0x9b, 0xce, 0xc3, 0x15, 0x18, 0x9b, 0x65, 0xee,
+    0x7a, 0xe0, 0xd7, 0x1d, 0xec, 0x0d, 0x1c, 0xa6,
+    0xb3, 0xf4, 0x67, 0x72, 0x4e, 0x0c, 0x8e, 0x14,
+    0xd4, 0x6a, 0xa2, 0xd2, 0x69, 0xd1, 0xa9, 0xae,
+};
+const benchmark_server_public = [65]u8{
+    0x04, 0x6a, 0x96, 0x1e, 0x4a, 0x09, 0x85, 0x77,
+    0xd5, 0x2e, 0xa2, 0x86, 0x11, 0x86, 0xda, 0xe0,
+    0x6b, 0xd3, 0x69, 0x39, 0x6d, 0x44, 0x4a, 0xc0,
+    0x95, 0x12, 0xf7, 0xfb, 0xfc, 0x8a, 0xb6, 0x62,
+    0xb8, 0xb2, 0xd1, 0x3e, 0x9f, 0x36, 0xed, 0x52,
+    0xb2, 0x41, 0xd8, 0xdd, 0x24, 0x16, 0x6f, 0xd8,
+    0x1d, 0x0b, 0xae, 0xcb, 0x12, 0x88, 0x86, 0xc7,
+    0xda, 0x00, 0xd1, 0x63, 0x6d, 0x47, 0xe8, 0xa7,
+    0xdf,
+};
+
+fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
+    // P-256 public-key derivation is expensive but the benchmark identity is
+    // immutable. Materialize the KeyPair once per process so each iteration
+    // measures a fresh TLS signature, not redundant long-term key loading.
+    const secret = try EcdsaP256Sha256.SecretKey.fromBytes(
+        benchmark_server_key_bytes,
+    );
+    return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
+}
 
 const Mode = enum { upload, handshake };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
-    const config = try parseArgs(init, allocator);
+    const config = try parseArgs(init, std.heap.smp_allocator);
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (config.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const server_key = try makeBenchmarkServerKey();
 
     if (config.mode == .handshake) {
-        return runHandshakeBenchmark(allocator, io, config);
+        try runHandshakeBenchmark(allocator, io, config, server_key);
+        if (config.stats) counting.snapshot().print();
+        return;
     }
 
     const samples = try allocator.alloc(f64, config.iterations);
@@ -41,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
             io,
             config,
             iteration,
+            server_key,
         );
         sample.* = mibPerSecond(config.transfer_bytes, result.elapsed_ns);
         aggregate_stats.add(result.client_stats, result.payload_bytes_received);
@@ -84,6 +121,7 @@ pub fn main(init: std.process.Init) !void {
         aggregate_stats.packets_lost,
         aggregate_stats.payload_bytes_received,
     });
+    if (config.stats) counting.snapshot().print();
 }
 
 const Config = struct {
@@ -95,6 +133,7 @@ const Config = struct {
     verbose: bool = false,
     enable_hystart: bool = true,
     enable_pacing: bool = true,
+    stats: bool = false,
 };
 
 const IterationResult = struct {
@@ -130,14 +169,8 @@ fn runIteration(
     io: std.Io,
     config: Config,
     iteration: usize,
+    server_key: EcdsaP256Sha256.KeyPair,
 ) !IterationResult {
-    // Identity setup is intentionally per connection and outside the latency
-    // sample. It remains inside the aggregate rate timer, matching quicz's
-    // measureOneHandshakeNs lifecycle for both reported measurements.
-    const server_key = try EcdsaP256Sha256.KeyPair.generateDeterministic(
-        [_]u8{0x55} ** 32,
-    );
-    const server_public = server_key.public_key.toUncompressedSec1();
     const transport_parameters = transferTransportParameters(config);
     const endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = max_datagram_size,
@@ -191,7 +224,6 @@ fn runIteration(
         verbose: bool,
         handshake_only: bool,
         server_key: EcdsaP256Sha256.KeyPair,
-        server_public: *const [65]u8,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -220,7 +252,7 @@ fn runIteration(
                     // quicz handshake workload: send Certificate and create
                     // a P-256 CertificateVerify signature on every sample.
                     .identity = .{
-                        .certificate_chain = &.{shared.server_public},
+                        .certificate_chain = &.{&benchmark_server_public},
                         .signer = .{ .ecdsa_p256_sha256 = .{
                             .key_pair = shared.server_key,
                         } },
@@ -291,13 +323,12 @@ fn runIteration(
         .verbose = config.verbose,
         .handshake_only = config.mode == .handshake,
         .server_key = server_key,
-        .server_public = &server_public,
     };
-    const server_thread = try std.Thread.spawn(
-        .{},
-        Shared.run,
-        .{&shared},
-    );
+    // Use the benchmark's existing I/O executor rather than creating and
+    // destroying an OS thread for every fresh connection. `concurrent` still
+    // guarantees the blocking accept has an execution resource before the
+    // client starts, so it cannot be deferred behind connect.
+    var server_future = try std.Io.concurrent(io, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) {
         cancelled.store(true, .release);
@@ -308,7 +339,7 @@ fn runIteration(
             server_endpoint.address(),
             &.{0},
         ) catch {};
-        server_thread.join();
+        server_future.await(io);
     };
 
     var original_dcid: [8]u8 = undefined;
@@ -336,7 +367,7 @@ fn runIteration(
             // identity and avoids making certificate-chain policy part of the
             // transport handshake measurement.
             .server_auth = .{
-                .pinned_ecdsa_p256_public_key = server_public,
+                .pinned_ecdsa_p256_public_key = benchmark_server_public,
             },
             .local_transport_parameters = transport_parameters,
             .initial_one_rtt_config = one_rtt_config,
@@ -357,7 +388,7 @@ fn runIteration(
     }
     if (config.mode == .handshake) {
         const elapsed_ns = nowNs(io) -| handshake_started_ns;
-        server_thread.join();
+        server_future.await(io);
         joined = true;
         if (shared.err) |err| return err;
         return .{
@@ -387,7 +418,7 @@ fn runIteration(
     const elapsed_ns = nowNs(io) -| started_ns;
 
     cancelled.store(true, .release);
-    server_thread.join();
+    server_future.await(io);
     joined = true;
     if (shared.err) |err| return err;
     const received = bytes_received.load(.acquire);
@@ -662,6 +693,8 @@ fn parseArgs(
             );
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            config.stats = true;
         } else if (std.mem.eql(u8, arg, "--disable-hystart")) {
             config.enable_hystart = false;
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
@@ -683,12 +716,19 @@ fn runHandshakeBenchmark(
     allocator: std.mem.Allocator,
     io: std.Io,
     config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
 ) !void {
     const latencies = try allocator.alloc(u64, config.iterations);
     defer allocator.free(latencies);
     const started = nowNs(io);
     for (latencies, 0..) |*latency, iteration| {
-        const result = try runIteration(allocator, io, config, iteration);
+        const result = try runIteration(
+            allocator,
+            io,
+            config,
+            iteration,
+            server_key,
+        );
         latency.* = result.elapsed_ns;
         if (config.verbose) {
             std.debug.print(

@@ -53,18 +53,18 @@ netz QUIC DATAGRAM:        297.06 MiB/s, 1200B payload, 16 MiB transfer
 netz Stream Upload:        311.69 MiB/s mean, 3.1% stddev, 3 x 64 MiB
 netz Multi-Stream (4x):    314.68 MiB/s mean, 0.6% stddev, 3 x 64 MiB
 quicz Handshake:           P50 563.4us, P99 775.3us, 1131.3 conn/s
-netz Handshake:            P50 1236.8us, P99 1710.5us, 638.0 conn/s
+netz Handshake:            P50 1172.1us, P99 1367.8us, 830.7 conn/s
 ```
 
 The handshake values are fresh same-host ReleaseFast runs. Latency uses 200
 fresh real TLS 1.3 connections and rate uses 100. The netz mode pins X25519
-and TLS_AES_128_GCM_SHA256, creates the same deterministic P-256 identity per
-connection, and reports P50/P99/P99.9 plus aggregate connections/s. It also
-validates the server's P-256 CertificateVerify against a pinned key, whereas
-the current quicz workload sets `skip_cert_verify = true`; netz also needs a
-server worker around its blocking public accept/connect API. Those security
-and scheduling differences make this a concrete optimization baseline, not a
-performance-superiority verdict.
+and TLS_AES_128_GCM_SHA256, reuses one immutable deterministic P-256 long-term
+identity, and reports P50/P99/P99.9 plus aggregate connections/s. Every sample
+still creates and validates a fresh server CertificateVerify against a pinned
+key, whereas the current quicz workload sets `skip_cert_verify = true`. Netz
+also uses an executor worker around its blocking public accept/connect API.
+Those security and scheduling differences make this a concrete optimization
+baseline, not a performance-superiority verdict.
 
 The old values share a host and aggregate transfer shape but not a controlled
 CPU layout. A fresh CPU-0-pinned quicz run produced 15.97/16.12 MB/s because
@@ -91,7 +91,7 @@ benchmarks.
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered; direct performance verdict pending controlled CPU layout | `examples/quic_echo.zig`, `examples/quic_handshake_echo.zig`, `examples/bench_quic_handshake_stream.zig`; historical unpinned 64 MiB netz means were 311.69 MiB/s single-stream and 314.68 MiB/s four-stream | Re-run both stacks with equivalent endpoint CPU placement; same-process single-CPU pinning is scheduling-bound and invalidates the old ratio. |
-| QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered; current authenticated netz sample is slower | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; fresh 200-connection latency sample was P50 1236.8 us / P99 1710.5 us and the 100-connection rate sample sustained 638.0 conn/s | Profile the blocking handshake and build an equal verification/scheduling policy before a direct verdict; quicz's 563.4 us / 775.3 us and 1131.3 conn/s sample skips CertificateVerify validation. |
+| QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered and improved; current authenticated netz sample remains slower | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; consecutive 200-connection samples sustained 824.1-830.7 conn/s, with the best sample at P50 1172.1 us / P99 1367.8 us. Exact Initial sizing also cut allocator calls from 167.0 to 92.0 per connection. | Equalize verification/scheduling policy before a direct verdict; quicz's 563.4 us / 775.3 us and 1131.3 conn/s sample skips CertificateVerify validation. |
 | QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast` | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered for local preconfigured 1-RTT smoke and tests | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close` | Add a full client/server CLI-style close demo only if external manual interop requires it. |
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
@@ -134,7 +134,7 @@ benchmarks.
    lacks an equal-wire quicz reference. DATAGRAM has a direct passing sample,
    while echo latency, loss simulation, stream churn, and multi-connection
    aggregate throughput still need controlled equivalent artifacts. Handshake
-   latency/rate now has a real artifact and exposes a netz optimization gap,
+   latency/rate now has a real artifact and a smaller netz optimization gap,
    but the two workloads still need equal certificate-verification and worker
    scheduling policies before the whole quicz benchmark surface can be
    considered surpassed.
@@ -143,9 +143,9 @@ benchmarks.
 
 1. Rebuild the raw QUIC comparison with equivalent endpoint CPU placement,
    then add echo latency, loss/churn, and multi-connection cases. Profile the
-   new handshake mode and equalize certificate verification and endpoint
-   scheduling before comparing handshake rate. The old unpinned ratio is no
-   longer accepted as proof.
+   handshake artifact now includes allocation telemetry; equalize certificate
+   verification and endpoint scheduling before comparing its rate. The old
+   unpinned ratio is no longer accepted as proof.
 2. Re-run HTTP/3 GRO on a host with larger kernel UDP receive buffers; the
    timer/recovery path is now safe, but this host's throughput regresses.
 3. Reduce HTTP/3 per-packet recovery ownership and STREAM/DATA framing cost;

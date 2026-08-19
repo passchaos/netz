@@ -835,6 +835,47 @@ the retained body, applications can borrow and incrementally consume
 contiguous STREAM data without allocation, and ACK-driven packet-threshold
 losses can be retransmitted in a bounded drain before waiting for PTO.
 
+### Raw QUIC TLS 1.3 handshake latency, rate, and memory
+
+Captured on 2026-08-19 using authenticated P-256 CertificateVerify, X25519,
+TLS_AES_128_GCM_SHA256, and fresh loopback QUIC endpoints for every sample:
+
+```sh
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=handshake --iterations=200
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=handshake --iterations=100 --stats
+```
+
+Three consecutive samples after the optimization were:
+
+```text
+connections/s: 824.1, 830.7, 817.6
+p50:           1179.1, 1172.1, 1185.2 us
+p99:           1409.9, 1367.8, 1712.8 us
+```
+
+The first two values came from 200-iteration runs; the final value came from
+the 100-iteration allocator run. A later validation pair under varying host
+load sustained 797.2 and 806.2 conn/s, so the faster pair is evidence of the
+captured improvement rather than a guaranteed floor. The allocator run ended
+with zero live bytes, 9,201 allocations (92.0 per connection), 15,001,739
+cumulative bytes and an 88,276-byte peak. Before exact Initial packet sizing it
+used 16,701 allocations
+(167.0 per connection), 1,700 remaps and 22,185,904 cumulative bytes. The new
+wire-length calculation removes speculative encrypt/allocate/free probes and
+reserves exact long-header packet storage, reducing allocation calls by 44.9%,
+remaps by 88.2%, and cumulative allocated bytes by 32.4%.
+
+The benchmark also stopped creating one OS thread per connection and now uses
+the existing `std.Io` executor, while the immutable long-term P-256 key is
+materialized once and each handshake still creates a fresh CertificateVerify
+signature and validates it against the pinned public key. Relative to the
+original captured 638.0 conn/s sample, the current 824.1-830.7 conn/s pair is
+29.2-30.2% higher. The current quicz sample remains faster and skips server
+CertificateVerify validation, so this is an internal improvement rather than
+a cross-stack superiority claim.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary

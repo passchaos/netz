@@ -816,7 +816,7 @@ pub fn minimumPacketNumberLenForHeaderProtection(payload_len: usize) u8 {
     return @intCast(4 - payload_len);
 }
 
-fn protectedLongPacketCapacity(
+pub fn protectedLongPacketCapacity(
     destination_connection_id_len: usize,
     source_connection_id_len: usize,
     token_len: usize,
@@ -835,7 +835,25 @@ fn protectedLongPacketCapacity(
         len = std.math.add(usize, len, token_len) catch
             return error.InvalidPayloadLength;
     }
-    len = std.math.add(usize, len, 8) catch return error.InvalidPayloadLength;
+    const protected_payload_len = std.math.add(
+        usize,
+        packet_number_len,
+        payload_len,
+    ) catch return error.InvalidPayloadLength;
+    const protected_len = std.math.add(
+        usize,
+        protected_payload_len,
+        aead_tag_len,
+    ) catch return error.InvalidPayloadLength;
+    // The payload length is known at sealing time, so reserve the exact QUIC
+    // varint width rather than the former eight-byte worst case. Besides
+    // avoiding over-allocation, exact capacity lets `toOwnedSlice` transfer
+    // packet storage without a shrink remap on every long-header packet.
+    len = std.math.add(
+        usize,
+        len,
+        try varint.length(protected_len),
+    ) catch return error.InvalidPayloadLength;
     len = std.math.add(usize, len, packet_number_len) catch
         return error.InvalidPayloadLength;
     len = std.math.add(usize, len, payload_len) catch

@@ -156,6 +156,65 @@ test "Initial CRYPTO flight rejects excessive packetization" {
     );
 }
 
+test "Initial CRYPTO packet sizing matches the MTU without speculative seals" {
+    const allocator = std.testing.allocator;
+    const keys = quic.protection.deriveInitialSecrets("12345678").client;
+    var message: [2400]u8 = undefined;
+    for (&message, 0..) |*byte, index| byte.* = @truncate(index);
+
+    var options = target.SendOptions{
+        .initial = .{
+            .destination_connection_id = "12345678",
+            .source_connection_id = "abcd",
+            .packet_number = 7,
+            .crypto_offset = 61,
+            .crypto_data = &message,
+            .max_crypto_frame_data_len = message.len,
+        },
+        .max_datagram_size = 1200,
+    };
+    const first_len = try target.largestChunk(options, 0);
+    try std.testing.expect(first_len != 0 and first_len < message.len);
+
+    var packet_options = options.initial;
+    packet_options.crypto_data = message[0..first_len];
+    packet_options.max_crypto_frame_data_len = first_len;
+    const packet = try target.sealPacket(allocator, keys, packet_options);
+    defer allocator.free(packet);
+    try std.testing.expectEqual(options.max_datagram_size, packet.len);
+
+    packet_options.crypto_data = message[0 .. first_len + 1];
+    packet_options.max_crypto_frame_data_len = first_len + 1;
+    const oversized = try target.sealPacket(allocator, keys, packet_options);
+    defer allocator.free(oversized);
+    try std.testing.expect(oversized.len > options.max_datagram_size);
+
+    // Crossing a CRYPTO length-varint boundary changes the frame overhead.
+    options.max_datagram_size = 90;
+    options.initial.crypto_offset = 63;
+    const boundary_len = try target.largestChunk(options, 0);
+    packet_options = options.initial;
+    packet_options.crypto_data = message[0..boundary_len];
+    packet_options.max_crypto_frame_data_len = boundary_len;
+    const boundary_packet = try target.sealPacket(
+        allocator,
+        keys,
+        packet_options,
+    );
+    defer allocator.free(boundary_packet);
+    try std.testing.expect(boundary_packet.len <= options.max_datagram_size);
+
+    try std.testing.expectError(
+        error.InvalidCryptoRange,
+        target.largestChunk(options, message.len + 1),
+    );
+    options.initial.crypto_offset = quic.varint.max_value;
+    try std.testing.expectError(
+        error.InvalidCryptoRange,
+        target.largestChunk(options, 0),
+    );
+}
+
 test "Initial CRYPTO flight reassembles reordered packets" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

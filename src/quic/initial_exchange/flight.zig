@@ -107,11 +107,8 @@ pub fn send(
             return error.InvalidPacketNumber;
         }
         const chunk_len = try largestChunk(
-            endpoint.allocator,
-            keys,
             options,
             sent,
-            packet_number,
         );
         if (chunk_len == 0) return error.DatagramTooLarge;
 
@@ -143,38 +140,76 @@ pub fn send(
     };
 }
 
-fn largestChunk(
-    allocator: std.mem.Allocator,
-    keys: quic.protection.PacketProtectionKeys,
+pub fn largestChunk(
     options: SendOptions,
     sent: usize,
-    packet_number: u64,
 ) Error!usize {
+    if (sent > options.initial.crypto_data.len) {
+        return error.InvalidCryptoRange;
+    }
     const remaining = options.initial.crypto_data.len - sent;
-    var low: usize = 0;
-    var high: usize = @min(
+    const upper_bound = @min(
         remaining,
         options.initial.max_crypto_frame_data_len,
     );
+    const frame_offset = std.math.add(
+        u64,
+        options.initial.crypto_offset,
+        sent,
+    ) catch return error.InvalidCryptoRange;
+
+    // The protected packet length is deterministic from header fields and the
+    // CRYPTO frame's varint widths. Compute the largest fitting payload from
+    // wire lengths instead of repeatedly allocating, encrypting and freeing
+    // candidate packets in a binary search. The final packet is still sealed
+    // normally, so this only removes speculative work.
+    var low: usize = 0;
+    var high = upper_bound;
     while (low < high) {
         const candidate = low + (high - low + 1) / 2;
-        var packet_options = options.initial;
-        packet_options.packet_number = packet_number;
-        packet_options.crypto_offset =
-            std.math.add(u64, options.initial.crypto_offset, sent) catch
-                return error.InvalidCryptoRange;
-        packet_options.crypto_data =
-            options.initial.crypto_data[sent .. sent + candidate];
-        packet_options.max_crypto_frame_data_len = candidate;
-        const packet = try sealPacket(allocator, keys, packet_options);
-        defer allocator.free(packet);
-        if (packet.len <= options.max_datagram_size) {
+        const packet_len = try initialPacketWireLen(
+            options.initial,
+            frame_offset,
+            candidate,
+        );
+        if (packet_len <= options.max_datagram_size) {
             low = candidate;
         } else {
             high = candidate - 1;
         }
     }
     return low;
+}
+
+fn initialPacketWireLen(
+    options: SendInitialOptions,
+    frame_offset: u64,
+    data_len: usize,
+) Error!usize {
+    const frame_len = try cryptoFrameWireLen(frame_offset, data_len);
+    return quic.protection.protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        options.token.len,
+        true,
+        options.packet_number_len,
+        frame_len,
+    );
+}
+
+fn cryptoFrameWireLen(offset: u64, data_len: usize) Error!usize {
+    const data_len_u64 = std.math.cast(u64, data_len) orelse
+        return error.InvalidCryptoRange;
+    const end = std.math.add(u64, offset, data_len_u64) catch
+        return error.InvalidCryptoRange;
+    if (end > quic.varint.max_value) return error.InvalidCryptoRange;
+    var len: usize = 1;
+    len = std.math.add(usize, len, try quic.varint.length(offset)) catch
+        return error.InvalidFrameLength;
+    len = std.math.add(usize, len, try quic.varint.length(data_len)) catch
+        return error.InvalidFrameLength;
+    return std.math.add(usize, len, data_len) catch
+        return error.InvalidFrameLength;
 }
 
 pub fn receive(
