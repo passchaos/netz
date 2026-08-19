@@ -20,6 +20,7 @@ const Config = struct {
     payload_bytes: usize = default_payload_bytes,
     overlapping_subscriptions: usize = 1,
     publisher_window: usize = 1,
+    session_expiry_seconds: u32 = 0,
 };
 
 const Worker = struct {
@@ -116,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
             config.address,
             client_id,
             config.publisher_window,
+            config.session_expiry_seconds,
         );
         subscribers_connected += 1;
         for (0..config.overlapping_subscriptions) |overlap| {
@@ -160,6 +162,7 @@ pub fn main(init: std.process.Init) !void {
             config.address,
             client_id,
             config.publisher_window,
+            config.session_expiry_seconds,
         );
         publishers_connected += 1;
     }
@@ -300,6 +303,7 @@ pub fn main(init: std.process.Init) !void {
         \\  subscribers: {d}
         \\  overlapping subscriptions/client: {d}
         \\  publisher window: {d}
+        \\  session expiry seconds: {d}
         \\  warmup publishes: {d}
         \\  measured publishes: {d}
         \\  measured deliveries: {d}
@@ -321,6 +325,7 @@ pub fn main(init: std.process.Init) !void {
         config.subscribers,
         config.overlapping_subscriptions,
         config.publisher_window,
+        config.session_expiry_seconds,
         config.warmup_messages,
         config.messages,
         measured_deliveries,
@@ -344,7 +349,12 @@ fn connect(
     address: std.Io.net.IpAddress,
     client_id: []const u8,
     max_outgoing_inflight: usize,
+    session_expiry_seconds: u32,
 ) !netz.mqtt.runtime.Connection {
+    const properties = [_]netz.mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = session_expiry_seconds,
+    } }};
     return netz.mqtt.runtime.Client.connect(
         allocator,
         io,
@@ -353,6 +363,10 @@ fn connect(
             .protocol = .v5,
             .client_id = client_id,
             .max_outgoing_inflight = @intCast(max_outgoing_inflight),
+            .properties = if (session_expiry_seconds == 0)
+                &.{}
+            else
+                &properties,
         },
     );
 }
@@ -441,6 +455,16 @@ fn parseArgs(
             if (config.publisher_window > std.math.maxInt(u16)) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--session-expiry-seconds=",
+        )) {
+            config.session_expiry_seconds = try std.fmt.parseInt(
+                u32,
+                arg["--session-expiry-seconds=".len..],
+                10,
+            );
         } else {
             return error.InvalidArgument;
         }

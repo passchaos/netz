@@ -210,6 +210,26 @@ client peak bytes, and 3,868 KiB broker peak RSS. Netz therefore delivered
 the broker RSS in this eight-client run. Mosquitto's smaller RSS remains a
 clear memory target rather than being hidden by the throughput result.
 
+The production driver also covers durable online Sessions through
+`--session-expiry-seconds=300`. Three otherwise identical window-64 runs gave
+these per-metric medians:
+
+```text
+broker       pub/s   deliveries/s   p50 ms   p99 ms   p99.9 ms   client allocs   broker peak RSS KiB
+netz        39,146        156,586    2.769    5.711       6.404         504,113                 6,456
+Mosquitto    6,341         25,365    4.102   44.989      45.953         672,117                 3,804
+rumqttd      6,999         27,996    1.037   40.942      41.756         672,129                17,448
+```
+
+All nine runs completed 80,000 measured deliveries with checksum 20,580,000.
+For this reconnect-safe QoS 1 shape, netz delivered 6.17x Mosquitto and 5.59x
+rumqttd throughput, with respectively 7.88x and 7.17x lower p99. Netz used
+69.7% more broker RSS than Mosquitto but 63.0% less than rumqttd. The durable
+netz path is 29.5% below its transient-session median because each destination
+must deep-own payload and acknowledgement state until completion; that cost is
+now measured rather than hidden. Persistence crash windows and broader
+conformance remain separate gaps.
+
 ## MQTT 3.1.1/5 broker interoperability
 
 The live TCP listener now follows Mosquitto's version negotiation model: the

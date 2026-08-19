@@ -1207,6 +1207,15 @@ Library users still select their allocator through `Broker.listen`. This
 comparison is specific to the bounded QoS 1 shape and is not a broad broker or
 persistence verdict.
 
+The same driver now accepts `--session-expiry-seconds=N` to force the durable
+online Session path rather than the expiry-zero shared-Publication fast path.
+With expiry 300 seconds and the otherwise identical window-64 shape, three
+netz runs measured 38,531 / 39,228 / 39,146 publishes/s, p99
+5.713 / 5.620 / 5.711 ms, and 6,456 KiB broker peak RSS in every run. All
+80,000 deliveries completed with checksum 20,580,000. This explicitly bounds
+the cost of retaining reconnect-safe QoS 1 payload/inflight state instead of
+silently generalizing the transient-session result.
+
 ## MQTT shared-subscription router
 
 Captured on 2026-08-19 with:
