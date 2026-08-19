@@ -1215,6 +1215,11 @@ netz runs measured 38,531 / 39,228 / 39,146 publishes/s, p99
 80,000 deliveries completed with checksum 20,580,000. This explicitly bounds
 the cost of retaining reconnect-safe QoS 1 payload/inflight state instead of
 silently generalizing the transient-session result.
+Topic and payload ownership is now coalesced into one allocation for each
+durable queued publication. A three-run rerun remained at 38,738-40,299
+publishes/s with p99 5.467-5.664 ms and 6,472-6,492 KiB broker peak RSS,
+confirming the allocation-count simplification without overstating it as a
+throughput improvement.
 
 ## MQTT shared-subscription router
 

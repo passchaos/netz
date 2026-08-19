@@ -230,6 +230,16 @@ must deep-own payload and acknowledgement state until completion; that cost is
 now measured rather than hidden. Persistence crash windows and broader
 conformance remain separate gaps.
 
+Durable Session publications now store Topic Name and payload in one contiguous
+allocation per destination instead of two. This preserves independent
+reconnect ownership and the existing snapshot views while removing one
+allocator round trip from every durable fanout. Three reruns of the expiry-300
+shape measured 38,738-40,299 publishes/s (median 39,077), p99
+5.467-5.664 ms, p99.9 5.973-6.577 ms and 6,476 KiB median broker peak RSS.
+Throughput remained effectively flat versus the prior 39,146 median, while
+tail latency improved about 1.7-1.9%; the main value is simpler bounded
+ownership rather than a claimed throughput step.
+
 ## MQTT 3.1.1/5 broker interoperability
 
 The live TCP listener now follows Mosquitto's version negotiation model: the

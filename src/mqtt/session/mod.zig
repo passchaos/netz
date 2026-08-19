@@ -190,6 +190,11 @@ const OwnedSubscription = struct {
 };
 
 const OwnedPublish = struct {
+    /// One allocation owns the immutable Topic Name and payload bytes. Session
+    /// fanout creates this object per durable destination, so co-locating the
+    /// two slices removes one allocator round trip without sharing reconnect
+    /// ownership or changing snapshot/wire views.
+    wire: []u8,
     topic: []u8,
     payload: []u8,
     qos: mqtt.QoS,
@@ -201,8 +206,7 @@ const OwnedPublish = struct {
 
     fn deinit(self: *OwnedPublish, allocator: std.mem.Allocator) void {
         owned_properties.deinit(allocator, self.properties);
-        allocator.free(self.payload);
-        allocator.free(self.topic);
+        allocator.free(self.wire);
         self.* = undefined;
     }
 };
@@ -1618,10 +1622,12 @@ fn clonePublish(
     properties: []const mqtt.Property,
     now_ns: i96,
 ) Error!OwnedPublish {
-    const topic_owned = try allocator.dupe(u8, topic);
-    errdefer allocator.free(topic_owned);
-    const payload_owned = try allocator.dupe(u8, payload);
-    errdefer allocator.free(payload_owned);
+    const wire_len = std.math.add(usize, topic.len, payload.len) catch
+        return error.SessionByteLimitExceeded;
+    const wire = try allocator.alloc(u8, wire_len);
+    errdefer allocator.free(wire);
+    @memcpy(wire[0..topic.len], topic);
+    @memcpy(wire[topic.len..], payload);
     const property_result = owned_properties.clone(
         allocator,
         properties,
@@ -1636,12 +1642,13 @@ fn clonePublish(
     );
     const bytes = std.math.add(
         usize,
-        topic_owned.len + payload_owned.len,
+        wire.len,
         property_result.allocation_bytes,
     ) catch return error.SessionByteLimitExceeded;
     return .{
-        .topic = topic_owned,
-        .payload = payload_owned,
+        .wire = wire,
+        .topic = wire[0..topic.len],
+        .payload = wire[topic.len..],
         .qos = qos,
         .retain = retain,
         .properties = property_result.properties,
