@@ -659,6 +659,15 @@ ArrayList even though ordinary packets touch one stream. That journal now uses
 MiB/s. A failing-allocator STREAM send test proves warmed recovery/sent storage
 no longer hides a rollback-journal allocation.
 
+The next exact-size sample traced 160-byte churn to ACK range decoding in the
+in-place visitor path. `parseFrameInto` now decodes ACK pairs into retained
+connection storage, so ACK processing no longer allocates/free a range slice
+for every feedback packet. Two stable 16 MiB/four-stream samples used only
+1,162-1,189 allocations versus 2,525-2,532 before (53.0-54.0% fewer), with
+214.45-225.55 MiB/s. One noisy run exercised substantially more recovery and
+is excluded from the stable allocation range rather than being hidden. Caller
+storage and insufficient-range tests cover the new parser contract.
+
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 
 ```text

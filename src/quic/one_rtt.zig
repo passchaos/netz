@@ -652,6 +652,7 @@ pub const Connection = struct {
     /// state-service paths. Owning diagnostic receives and GRO batches keep
     /// their independent lifetime-bearing storage.
     receive_packet_buffer: std.ArrayList(u8) = .empty,
+    receive_ack_range_buffer: std.ArrayList(quic.AckRange) = .empty,
     /// Borrowed frame views used by state-only service and synchronous packet
     /// visitors. They never outlive the current decrypted datagram/GRO segment
     /// and therefore avoid one frame slice allocation per packet on the
@@ -695,6 +696,10 @@ pub const Connection = struct {
             endpoint.allocator,
             endpoint.limits.max_datagram_size,
         );
+        try connection.receive_ack_range_buffer.ensureTotalCapacity(
+            endpoint.allocator,
+            config.max_ack_ranges,
+        );
         if (config.local_stateless_reset_key) |key| {
             try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
         } else {
@@ -735,6 +740,7 @@ pub const Connection = struct {
             self.endpoint.allocator,
         );
         self.receive_packet_buffer.deinit(self.endpoint.allocator);
+        self.receive_ack_range_buffer.deinit(self.endpoint.allocator);
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
         self.fixed_bit_generator.deinit();
         self.* = undefined;
@@ -4564,8 +4570,8 @@ pub const Connection = struct {
 
         const frames = try self.parseServicePacketFramesOrClose(packet.payload, now_ns);
         defer {
-            quic.deinitOwnedFrameSlice(self.receive_frame_buffer.items, self.endpoint.allocator);
             self.receive_frame_buffer.clearRetainingCapacity();
+            self.receive_ack_range_buffer.clearRetainingCapacity();
         }
         var peer_address_update = try self.preparePeerAddressUpdate(
             from,
@@ -4598,9 +4604,10 @@ pub const Connection = struct {
 
     fn parseServicePacketFramesOrClose(self: *Connection, payload: []const u8, now_ns: ?u64) Error![]quic.Frame {
         std.debug.assert(self.receive_frame_buffer.items.len == 0);
+        std.debug.assert(self.receive_ack_range_buffer.items.len == 0);
         errdefer {
-            quic.deinitOwnedFrameSlice(self.receive_frame_buffer.items, self.endpoint.allocator);
             self.receive_frame_buffer.clearRetainingCapacity();
+            self.receive_ack_range_buffer.clearRetainingCapacity();
         }
         if (payload.len == 0) {
             try self.closeTransportAt(
@@ -4617,7 +4624,14 @@ pub const Connection = struct {
         while (pos < payload.len) {
             if (self.receive_frame_buffer.items.len >= self.config.max_frames_per_packet) return error.MissingFrame;
             const frame_type = quic.rawFrameTypeValue(payload[pos..]);
-            var parsed = quic.parseFrameOwned(self.endpoint.allocator, payload[pos..]) catch |err| {
+            const ack_range_start = self.receive_ack_range_buffer.items.len;
+            self.receive_ack_range_buffer.items.len =
+                self.receive_ack_range_buffer.capacity;
+            const parsed = quic.parseFrameInto(
+                payload[pos..],
+                self.receive_ack_range_buffer.items[ack_range_start..],
+            ) catch |err| {
+                self.receive_ack_range_buffer.items.len = ack_range_start;
                 if (err == error.OutOfMemory) return err;
                 const code = quic.frameDecodeTransportErrorCode(err) orelse return err;
                 try self.closeTransportAt(
@@ -4629,10 +4643,9 @@ pub const Connection = struct {
                 );
                 return error.InvalidFrame;
             };
-            var appended = false;
-            defer if (!appended) parsed.deinitOwned(self.endpoint.allocator);
+            self.receive_ack_range_buffer.items.len = ack_range_start +
+                if (parsed.frame == .ack) parsed.frame.ack.ranges.len else 0;
             try self.receive_frame_buffer.append(self.endpoint.allocator, parsed.frame);
-            appended = true;
             pos += parsed.consumed;
         }
         return self.receive_frame_buffer.items;

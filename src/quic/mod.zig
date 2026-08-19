@@ -1626,6 +1626,43 @@ pub fn parseFrameOwned(allocator: std.mem.Allocator, bytes: []const u8) Error!Pa
     return parseFrameWithAllocator(allocator, bytes);
 }
 
+/// Parse one frame while placing ACK range pairs in caller storage.
+///
+/// All other frame payloads borrow from `bytes`; only ACK's variable range
+/// list historically required ownership. The returned frame therefore stays
+/// valid until either input slice is reused and never needs `deinitOwned`.
+pub fn parseFrameInto(
+    bytes: []const u8,
+    ack_ranges: []AckRange,
+) Error!ParsedFrame {
+    var cursor = wire.Cursor.init(bytes);
+    const frame_type_len = varint.encodedLen(try cursor.peekByte());
+    const frame_type = try varint.decode(&cursor);
+    try validateFrameTypeEncoding(frame_type, frame_type_len);
+    if (frame_type == @intFromEnum(FrameType.padding)) {
+        cursor.pos = std.mem.indexOfNonePos(
+            u8,
+            cursor.buf,
+            cursor.pos,
+            &.{@intFromEnum(FrameType.padding)},
+        ) orelse cursor.buf.len;
+        return .{
+            .frame = .{ .padding = .{ .len = cursor.pos } },
+            .consumed = cursor.pos,
+        };
+    }
+    const frame = if (frame_type == @intFromEnum(FrameType.ack) or
+        frame_type == @intFromEnum(FrameType.ack_ecn))
+        Frame{ .ack = try parseAckFrameInto(
+            &cursor,
+            frame_type == @intFromEnum(FrameType.ack_ecn),
+            ack_ranges,
+        ) }
+    else
+        try parseFrameAfterType(null, frame_type, &cursor, bytes);
+    return .{ .frame = frame, .consumed = cursor.pos };
+}
+
 fn parseFrameWithAllocator(allocator: ?std.mem.Allocator, bytes: []const u8) Error!ParsedFrame {
     var cursor = wire.Cursor.init(bytes);
     const frame_type_len = varint.encodedLen(try cursor.peekByte());
@@ -1825,6 +1862,40 @@ fn parseAckFrame(allocator: ?std.mem.Allocator, cursor: *wire.Cursor, has_ecn: b
     } else null;
 
     const ack = AckFrame{
+        .largest_acknowledged = largest_acknowledged,
+        .ack_delay = ack_delay,
+        .first_ack_range = first_ack_range,
+        .ranges = ranges,
+        .ecn_counts = ecn_counts,
+    };
+    try validateAckFrame(ack);
+    return ack;
+}
+
+fn parseAckFrameInto(
+    cursor: *wire.Cursor,
+    has_ecn: bool,
+    storage: []AckRange,
+) Error!AckFrame {
+    const largest_acknowledged = try varint.decode(cursor);
+    const ack_delay = try varint.decode(cursor);
+    const range_count = try usizeFromVarint(try varint.decode(cursor));
+    const first_ack_range = try varint.decode(cursor);
+    try validateAckRangePayloadFits(cursor.remaining(), range_count, has_ecn);
+    if (range_count > storage.len) return error.BufferTooShort;
+    const ranges = storage[0..range_count];
+    for (ranges) |*range| {
+        range.* = .{
+            .gap = try varint.decode(cursor),
+            .ack_range_length = try varint.decode(cursor),
+        };
+    }
+    const ecn_counts: ?EcnCounts = if (has_ecn) .{
+        .ect0_count = try varint.decode(cursor),
+        .ect1_count = try varint.decode(cursor),
+        .ecn_ce_count = try varint.decode(cursor),
+    } else null;
+    const ack: AckFrame = .{
         .largest_acknowledged = largest_acknowledged,
         .ack_delay = ack_delay,
         .first_ack_range = first_ack_range,
@@ -3327,6 +3398,35 @@ test "QUIC ACK frame owned parser preserves sparse ranges" {
     try std.testing.expectEqual(@as(u64, 1), parsed.frame.ack.ranges[0].ack_range_length);
     try std.testing.expectEqual(@as(u64, 2), parsed.frame.ack.ranges[1].gap);
     try std.testing.expectEqual(@as(u64, 0), parsed.frame.ack.ranges[1].ack_range_length);
+}
+
+test "QUIC ACK frame parser writes ranges into caller storage" {
+    const allocator = std.testing.allocator;
+    const ranges = [_]AckRange{
+        .{ .gap = 0, .ack_range_length = 1 },
+        .{ .gap = 2, .ack_range_length = 0 },
+    };
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try (Frame{ .ack = .{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    } }).write(&bytes, allocator);
+
+    var storage: [2]AckRange = undefined;
+    const parsed = try parseFrameInto(bytes.items, &storage);
+    try std.testing.expect(parsed.frame == .ack);
+    try std.testing.expectEqual(
+        @intFromPtr(&storage),
+        @intFromPtr(parsed.frame.ack.ranges.ptr),
+    );
+    try std.testing.expectEqualDeep(ranges, storage);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        parseFrameInto(bytes.items, storage[0..1]),
+    );
 }
 
 test "QUIC ACK frame codec rejects invalid ranges" {
