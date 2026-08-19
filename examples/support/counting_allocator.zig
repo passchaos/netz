@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const bucket_count = 7;
+pub const exact_size_capacity = 128;
 pub const bucket_labels = [_][]const u8{
     "<=64", "<=256", "<=1K", "<=4K", "<=16K", "<=64K", ">64K",
 };
@@ -18,6 +19,8 @@ pub const Snapshot = struct {
     remap_count: usize,
     alloc_buckets: [bucket_count]usize,
     alloc_bucket_bytes: [bucket_count]usize,
+    exact_sizes: [exact_size_capacity]ExactSize,
+    exact_size_len: usize,
 
     pub fn print(self: Snapshot) void {
         std.debug.print(
@@ -47,8 +50,23 @@ pub const Snapshot = struct {
                 },
             );
         }
+        std.debug.print("  top exact allocation sizes:\n", .{});
+        var emitted: usize = 0;
+        var ceiling: usize = std.math.maxInt(usize);
+        while (emitted < 12) : (emitted += 1) {
+            var best: ?ExactSize = null;
+            for (self.exact_sizes[0..self.exact_size_len]) |entry| {
+                if (entry.count >= ceiling) continue;
+                if (best == null or entry.count > best.?.count) best = entry;
+            }
+            const entry = best orelse break;
+            std.debug.print("    {d} bytes: {d}\n", .{ entry.size, entry.count });
+            ceiling = entry.count;
+        }
     }
 };
+
+pub const ExactSize = struct { size: usize = 0, count: usize = 0 };
 
 pub const CountingAllocator = struct {
     backing: std.mem.Allocator,
@@ -64,6 +82,10 @@ pub const CountingAllocator = struct {
         .{std.atomic.Value(usize).init(0)} ** bucket_count,
     alloc_bucket_bytes: [bucket_count]std.atomic.Value(usize) =
         .{std.atomic.Value(usize).init(0)} ** bucket_count,
+    exact_mutex: std.Io.Mutex = .init,
+    exact_sizes: [exact_size_capacity]ExactSize =
+        .{ExactSize{}} ** exact_size_capacity,
+    exact_size_len: usize = 0,
 
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
@@ -92,6 +114,8 @@ pub const CountingAllocator = struct {
             .remap_count = self.remap_count.load(.monotonic),
             .alloc_buckets = undefined,
             .alloc_bucket_bytes = undefined,
+            .exact_sizes = undefined,
+            .exact_size_len = 0,
         };
         for (0..bucket_count) |index| {
             result.alloc_buckets[index] =
@@ -99,6 +123,15 @@ pub const CountingAllocator = struct {
             result.alloc_bucket_bytes[index] =
                 self.alloc_bucket_bytes[index].load(.monotonic);
         }
+        const mutable: *CountingAllocator = @constCast(self);
+        const io = std.Io.Threaded.global_single_threaded.io();
+        mutable.exact_mutex.lockUncancelable(io);
+        defer mutable.exact_mutex.unlock(io);
+        result.exact_size_len = self.exact_size_len;
+        @memcpy(
+            result.exact_sizes[0..self.exact_size_len],
+            self.exact_sizes[0..self.exact_size_len],
+        );
         return result;
     }
 
@@ -146,9 +179,27 @@ pub const CountingAllocator = struct {
         const bucket = bucketIndex(len);
         _ = self.alloc_buckets[bucket].fetchAdd(1, .monotonic);
         _ = self.alloc_bucket_bytes[bucket].fetchAdd(len, .monotonic);
+        self.recordExactSize(len);
         _ = self.total_allocated.fetchAdd(len, .monotonic);
         const current = self.current_bytes.fetchAdd(len, .monotonic) + len;
         _ = self.peak_bytes.fetchMax(current, .monotonic);
+    }
+
+    fn recordExactSize(self: *CountingAllocator, len: usize) void {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        self.exact_mutex.lockUncancelable(io);
+        defer self.exact_mutex.unlock(io);
+        for (self.exact_sizes[0..self.exact_size_len]) |*entry| {
+            if (entry.size != len) continue;
+            entry.count += 1;
+            return;
+        }
+        if (self.exact_size_len == self.exact_sizes.len) return;
+        self.exact_sizes[self.exact_size_len] = .{
+            .size = len,
+            .count = 1,
+        };
+        self.exact_size_len += 1;
     }
 
     fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {

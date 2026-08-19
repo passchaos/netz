@@ -3947,19 +3947,21 @@ pub const Connection = struct {
     ) Error!void {
         std.debug.assert(views.len == offsets.len);
         while (!self.responseBatchHasSendCapacity(views, offsets)) {
-            var frame = try self.readOwnedFrame();
-            defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
-            switch (frame.frame.header.frame_type) {
+            // The server-side flow pump consumes every accepted control frame
+            // before reading another one, so it can borrow frame-reader storage
+            // instead of allocating an OwnedFrame for each WINDOW_UPDATE.
+            const frame = try self.readFrameScratch();
+            if (try self.handleConnectionFrame(frame)) continue;
+            switch (frame.header.frame_type) {
                 .goaway => {
                     try self.recordPeerGoAway(
-                        try http2.GoAwayPayload.parse(frame.frame),
+                        try http2.GoAwayPayload.parse(frame),
                     );
                     return error.ConnectionGoAway;
                 },
                 .rst_stream => {
                     const reset =
-                        try http2.ResetStreamPayload.parse(frame.frame);
+                        try http2.ResetStreamPayload.parse(frame);
                     if (findBatchDataViewIndex(
                         views,
                         reset.stream_id,

@@ -430,6 +430,14 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    64-KiB/8-KiB-window smoke observed 293 allocations and 288,461 peak live
    bytes. Equal instrumentation is still needed on the Hyper harness before
    making a memory ratio.
+   On the full 10-stream/1-MiB/8-KiB-window shape, call-stack sampling showed
+   WINDOW_UPDATE flow pumping allocating one 13-byte OwnedFrame per control
+   frame. The server now consumes those frames directly from retained reader
+   storage. Three CPU-0 runs used exactly 1,910 allocations versus 12,948 before
+   (85.2% fewer), while peak live bytes stayed 1,286,109 because the eliminated
+   frames were transient. Stable runs measured 7.20-7.23 ms/batch; one noisy
+   10.81-ms sample is retained as variance rather than folded into a speed
+   ratio. Exact-size allocation reporting remains available for the next audit.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.
