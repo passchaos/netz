@@ -2187,7 +2187,7 @@ pub const Connection = struct {
             try writeAll(self.io, self.stream, batch.items);
         }
         for (states) |state| {
-            if (!state.done) self.forgetRecvStreamWindow(state.stream_id);
+            if (!state.done) self.forgetStreamWindows(state.stream_id);
         }
     }
 
@@ -4388,6 +4388,7 @@ pub const Connection = struct {
         try self.writeResetStreamFrame(stream_id, error_code);
         self.releaseLocalStream(stream_id);
         self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
     }
 
     pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
@@ -4442,6 +4443,7 @@ pub const Connection = struct {
                 self.allocator,
                 reset.stream_id,
             );
+            self.forgetStreamWindows(reset.stream_id);
             return;
         }
         if (self.role == .client) {
@@ -4451,6 +4453,7 @@ pub const Connection = struct {
             )) {
                 self.releaseLocalStream(reset.stream_id);
                 self.releasePeerStream(reset.stream_id);
+                self.forgetStreamWindows(reset.stream_id);
                 return;
             }
         }
@@ -4459,6 +4462,7 @@ pub const Connection = struct {
         // sendResetStream still rejects streams that were never activated.
         self.releaseLocalStream(reset.stream_id);
         self.releasePeerStream(reset.stream_id);
+        self.forgetStreamWindows(reset.stream_id);
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
@@ -6072,6 +6076,28 @@ pub const Connection = struct {
         }
         if (self.peer_initial_stream_window <= 0) return 0;
         return @intCast(self.peer_initial_stream_window);
+    }
+
+    /// A reset closes both stream directions immediately. Unlike a normal
+    /// half-close, no later DATA/WINDOW_UPDATE can legally need either window,
+    /// so both indexed entries may be retired together.
+    fn forgetStreamWindows(self: *Connection, stream_id: u31) void {
+        self.forgetSendStreamWindow(stream_id);
+        self.forgetRecvStreamWindow(stream_id);
+    }
+
+    fn forgetSendStreamWindow(self: *Connection, stream_id: u31) void {
+        if (self.send_stream_window_index.count() == 0) return;
+        const index = self.send_stream_window_index.get(stream_id) orelse
+            return;
+        const last_index = self.send_stream_windows.items.len - 1;
+        const removed = self.send_stream_windows.swapRemove(index);
+        _ = self.send_stream_window_index.remove(removed.stream_id);
+        if (index != last_index) {
+            const moved = self.send_stream_windows.items[index];
+            self.send_stream_window_index.getPtr(moved.stream_id).?.* =
+                index;
+        }
     }
 
     fn recvStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
@@ -13992,6 +14018,37 @@ test "HTTP/2 stream window helpers reject connection stream id" {
     try std.testing.expectError(error.InvalidStreamId, connection.recvStreamWindow(0));
     try std.testing.expectEqual(@as(usize, 0), connection.send_stream_windows.items.len);
     try std.testing.expectEqual(@as(usize, 0), connection.recv_stream_windows.items.len);
+}
+
+test "HTTP/2 reset retirement clears both stream windows" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    _ = try connection.sendStreamWindow(1);
+    _ = try connection.recvStreamWindow(1);
+    connection.forgetStreamWindows(1);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.send_stream_windows.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.recv_stream_windows.items.len,
+    );
+    try std.testing.expect(!connection.send_stream_window_index.contains(1));
+    try std.testing.expect(!connection.recv_stream_window_index.contains(1));
 }
 
 test "HTTP/2 sendWindowUpdate rejects idle streams" {

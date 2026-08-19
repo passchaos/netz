@@ -434,7 +434,8 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    connection windows, processes eight priority-scheduled DATA callbacks, then
    cancels all unfinished members. The client now writes every RST_STREAM in
    one batch instead of one transport write per stream and drops their retained
-   receive-window entries. Five CPU-0 runs took 230.4-241.2 us from request
+   send/receive-window entries. Unlike generic half-close cleanup, this happens
+   only at RST_STREAM, where both directions are terminal. Five CPU-0 runs took 230.4-241.2 us from request
    submission through server observation of the reset batch. One `--stats` run
    used 293 allocations and 1,287,988 peak live bytes. Hyper/h2 has no RFC 9218
    scheduler, so this is internal timing evidence rather than a cross-stack

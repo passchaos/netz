@@ -277,7 +277,10 @@ The client accepts eight scheduled DATA callbacks, then rejects the batch and
 sends RST_STREAM(CANCEL) for all unfinished streams. Timing includes server
 observation of the reset batch. Five CPU-0 runs measured 230.4-241.2 us/batch.
 The cancellation path now coalesces all resets into one transport write instead
-of one write per stream and removes canceled receive-window entries. A `--stats`
+of one write per stream and removes canceled send/receive-window entries. Reset
+is the precise lifecycle boundary: ordinary half-close keeps its windows until
+the opposite direction completes, while local, peer, pushed-stream, and batch
+RST_STREAM paths retire both indexed entries immediately. A `--stats`
 sample made 293 allocations and peaked at 1,287,988 live bytes. This closes the
 previous priority-aware cancellation timing gap; there is no equal Hyper/h2
 RFC 9218 scheduler workload, so it remains internal evidence.
