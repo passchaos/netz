@@ -11,6 +11,7 @@ pub const Error = quic.Error || error{
     NoConnectionRoute,
     EcnUnavailable,
     InvalidGroSegment,
+    CallerBufferReceiveWithGro,
 } || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 pub const ReceiveTimeoutError = Error ||
     std.Io.Timeout.Error ||
@@ -403,6 +404,40 @@ pub const Endpoint = struct {
         return self.receiveBytesWithEcn();
     }
 
+    /// Receive one non-GRO datagram directly into caller storage.
+    ///
+    /// The returned bytes borrow `buffer` until the caller reuses it. GRO is
+    /// rejected because one kernel receive can contain several logical
+    /// datagrams whose suffix must remain owned after this call returns; use
+    /// `receiveBytesBatch` for that shape.
+    pub fn receiveBytesInto(
+        self: *Endpoint,
+        buffer: []u8,
+    ) Error!ReceivedBytesView {
+        if (buffer.len == 0) return error.BufferTooShort;
+        if (self.gro_receive_enabled) {
+            return error.CallerBufferReceiveWithGro;
+        }
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        return self.receiveKernelBytesInto(buffer);
+    }
+
+    /// Deadline-aware counterpart to `receiveBytesInto`.
+    pub fn receiveBytesIntoTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!ReceivedBytesView {
+        if (buffer.len == 0) return error.BufferTooShort;
+        if (self.gro_receive_enabled) {
+            return error.CallerBufferReceiveWithGro;
+        }
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        return self.receiveKernelBytesIntoTimeout(buffer, timeout);
+    }
+
     /// Receive one datagram with a caller-supplied deadline.
     ///
     /// Pending GRO segments are consumed before arming a kernel timeout. This
@@ -527,6 +562,70 @@ pub const Endpoint = struct {
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
         return self.finishKernelBytesBatch(buffer, incoming);
+    }
+
+    fn receiveKernelBytesInto(
+        self: *Endpoint,
+        buffer: []u8,
+    ) Error!ReceivedBytesView {
+        var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        @memset(&control_buffer, 0);
+        var incoming: net.IncomingMessage = .init;
+        incoming.control = &control_buffer;
+        const maybe_err, const count = (try self.io.operate(.{ .net_receive = .{
+            .socket_handle = self.socket.handle,
+            .message_buffer = (&incoming)[0..1],
+            .data_buffer = buffer,
+            .flags = .{},
+        } })).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(count == 1);
+        return self.finishKernelBytesInto(incoming);
+    }
+
+    fn receiveKernelBytesIntoTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!ReceivedBytesView {
+        var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        @memset(&control_buffer, 0);
+        var incoming: net.IncomingMessage = .init;
+        incoming.control = &control_buffer;
+        const maybe_err, const count = (try self.io.operateTimeout(
+            .{ .net_receive = .{
+                .socket_handle = self.socket.handle,
+                .message_buffer = (&incoming)[0..1],
+                .data_buffer = buffer,
+                .flags = .{},
+            } },
+            timeout,
+        )).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(count == 1);
+        return self.finishKernelBytesInto(incoming);
+    }
+
+    fn finishKernelBytesInto(
+        self: *Endpoint,
+        incoming: net.IncomingMessage,
+    ) Error!ReceivedBytesView {
+        if (incoming.data.len == 0) return error.EmptyDatagram;
+        if (incoming.flags.trunc or incoming.flags.ctrunc) {
+            return error.DatagramTooLarge;
+        }
+        if (incoming.data.len > self.limits.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        const control = receiveControlFromBytes(incoming.control);
+        if (control.gro_segment_size != null) {
+            return error.CallerBufferReceiveWithGro;
+        }
+        return .{
+            .from = incoming.from,
+            .bytes = incoming.data,
+            .ecn = if (self.receive_ecn_enabled) control.ecn else .not_ect,
+        };
     }
 
     fn receiveKernelBytesBatchTimeout(
@@ -1206,6 +1305,12 @@ pub const OwnedBytes = struct {
     }
 };
 
+pub const ReceivedBytesView = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    ecn: quic.packet_space.EcnCodepoint = .not_ect,
+};
+
 fn ownedBytesAsBatch(bytes: OwnedBytes) OwnedBytesBatch {
     return .{
         .from = bytes.from,
@@ -1694,6 +1799,40 @@ test "QUIC UDP endpoint sends many datagrams in one batch" {
 
     const invalid = [_][]const u8{ "valid-but-must-not-send", "" };
     try std.testing.expectError(error.EmptyDatagram, sender.sendManyBytes(receiver.address(), &invalid));
+}
+
+test "QUIC UDP endpoint receives into caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+
+    try sender.sendBytes(receiver.address(), "borrowed-datagram");
+    var storage: [128]u8 = undefined;
+    const received = try receiver.receiveBytesInto(&storage);
+    try std.testing.expectEqualStrings(
+        "borrowed-datagram",
+        received.bytes,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&storage),
+        @intFromPtr(received.bytes.ptr),
+    );
+    try std.testing.expect(received.from.eql(&sender.address()));
 }
 
 test "QUIC UDP GSO planner requires a contiguous equal-sized prefix" {

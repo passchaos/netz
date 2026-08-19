@@ -2626,6 +2626,69 @@ test "QUIC single-packet service applies stream data without owned packet" {
     try std.testing.expectEqual(@as(u64, 1), server.expected_packet_number);
 }
 
+test "QUIC single-packet service reuses connection receive storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x91} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+    const receive_storage = server.receive_packet_buffer.allocatedSlice().ptr;
+
+    for (0..2) |packet_number| {
+        try one_rtt.sendFrames(
+            &client_endpoint,
+            server_endpoint.address(),
+            keys,
+            .{
+                .destination_connection_id = &server_cid,
+                .packet_number = packet_number,
+                .frames = &.{.{ .stream = .{
+                    .stream_id = 0,
+                    .offset = packet_number,
+                    .data = "x",
+                    .fin = packet_number == 1,
+                } }},
+            },
+        );
+        try server.servicePacketAt(1_000 + packet_number);
+        try std.testing.expectEqual(
+            receive_storage,
+            server.receive_packet_buffer.allocatedSlice().ptr,
+        );
+    }
+    try std.testing.expectEqualStrings(
+        "xx",
+        server.availableReceivedStream(0).?,
+    );
+}
+
 test "QUIC packet visitor exposes borrowed frames after transport apply" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

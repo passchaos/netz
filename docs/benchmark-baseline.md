@@ -622,6 +622,18 @@ throughput swing should be treated as promising rather than a final ratio.
 Failing-allocator and duplicate-PATH_RESPONSE tests cover the new no-path
 fast path and packet-local transactional response tracking.
 
+The synchronous non-GRO visitor/service pump now receives UDP directly into a
+connection-owned buffer instead of allocating and shrinking one endpoint
+buffer per packet. Against the post-preflight baseline above, the same 16
+MiB/four-stream `--stats` shape dropped again from 29,223-29,300 allocation
+calls to 15,210-15,268 (47.8-48.1%), and from 100.4-100.6 MB cumulative
+allocation to 25.8-27.1 MB (73.1-74.3%). Three runs measured 175.15-281.39
+MiB/s; like the previous single-run spread this supports a no-regression smoke,
+not a stable throughput ratio. Caller-buffer endpoint and two-packet
+connection-reuse tests verify borrowed lifetime and storage reuse; GRO remains
+on its owning batch API because one kernel receive may outlive a single packet
+callback.
+
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 
 ```text

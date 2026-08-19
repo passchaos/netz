@@ -648,6 +648,10 @@ pub const Connection = struct {
     /// recovery's required stable payload ownership.
     send_batch_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
     send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
+    /// Reused socket receive storage for the synchronous non-GRO visitor and
+    /// state-service paths. Owning diagnostic receives and GRO batches keep
+    /// their independent lifetime-bearing storage.
+    receive_packet_buffer: std.ArrayList(u8) = .empty,
     /// Borrowed frame views used by state-only service and synchronous packet
     /// visitors. They never outlive the current decrypted datagram/GRO segment
     /// and therefore avoid one frame slice allocation per packet on the
@@ -687,6 +691,10 @@ pub const Connection = struct {
         );
         try connection.send_frame_buffer.ensureTotalCapacity(endpoint.allocator, config.max_datagram_size);
         try connection.send_packet_buffer.ensureTotalCapacity(endpoint.allocator, send_buffer_capacity);
+        try connection.receive_packet_buffer.ensureTotalCapacity(
+            endpoint.allocator,
+            endpoint.limits.max_datagram_size,
+        );
         if (config.local_stateless_reset_key) |key| {
             try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
         } else {
@@ -726,6 +734,7 @@ pub const Connection = struct {
         self.send_batch_packet_stream_scratch.deinit(
             self.endpoint.allocator,
         );
+        self.receive_packet_buffer.deinit(self.endpoint.allocator);
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
         self.fixed_bit_generator.deinit();
         self.* = undefined;
@@ -4275,8 +4284,9 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
-        var datagram = try self.endpoint.receiveBytes();
-        defer datagram.deinit(self.endpoint.allocator);
+        const datagram = try self.endpoint.receiveBytesInto(
+            self.receive_packet_buffer.allocatedSlice(),
+        );
         return self.processReceivedBytesVisitingAt(
             datagram.from,
             datagram.bytes,
@@ -4296,8 +4306,7 @@ pub const Connection = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
-        var datagram = try self.receiveBytesServicingTimers();
-        defer datagram.deinit(self.endpoint.allocator);
+        const datagram = try self.receiveBytesIntoServicingTimers();
 
         const Context = @TypeOf(context);
         const VisitorError = callbackErrorSet(visitor);
@@ -4334,6 +4343,85 @@ pub const Connection = struct {
     /// from connection receive state rather than inspecting packet frames.
     pub fn servicePacketServicingTimers(self: *Connection) Error!void {
         return self.visitPacketServicingTimers(self, acknowledgePacketView);
+    }
+
+    fn receiveBytesIntoServicingTimers(
+        self: *Connection,
+    ) Error!quic.runtime.ReceivedBytesView {
+        const storage = self.receive_packet_buffer.allocatedSlice();
+        while (true) {
+            if (self.close_info != null or self.idle_timed_out) {
+                return error.ConnectionClosed;
+            }
+            const timer = self.nextTimerDeadline() orelse
+                return self.endpoint.receiveBytesInto(storage);
+            const now_ns = self.monotonicNowNs();
+            if (now_ns >= timer.deadline_ns) {
+                if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
+                    continue;
+                }
+                if (try self.receiveBytesIntoAfterBlockedTimer(
+                    storage,
+                    now_ns,
+                )) |datagram| {
+                    return datagram;
+                }
+                continue;
+            }
+            const deadline_ns_i96 = std.math.cast(
+                i96,
+                timer.deadline_ns,
+            ) orelse std.math.maxInt(i96);
+            return self.endpoint.receiveBytesIntoTimeout(storage, .{
+                .deadline = .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(deadline_ns_i96),
+                },
+            }) catch |err| switch (err) {
+                error.Timeout => {
+                    const timeout_ns = self.monotonicNowNs();
+                    if (!try self.serviceNextTimerForBlockingReceive(
+                        timeout_ns,
+                    )) {
+                        if (try self.receiveBytesIntoAfterBlockedTimer(
+                            storage,
+                            timeout_ns,
+                        )) |datagram| {
+                            return datagram;
+                        }
+                    }
+                    continue;
+                },
+                error.ConcurrencyUnavailable => self.endpoint.receiveBytesInto(storage),
+                else => |other| return @errorCast(other),
+            };
+        }
+    }
+
+    fn receiveBytesIntoAfterBlockedTimer(
+        self: *Connection,
+        storage: []u8,
+        now_ns: u64,
+    ) Error!?quic.runtime.ReceivedBytesView {
+        const deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            timer_blocked_receive_backoff_ns,
+        ) catch std.math.maxInt(u64);
+        const deadline_ns_i96 = std.math.cast(
+            i96,
+            deadline_ns,
+        ) orelse std.math.maxInt(i96);
+        return self.endpoint.receiveBytesIntoTimeout(storage, .{
+            .deadline = .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(deadline_ns_i96),
+            },
+        }) catch |err| switch (err) {
+            error.Timeout => null,
+            error.ConcurrencyUnavailable => try self.endpoint.receiveBytesInto(storage),
+            else => |other| return @errorCast(other),
+        };
     }
 
     fn processReceivedBytesVisitingAt(
