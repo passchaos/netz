@@ -1403,6 +1403,29 @@ pub const Store = struct {
         return out[0..written];
     }
 
+    /// Roll back one PUBLISH selected by `drainInto` when encoding or socket
+    /// submission fails before the peer can receive it. Selection moves a
+    /// queued message into inflight state; without this rollback a reconnect
+    /// marks that never-sent message as DUP, conflating local failure with a
+    /// genuine retransmission.
+    pub fn retryUnsentPublish(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        const index = session.packet_index.get(packet_id) orelse
+            return error.InvalidAcknowledgement;
+        const inflight = &session.inflight.items[index].?;
+        if (inflight.state != .await_puback and
+            inflight.state != .await_pubrec)
+        {
+            return error.InvalidAcknowledgement;
+        }
+        inflight.needs_send = true;
+        inflight.retransmission = false;
+    }
+
     pub fn handleAck(
         self: *Store,
         handle: Handle,

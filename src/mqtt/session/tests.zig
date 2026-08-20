@@ -654,6 +654,46 @@ test "session drops oversized PUBLISH without dropping PUBREL" {
     try std.testing.expectEqual(@as(usize, 1), stats.inflight_count);
 }
 
+test "session unsent publish retry remains first delivery" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("unsent-retry", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "retry/topic",
+        "payload",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    var output: [1]Transmission = undefined;
+    const selected = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expect(!selected[0].publish.dup);
+    const packet_id = selected[0].publish.packet_id;
+    try store.retryUnsentPublish(opened.handle, packet_id);
+    const retried = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(packet_id, retried[0].publish.packet_id);
+    try std.testing.expect(!retried[0].publish.dup);
+
+    try store.disconnect(opened.handle, null, .zero);
+    const resumed = try store.open("unsent-retry", false, 60, .zero);
+    const after_reconnect = try store.drainInto(
+        resumed.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expect(after_reconnect[0].publish.dup);
+}
+
 test "session limits preserve existing state" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{

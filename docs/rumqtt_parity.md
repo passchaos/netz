@@ -455,6 +455,12 @@ described below.
   reconnect Receive Maximum retain the Store's existing bounded semantics.
 - Session deletion/expiry removes the stable router identity before future
   matching, including shared-subscription selection.
+- If an offline queued PUBLISH is selected into inflight state but encoding or
+  socket submission fails before the peer can receive it, the broker rolls that
+  selection back as unsent. Reconnect therefore sets DUP only for a packet that
+  may actually have reached a prior Network Connection, not for a locally
+  failed first attempt; a focused Store test and 20 repeated broker resume runs
+  cover both sides of the boundary.
 
 This follows Mosquitto's queued/inflight split and reconnect reset while
 avoiding the audited rumqttd limitation that rejects valid out-of-order ACKs.

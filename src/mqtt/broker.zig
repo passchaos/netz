@@ -1888,7 +1888,19 @@ pub const Broker = struct {
                         self.state_mutex.unlock(self.io);
                         continue;
                     },
-                    else => return err,
+                    else => {
+                        if (packet.kind == .publish) {
+                            self.state_mutex.lockUncancelable(self.io);
+                            if (slot.session_handle) |handle| {
+                                self.sessions.retryUnsentPublish(
+                                    handle,
+                                    packet.packet_id,
+                                ) catch {};
+                            }
+                            self.state_mutex.unlock(self.io);
+                        }
+                        return err;
+                    },
                 };
                 continue;
             }
