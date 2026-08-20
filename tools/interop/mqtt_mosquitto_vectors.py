@@ -264,6 +264,87 @@ def hostile_initial_packets(executable: Path, mqtt_packets) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def qos2_routes_at_pubrel(executable: Path, mqtt_packets) -> None:
+    # Mosquitto's QoS 2 regression vectors require that the Application
+    # Message is invisible until PUBREL and then completes an independent
+    # broker-to-subscriber QoS 2 handshake.
+    topic = "pub/qos2/reuse"
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_v5(subscriber, mqtt_packets, "sub-qos2-test")
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 2, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 2, proto_ver=5),
+                "QoS2 SUBACK",
+            )
+            connect_v5(publisher, mqtt_packets, "pub-qos2-test")
+
+            incoming_mid = 312
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=2,
+                    mid=incoming_mid,
+                    payload="message",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                publisher,
+                mqtt_packets.gen_pubrec(incoming_mid, proto_ver=5),
+                "publisher PUBREC",
+            )
+            subscriber.settimeout(0.05)
+            try:
+                early = subscriber.recv(1)
+                if early:
+                    raise AssertionError(
+                        f"QoS2 PUBLISH routed before PUBREL: {early.hex()}"
+                    )
+            except socket.timeout:
+                pass
+            finally:
+                subscriber.settimeout(5)
+
+            publisher.sendall(
+                mqtt_packets.gen_pubrel(incoming_mid, proto_ver=5)
+            )
+            expect_packet(
+                publisher,
+                mqtt_packets.gen_pubcomp(incoming_mid, proto_ver=5),
+                "publisher PUBCOMP",
+            )
+
+            outgoing_mid = 1
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=2,
+                    mid=outgoing_mid,
+                    payload="message",
+                    proto_ver=5,
+                ),
+                "downstream QoS2 PUBLISH",
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_pubrec(outgoing_mid, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_pubrel(outgoing_mid, proto_ver=5),
+                "downstream PUBREL",
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_pubcomp(outgoing_mid, proto_ver=5)
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -274,7 +355,8 @@ def main() -> None:
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
     hostile_initial_packets(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT 5 wire vectors passed: 3 scenarios")
+    qos2_routes_at_pubrel(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT 5 wire vectors passed: 4 scenarios")
 
 
 if __name__ == "__main__":
