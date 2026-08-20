@@ -261,11 +261,17 @@ these counts explain submission shape but are not timing samples.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
-   long-lived netz echo endpoint. All 517 cases passed, including close
-   behavior, on 2026-08-21. The runner rejects `FAILED`, `FAILED BY CLIENT`,
-   `WRONG CODE`, or `UNCLEAN` results and accepts optional case IDs for a
-   faster focused run. This is external RFC 6455 conformance evidence for the
-   HTTP/1.1 transport, not for RFC 8441 or WSS.
+   long-lived netz echo endpoint. On 2026-08-21, all 517 cases completed with
+   behavior counts `OK=456`, `NON-STRICT=4`, `INFORMATIONAL=3`, and
+   `UNIMPLEMENTED=54`; close-behavior counts were `OK=514` and
+   `INFORMATIONAL=3`. Thus this is not a 517-case pass result. The runner
+   accepts only the explicit `OK`, `NON-STRICT`, and `INFORMATIONAL` behavior
+   statuses and `OK` and `INFORMATIONAL` close statuses, reports every non-OK
+   case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing, or
+   unknown statuses. The full-suite run therefore remains a failing gate until
+   the 54 unimplemented cases are supported. Optional case IDs select a faster
+   focused run. This is external RFC 6455 conformance evidence for the HTTP/1.1
+   transport, not for RFC 8441 or WSS.
 4. Add an equal-wire compressed echo comparison if the reference re-enables
    its currently disabled outbound compressor; until then the netz timing is
    only an internal baseline.
