@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-server=${1:?server executable path}
+netz_server=${1:?netz server executable path}
+netz_client=${2:?netz client executable path}
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 client_manifest="$repo_root/tools/interop/webtransport_wtransport/Cargo.toml"
 work=$(mktemp -d)
@@ -31,7 +32,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
 PY
 )
 
-"$server" "$port" >"$work/server.log" 2>&1 &
+"$netz_server" "$port" >"$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
   if grep -q 'WebTransport interop server listening' "$work/server.log"; then
@@ -50,7 +51,33 @@ if ! grep -q 'WebTransport interop server listening' "$work/server.log"; then
 fi
 
 timeout 180s cargo run --quiet --release --locked \
-  --manifest-path "$client_manifest" -- "$port"
+  --manifest-path "$client_manifest" -- client "$port"
 wait "$server_pid"
 server_pid=
 cat "$work/server.log"
+
+timeout 30s cargo run --quiet --release --locked \
+  --manifest-path "$client_manifest" -- server \
+  >"$work/wtransport-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  rust_port=$(sed -n 's/^WTRANSPORT_PORT=//p' \
+    "$work/wtransport-server.log" | head -1)
+  if [[ -n "$rust_port" ]]; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/wtransport-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ -z "${rust_port:-}" ]]; then
+  echo 'timed out waiting for wtransport server' >&2
+  cat "$work/wtransport-server.log" >&2
+  exit 1
+fi
+"$netz_client" "$rust_port"
+wait "$server_pid"
+server_pid=
+cat "$work/wtransport-server.log"

@@ -17,16 +17,18 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 ```
 
 The external interoperability gate builds the audited `~/Work/wtransport`
-checkout at `d96cbb8` as an independent Rust/Quinn client and drives a real
-TLS 1.3/QUIC/HTTP/3 connection into the netz server. It verifies a
+checkout at `d96cbb8` and exercises both directions over real TLS
+1.3/QUIC/HTTP/3 connections. The wtransport-client/netz-server half verifies a
 successful Extended CONNECT at `/interop`, bidirectional DATAGRAM exchange, a
 client-created bidirectional stream and its reverse direction, client- and
 server-created unidirectional streams, and a `CLOSE_WEBTRANSPORT_SESSION` with
-code 77/reason `netz done`. The gate exposed three cross-stack assumptions now
-covered in production code: Client Finished can follow an Initial ACK in the
-same UDP datagram, modern peers may omit the older Capsule-Protocol and
-per-session stream-limit settings, and HTTP/3 critical stream IDs must not be
-hidden from WebTransport association based only on their numeric values.
+code 77/reason `netz done`. The netz-client/wtransport-server half repeats
+CONNECT, DATAGRAM and both stream-direction checks. The gate exposed three
+cross-stack assumptions now covered in production code: Client Finished can
+follow an Initial ACK in the same UDP datagram, modern peers may omit the older
+Capsule-Protocol and per-session stream-limit settings, and HTTP/3 critical
+stream IDs must not be hidden from WebTransport association based only on
+their numeric values.
 
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:
@@ -179,10 +181,10 @@ lightweight protected transport does not own a stateful recovery connection.
    a full `one_rtt.Connection`; association streams must not be advertised
    until ACK, recovery, flow control and reset/stop state share one connection
    owner.
-2. Add the reverse netz-client/`wtransport`-server run and browser WebTransport
-   evidence. The current checked-in gate covers the independent wtransport
-   client against the netz server across CONNECT, DATAGRAM, both stream
-   directions and session close.
+2. Add browser WebTransport evidence. The checked-in wtransport gate now
+   covers both client/server directions across CONNECT, DATAGRAM, and
+   bidirectional/unidirectional streams; its wtransport-client half also checks
+   the detailed session-close capsule.
 3. Add larger long-run stream-churn distributions; concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The
