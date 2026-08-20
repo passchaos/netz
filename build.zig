@@ -95,6 +95,28 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_vectors_step.dependOn(&mqtt_vectors.step);
 
+    const websocket_autobahn_server = b.addExecutable(.{
+        .name = "netz-websocket-autobahn-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_autobahn_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_autobahn = b.addSystemCommand(
+        &.{"tools/interop/websocket_autobahn.sh"},
+    );
+    websocket_autobahn.addArtifactArg(websocket_autobahn_server);
+    if (b.args) |args| websocket_autobahn.addArgs(args);
+    const websocket_autobahn_step = b.step(
+        "interop-websocket-autobahn",
+        "Run the external Autobahn WebSocket server suite against netz",
+    );
+    websocket_autobahn_step.dependOn(&websocket_autobahn.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{

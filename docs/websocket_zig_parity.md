@@ -258,8 +258,14 @@ these counts explain submission shape but are not timing samples.
    both client and server runtime state plus benchmark coordination). A 64-
    connection run exceeded the practical duration of this same-process smoke
    on the current host, so it is not counted as passing evidence.
-3. Add Autobahn/WebSocket protocol-suite evidence for both implementations
-   rather than relying only on in-repository tests.
+3. Keep the external Autobahn gate current.
+   `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
+   Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
+   long-lived netz echo endpoint. All 517 cases passed, including close
+   behavior, on 2026-08-21. The runner rejects `FAILED`, `FAILED BY CLIENT`,
+   `WRONG CODE`, or `UNCLEAN` results and accepts optional case IDs for a
+   faster focused run. This is external RFC 6455 conformance evidence for the
+   HTTP/1.1 transport, not for RFC 8441 or WSS.
 4. Add an equal-wire compressed echo comparison if the reference re-enables
    its currently disabled outbound compressor; until then the netz timing is
    only an internal baseline.

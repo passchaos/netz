@@ -539,6 +539,9 @@ zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
+# Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
+# arguments select individual case IDs; with none, all 517 cases run.
+zig build interop-websocket-autobahn -Doptimize=ReleaseFast
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
