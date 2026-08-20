@@ -54,6 +54,13 @@ pub const Role = enum {
     server,
 };
 
+const IncomingDataKind = enum {
+    none,
+    binary,
+    text,
+    compressed_text,
+};
+
 pub const ClientIdentity = tls_client_identity.ClientIdentity;
 pub const ClientCertificateVerifier =
     tls_client_identity.CertificateVerifier;
@@ -857,6 +864,8 @@ pub const Connection = struct {
     send_mutex: std.Io.Mutex = .init,
     close_sent: bool = false,
     close_received: bool = false,
+    incoming_data_kind: IncomingDataKind = .none,
+    incoming_text_utf8: websocket.Utf8Validator = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     /// Maximum LZ77 distance for messages emitted by this endpoint. The field
@@ -1066,7 +1075,7 @@ pub const Connection = struct {
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
-        try self.ensureBuffered(total_len);
+        try ensureIncomingFrameBuffered(self, header, total_len);
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
@@ -1262,7 +1271,7 @@ pub const Connection = struct {
             header.header_len,
             payload_len,
         ) catch return error.PayloadTooLarge;
-        try self.ensureBuffered(total_len);
+        try ensureIncomingFrameBuffered(self, header, total_len);
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{
                 .expect_mask = .unmasked,
@@ -1523,6 +1532,8 @@ pub const H2Connection = struct {
     send_mutex: std.Io.Mutex = .init,
     close_sent: bool = false,
     close_received: bool = false,
+    incoming_data_kind: IncomingDataKind = .none,
+    incoming_text_utf8: websocket.Utf8Validator = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     compression_send_max_window_bits: u8 = 15,
@@ -1702,7 +1713,7 @@ pub const H2Connection = struct {
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
-        try self.ensureBuffered(total_len);
+        try ensureIncomingFrameBuffered(self, header, total_len);
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
@@ -2152,6 +2163,89 @@ fn closeCodeForReceiveError(err: anyerror) ?websocket.CloseCode {
         => .protocol_error,
         else => null,
     };
+}
+
+/// Read the current frame body while validating uncompressed text bytes as
+/// they arrive from the transport. A complete invalid frame need not be
+/// buffered before the peer receives Close 1007; this is the fail-fast behavior
+/// recommended by RFC 6455 section 8.1 and exercised by Autobahn 6.4.
+fn ensureIncomingFrameBuffered(
+    connection: anytype,
+    header: websocket.FrameHeader,
+    total_len: usize,
+) Error!void {
+    const message_kind: IncomingDataKind = switch (header.opcode) {
+        .text => blk: {
+            if (connection.incoming_data_kind != .none) {
+                return error.InvalidFrame;
+            }
+            connection.incoming_text_utf8.reset();
+            break :blk if (header.rsv1) .compressed_text else .text;
+        },
+        .binary => blk: {
+            if (connection.incoming_data_kind != .none) {
+                return error.InvalidFrame;
+            }
+            break :blk .binary;
+        },
+        .continuation => blk: {
+            if (connection.incoming_data_kind == .none) {
+                return error.InvalidFrame;
+            }
+            break :blk connection.incoming_data_kind;
+        },
+        else => .none,
+    };
+    const validate_text = message_kind == .text;
+    var validated = header.header_len;
+    while (connection.inbuf.items.len < total_len) {
+        if (validate_text) {
+            try validateBufferedTextRange(
+                connection,
+                header,
+                &validated,
+                total_len,
+            );
+        }
+        try connection.ensureBuffered(
+            @min(total_len, connection.inbuf.items.len + 1),
+        );
+    }
+    if (validate_text) {
+        try validateBufferedTextRange(
+            connection,
+            header,
+            &validated,
+            total_len,
+        );
+        if (header.fin) try connection.incoming_text_utf8.finish();
+    }
+
+    if (!header.opcode.isControl()) {
+        connection.incoming_data_kind =
+            if (header.fin) .none else message_kind;
+    }
+}
+
+fn validateBufferedTextRange(
+    connection: anytype,
+    header: websocket.FrameHeader,
+    validated: *usize,
+    total_len: usize,
+) Error!void {
+    const available_end = @min(connection.inbuf.items.len, total_len);
+    if (available_end <= validated.*) return;
+    const bytes = connection.inbuf.items[validated.*..available_end];
+    if (header.mask_key) |mask| {
+        for (bytes, 0..) |byte, index| {
+            try connection.incoming_text_utf8.feedByte(
+                byte ^ mask[(validated.* - header.header_len + index) & 3],
+            );
+        }
+    } else {
+        try connection.incoming_text_utf8.feed(bytes);
+    }
+    validated.* = available_end;
 }
 
 fn finishIncomingMessage(

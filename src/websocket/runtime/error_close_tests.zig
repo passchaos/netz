@@ -132,6 +132,69 @@ test "WebSocket caller-buffer receiver closes on invalid UTF-8" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket receiver rejects invalid UTF-8 before a frame finishes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 32,
+            .max_message_bytes = 32,
+        },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept(.{}) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            _ = connection.receiveMessage() catch |err| {
+                if (err != error.InvalidUtf8) shared.err = err;
+                return;
+            };
+            shared.err = error.ProtocolFailure;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/utf8-fail-fast",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 32,
+            .max_message_bytes = 32,
+        },
+    });
+    defer client.close();
+
+    // Announce a longer masked frame but stop writing immediately after the
+    // second byte proves F4 90 cannot encode a Unicode scalar. A receiver that
+    // waits for the remaining payload bytes deadlocks instead of failing fast.
+    const prefix = [_]u8{
+        0x81, 0x88,
+        0x00, 0x00,
+        0x00, 0x00,
+        0xf4, 0x90,
+    };
+    try writeAllToStream(io, client.stream, &prefix);
+    try expectCloseCode(allocator, &client, .invalid_payload_data);
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket HTTP2 receiver closes on invalid UTF-8" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

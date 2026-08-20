@@ -285,7 +285,7 @@ pub fn parseFrameInto(
     };
 }
 
-fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!void {
+pub fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!void {
     if (header.opcode.isControl() and (header.rsv1 or header.rsv2 or header.rsv3)) return error.UnexpectedRsv;
     if (header.opcode == .continuation and (header.rsv1 or header.rsv2 or header.rsv3)) return error.UnexpectedRsv;
     if ((header.rsv1 and !options.allow_rsv1) or
@@ -306,6 +306,88 @@ fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!vo
         const extended_len_bytes: usize = if (header.mask_key == null) header.header_len - 2 else header.header_len - 6;
         if (extended_len_bytes == 8) return error.NonMinimalLength;
     }
+}
+
+/// Incremental RFC 3629 validator for fragmented or partially received text.
+/// In addition to rejecting bad lead/continuation bytes, the first continuation
+/// range rejects overlong encodings, surrogate halves, and values above
+/// U+10FFFF as soon as the decisive byte arrives.
+pub const Utf8Validator = struct {
+    remaining: u3 = 0,
+    next_min: u8 = 0x80,
+    next_max: u8 = 0xbf,
+
+    pub fn reset(self: *Utf8Validator) void {
+        self.* = .{};
+    }
+
+    pub fn feed(self: *Utf8Validator, bytes: []const u8) Error!void {
+        for (bytes) |byte| try self.feedByte(byte);
+    }
+
+    pub fn feedByte(self: *Utf8Validator, byte: u8) Error!void {
+        if (self.remaining != 0) {
+            if (byte < self.next_min or byte > self.next_max) {
+                return error.InvalidUtf8;
+            }
+            self.remaining -= 1;
+            self.next_min = 0x80;
+            self.next_max = 0xbf;
+            return;
+        }
+
+        switch (byte) {
+            0x00...0x7f => {},
+            0xc2...0xdf => self.remaining = 1,
+            0xe0 => {
+                self.remaining = 2;
+                self.next_min = 0xa0;
+            },
+            0xe1...0xec, 0xee...0xef => self.remaining = 2,
+            0xed => {
+                self.remaining = 2;
+                self.next_max = 0x9f;
+            },
+            0xf0 => {
+                self.remaining = 3;
+                self.next_min = 0x90;
+            },
+            0xf1...0xf3 => self.remaining = 3,
+            0xf4 => {
+                self.remaining = 3;
+                self.next_max = 0x8f;
+            },
+            else => return error.InvalidUtf8,
+        }
+    }
+
+    pub fn finish(self: Utf8Validator) Error!void {
+        if (self.remaining != 0) return error.InvalidUtf8;
+    }
+};
+
+test "WebSocket incremental UTF-8 validator rejects decisive bytes" {
+    var validator: Utf8Validator = .{};
+    try validator.feed("valid \xe2");
+    try validator.feed("\x82");
+    try validator.feed("\xac text");
+    try validator.finish();
+
+    validator.reset();
+    try validator.feedByte(0xf4);
+    try std.testing.expectError(error.InvalidUtf8, validator.feedByte(0x90));
+
+    validator.reset();
+    try validator.feedByte(0xed);
+    try std.testing.expectError(error.InvalidUtf8, validator.feedByte(0xa0));
+
+    validator.reset();
+    try validator.feedByte(0xe0);
+    try std.testing.expectError(error.InvalidUtf8, validator.feedByte(0x9f));
+
+    validator.reset();
+    try validator.feedByte(0xf0);
+    try std.testing.expectError(error.InvalidUtf8, validator.finish());
 }
 
 fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrameOptions) Error!void {
@@ -776,6 +858,7 @@ pub const MessageAssembler = struct {
     max_message_bytes: usize = std.math.maxInt(usize),
     opcode: ?Opcode = null,
     compressed: bool = false,
+    text_utf8: Utf8Validator = .{},
     buffer: std.ArrayList(u8) = .empty,
 
     pub const Message = struct {
@@ -803,6 +886,7 @@ pub const MessageAssembler = struct {
             if (self.opcode != null) return error.InvalidFrame;
             self.opcode = frame.header.opcode;
             self.compressed = frame.header.rsv1;
+            self.text_utf8.reset();
             self.buffer.clearRetainingCapacity();
         } else if (self.opcode == null) {
             return error.InvalidFrame;
@@ -815,18 +899,18 @@ pub const MessageAssembler = struct {
         const new_len = std.math.add(usize, self.buffer.items.len, frame.payload.len) catch return error.PayloadTooLarge;
         if (new_len > self.max_message_bytes) return error.PayloadTooLarge;
         try self.buffer.appendSlice(self.allocator, frame.payload);
+        if (self.opcode == .text and !self.compressed) {
+            try self.text_utf8.feed(frame.payload);
+            if (frame.header.fin) try self.text_utf8.finish();
+        }
         if (!frame.header.fin) return null;
         const payload = try self.buffer.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(payload);
         const opcode = self.opcode.?;
         const compressed = self.compressed;
-        // Keep the public assembler as strict as the runtime wrapper and
-        // tungstenite's text collector: fragmented text is allowed to split
-        // UTF-8 code points, but the completed uncompressed message must be
-        // valid UTF-8 before it is handed to callers.
-        if (opcode == .text and !compressed and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
         self.opcode = null;
         self.compressed = false;
+        self.text_utf8.reset();
         self.buffer = .empty;
         return .{ .opcode = opcode, .payload = payload, .compressed = compressed };
     }

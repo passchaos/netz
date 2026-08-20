@@ -262,11 +262,14 @@ these counts explain submission shape but are not timing samples.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
    long-lived netz echo endpoint. On 2026-08-21, all 517 cases completed with
-   behavior counts `OK=510`, `NON-STRICT=4`, and `INFORMATIONAL=3`;
+   behavior counts `OK=514` and `INFORMATIONAL=3`;
    close-behavior counts were `OK=514` and `INFORMATIONAL=3`. The 54
    compression cases previously reported as `UNIMPLEMENTED` now complete as
    `OK`: the server echoes `server_max_window_bits=9` when offered and bounds
    every emitted Vort LZ77 distance to that negotiated 512-byte window. The
+   four fail-fast UTF-8 cases previously reported as `NON-STRICT` are also now
+   `OK`: invalid text is rejected as soon as the decisive byte arrives, even
+   before the current frame or a fragmented message has completed. The
    runner accepts only the explicit `OK`, `NON-STRICT`, and `INFORMATIONAL`
    behavior statuses and `OK` and `INFORMATIONAL` close statuses, reports every
    non-OK case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing,
