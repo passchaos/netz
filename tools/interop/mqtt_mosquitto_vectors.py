@@ -86,23 +86,29 @@ def expect_packets_unordered(
 
 class NetzBroker:
     def __init__(
-        self, executable: Path, connections: int = 1, ignore_errors: bool = False
+        self,
+        executable: Path,
+        connections: int = 1,
+        ignore_errors: bool = False,
+        extra_args: tuple[str, ...] = (),
     ):
         self.executable = executable
         self.connections = connections
         self.ignore_errors = ignore_errors
+        self.extra_args = extra_args
         self.port = free_port()
         self.process: subprocess.Popen[str] | None = None
 
     def __enter__(self) -> "NetzBroker":
         command = [
-                str(self.executable),
-                f"--bind=127.0.0.1:{self.port}",
-                f"--connections={self.connections}",
-                "--max-queued-deliveries=1024",
-                "--max-outgoing-inflight=64",
-                "--no-restore",
-            ]
+            str(self.executable),
+            f"--bind=127.0.0.1:{self.port}",
+            f"--connections={self.connections}",
+            "--max-queued-deliveries=1024",
+            "--max-outgoing-inflight=64",
+            "--no-restore",
+            *self.extra_args,
+        ]
         if self.ignore_errors:
             command.append("--ignore-connection-errors")
         self.process = subprocess.Popen(
@@ -360,6 +366,123 @@ def hostile_initial_packets(executable: Path, mqtt_packets) -> None:
         with broker.connect() as sock:
             connect_v5(sock, mqtt_packets, "after-hostile-initial")
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
+def publish_capability_disconnects(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Directly port the two cases in Mosquitto 03-publish-bad-flags.py.
+    # The broker advertises each restriction and must send the matching MQTT 5
+    # DISCONNECT when a raw client ignores it.
+    cases = (
+        (
+            ("--maximum-qos=1",),
+            mqtt_packets.gen_publish(
+                "test/topic", qos=2, mid=1, proto_ver=5
+            ),
+            mqtt5_props.gen_byte_prop(mqtt5_props.MAXIMUM_QOS, 1),
+            mqtt5_rc.QOS_NOT_SUPPORTED,
+            "qos above Maximum QoS",
+        ),
+        (
+            ("--no-retain",),
+            mqtt_packets.gen_publish(
+                "test/topic", qos=0, retain=True, payload="a",
+                proto_ver=5,
+            ),
+            mqtt5_props.gen_byte_prop(mqtt5_props.RETAIN_AVAILABLE, 0),
+            mqtt5_rc.RETAIN_NOT_SUPPORTED,
+            "retain unavailable",
+        ),
+    )
+    for args, publish, advertised_property, reason, label in cases:
+        with NetzBroker(executable, extra_args=args) as broker:
+            with broker.connect() as sock:
+                sock.sendall(
+                    mqtt_packets.gen_connect(
+                        "publish-capability", proto_ver=5
+                    )
+                )
+                expected_connack = mqtt_packets.gen_connack(
+                    rc=0,
+                    proto_ver=5,
+                    properties=(
+                        mqtt5_props.gen_uint16_prop(
+                            mqtt5_props.RECEIVE_MAXIMUM, 64
+                        )
+                        + mqtt5_props.gen_uint32_prop(
+                            mqtt5_props.MAXIMUM_PACKET_SIZE, 16 * 1024 * 1024
+                        )
+                        + mqtt5_props.gen_uint16_prop(
+                            mqtt5_props.TOPIC_ALIAS_MAXIMUM, 16
+                        )
+                        + advertised_property
+                    ),
+                    property_helper=False,
+                )
+                expect_packet(sock, expected_connack, f"{label} CONNACK")
+                sock.sendall(publish)
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_disconnect(
+                        reason_code=reason, proto_ver=5
+                    ),
+                    f"{label} DISCONNECT",
+                )
+
+
+def maximum_packet_size_disconnect(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Port Mosquitto 12-prop-maximum-packet-size-broker.py: a boundary-fitting
+    # PUBLISH keeps the connection alive, then one extra payload byte produces
+    # the precise Packet Too Large DISCONNECT.
+    with NetzBroker(executable, extra_args=("--max-packet-size=50",)) as broker:
+        with broker.connect() as sock:
+            sock.sendall(
+                mqtt_packets.gen_connect(
+                    "12-max-packet-broker", proto_ver=5
+                )
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_connack(
+                    rc=0,
+                    proto_ver=5,
+                    properties=(
+                        mqtt5_props.gen_uint16_prop(
+                            mqtt5_props.RECEIVE_MAXIMUM, 64
+                        )
+                        + mqtt5_props.gen_uint32_prop(
+                            mqtt5_props.MAXIMUM_PACKET_SIZE, 50
+                        )
+                        + mqtt5_props.gen_uint16_prop(
+                            mqtt5_props.TOPIC_ALIAS_MAXIMUM, 16
+                        )
+                    ),
+                    property_helper=False,
+                ),
+                "maximum packet size CONNACK",
+            )
+            topic = "12/max/packet/size/broker/test/topic"
+            sock.sendall(mqtt_packets.gen_publish(
+                topic, qos=0, payload="012345678", proto_ver=5
+            ))
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(),
+                "maximum packet size boundary PINGRESP",
+            )
+            sock.sendall(mqtt_packets.gen_publish(
+                topic, qos=0, payload="0123456789", proto_ver=5
+            ))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.PACKET_TOO_LARGE, proto_ver=5
+                ),
+                "maximum packet size DISCONNECT",
+            )
 
 
 def qos2_routes_at_pubrel(executable: Path, mqtt_packets) -> None:
@@ -1830,6 +1953,12 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_opts
     )
     hostile_initial_packets(args.broker, mqtt_packets)
+    publish_capability_disconnects(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
+    maximum_packet_size_disconnect(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
@@ -1856,7 +1985,7 @@ def main() -> None:
     retained_replacement(args.broker, mqtt_packets, mqtt5_props)
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 26 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 29 scenarios")
 
 
 if __name__ == "__main__":

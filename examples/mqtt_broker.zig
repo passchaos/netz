@@ -6,6 +6,13 @@ const Config = struct {
     connections: usize = 16,
     max_queued_deliveries: usize = 1024,
     max_outgoing_inflight: u16 = 64,
+    max_packet_size: usize = 16 * 1024 * 1024,
+    maximum_qos: ?netz.mqtt.QoS = null,
+    retain_available: bool = true,
+    topic_alias_maximum: u16 = 16,
+    wildcard_subscription_available: bool = true,
+    subscription_identifier_available: bool = true,
+    shared_subscription_available: bool = true,
     persistence_path: ?[]const u8 = null,
     restore: bool = true,
     ignore_connection_errors: bool = false,
@@ -33,9 +40,16 @@ pub fn main(init: std.process.Init) !void {
             .limits = .{
                 .max_connections = config.connections,
                 .max_queued_deliveries_per_connection = config.max_queued_deliveries,
+                .runtime = .{ .max_packet_size = config.max_packet_size },
             },
             .accept = .{
                 .max_outgoing_inflight = config.max_outgoing_inflight,
+                .maximum_qos = config.maximum_qos,
+                .retain_available = config.retain_available,
+                .topic_alias_maximum = config.topic_alias_maximum,
+                .wildcard_subscription_available = config.wildcard_subscription_available,
+                .subscription_identifier_available = config.subscription_identifier_available,
+                .shared_subscription_available = config.shared_subscription_available,
             },
         },
     );
@@ -109,6 +123,59 @@ fn parseArgs(
             if (config.max_outgoing_inflight == 0) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--max-packet-size=",
+        )) {
+            config.max_packet_size = try parsePositiveUsize(
+                arg["--max-packet-size=".len..],
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--maximum-qos=",
+        )) {
+            config.maximum_qos = switch (try std.fmt.parseInt(
+                u2,
+                arg["--maximum-qos=".len..],
+                10,
+            )) {
+                0 => .at_most_once,
+                1 => .at_least_once,
+                2 => .exactly_once,
+                else => return error.InvalidArgument,
+            };
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--topic-alias-maximum=",
+        )) {
+            config.topic_alias_maximum = try std.fmt.parseInt(
+                u16,
+                arg["--topic-alias-maximum=".len..],
+                10,
+            );
+        } else if (std.mem.eql(u8, arg, "--no-retain")) {
+            config.retain_available = false;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--no-wildcard-subscriptions",
+        )) {
+            config.wildcard_subscription_available = false;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--no-subscription-identifiers",
+        )) {
+            config.subscription_identifier_available = false;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--no-shared-subscriptions",
+        )) {
+            config.shared_subscription_available = false;
         } else if (std.mem.startsWith(
             u8,
             arg,
