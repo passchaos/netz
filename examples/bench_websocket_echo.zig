@@ -13,6 +13,7 @@ const iterations: usize = 200;
 const max_message_bytes: usize = payload_bytes;
 const default_connections: usize = 1;
 const max_connections: usize = 256;
+const fragmented_slices: usize = 16;
 
 pub fn main(init: std.process.Init) !void {
     const options = try parseOptions(init);
@@ -137,6 +138,7 @@ pub fn main(init: std.process.Init) !void {
         finished_ns: *u64,
         checksum: *u64,
         seed: u8,
+        fragmented: bool,
 
         fn run(worker: *@This()) void {
             runFallible(worker) catch |err| {
@@ -152,7 +154,12 @@ pub fn main(init: std.process.Init) !void {
                 byte.* = worker.seed +% @as(u8, @truncate(index));
             }
             for (0..warmup_iterations) |_| {
-                _ = try exchange(worker.client, &payload, &response);
+                _ = try exchange(
+                    worker.client,
+                    &payload,
+                    &response,
+                    worker.fragmented,
+                );
             }
             _ = worker.ready.fetchAdd(1, .release);
             worker.start.waitUncancelable(worker.io);
@@ -162,6 +169,7 @@ pub fn main(init: std.process.Init) !void {
                     worker.client,
                     &payload,
                     &response,
+                    worker.fragmented,
                 );
             }
             worker.checksum.* = checksum;
@@ -181,6 +189,7 @@ pub fn main(init: std.process.Init) !void {
             .finished_ns = &finished_ns[index],
             .checksum = &checksums[index],
             .seed = @truncate(index * 17),
+            .fragmented = options.fragmented,
         };
         workers[index] = try std.Thread.spawn(
             .{},
@@ -233,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
         \\  measured iterations: {d}
         \\  payload bytes: {d}
         \\  permessage-deflate: {}
+        \\  fragmented send slices: {d}
         \\  uncompressed-equivalent wire bytes/roundtrip: {d}
         \\  aggregate ns/roundtrip: {d}
         \\  roundtrips/s: {d}
@@ -246,6 +256,7 @@ pub fn main(init: std.process.Init) !void {
         iterations,
         payload_bytes,
         options.compression,
+        if (options.fragmented) fragmented_slices else 1,
         uncompressed_roundtrip_wire_bytes,
         elapsed / measured_roundtrips,
         roundtrips_per_second,
@@ -265,6 +276,7 @@ const Options = struct {
     connections: usize = default_connections,
     compression: bool = false,
     stats: bool = false,
+    fragmented: bool = false,
 };
 
 fn parseOptions(init: std.process.Init) !Options {
@@ -286,11 +298,16 @@ fn parseOptions(init: std.process.Init) !Options {
             options.compression = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
             options.stats = true;
+        } else if (std.mem.eql(u8, arg, "--fragmented")) {
+            options.fragmented = true;
         } else {
             return error.InvalidArgument;
         }
     }
     if (options.connections == 0 or options.connections > max_connections) {
+        return error.InvalidArgument;
+    }
+    if (options.fragmented and !options.compression) {
         return error.InvalidArgument;
     }
     return options;
@@ -300,8 +317,17 @@ fn exchange(
     client: *netz.websocket.runtime.Connection,
     payload: *[payload_bytes]u8,
     response_storage: *[payload_bytes]u8,
+    fragmented: bool,
 ) !u64 {
-    if (client.permessage_deflate) {
+    if (fragmented) {
+        var fragments: [fragmented_slices][]const u8 = undefined;
+        for (&fragments, 0..) |*fragment, index| {
+            const start = index * payload.len / fragments.len;
+            const end = (index + 1) * payload.len / fragments.len;
+            fragment.* = payload[start..end];
+        }
+        try client.sendFragmented(.binary, &fragments);
+    } else if (client.permessage_deflate) {
         try client.sendBinary(payload);
     } else {
         try client.sendBinaryInPlace(payload);

@@ -1055,11 +1055,11 @@ header-only stream preparation: 0.54-0.56 ns/op
 
 The same command now includes retained RFC 7692 no-context-takeover complete
 and 16-slice compressor cases. Three CPU-14-pinned 2026-08-20 samples encoded
-a repeated 4 KiB telemetry-like message in 5.57-5.59 us and reduced its wire
-payload from 4,096 to 69 bytes. The discontiguous path took 6.67-6.71 us
+a repeated 4 KiB telemetry-like message in 5.55-5.88 us and reduced its wire
+payload from 4,096 to 69 bytes. The discontiguous path took 5.77-6.10 us
 without a plaintext join and produced 69 bytes using a bounded 16 KiB rolling
 dictionary and one fixed block shared across all slices. Versus the prior
-standard-library 51.10 us fragmented baseline, this is a 7.6x latency
+standard-library 51.10 us fragmented baseline, this is an 8.4-8.9x latency
 improvement. It also recovers the first slice-local vort path's 463-byte wire
 payload completely relative to the complete-message vort path. This is an
 internal baseline rather than a reference ratio:
@@ -1176,6 +1176,14 @@ Three four-connection CPU 0-7 runs measured 12.09-12.18 us aggregate/roundtrip
 and 641.52-645.95 logical MiB/s, versus the previous 45.96 us/169.98 MiB/s. A
 four-connection `--stats` sample made 7,151 allocations, allocated 48,068,236
 cumulative bytes, peaked at 1,240,114 live bytes, and verified checksum 111,600.
+
+`--compression --fragmented` sends the same 4 KiB client message as sixteen
+compressed WebSocket frames. Three CPU-14 runs measured 35.80-36.60
+us/roundtrip and 213.48-218.24 logical MiB/s, versus 129.24 us before batching
+the small masked/unmasked frame sequence and 30.65-30.91 us for the one-frame
+control. Thus wire-visible fragmentation retains a 16.8-19.4% latency cost but
+no longer multiplies transport submissions by the frame count. Each run
+verified checksum 51,000.
 
 ## MQTT 5 windowed QoS 1 broker fanout
 

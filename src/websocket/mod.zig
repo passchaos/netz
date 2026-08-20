@@ -909,9 +909,9 @@ pub fn compressMessageVortInto(
 /// Encode discontiguous RFC 7692 input without joining caller plaintext.
 ///
 /// Vort feeds all non-empty slices into one non-final fixed-Huffman block and
-/// follows it with one sync-flush block. A bounded rolling dictionary preserves
-/// cross-slice matches while DEFLATE bit packing and the WebSocket message
-/// stream remain continuous.
+/// follows it with one sync-flush block. Adjacent slices share one zero-copy
+/// parse run; a bounded rolling dictionary preserves matches across separate
+/// runs while the WebSocket message stream remains continuous.
 pub fn compressMessageFragmentsVortInto(
     output: *std.ArrayList(u8),
     allocator: std.mem.Allocator,

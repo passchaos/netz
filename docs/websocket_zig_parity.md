@@ -72,15 +72,15 @@ message. The chunked encoder keeps plaintext discontiguous while a bounded
 16 KiB rolling dictionary preserves matches across caller slices.
 
 ```text
-permessage-deflate: 5.57-5.59 us/message, 4096 -> 69 wire bytes
-16-slice streaming: 6.67-6.71 us/message, 4096 -> 69 wire bytes, no join
+permessage-deflate: 5.55-5.88 us/message, 4096 -> 69 wire bytes
+16-slice streaming: 5.77-6.10 us/message, 4096 -> 69 wire bytes, no join
 ```
 
 These are three CPU-14-pinned `ReleaseFast` runs on 2026-08-20. Compared with
 the original standard-library encoder baseline, the fragmented path is
-7.6x faster. Rolling history plus one shared fixed block also reduce the first
-vort chunked path's 463-byte payload to the same 69 bytes as the complete-
-message path. This remains an
+8.4-8.9x faster. Adjacent slice coalescing, rolling history and one shared
+fixed block also reduce the first vort chunked path's 463-byte payload to the
+same 69 bytes as the complete-message path. This remains an
 internal encoder baseline and compression-ratio example, not a cross-library
 speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
 `compressed = false`, so no equal compressed-send workload exists there.
@@ -104,6 +104,15 @@ connection CPU 0-7 runs measured 12.09-12.18 us aggregate/roundtrip and
 641.52-645.95 logical MiB/s, versus the previous 45.96 us/169.98 MiB/s. These
 are internal compressed-runtime baselines because the
 audited websocket.zig outbound compressor remains disabled.
+
+Adding `--fragmented` sends the same client payload as sixteen application
+slices while the server continues to echo one complete message. Three CPU-14
+runs measured 35.80-36.60 us/roundtrip and 213.48-218.24 logical MiB/s after
+the runtime began batching small masked and unmasked compressed continuation
+frames. The same workload previously took 129.24 us/roundtrip before batching.
+The complete-message control measured 30.65-30.91 us/roundtrip, so preserving
+sixteen RFC 6455 frame boundaries costs 16.8-19.4% rather than multiplying
+socket writes sixteenfold. All runs verified checksum 51,000.
 
 The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw

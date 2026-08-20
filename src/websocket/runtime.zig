@@ -109,6 +109,23 @@ const RuntimeTransport = union(enum) {
         };
     }
 
+    fn writeAllSlices(
+        self: RuntimeTransport,
+        parts: []const []const u8,
+    ) Error!void {
+        switch (self) {
+            .tcp => |tcp| return stream_io.writeAllSlices(
+                tcp.io,
+                tcp.stream,
+                parts,
+            ),
+            .tls => |conn| return conn.writeAllSlices(parts),
+            .tls_vail, .tls_server, .linux_io_uring => {
+                for (parts) |part| try self.writeAll(part);
+            },
+        }
+    }
+
     fn close(self: RuntimeTransport) void {
         switch (self) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
@@ -1325,6 +1342,23 @@ pub const Connection = struct {
         compressed_payload: []const u8,
         frame_count: usize,
     ) Error!void {
+        if (self.role == .client and
+            try self.writeMaskedCompressedFragmentsBatchLocked(
+                opcode,
+                compressed_payload,
+                frame_count,
+            ))
+        {
+            return;
+        }
+        if (self.role == .server) {
+            try self.writeUnmaskedCompressedFragmentsLocked(
+                opcode,
+                compressed_payload,
+                frame_count,
+            );
+            return;
+        }
         for (0..frame_count) |index| {
             const range = compressedFragmentRange(compressed_payload.len, frame_count, index);
             try self.writeFrameLockedExtended(
@@ -1334,6 +1368,116 @@ pub const Connection = struct {
                 .{ .rsv1 = index == 0 },
             );
         }
+    }
+
+    fn writeMaskedCompressedFragmentsBatchLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        compressed_payload: []const u8,
+        frame_count: usize,
+    ) Error!bool {
+        const header_bound = std.math.mul(
+            usize,
+            frame_count,
+            websocket.max_frame_header_len,
+        ) catch return false;
+        const required = std.math.add(
+            usize,
+            header_bound,
+            compressed_payload.len,
+        ) catch return false;
+        if (required > masked_write_scratch_len) return false;
+
+        // Mask each frame with its own RFC 6455 key, but stage the small
+        // compressed message in the same bounded scratch already used by the
+        // ordinary client masking path. One transport write then preserves all
+        // frame boundaries without sixteen loopback syscalls for a 16-slice
+        // application message. Larger messages retain the streaming fallback.
+        var encoded: [masked_write_scratch_len]u8 align(64) = undefined;
+        var cursor: usize = 0;
+        for (0..frame_count) |index| {
+            const range = compressedFragmentRange(
+                compressed_payload.len,
+                frame_count,
+                index,
+            );
+            const payload = compressed_payload[range.start..range.end];
+            var mask_key: [4]u8 = undefined;
+            try std.Io.randomSecure(self.io, &mask_key);
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderInto(
+                &header_storage,
+                if (index == 0) opcode else .continuation,
+                payload,
+                .{
+                    .fin = index + 1 == frame_count,
+                    .mask_key = mask_key,
+                    .rsv1 = index == 0,
+                },
+            );
+            @memcpy(encoded[cursor..][0..header.len], header);
+            cursor += header.len;
+            try websocket.applyMaskCopy(
+                encoded[cursor..][0..payload.len],
+                payload,
+                mask_key,
+                0,
+            );
+            cursor += payload.len;
+        }
+        try self.transport().writeAll(encoded[0..cursor]);
+        return true;
+    }
+
+    fn writeUnmaskedCompressedFragmentsLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        compressed_payload: []const u8,
+        frame_count: usize,
+    ) Error!void {
+        // One logical message can contain many intentionally tiny compressed
+        // continuation frames. Batch their stack headers and borrowed payload
+        // ranges so TCP/std-TLS perform bounded writes/flushes instead of one
+        // per frame. Larger frame counts fall back to the ordinary loop below.
+        const max_batched_frames: usize = 16;
+        if (frame_count > max_batched_frames) {
+            for (0..frame_count) |index| {
+                const range = compressedFragmentRange(
+                    compressed_payload.len,
+                    frame_count,
+                    index,
+                );
+                try self.writeFrameLockedExtended(
+                    if (index == 0) opcode else .continuation,
+                    compressed_payload[range.start..range.end],
+                    index + 1 == frame_count,
+                    .{ .rsv1 = index == 0 },
+                );
+            }
+            return;
+        }
+
+        var headers: [max_batched_frames][websocket.max_frame_header_len]u8 = undefined;
+        var parts: [max_batched_frames * 2][]const u8 = undefined;
+        for (0..frame_count) |index| {
+            const range = compressedFragmentRange(
+                compressed_payload.len,
+                frame_count,
+                index,
+            );
+            const payload = compressed_payload[range.start..range.end];
+            parts[index * 2] = try websocket.writeFrameHeaderInto(
+                &headers[index],
+                if (index == 0) opcode else .continuation,
+                payload,
+                .{
+                    .fin = index + 1 == frame_count,
+                    .rsv1 = index == 0,
+                },
+            );
+            parts[index * 2 + 1] = payload;
+        }
+        try self.transport().writeAllSlices(parts[0 .. frame_count * 2]);
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
