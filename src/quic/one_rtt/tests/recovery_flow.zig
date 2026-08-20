@@ -670,7 +670,11 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     defer server.deinit();
 
     const ping = [_]quic.Frame{.{ .ping = {} }};
-    for (0..5) |_| try client.send(&ping);
+    // Keep all five sends and the ACK inside the initial 100ms time-loss
+    // threshold. The test is specifically for packet-threshold loss; using
+    // wall-clock `send`/`receivePacket` made a busy test host occasionally
+    // classify packet 2 by time before the assertion below.
+    for (0..5) |_| try client.sendAt(&ping, 0);
     try std.testing.expectEqual(@as(usize, 5), client.pendingRecoveryCount());
 
     for (0..4) |_| {
@@ -683,7 +687,7 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     try std.testing.expectEqual(@as(u64, 4), fifth.packet.packet_number);
     try server.sendAck(0);
 
-    var ack_packet = try client.receivePacket();
+    var ack_packet = try client.receivePacketAt(1);
     defer ack_packet.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 4), ack_packet.frames[0].ack.largest_acknowledged);
     try std.testing.expect(client.sent.packets.items[0].lost);
