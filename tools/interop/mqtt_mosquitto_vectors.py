@@ -1533,6 +1533,41 @@ def reject_publish_subscription_identifier(
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def unsubscribe_reason_codes(executable: Path, mqtt_packets) -> None:
+    topic = "unsubscribe/reason/existing"
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_v5(subscriber, mqtt_packets, "unsubscribe-reasons")
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "unsubscribe reason SUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_unsubscribe_multiple(
+                2, [topic, "unsubscribe/reason/missing"], proto_ver=5
+            ))
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_unsuback(
+                    2, reason_code=[0x00, 0x11], proto_ver=5
+                ),
+                "multi-filter UNSUBACK reasons",
+            )
+            connect_v5(publisher, mqtt_packets, "unsubscribe-publisher")
+            publisher.sendall(mqtt_packets.gen_publish(
+                topic, qos=0, payload="not-routed", proto_ver=5
+            ))
+            subscriber.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                subscriber, mqtt_packets.gen_pingresp(),
+                "PINGRESP after unsubscribe",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1565,7 +1600,8 @@ def main() -> None:
     reject_publish_subscription_identifier(
         args.broker, mqtt_packets, mqtt5_props
     )
-    print("Mosquitto-derived MQTT wire vectors passed: 20 scenarios")
+    unsubscribe_reason_codes(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 21 scenarios")
 
 
 if __name__ == "__main__":
