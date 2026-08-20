@@ -537,7 +537,8 @@ zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
-# Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec.
+# Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
+# always enables strict mode and rejects empty, skipped, or failed test runs.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run.

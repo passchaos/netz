@@ -473,8 +473,10 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    deinitializer, and tests cover both ordinary and pushed headers.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
    in h2spec v2.6.0 strict server mode (`H2SPEC=/tmp/h2spec-download/h2spec zig
-   build interop-http2-h2spec -Doptimize=ReleaseFast -- --strict`, 2026-08-20).
-   This covers the external wire checks but does not replace TLS/ALPN or
-   broader HTTP client interoperability evidence.
+   build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-08-21).
+   The gate now supplies `--strict` itself and parses h2spec's summary so an
+   empty selection, skipped case, or failed case cannot be mistaken for a
+   successful conformance run. This covers the external wire checks but does
+   not replace TLS/ALPN or broader HTTP client interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.

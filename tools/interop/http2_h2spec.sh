@@ -46,4 +46,33 @@ if ! grep -q 'h2spec server listening' "$work/server.log"; then
   exit 1
 fi
 
-"$h2spec" --host 127.0.0.1 --port "$port" --timeout 2 "$@"
+log="$work/h2spec.log"
+# Strict mode adds the connection-error GOAWAY check that h2spec otherwise
+# skips. Keep it mandatory for the repository gate rather than relying on every
+# caller to remember an optional flag.
+"$h2spec" --host 127.0.0.1 --port "$port" --timeout 2 --strict "$@" \
+  2>&1 | tee "$log"
+
+# h2spec currently exits successfully when a selector matches no tests. Its
+# summary is therefore part of the gate contract: a successful run must execute
+# at least one test and may neither skip nor fail one.
+python3 - "$log" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+log = Path(sys.argv[1]).read_text(errors="replace")
+matches = re.findall(
+    r"(?m)^(\d+) tests, (\d+) passed, (\d+) skipped, (\d+) failed$",
+    log.replace("\r", ""),
+)
+if len(matches) != 1:
+    raise SystemExit("h2spec did not produce exactly one parseable summary")
+total, passed, skipped, failed = map(int, matches[0])
+if total == 0 or passed != total or skipped != 0 or failed != 0:
+    raise SystemExit(
+        f"h2spec gate rejected totals: total={total} passed={passed} "
+        f"skipped={skipped} failed={failed}"
+    )
+print(f"h2spec strict cases passed: {passed}")
+PY
