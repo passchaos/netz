@@ -254,6 +254,25 @@ const ClientSlot = struct {
         std.debug.assert(self.queue.items.len < self.queue.capacity);
         self.queue.appendAssumeCapacity(delivery);
     }
+
+    fn removePublication(self: *ClientSlot, publication: *Publication) usize {
+        var removed: usize = 0;
+        var index = self.queue_head;
+        while (index < self.queue.items.len) {
+            if (self.queue.items[index].publication != publication) {
+                index += 1;
+                continue;
+            }
+            var delivery = self.queue.orderedRemove(index);
+            delivery.deinit();
+            removed += 1;
+        }
+        if (self.queue_head == self.queue.items.len) {
+            self.queue.clearRetainingCapacity();
+            self.queue_head = 0;
+        }
+        return removed;
+    }
 };
 
 /// A broker listener that accepts a configured, bounded number of live TCP
@@ -1686,6 +1705,20 @@ pub const Broker = struct {
                 self.releaseRouteReservations(plan);
                 return err;
             };
+        var publication_committed = false;
+        errdefer if (!publication_committed) {
+            if (publication) |value| {
+                var removed: usize = 0;
+                for (self.slots) |*slot| {
+                    removed += slot.removePublication(value);
+                }
+                // `Publication` starts with one reference per raw match. Queue
+                // rollback released one per materialized destination; release
+                // the unmaterialized/merged owners here.
+                for (removed..plan.len) |_| value.release();
+            }
+            self.releaseRouteReservations(plan);
+        };
         var enqueued_count: usize = 0;
         for (plan) |match| {
             const destination_index = subscriberIndex(
@@ -1736,6 +1769,7 @@ pub const Broker = struct {
         // overlapping subscriptions were merged. Release the unused owners.
         for (enqueued_count..plan.len) |_| publication.?.release();
         self.releaseRouteReservations(plan);
+        publication_committed = true;
         return .{
             .storage = matches,
             .deliveries = matches[0..plan_count],
