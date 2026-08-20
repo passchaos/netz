@@ -1035,6 +1035,18 @@ bytes and ended with zero live bytes. The endpoint interceptor consumes dropped
 datagrams from QUIC's send perspective, including batch submissions, so normal
 packet-number/recovery semantics remain active.
 
+The same real-handshake gate now accepts
+`--mode=reorder --reorder-every=5`. The client endpoint holds every fifth
+outgoing datagram,
+sends its successor first, then releases the held packet; handshake traffic is
+excluded by enabling the hook only for the 4 MiB STREAM upload. Three CPU 0-7
+runs verified all 4,194,304 bytes, considered 504-610 datagrams, held 100-122,
+and reported 33-160 packets declared lost while completing at 310.38-379.01
+MiB/s. A no-drop control through the same fault-mode path measured 313.00-
+466.71 MiB/s. The wide first-run spread is reported rather than converted into
+a speed claim; the durable result is successful byte-exact recovery under real
+client STREAM packet reordering.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary

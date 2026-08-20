@@ -53,7 +53,7 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake, echo, stream_churn, aggregate, loss };
+const Mode = enum { upload, handshake, echo, stream_churn, aggregate, loss, reorder };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
         try runAggregateBenchmark(config, server_key);
         return;
     }
-    if (config.mode == .loss) {
+    if (config.mode == .loss or config.mode == .reorder) {
         try runLossBenchmark(
             std.heap.smp_allocator,
             config,
@@ -165,6 +165,7 @@ const Config = struct {
     connections: usize = default_connections,
     loss_pct: u8 = 0,
     rtt_us: u64 = 0,
+    reorder_every: usize = 0,
 };
 
 const IterationResult = struct {
@@ -174,6 +175,8 @@ const IterationResult = struct {
     payload_bytes_received: usize,
     loss_considered: usize = 0,
     loss_dropped: usize = 0,
+    reorder_considered: usize = 0,
+    reorder_held: usize = 0,
 };
 
 const Summary = struct {
@@ -244,6 +247,22 @@ const LossState = struct {
     }
 };
 
+const ReorderState = struct {
+    enabled: std.atomic.Value(bool) = .init(false),
+    considered: std.atomic.Value(usize) = .init(0),
+    held: std.atomic.Value(usize) = .init(0),
+    every: usize,
+
+    fn shouldHold(context: *anyopaque, _: []const u8) bool {
+        const self: *ReorderState = @ptrCast(@alignCast(context));
+        if (!self.enabled.load(.acquire)) return false;
+        const index = self.considered.fetchAdd(1, .monotonic) + 1;
+        if (index % self.every != 0) return false;
+        _ = self.held.fetchAdd(1, .monotonic);
+        return true;
+    }
+};
+
 fn runIteration(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -257,6 +276,7 @@ fn runIteration(
         .half_rtt_us = config.rtt_us / 2,
         .io = io,
     };
+    var reorder_state = ReorderState{ .every = config.reorder_every };
     const endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = max_datagram_size,
         .max_frames_per_datagram = 32,
@@ -268,6 +288,10 @@ fn runIteration(
     if (config.mode == .loss) client_endpoint_limits.send_interceptor = .{
         .context = &loss_state,
         .should_drop = LossState.shouldDrop,
+    };
+    if (config.mode == .reorder) client_endpoint_limits.send_interceptor = .{
+        .context = &reorder_state,
+        .should_hold = ReorderState.shouldHold,
     };
     const one_rtt_config: netz.quic.handshake.OneRttConfig = .{
         .max_datagram_size = max_datagram_size,
@@ -539,6 +563,7 @@ fn runIteration(
 
     const started_ns = nowNs(io);
     if (config.mode == .loss) loss_state.enabled.store(true, .release);
+    if (config.mode == .reorder) reorder_state.enabled.store(true, .release);
     const deadline_ns = started_ns +| transfer_timeout_ns;
     try sendTransfer(
         &established.connection,
@@ -570,6 +595,8 @@ fn runIteration(
         .payload_bytes_received = received,
         .loss_considered = loss_state.considered.load(.monotonic),
         .loss_dropped = loss_state.dropped.load(.monotonic),
+        .reorder_considered = reorder_state.considered.load(.monotonic),
+        .reorder_held = reorder_state.held.load(.monotonic),
     };
 }
 
@@ -970,6 +997,8 @@ fn parseArgs(
             config.mode = .aggregate;
         } else if (std.mem.eql(u8, arg, "--mode=loss")) {
             config.mode = .loss;
+        } else if (std.mem.eql(u8, arg, "--mode=reorder")) {
+            config.mode = .reorder;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
@@ -1003,6 +1032,10 @@ fn parseArgs(
                 arg["--rtt-us=".len..],
                 10,
             );
+        } else if (std.mem.startsWith(u8, arg, "--reorder-every=")) {
+            config.reorder_every = try parsePositiveUsize(
+                arg["--reorder-every=".len..],
+            );
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
@@ -1021,7 +1054,7 @@ fn parseArgs(
     if (config.mode == .stream_churn and !iterations_set) {
         config.iterations = default_stream_churn_iterations;
     }
-    if (config.mode == .loss and
+    if ((config.mode == .loss or config.mode == .reorder) and
         config.transfer_bytes == default_transfer_bytes)
     {
         config.transfer_bytes = default_loss_transfer_bytes;
@@ -1039,6 +1072,9 @@ fn parseArgs(
         config.batch_packets > max_packet_batch_size or
         config.streams > config.transfer_bytes)
     {
+        return error.InvalidArgument;
+    }
+    if (config.mode == .reorder and config.reorder_every < 2) {
         return error.InvalidArgument;
     }
     return config;
@@ -1194,24 +1230,32 @@ fn runLossBenchmark(
         return error.InvalidTransferSize;
     }
     std.debug.print(
-        "QUIC real TLS 1.3 simulated-loss benchmark\n" ++
+        "QUIC real TLS 1.3 network-fault benchmark\n" ++
+            "  mode: {s}\n" ++
             "  loss percent: {d}\n" ++
+            "  reorder every: {d}\n" ++
             "  configured RTT us: {d}\n" ++
             "  transfer bytes: {d}\n" ++
             "  elapsed ns: {d}\n" ++
             "  MiB/s: {d:.2}\n" ++
             "  datagrams considered: {d}\n" ++
             "  datagrams dropped: {d}\n" ++
+            "  reorder datagrams considered: {d}\n" ++
+            "  datagrams held: {d}\n" ++
             "  transport packets lost: {d}\n" ++
             "  payload bytes verified: {d}\n",
         .{
+            @tagName(config.mode),
             config.loss_pct,
+            config.reorder_every,
             config.rtt_us,
             config.transfer_bytes,
             result.elapsed_ns,
             mibPerSecond(config.transfer_bytes, result.elapsed_ns),
             result.loss_considered,
             result.loss_dropped,
+            result.reorder_considered,
+            result.reorder_held,
             result.client_stats.packets_lost,
             result.payload_bytes_received,
         },
