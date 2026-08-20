@@ -1019,6 +1019,52 @@ pub const Connection = struct {
         return packet_id;
     }
 
+    /// Add or reuse a negotiated Topic Alias for a server-forwarded PUBLISH.
+    ///
+    /// The caller retains property-list ownership and must pass the returned
+    /// Topic Name plus the same list to `writePublish`. Alias state is committed
+    /// there only after the packet write succeeds. Existing explicit aliases
+    /// are left untouched, and a full alias table falls back to the full topic.
+    pub fn prepareAutomaticTopicAlias(
+        self: *Connection,
+        topic: []const u8,
+        properties: *std.ArrayList(mqtt.Property),
+    ) Error![]const u8 {
+        if (self.protocol != .v5 or topic.len == 0 or
+            self.peer_topic_alias_maximum == 0 or
+            mqtt.topicAlias(properties.items) != null)
+        {
+            return topic;
+        }
+        const limit = @min(
+            @as(usize, self.peer_topic_alias_maximum),
+            self.outgoing_topic_aliases.len,
+        );
+        var empty_index: ?usize = null;
+        for (self.outgoing_topic_aliases[0..limit], 0..) |
+            maybe_stored,
+            index,
+        | {
+            if (maybe_stored) |stored| {
+                if (std.mem.eql(u8, stored, topic)) {
+                    try properties.append(self.allocator, .{ .two_byte = .{
+                        .id = .topic_alias,
+                        .value = @intCast(index + 1),
+                    } });
+                    return "";
+                }
+            } else if (empty_index == null) {
+                empty_index = index;
+            }
+        }
+        const index = empty_index orelse return topic;
+        try properties.append(self.allocator, .{ .two_byte = .{
+            .id = .topic_alias,
+            .value = @intCast(index + 1),
+        } });
+        return topic;
+    }
+
     /// Write one Session packet encoded under the broker state lock.
     ///
     /// The byte slice is detached from Session Store ownership, allowing the
@@ -2947,6 +2993,56 @@ test "MQTT connection rejects topic aliases beyond negotiated maximum" {
         .payload = "payload",
     };
     try std.testing.expectError(error.InvalidProperty, connection.applyIncomingTopicAlias(&incoming));
+}
+
+test "MQTT connection automatically establishes and reuses outgoing aliases" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .peer_topic_alias_maximum = 2,
+    };
+    defer for (connection.outgoing_topic_aliases) |maybe_topic| {
+        if (maybe_topic) |topic| allocator.free(topic);
+    };
+
+    var first_properties: std.ArrayList(mqtt.Property) = .empty;
+    defer first_properties.deinit(allocator);
+    const first_topic = try connection.prepareAutomaticTopicAlias(
+        "alias/topic",
+        &first_properties,
+    );
+    try std.testing.expectEqualStrings("alias/topic", first_topic);
+    try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(
+        first_properties.items,
+    ));
+    try connection.rememberOutgoingTopicAlias(
+        first_topic,
+        first_properties.items,
+    );
+
+    var repeated_properties: std.ArrayList(mqtt.Property) = .empty;
+    defer repeated_properties.deinit(allocator);
+    const repeated_topic = try connection.prepareAutomaticTopicAlias(
+        "alias/topic",
+        &repeated_properties,
+    );
+    try std.testing.expectEqualStrings("", repeated_topic);
+    try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(
+        repeated_properties.items,
+    ));
+
+    var second_properties: std.ArrayList(mqtt.Property) = .empty;
+    defer second_properties.deinit(allocator);
+    const second_topic = try connection.prepareAutomaticTopicAlias(
+        "second/topic",
+        &second_properties,
+    );
+    try std.testing.expectEqualStrings("second/topic", second_topic);
+    try std.testing.expectEqual(@as(?u16, 2), mqtt.topicAlias(
+        second_properties.items,
+    ));
 }
 
 test "MQTT runtime caps advertised topic alias maximum to local storage" {

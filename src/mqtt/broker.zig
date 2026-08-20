@@ -1915,8 +1915,13 @@ pub const Broker = struct {
                 delivery.deinit();
                 continue;
             }
-            const packet_id = connection.writePublish(
+            const outgoing_topic = try connection
+                .prepareAutomaticTopicAlias(
                 delivery.publication.topic(),
+                &properties,
+            );
+            const packet_id = connection.writePublish(
+                outgoing_topic,
                 delivery.publication.payload(),
                 .{
                     .qos = delivery.qos,

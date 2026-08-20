@@ -674,6 +674,76 @@ def incoming_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def outgoing_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Bounded port of Mosquitto 02-subpub-b2c-topic-alias.py. The subscriber
+    # advertises two aliases; first delivery establishes alias 1 with the full
+    # topic, and the repeated topic must use an empty Topic Name plus alias 1.
+    topic = "02/b2c/topic/alias/1"
+    maximum_property = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.TOPIC_ALIAS_MAXIMUM, 2
+    )
+    alias_property = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.TOPIC_ALIAS, 1
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            subscriber.sendall(
+                mqtt_packets.gen_connect(
+                    "02-b2c-topic-alias",
+                    proto_ver=5,
+                    properties=maximum_property,
+                )
+            )
+            connack = read_packet(subscriber)
+            if connack[0] != 0x20 or connack[3] != 0:
+                raise AssertionError(f"invalid alias CONNACK: {connack.hex()}")
+            connect_v5(
+                publisher, mqtt_packets, "02-b2c-topic-alias-helper"
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "outgoing topic alias SUBACK",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic, qos=0, payload="first", proto_ver=5
+                )
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload="first",
+                    proto_ver=5,
+                    properties=alias_property,
+                ),
+                "outgoing topic alias establish",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic, qos=0, payload="second", proto_ver=5
+                )
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    "",
+                    qos=0,
+                    payload="second",
+                    proto_ver=5,
+                    properties=alias_property,
+                ),
+                "outgoing topic alias reuse",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
     # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
     # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
@@ -766,8 +836,9 @@ def main() -> None:
     persistent_no_local(args.broker, mqtt_packets)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
+    outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 9 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 10 scenarios")
 
 
 if __name__ == "__main__":

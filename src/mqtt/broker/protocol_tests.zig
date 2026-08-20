@@ -224,8 +224,12 @@ test "broker auto-detects MQTT 3.1.1 and MQTT 5 on one listener" {
         v5_delivery.publish.payload,
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         v5_delivery.publish.properties.len,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 1),
+        mqtt.topicAlias(v5_delivery.publish.properties),
     );
     try v5_subscriber.writePubAck(
         v5_delivery.publish.packet_id.?,
