@@ -279,13 +279,20 @@ The listener-wide cap also applies to MQTT 3.1.1 connections even though that
 protocol cannot advertise it in CONNACK. CONNECT rejects a Will above Maximum
 QoS, and rejects a retained Will when Retain Available is false; MQTT 5 peers
 receive reason `0x9b` or `0x9a`, respectively.
+Post-CONNECT PUBLISH violations receive the same precise MQTT 5 DISCONNECT
+reasons before the broker closes the Network Connection. Receive Maximum
+overflow is likewise mapped to DISCONNECT `0x93`; MQTT 3.1.1 peers receive the
+only representation available to that protocol, a connection close.
 
 This matches the audited Mosquitto control points: `src/handle_subscribe.c`
 caps requested subscription QoS, `src/database.c` caps outbound delivery QoS,
 and `src/handle_connect.c` rejects unsupported Will QoS and retain settings.
+Mosquitto's `src/read_handle.c` maps the corresponding post-CONNECT failures
+to the same MQTT 5 DISCONNECT reasons.
 Focused tests cover the advertised property and SUBACK, live delivery, durable
 Session reconnect delivery, Session packet encoding, and both Will refusal
-reason codes.
+reason codes, plus raw non-compliant PUBLISH packets for both capabilities and
+Receive Maximum overflow.
 
 ## MQTT 5 Enhanced Authentication
 

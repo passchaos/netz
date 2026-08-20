@@ -2299,6 +2299,11 @@ const ClientTask = struct {
     ) !void {
         while (true) {
             var event = connection.readBrokerEventWithKeepAlive() catch |err| {
+                if (try task.disconnectForReadViolation(
+                    slot,
+                    connection,
+                    err,
+                )) return;
                 return err;
             };
             defer event.deinit(task.broker.allocator);
@@ -2452,7 +2457,68 @@ const ClientTask = struct {
             }
         }
     }
+
+    fn disconnectForReadViolation(
+        task: ClientTask,
+        slot: *ClientSlot,
+        connection: *runtime.Connection,
+        err: anyerror,
+    ) !bool {
+        const reason_code = disconnectReasonForReadViolation(err) orelse
+            return false;
+        if (connection.protocol == .v5) {
+            slot.writer_mutex.lockUncancelable(task.broker.io);
+            defer slot.writer_mutex.unlock(task.broker.io);
+            connection.writeDisconnectWithProperties(
+                reason_code,
+                &.{},
+            ) catch |write_err| switch (write_err) {
+                // A peer can close first or advertise a Maximum Packet Size
+                // too small for the four-byte MQTT 5 DISCONNECT. In both
+                // cases closing the Network Connection is the required
+                // fallback, so do not turn client behavior into a broker-wide
+                // serve failure.
+                error.OutgoingPacketTooLarge => {},
+                else => if (!ungracefulTransportClose(write_err)) {
+                    return write_err;
+                },
+            };
+        }
+        return true;
+    }
 };
+
+fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
+    return switch (err) {
+        error.QoSNotSupported => 0x9b,
+        error.RetainNotSupported => 0x9a,
+        error.ReceiveMaximumExceeded => 0x93,
+        else => null,
+    };
+}
+
+test "broker maps only negotiated publish violations to DISCONNECT reasons" {
+    try std.testing.expectEqual(
+        @as(?u8, 0x9b),
+        disconnectReasonForReadViolation(error.QoSNotSupported),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x9a),
+        disconnectReasonForReadViolation(error.RetainNotSupported),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x93),
+        disconnectReasonForReadViolation(error.ReceiveMaximumExceeded),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, null),
+        disconnectReasonForReadViolation(error.InvalidProperty),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, null),
+        disconnectReasonForReadViolation(error.InvalidQoS),
+    );
+}
 
 fn ungracefulTransportClose(err: anyerror) bool {
     return switch (err) {

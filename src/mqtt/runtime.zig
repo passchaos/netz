@@ -16,6 +16,8 @@ pub const Error = packet_transport.Error || error{
     ConnectRefused,
     InflightFull,
     ReceiveMaximumExceeded,
+    QoSNotSupported,
+    RetainNotSupported,
     OutgoingPacketTooLarge,
     PublishRefused,
     SubscriptionRefused,
@@ -1790,8 +1792,12 @@ pub const Connection = struct {
     }
 
     fn validateIncomingPublishCapabilities(self: Connection, publish_packet: mqtt.Publish) Error!void {
-        if (@intFromEnum(publish_packet.qos) > @intFromEnum(self.local_maximum_qos)) return error.InvalidQoS;
-        if (publish_packet.retain and !self.local_retain_available) return error.InvalidProperty;
+        // Keep negotiated-capability failures distinct from malformed wire
+        // values. The broker can then send the precise MQTT 5 DISCONNECT
+        // reason without accidentally classifying every codec InvalidQoS or
+        // InvalidProperty failure as an unsupported feature.
+        if (@intFromEnum(publish_packet.qos) > @intFromEnum(self.local_maximum_qos)) return error.QoSNotSupported;
+        if (publish_packet.retain and !self.local_retain_available) return error.RetainNotSupported;
     }
 
     fn validateIncomingPubRel(self: Connection, packet_id: u16) Error!void {
@@ -3217,7 +3223,7 @@ test "MQTT connection enforces peer publish capabilities" {
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{ .retain = true }));
 
     connection.local_maximum_qos = .at_most_once;
-    try std.testing.expectError(error.InvalidQoS, connection.validateIncomingPublishCapabilities(.{
+    try std.testing.expectError(error.QoSNotSupported, connection.validateIncomingPublishCapabilities(.{
         .dup = false,
         .qos = .at_least_once,
         .retain = false,
@@ -3228,7 +3234,7 @@ test "MQTT connection enforces peer publish capabilities" {
 
     connection.local_maximum_qos = .exactly_once;
     connection.local_retain_available = false;
-    try std.testing.expectError(error.InvalidProperty, connection.validateIncomingPublishCapabilities(.{
+    try std.testing.expectError(error.RetainNotSupported, connection.validateIncomingPublishCapabilities(.{
         .dup = false,
         .qos = .at_most_once,
         .retain = true,

@@ -494,6 +494,7 @@ test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
 }
 
 test {
+    _ = @import("broker/capability_tests.zig");
     _ = @import("broker/protocol_tests.zig");
     _ = @import("broker/qos2_tests.zig");
     _ = @import("broker/retained_tests.zig");
