@@ -154,15 +154,18 @@ test "HTTP/2 response body batch resumes fairly under small windows" {
 
     const Shared = struct {
         server: *Server,
+        io: std.Io,
+        client_finished: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
+            runFallible(shared) catch |err| {
                 shared.err = err;
             };
         }
 
-        fn runFallible(server_ptr: *Server) !void {
+        fn runFallible(shared: *@This()) !void {
+            const server_ptr = shared.server;
             var connection = try server_ptr.accept();
             defer connection.close();
             var requests: [parallel]OwnedRequest = undefined;
@@ -184,9 +187,14 @@ test "HTTP/2 response body batch resumes fairly under small windows" {
                 &responses,
                 chunk_size,
             );
+            // This test targets flow-control fairness, not TCP teardown. Keep
+            // the accepted socket alive until the client parses every final
+            // DATA frame; otherwise unread WINDOW_UPDATE bytes can make Linux
+            // close abortive and turn a successful response into EOF.
+            shared.client_finished.waitUncancelable(shared.io);
         }
     };
-    var shared = Shared{ .server = &server };
+    var shared = Shared{ .server = &server, .io = io };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try Client.connect(
@@ -240,6 +248,7 @@ test "HTTP/2 response body batch resumes fairly under small windows" {
         &.{ 0, 1, 2, 3, 4 },
         &context.first_round,
     );
+    shared.client_finished.set(io);
 
     thread.join();
     if (shared.err) |err| return err;

@@ -544,7 +544,10 @@ test "broker queues offline QoS 1 and drains on resume" {
     var delivered = try resumed.readPublish();
     defer delivered.deinit(allocator);
     try std.testing.expectEqualStrings("queued", delivered.publish.payload);
-    try std.testing.expect(!delivered.publish.dup);
+    // DISCONNECT has no acknowledgment. If reconnect races the broker's prior
+    // task teardown, it may legitimately have attempted this queued PUBLISH on
+    // that previous Network Connection, in which case MQTT requires DUP=1.
+    // The Store-level unsent-write test covers the stricter never-on-wire case.
     try resumed.writePubAck(delivered.publish.packet_id.?, 0);
 
     try disconnectAll(&.{ &publisher, &resumed });
