@@ -120,6 +120,28 @@ pub const Publication = struct {
         subscription_identifier: ?usize,
         now: std.Io.Timestamp,
     ) Error!bool {
+        var storage: [1]usize = undefined;
+        const identifiers = if (subscription_identifier) |identifier| blk: {
+            storage[0] = identifier;
+            break :blk storage[0..1];
+        } else storage[0..0];
+        return self.appendDeliveryPropertiesMany(
+            out,
+            allocator,
+            protocol,
+            identifiers,
+            now,
+        );
+    }
+
+    pub fn appendDeliveryPropertiesMany(
+        self: Publication,
+        out: *std.ArrayList(mqtt.Property),
+        allocator: std.mem.Allocator,
+        protocol: mqtt.ProtocolVersion,
+        subscription_identifiers: []const usize,
+        now: std.Io.Timestamp,
+    ) Error!bool {
         const remaining = remainingExpiry(
             self.expiry_interval,
             self.stored_at_ns,
@@ -129,8 +151,7 @@ pub const Publication = struct {
         if (protocol == .v3_1_1) return true;
         try out.ensureTotalCapacity(
             allocator,
-            self.properties.len +
-                @intFromBool(subscription_identifier != null),
+            self.properties.len + subscription_identifiers.len,
         );
         for (self.properties) |property| {
             if (property == .four_byte and
@@ -144,7 +165,7 @@ pub const Publication = struct {
                 out.appendAssumeCapacity(property);
             }
         }
-        if (subscription_identifier) |identifier| {
+        for (subscription_identifiers) |identifier| {
             out.appendAssumeCapacity(.{ .varint = .{
                 .id = .subscription_identifier,
                 .value = identifier,

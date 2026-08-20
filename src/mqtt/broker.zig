@@ -88,10 +88,53 @@ const Delivery = struct {
     qos: mqtt.QoS,
     retain: bool,
     subscription_identifier: ?usize = null,
+    additional_subscription_identifiers: []usize = &.{},
 
     fn deinit(self: *Delivery) void {
+        if (self.additional_subscription_identifiers.len != 0) {
+            self.publication.allocator.free(
+                self.additional_subscription_identifiers,
+            );
+        }
         self.publication.release();
         self.* = undefined;
+    }
+
+    fn appendSubscriptionIdentifier(
+        self: *Delivery,
+        allocator: std.mem.Allocator,
+        identifier: ?usize,
+    ) Error!void {
+        const value = identifier orelse return;
+        if (self.subscription_identifier == null) {
+            self.subscription_identifier = value;
+            return;
+        }
+        for (self.additional_subscription_identifiers) |existing| {
+            if (existing == value) return;
+        }
+        const old = self.additional_subscription_identifiers;
+        const replacement = try allocator.alloc(usize, old.len + 1);
+        @memcpy(replacement[0..old.len], old);
+        replacement[old.len] = value;
+        if (old.len != 0) allocator.free(old);
+        self.additional_subscription_identifiers = replacement;
+    }
+
+    fn identifiersInto(
+        self: Delivery,
+        out: []usize,
+    ) []const usize {
+        var count: usize = 0;
+        if (self.subscription_identifier) |identifier| {
+            out[count] = identifier;
+            count += 1;
+        }
+        @memcpy(
+            out[count..][0..self.additional_subscription_identifiers.len],
+            self.additional_subscription_identifiers,
+        );
+        return out[0 .. count + self.additional_subscription_identifiers.len];
     }
 };
 
@@ -1643,12 +1686,29 @@ pub const Broker = struct {
                 self.releaseRouteReservations(plan);
                 return err;
             };
+        var enqueued_count: usize = 0;
         for (plan) |match| {
             const destination_index = subscriberIndex(
                 match.subscriber_id,
                 self.slots.len,
             ).?;
             const destination = &self.slots[destination_index];
+            var duplicate: ?*Delivery = null;
+            for (destination.queue.items[destination.queue_head..]) |
+                *queued_delivery,
+            | {
+                if (queued_delivery.publication == publication.?) {
+                    duplicate = queued_delivery;
+                    break;
+                }
+            }
+            if (duplicate) |delivery| {
+                try delivery.appendSubscriptionIdentifier(
+                    self.allocator,
+                    match.subscription_identifier,
+                );
+                continue;
+            }
             const delivery_qos = minQos(
                 publish.qos,
                 match.subscription.qos,
@@ -1663,7 +1723,11 @@ pub const Broker = struct {
                 .subscription_identifier = match.subscription_identifier,
             };
             destination.appendDeliveryAssumeCapacity(delivery);
+            enqueued_count += 1;
         }
+        // Publication references were reserved from raw match count before
+        // overlapping subscriptions were merged. Release the unused owners.
+        for (enqueued_count..plan.len) |_| publication.?.release();
         self.releaseRouteReservations(plan);
         return .{
             .storage = matches,
@@ -1917,11 +1981,22 @@ pub const Broker = struct {
             const connection = &slot.connection.?;
             var properties: std.ArrayList(mqtt.Property) = .empty;
             defer properties.deinit(self.allocator);
-            if (!try delivery.publication.appendDeliveryProperties(
+            const identifier_count =
+                delivery.additional_subscription_identifiers.len +
+                @intFromBool(delivery.subscription_identifier != null);
+            var identifiers_stack: [8]usize = undefined;
+            const identifiers = if (identifier_count <= identifiers_stack.len)
+                identifiers_stack[0..identifier_count]
+            else
+                try self.allocator.alloc(usize, identifier_count);
+            defer if (identifiers.ptr != identifiers_stack[0..].ptr) {
+                self.allocator.free(identifiers);
+            };
+            if (!try delivery.publication.appendDeliveryPropertiesMany(
                 &properties,
                 self.allocator,
                 connection.protocol,
-                delivery.subscription_identifier,
+                delivery.identifiersInto(identifiers),
                 std.Io.Clock.awake.now(self.io),
             )) {
                 delivery.deinit();

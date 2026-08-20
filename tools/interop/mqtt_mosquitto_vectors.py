@@ -286,6 +286,48 @@ def subscription_identifiers(executable: Path, mqtt_packets, mqtt5_props) -> Non
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def multiple_subscription_identifiers(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    topic = "multi/subid/value"
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "multi-subscription-id")
+            subscriptions = (
+                (1, "multi/subid/value", 3),
+                (2, "multi/subid/+", 9),
+            )
+            for mid, topic_filter, identifier in subscriptions:
+                properties = mqtt5_props.gen_varint_prop(
+                    mqtt5_props.SUBSCRIPTION_IDENTIFIER, identifier
+                )
+                sock.sendall(mqtt_packets.gen_subscribe(
+                    mid, topic_filter, 0, proto_ver=5, properties=properties
+                ))
+                expect_packet(
+                    sock, mqtt_packets.gen_suback(mid, 0, proto_ver=5),
+                    f"multi-subid SUBACK {mid}",
+                )
+            sock.sendall(mqtt_packets.gen_publish(
+                topic, qos=0, payload="both", proto_ver=5
+            ))
+            properties = (
+                mqtt5_props.gen_varint_prop(
+                    mqtt5_props.SUBSCRIPTION_IDENTIFIER, 3
+                )
+                + mqtt5_props.gen_varint_prop(
+                    mqtt5_props.SUBSCRIPTION_IDENTIFIER, 9
+                )
+            )
+            expect_packet(
+                sock, mqtt_packets.gen_publish(
+                    topic, qos=0, payload="both", proto_ver=5,
+                    properties=properties,
+                ), "multi-subid forwarded PUBLISH",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def hostile_initial_packets(executable: Path, mqtt_packets) -> None:
     # Derived from Mosquitto 01-bad-initial-packets.py. A huge declared
     # Remaining Length must be rejected before payload allocation/read, and a
@@ -1774,6 +1816,7 @@ def main() -> None:
 
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
+    multiple_subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
     hostile_initial_packets(args.broker, mqtt_packets)
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
@@ -1801,7 +1844,7 @@ def main() -> None:
     retained_replacement(args.broker, mqtt_packets, mqtt5_props)
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 25 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 26 scenarios")
 
 
 if __name__ == "__main__":
