@@ -766,7 +766,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs fifteen
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs sixteen
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -825,9 +825,13 @@ The fifteenth scenario ports Mosquitto's QoS 2 Maximum Packet Size companion:
 an oversized released message completes publisher PUBREC/PUBREL/PUBCOMP but
 creates no downstream transaction, then a fitting message completes both the
 publisher and independent subscriber QoS 2 handshakes.
+The sixteenth scenario ports Mosquitto's multi-level retained clear vector on
+one MQTT 5 connection: three nested topics replay through `#`, middle and leaf
+tombstones return no-match PUBACK 0x10, and subsequent wildcard replay proves
+ancestor/child retained trie nodes survive independent deletion.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all fifteen scenarios pass. This is deliberately described as a selected
+packets; all sixteen scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -839,5 +843,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Fifteen passing packet-vector scenarios do not cover
+   persistence semantics. Sixteen passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

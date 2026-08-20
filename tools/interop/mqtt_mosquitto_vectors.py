@@ -1283,6 +1283,68 @@ def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_multilevel_clear(executable: Path, mqtt_packets) -> None:
+    # Single-process MQTT 5 port of Mosquitto 04-retain-clear-multiple.py.
+    # Nested retained nodes are removed independently; wildcard replay after
+    # each tombstone proves trie compaction preserves ancestors and children.
+    topics = ["1", "1/2/3/4", "1/2/3/4/5/6/7"]
+    payload = "retained message"
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "retain-clear-test")
+            for mid, topic in enumerate(topics, start=1):
+                sock.sendall(
+                    mqtt_packets.gen_publish(
+                        topic, qos=1, mid=mid, payload=payload,
+                        retain=True, proto_ver=5,
+                    )
+                )
+                expect_packet(
+                    sock, mqtt_packets.gen_puback(
+                        mid, proto_ver=5, reason_code=0x10
+                    ),
+                    f"multilevel retained set {topic}",
+                )
+
+            def replay(mid: int, expected_topics: list[str]) -> None:
+                sock.sendall(mqtt_packets.gen_subscribe(mid, "#", 0, proto_ver=5))
+                expect_packet(
+                    sock, mqtt_packets.gen_suback(mid, 0, proto_ver=5),
+                    f"multilevel retained SUBACK {mid}",
+                )
+                expect_packets_unordered(
+                    sock,
+                    [mqtt_packets.gen_publish(
+                        topic, qos=0, payload=payload, retain=True, proto_ver=5
+                    ) for topic in expected_topics],
+                    f"multilevel retained replay {mid}",
+                )
+                sock.sendall(mqtt_packets.gen_unsubscribe(mid, "#", proto_ver=5))
+                expect_packet(
+                    sock, mqtt_packets.gen_unsuback(mid, proto_ver=5),
+                    f"multilevel retained UNSUBACK {mid}",
+                )
+
+            replay(10, topics)
+            remaining = topics.copy()
+            for mid, topic in enumerate(
+                ("1/2/3/4", "1/2/3/4/5/6/7"), start=20
+            ):
+                sock.sendall(mqtt_packets.gen_publish(
+                    topic, qos=1, mid=mid, payload=None,
+                    retain=True, proto_ver=5,
+                ))
+                expect_packet(
+                    sock, mqtt_packets.gen_puback(
+                        mid, proto_ver=5, reason_code=0x10
+                    ),
+                    f"multilevel retained clear {topic}",
+                )
+                remaining.remove(topic)
+                replay(mid + 20, remaining)
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1308,7 +1370,8 @@ def main() -> None:
     maximum_packet_size_qos1(args.broker, mqtt_packets, mqtt5_props)
     maximum_packet_size_qos2(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 15 scenarios")
+    retained_multilevel_clear(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 16 scenarios")
 
 
 if __name__ == "__main__":
