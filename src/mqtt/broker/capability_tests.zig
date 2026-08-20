@@ -425,3 +425,54 @@ test "broker disconnects MQTT 5 publisher with invalid Topic Alias" {
     );
     try joinServer(thread, &joined, &serve);
 }
+
+test "broker disconnects MQTT 5 peer after malformed control flags" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "invalid-flags" },
+    );
+    defer client.close();
+
+    // PINGREQ requires flags zero. This raw frame reaches the broker parser
+    // with the reserved low bit set and must elicit Protocol Error.
+    var malformed = [_]u8{ 0xc1, 0x00 };
+    try client.transport.writePacket(&malformed);
+    var disconnect = try client.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x82),
+        disconnect.disconnect.reason_code,
+    );
+    try joinServer(thread, &joined, &serve);
+}

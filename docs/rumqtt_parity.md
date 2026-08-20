@@ -288,6 +288,10 @@ Clients that ignore disabled Shared Subscription, Subscription Identifier, or
 Wildcard Subscription capabilities receive `0x9e`, `0xa1`, or `0xa2` rather
 than a generic local error or silent close. The high-level client still rejects
 such SUBSCRIBE attempts before writing them.
+Malformed MQTT 5 traffic is mapped at the same broker boundary: protocol
+violations receive DISCONNECT `0x82`, malformed packet/UTF-8 failures receive
+`0x81`, and configured packet-size violations receive `0x95` when the peer's
+own outbound limit permits the response.
 
 This matches the audited Mosquitto control points: `src/handle_subscribe.c`
 caps requested subscription QoS, `src/database.c` caps outbound delivery QoS,
@@ -299,6 +303,7 @@ Session reconnect delivery, Session packet encoding, and both Will refusal
 reason codes, plus raw non-compliant PUBLISH packets for both capabilities and
 Receive Maximum overflow, and an out-of-range Topic Alias.
 The three subscription capability flags also have raw-wire negative tests.
+An invalid-control-flags wire case verifies the general Protocol Error path.
 
 ## MQTT 5 Enhanced Authentication
 

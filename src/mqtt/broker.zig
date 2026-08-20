@@ -2497,6 +2497,22 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.SharedSubscriptionsNotSupported => 0x9e,
         error.SubscriptionIdentifiersNotSupported => 0xa1,
         error.WildcardSubscriptionsNotSupported => 0xa2,
+        error.InvalidPacketType,
+        error.InvalidFlags,
+        error.InvalidQoS,
+        error.InvalidProperty,
+        error.InvalidReasonCode,
+        error.InvalidTopic,
+        error.InvalidSubscription,
+        error.InvalidPacketIdentifier,
+        error.UnexpectedPacket,
+        => 0x82,
+        error.BufferTooShort,
+        error.MalformedRemainingLength,
+        error.RemainingLengthTooLarge,
+        error.InvalidUtf8,
+        => 0x81,
+        error.PacketTooLarge => 0x95,
         else => null,
     };
 }
@@ -2537,12 +2553,20 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
         ),
     );
     try std.testing.expectEqual(
-        @as(?u8, null),
+        @as(?u8, 0x82),
         disconnectReasonForReadViolation(error.InvalidProperty),
     );
     try std.testing.expectEqual(
-        @as(?u8, null),
+        @as(?u8, 0x82),
         disconnectReasonForReadViolation(error.InvalidQoS),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
+        disconnectReasonForReadViolation(error.InvalidUtf8),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x95),
+        disconnectReasonForReadViolation(error.PacketTooLarge),
     );
 }
 
