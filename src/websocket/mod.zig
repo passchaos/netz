@@ -908,8 +908,8 @@ pub fn compressMessageVortInto(
 
 /// Encode discontiguous RFC 7692 input without joining caller plaintext.
 ///
-/// Vort emits one non-final fixed-Huffman block per non-empty slice and one
-/// sync-flush block for the message. A bounded rolling dictionary preserves
+/// Vort feeds all non-empty slices into one non-final fixed-Huffman block and
+/// follows it with one sync-flush block. A bounded rolling dictionary preserves
 /// cross-slice matches while DEFLATE bit packing and the WebSocket message
 /// stream remain continuous.
 pub fn compressMessageFragmentsVortInto(

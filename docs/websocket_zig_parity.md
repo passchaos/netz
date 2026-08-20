@@ -72,16 +72,15 @@ message. The chunked encoder keeps plaintext discontiguous while a bounded
 16 KiB rolling dictionary preserves matches across caller slices.
 
 ```text
-permessage-deflate: 5.86-5.87 us/message, 4096 -> 69 wire bytes
-16-slice streaming: 8.07-8.19 us/message, 4096 -> 88 wire bytes, no join
+permessage-deflate: 5.57-5.59 us/message, 4096 -> 69 wire bytes
+16-slice streaming: 6.67-6.71 us/message, 4096 -> 69 wire bytes, no join
 ```
 
 These are three CPU-14-pinned `ReleaseFast` runs on 2026-08-20. Compared with
 the original standard-library encoder baseline, the fragmented path is
-6.2-6.3x faster. Rolling history also reduces the first vort chunked path's
-463-byte payload to 88 bytes with no measurable latency regression; the
-remaining 34-byte difference from the old 54-byte stream is chiefly the fixed
-block header/end marker retained for each caller slice. This remains an
+7.6x faster. Rolling history plus one shared fixed block also reduce the first
+vort chunked path's 463-byte payload to the same 69 bytes as the complete-
+message path. This remains an
 internal encoder baseline and compression-ratio example, not a cross-library
 speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
 `compressed = false`, so no equal compressed-send workload exists there.
@@ -118,7 +117,7 @@ message allocation. With permessage-deflate, the decompressed message lands
 directly in the caller buffer. TCP and RFC 8441 connections retain bounded
 compressed-wire scratch plus a reusable receive DEFLATE history window. Both
 complete and fragmented sends use vort's native raw fixed-block sync flush;
-the fragmented form emits one block per non-empty caller slice without joining
+the fragmented form feeds per-slice token plans into one block without joining
 plaintext and carries up to 16 KiB of prior plaintext as match history. Both
 paths remove the RFC 7692 suffix and set RSV1 only when the wire payload is
 strictly smaller; incompressible/small input is sent unchanged rather than

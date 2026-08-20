@@ -1055,15 +1055,14 @@ header-only stream preparation: 0.54-0.56 ns/op
 
 The same command now includes retained RFC 7692 no-context-takeover complete
 and 16-slice compressor cases. Three CPU-14-pinned 2026-08-20 samples encoded
-a repeated 4 KiB telemetry-like message in 5.86-5.87 us and reduced its wire
-payload from 4,096 to 69 bytes. The discontiguous path took 8.07-8.19 us
-without a plaintext join and produced 88 bytes using a bounded 16 KiB rolling
-dictionary. Versus the prior standard-library 51.10 us fragmented baseline,
-this is a 6.2-6.3x latency improvement. It also recovers most of the first
-slice-local vort path's 463-byte wire payload without regressing latency; the
-remaining per-slice fixed-block framing explains most of the gap to the old
-54-byte standard-library stream. This is an internal
-baseline rather than a reference ratio:
+a repeated 4 KiB telemetry-like message in 5.57-5.59 us and reduced its wire
+payload from 4,096 to 69 bytes. The discontiguous path took 6.67-6.71 us
+without a plaintext join and produced 69 bytes using a bounded 16 KiB rolling
+dictionary and one fixed block shared across all slices. Versus the prior
+standard-library 51.10 us fragmented baseline, this is a 7.6x latency
+improvement. It also recovers the first slice-local vort path's 463-byte wire
+payload completely relative to the complete-message vort path. This is an
+internal baseline rather than a reference ratio:
 the audited websocket.zig 0.16 outbound compression paths currently force
 `compressed = false`.
 
