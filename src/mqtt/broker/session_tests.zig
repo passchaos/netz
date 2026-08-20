@@ -6,6 +6,7 @@ const ServeState = context.TestContext.ServeStateType;
 const testBroker = context.TestContext.testBrokerFn;
 const connect = context.TestContext.connectFn;
 const disconnectAll = context.TestContext.disconnectAllFn;
+const waitForPeerClose = context.TestContext.waitForPeerCloseFn;
 const joinServer = context.TestContext.joinServerFn;
 
 const session_expiry = [_]mqtt.Property{
@@ -270,6 +271,9 @@ test "broker drops QoS 0 while a persistent Session is offline" {
     );
     defer suback.deinit(allocator);
     try subscriber.disconnect(0);
+    // MQTT has no DISCONNECT acknowledgment. Wait until the broker closes its
+    // side so the publication below is unambiguously an offline delivery.
+    try waitForPeerClose(&subscriber);
 
     var publisher = try connect(
         allocator,
@@ -280,6 +284,10 @@ test "broker drops QoS 0 while a persistent Session is offline" {
     );
     defer publisher.close();
     try publisher.publish("offline/qos0", "drop", .{});
+    // QoS 0 has no publish acknowledgment. PINGRESP proves the broker has
+    // routed the preceding PUBLISH while the durable Session is still
+    // offline, before the reconnect can make that Session live again.
+    try publisher.ping();
 
     var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
         allocator,

@@ -6,6 +6,7 @@ const ServeState = context.ServeStateType;
 const testBroker = context.testBrokerFn;
 const connectWithOptions = context.connectWithOptionsFn;
 const joinServer = context.joinServerFn;
+const waitForPeerClose = context.waitForPeerCloseFn;
 
 fn connectV311(
     allocator: std.mem.Allocator,
@@ -24,28 +25,6 @@ fn connectV311(
             .clean_start = clean_session,
         },
     );
-}
-
-fn waitForPeerClose(
-    connection: *context.runtime_mod.Connection,
-) !void {
-    while (true) {
-        var scratch: [1]u8 = undefined;
-        var bufs = [_][]u8{&scratch};
-        const result = connection.transport.tcp.io.vtable.netRead(
-            connection.transport.tcp.io.userdata,
-            connection.transport.tcp.stream.socket.handle,
-            &bufs,
-        );
-        if (result) |read_count| {
-            if (read_count == 0) return;
-        } else |err| switch (err) {
-            error.SocketUnconnected,
-            error.ConnectionResetByPeer,
-            => return,
-            else => return err,
-        }
-    }
 }
 
 test "broker Keep Alive zero disables inactivity timeout" {

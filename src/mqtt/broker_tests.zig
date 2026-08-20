@@ -15,6 +15,7 @@ pub const TestContext = struct {
     pub const connectFn = connect;
     pub const connectWithOptionsFn = connectWithOptions;
     pub const disconnectAllFn = disconnectAll;
+    pub const waitForPeerCloseFn = waitForPeerClose;
     pub const joinServerFn = joinServer;
     pub const writeDuplicatePublishFn = writeDuplicatePublish;
 };
@@ -90,6 +91,26 @@ fn connect(
 
 fn disconnectAll(connections: []const *runtime.Connection) !void {
     for (connections) |connection| try connection.disconnect(0);
+}
+
+fn waitForPeerClose(connection: *runtime.Connection) !void {
+    while (true) {
+        var scratch: [1]u8 = undefined;
+        var bufs = [_][]u8{&scratch};
+        const result = connection.transport.tcp.io.vtable.netRead(
+            connection.transport.tcp.io.userdata,
+            connection.transport.tcp.stream.socket.handle,
+            &bufs,
+        );
+        if (result) |read_count| {
+            if (read_count == 0) return;
+        } else |err| switch (err) {
+            error.SocketUnconnected,
+            error.ConnectionResetByPeer,
+            => return,
+            else => return err,
+        }
+    }
 }
 
 fn joinServer(
