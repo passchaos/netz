@@ -940,6 +940,105 @@ def retained_message_expiry(
             expired.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def qos2_receive_maximum_one(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Bounded wire port of Mosquitto 02-subpub-qos2-receive-maximum-1.py. Two
+    # QoS 2 messages are released to the broker, but the subscriber must not
+    # receive the second PUBLISH until the first transaction returns credit.
+    topic = "subpub/qos2/receive/maximum1"
+    receive_one = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.RECEIVE_MAXIMUM, 1
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            subscriber.sendall(
+                mqtt_packets.gen_connect(
+                    "subpub-qos2-receive-max1",
+                    proto_ver=5,
+                    properties=receive_one,
+                )
+            )
+            connack = read_packet(subscriber)
+            if connack[0] != 0x20 or connack[3] != 0:
+                raise AssertionError(
+                    f"invalid Receive Maximum CONNACK: {connack.hex()}"
+                )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 2, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 2, proto_ver=5),
+                "Receive Maximum SUBACK",
+            )
+            connect_v5(
+                publisher, mqtt_packets, "subpub-qos2-recv-max1-helper"
+            )
+            for mid in (1, 2):
+                publisher.sendall(
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=2,
+                        mid=mid,
+                        payload=f"message{mid}",
+                        proto_ver=5,
+                    )
+                )
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_pubrec(mid, proto_ver=5),
+                    f"Receive Maximum publisher PUBREC {mid}",
+                )
+                publisher.sendall(
+                    mqtt_packets.gen_pubrel(mid, proto_ver=5)
+                )
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_pubcomp(mid, proto_ver=5),
+                    f"Receive Maximum publisher PUBCOMP {mid}",
+                )
+
+            for mid in (1, 2):
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=2,
+                        mid=mid,
+                        payload=f"message{mid}",
+                        proto_ver=5,
+                    ),
+                    f"Receive Maximum downstream PUBLISH {mid}",
+                )
+                if mid == 1:
+                    subscriber.settimeout(0.05)
+                    try:
+                        early = subscriber.recv(1)
+                        if early:
+                            raise AssertionError(
+                                "Receive Maximum leaked second PUBLISH: "
+                                + early.hex()
+                            )
+                    except socket.timeout:
+                        pass
+                    finally:
+                        subscriber.settimeout(5)
+                subscriber.sendall(
+                    mqtt_packets.gen_pubrec(mid, proto_ver=5)
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_pubrel(mid, proto_ver=5),
+                    f"Receive Maximum downstream PUBREL {mid}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_pubcomp(mid, proto_ver=5)
+                )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
     # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
     # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
@@ -1037,8 +1136,9 @@ def main() -> None:
     retained_message_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
+    qos2_receive_maximum_one(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 12 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 13 scenarios")
 
 
 if __name__ == "__main__":
