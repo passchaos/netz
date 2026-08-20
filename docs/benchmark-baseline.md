@@ -1166,8 +1166,10 @@ to vort's native raw fixed-DEFLATE sync-flush path were 29.44-31.14
 us/roundtrip and 250.91-265.34 logical payload MiB/s. This is 4.6-5.0x lower
 latency than the previous Zig-flate 144.6-147.5 us range; the new path avoids
 clearing roughly 224 KiB of compressor state per no-context-takeover message.
-Four concurrent connections previously reached 45.96
-us aggregate/roundtrip and 169.98 logical MiB/s on CPUs 0-7.
+Three four-connection CPU 0-7 runs measured 12.09-12.18 us aggregate/roundtrip
+and 641.52-645.95 logical MiB/s, versus the previous 45.96 us/169.98 MiB/s. A
+four-connection `--stats` sample made 7,151 allocations, allocated 48,068,236
+cumulative bytes, peaked at 1,240,114 live bytes, and verified checksum 111,600.
 
 ## MQTT 5 windowed QoS 1 broker fanout
 

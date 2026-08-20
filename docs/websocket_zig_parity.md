@@ -94,9 +94,10 @@ The same executable accepts `--compression`, negotiating permessage-deflate on
 both endpoints and exercising retained send/receive scratch plus direct caller-
 buffer inflation over a real upgraded connection. Five 2026-08-20 CPU-0 runs
 measured 29.44-31.14 us/roundtrip (250.91-265.34 logical payload MiB/s),
-4.6-5.0x lower latency than the previous 144.6-147.5 us range; four concurrent
-connections on CPUs 0-7 measured 45.96 us aggregate/roundtrip and 169.98
-logical MiB/s. These are internal compressed-runtime baselines because the
+4.6-5.0x lower latency than the previous 144.6-147.5 us range. Three four-
+connection CPU 0-7 runs measured 12.09-12.18 us aggregate/roundtrip and
+641.52-645.95 logical MiB/s, versus the previous 45.96 us/169.98 MiB/s. These
+are internal compressed-runtime baselines because the
 audited websocket.zig outbound compressor remains disabled.
 
 The first compressed frame is copied once from the transport/caller frame
@@ -126,6 +127,11 @@ Tests cover a zlib-generated dynamic-DEFLATE fixture, fragmented compressed
 text with interleaved PING, send/receive scratch reuse under failing allocators,
 actual wire shrink plus RSV1, expansion fallback without RSV1, output overflow,
 and H2 compressed caller storage in both directions.
+One four-connection `--stats` run made 7,151 allocations, allocated 48,068,236
+cumulative bytes and peaked at 1,240,114 live bytes while verifying checksum
+111,600. The high steady allocation count is now dominated by vort's one-shot
+token/output ownership and remains the next compression-memory target; it is
+reported rather than hidden by the latency result.
 
 ```sh
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
