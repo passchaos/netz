@@ -299,6 +299,15 @@ HTTP/3 QPACK dynamic encode benchmark
 
 Dynamic entries own name and value in one contiguous allocation rather than two independent blocks. This removes one allocation/free pair per insert/eviction while retaining separate borrowed slices. The immediately preceding two-block build measured 1,235-1,268 ns/block; the indexed lookup workload improved by about 1.40-1.47x. Quicz duplicates name and value separately and inserts at array index zero, adding a second allocation and an O(n) shift under churn.
 
+The same executable now includes a 512-field/512-unique-reference section to
+expose reference-set bookkeeping that the ordinary 32-field block cannot.
+Three CPU-14 baseline runs took 50.50-65.60 us/block (98-128 ns/field). A
+sort/compact prototype reduced that large shape to 18.70-18.79 us but enlarged
+the shared encoder enough to regress the ordinary block from 917 ns to about
+1,247 ns, so the implementation was rejected and fully rolled back. The
+large-section number remains a checked-in optimization gate rather than hiding
+the trade-off.
+
 ### QUIC 1-RTT send
 
 ```text

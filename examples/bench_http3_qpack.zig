@@ -3,6 +3,7 @@ const netz = @import("netz");
 
 const table_entries: usize = 512;
 const fields_per_block: usize = 32;
+const large_fields_per_block: usize = 512;
 const iterations: usize = 100_000;
 const churn_iterations: usize = 100_000;
 
@@ -84,6 +85,13 @@ pub fn main() !void {
         reference_total +|= references.items.len;
     }
     const elapsed = nowNs(io) -| started;
+    const large_ns = try measureLargeReferenceBlock(
+        allocator,
+        io,
+        table,
+        &name_slices,
+        &value_slices,
+    );
     const churn_ns = try measureDynamicTableChurn(allocator, io);
 
     std.debug.print(
@@ -91,6 +99,7 @@ pub fn main() !void {
         \\  iterations: {d}, table entries: {d}, fields/block: {d}
         \\  encoded bytes/block: {d}, references/block: {d}
         \\  ns/block: {d}, ns/field: {d}
+        \\  512-reference block: {d} ns/block, {d} ns/field
         \\  dynamic table churn: {d} ns/insert
         \\  checksum: {d}
         \\
@@ -102,9 +111,55 @@ pub fn main() !void {
         references_len,
         elapsed / iterations,
         elapsed / (iterations * fields_per_block),
+        large_ns / iterations,
+        large_ns / (iterations * large_fields_per_block),
         churn_ns / churn_iterations,
         encoded_total +| reference_total,
     });
+}
+
+fn measureLargeReferenceBlock(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    table: netz.http3.Qpack.DynamicTable,
+    names: []const []const u8,
+    values: []const []const u8,
+) !u64 {
+    var fields: [large_fields_per_block]netz.http3.Qpack.HeaderField =
+        undefined;
+    for (&fields, 0..) |*field, index| {
+        field.* = .{
+            .name = names[index],
+            .value = values[index],
+        };
+    }
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var references: std.ArrayList(u64) = .empty;
+    defer references.deinit(allocator);
+    try netz.http3.Qpack.encodeDynamicBlockKnownReceived(
+        &encoded,
+        allocator,
+        &fields,
+        table,
+        table.insert_count,
+        &references,
+    );
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        encoded.clearRetainingCapacity();
+        references.clearRetainingCapacity();
+        try netz.http3.Qpack.encodeDynamicBlockKnownReceived(
+            &encoded,
+            allocator,
+            &fields,
+            table,
+            table.insert_count,
+            &references,
+        );
+    }
+    std.mem.doNotOptimizeAway(encoded.items.ptr);
+    return nowNs(io) -| started;
 }
 
 fn measureDynamicTableChurn(
