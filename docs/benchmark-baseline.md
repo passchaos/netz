@@ -1053,10 +1053,15 @@ caller-buffer masked frame:    71-82 ns/op
 header-only stream preparation: 0.54-0.56 ns/op
 ```
 
-The same command now includes a retained RFC 7692 no-context-takeover
-compressor case. Three CPU-0-pinned 2026-08-19 runs encoded a repeated 4 KiB
-telemetry-like message in 50.94-51.08 us and reduced its wire payload from
-4,096 to 54 bytes. This is an internal baseline rather than a reference ratio:
+The same command now includes retained RFC 7692 no-context-takeover complete
+and 16-slice compressor cases. Three stable CPU-14-pinned 2026-08-20 samples
+encoded a repeated 4 KiB telemetry-like message in 5.45-5.51 us and reduced
+its wire payload from 4,096 to 69 bytes. The discontiguous path took 8.28-8.37
+us without a plaintext join and produced 463 bytes because match search resets
+at each slice. A separate cold/noisy sample was 5.81/9.62 us. Versus the prior
+standard-library 51.10 us fragmented baseline, this is a 6.1-6.2x latency
+improvement with a documented compression-ratio trade-off. This is an internal
+baseline rather than a reference ratio:
 the audited websocket.zig 0.16 outbound compression paths currently force
 `compressed = false`.
 

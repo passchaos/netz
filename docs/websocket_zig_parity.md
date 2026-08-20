@@ -65,18 +65,24 @@ clients copy and mask in one SIMD pass through a fixed 16 KiB stack scratch,
 so payload size no longer drives heap allocation.
 
 The same command also measures one 4 KiB repeated telemetry-like message
-through no-context-takeover compression. Complete messages now use the
-project-local vort fixed-DEFLATE sync-flush encoder, whose small-input hash path
-avoids clearing Zig flate's roughly 224 KiB compressor state per message.
+through no-context-takeover compression. Complete and discontiguous messages
+now use project-local vort fixed-DEFLATE sync-flush encoders, whose small-input
+hash paths avoid clearing Zig flate's roughly 224 KiB compressor state per
+message. The chunked encoder keeps plaintext discontiguous and deliberately
+limits match search to each caller slice.
 
 ```text
-permessage-deflate: 50.94-51.08 us/message
-wire payload:       4096 -> 54 bytes
-16-slice streaming: 51.10 us/message, no 4096-byte plaintext join
+permessage-deflate: 5.45-5.51 us/message, 4096 -> 69 wire bytes
+16-slice streaming: 8.28-8.37 us/message, 4096 -> 463 wire bytes, no join
 ```
 
-These are three CPU-0-pinned `ReleaseFast` runs on 2026-08-19. This is an
-internal encoder baseline and compression-ratio example, not a cross-library
+These are three stable CPU-14-pinned `ReleaseFast` runs on 2026-08-20; a
+separate cold/noisy sample was 5.81/9.62 us. Compared with the previous standard-
+library encoder baseline, the fragmented path is 6.1-6.2x faster, while its
+slice-local match search makes the wire payload larger (463 versus 54 bytes).
+This is an explicit speed/ratio trade-off rather than a claim that boundaries
+are free. This remains an internal encoder baseline and compression-ratio
+example, not a cross-library
 speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
 `compressed = false`, so no equal compressed-send workload exists there.
 
@@ -110,19 +116,22 @@ leaves caller storage masked, matching websocket.zig's mutable-input contract,
 while the latter assembles fragments and handles control frames without a
 message allocation. With permessage-deflate, the decompressed message lands
 directly in the caller buffer. TCP and RFC 8441 connections retain bounded
-compressed-wire scratch plus reusable receive and fragmented-send DEFLATE
-history windows. Complete sends use vort's native raw fixed-block sync flush;
-fragmented sends retain the standard streaming compressor. Both paths
-removes the RFC 7692 suffix, and sets RSV1 only when the wire payload is
-strictly smaller; incompressible/small input is sent unchanged rather than
+compressed-wire scratch plus a reusable receive DEFLATE history window. Both
+complete and fragmented sends use vort's native raw fixed-block sync flush;
+the fragmented form emits one block per non-empty caller slice without joining
+plaintext. Both paths remove the RFC 7692 suffix and set RSV1 only when the
+wire payload is strictly smaller; incompressible/small input is sent unchanged rather than
 paying expansion, and payloads below 32 bytes skip compressor setup entirely.
 No-context-takeover resets codec state for every message
-while retaining allocations. TCP compressed send and receive allocate nothing
-after first-use warmup; the H2 adapter still owns tunnel-frame/message scratch
+while retaining wire buffers. Vort's current hash parser allocates temporary
+match state per compressed send; receive-side codec storage is allocation-free
+after first-use warmup. The H2 adapter still owns tunnel-frame/message scratch
 but avoids separate compression-output/decompressed-message allocations.
 Fragmented compressed sends no longer concatenate plaintext first: each caller
-slice feeds the same DEFLATE stream directly, UTF-8 is validated across slice
-boundaries with four bytes of state, and only compressed wire scratch remains.
+slice feeds the same bit-packed DEFLATE stream directly, UTF-8 is validated
+across slice boundaries with four bytes of state, and only compressed wire
+scratch remains. A wire-level regression also verifies that requested frame
+count/FIN boundaries survive compression and only the first frame carries RSV1.
 Tests cover a zlib-generated dynamic-DEFLATE fixture, fragmented compressed
 text with interleaved PING, send/receive scratch reuse under failing allocators,
 actual wire shrink plus RSV1, expansion fallback without RSV1, output overflow,

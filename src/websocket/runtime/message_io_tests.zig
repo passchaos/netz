@@ -322,7 +322,7 @@ test "WebSocket permessage-deflate decodes into caller storage" {
     );
 }
 
-test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
+test "WebSocket permessage-deflate send scratch reuses output storage" {
     const allocator = std.testing.allocator;
     const fragment = "repeated wire payload repeated wire payload ";
     const fragments = [_][]const u8{ fragment ** 8, fragment ** 8 };
@@ -330,10 +330,9 @@ test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
     var scratch: compression_scratch.SendScratch = .{};
     defer scratch.deinit(allocator);
     try scratch.prepare(allocator, payload.len);
-    const first = try websocket.compressMessageFragmentsInto(
+    const first = try websocket.compressMessageFragmentsVortInto(
         &scratch.payload,
         allocator,
-        scratch.flate_window.?,
         &fragments,
     );
     try std.testing.expect(first.len < payload.len / 4);
@@ -343,21 +342,23 @@ test "WebSocket permessage-deflate send scratch compresses and reuses storage" {
         "\x00\x00\xff\xff",
     ));
     const payload_ptr = scratch.payload.allocatedSlice().ptr;
-    const window_ptr = scratch.flate_window.?.ptr;
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     failing.fail_index = failing.alloc_index;
     try scratch.prepare(failing.allocator(), payload.len);
-    const second = try websocket.compressMessageFragmentsInto(
+    try std.testing.expectEqual(
+        payload_ptr,
+        scratch.payload.allocatedSlice().ptr,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+
+    const second = try websocket.compressMessageFragmentsVortInto(
         &scratch.payload,
-        failing.allocator(),
-        scratch.flate_window.?,
+        allocator,
         &fragments,
     );
     try std.testing.expectEqual(first.len, second.len);
     try std.testing.expectEqual(payload_ptr, scratch.payload.allocatedSlice().ptr);
-    try std.testing.expectEqual(window_ptr, scratch.flate_window.?.ptr);
-    try std.testing.expect(!failing.has_induced_failure);
 }
 
 test "WebSocket vort sync flush interoperates with std flate decoder" {
@@ -391,13 +392,11 @@ test "WebSocket fragmented compression preserves split UTF-8 without plaintext s
         "\xac payload fragmented payload",
     };
     const plain = "fragmented \xe2\x82\xac payload fragmented payload";
-    var scratch: compression_scratch.SendScratch = .{};
-    defer scratch.deinit(allocator);
-    try scratch.prepare(allocator, plain.len);
-    const compressed = try websocket.compressMessageFragmentsInto(
-        &scratch.payload,
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const compressed = try websocket.compressMessageFragmentsVortInto(
+        &encoded,
         allocator,
-        scratch.flate_window.?,
         &fragments,
     );
     const decoded = try websocket.decompressMessage(

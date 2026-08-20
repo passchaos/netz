@@ -986,10 +986,9 @@ pub const Connection = struct {
                     plain_len,
                 );
                 const compressed = try websocket
-                    .compressMessageFragmentsInto(
+                    .compressMessageFragmentsVortInto(
                     &self.compression_send.payload,
                     self.allocator,
-                    self.compression_send.flate_window.?,
                     fragments,
                 );
                 if (compressed.len < plain_len) {
@@ -1486,10 +1485,9 @@ pub const H2Connection = struct {
                     plain_len,
                 );
                 const compressed = try websocket
-                    .compressMessageFragmentsInto(
+                    .compressMessageFragmentsVortInto(
                     &self.compression_send.payload,
                     self.allocator,
-                    self.compression_send.flate_window.?,
                     fragments,
                 );
                 if (compressed.len < plain_len) {
@@ -3009,10 +3007,32 @@ test "WebSocket runtime negotiates permessage-deflate" {
             defer connection.close();
             try std.testing.expect(connection.permessage_deflate);
 
-            var request = try connection.receiveMessage();
-            defer request.deinit(server_ptr.http.allocator);
-            try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
-            try std.testing.expectEqualStrings("compressible compressible compressible", request.payload);
+            var compressed: std.ArrayList(u8) = .empty;
+            defer compressed.deinit(server_ptr.http.allocator);
+            for (0..3) |index| {
+                var frame = try connection.receiveFrame();
+                defer frame.deinit(server_ptr.http.allocator);
+                try std.testing.expectEqual(
+                    if (index == 0) websocket.Opcode.text else .continuation,
+                    frame.header.opcode,
+                );
+                try std.testing.expectEqual(index == 0, frame.header.rsv1);
+                try std.testing.expectEqual(index == 2, frame.header.fin);
+                try compressed.appendSlice(
+                    server_ptr.http.allocator,
+                    frame.payload,
+                );
+            }
+            const request = try websocket.decompressMessage(
+                server_ptr.http.allocator,
+                compressed.items,
+                4096,
+            );
+            defer server_ptr.http.allocator.free(request);
+            try std.testing.expectEqualStrings(
+                "compressible \xe2\x82\xac compressible compressible",
+                request,
+            );
 
             try connection.sendFragmented(.text, &.{ "deflated response ", "deflated response" });
 
@@ -3034,7 +3054,14 @@ test "WebSocket runtime negotiates permessage-deflate" {
     defer client.close();
     try std.testing.expect(client.permessage_deflate);
 
-    try client.sendFragmented(.text, &.{ "compressible ", "compressible ", "compressible" });
+    // Split one UTF-8 scalar across the application slices. Compression must
+    // still produce one DEFLATE message, then preserve the requested three
+    // WebSocket frames with RSV1 set only on the first frame.
+    try client.sendFragmented(.text, &.{
+        "compressible \xe2",
+        "\x82",
+        "\xac compressible compressible",
+    });
     var response = try client.receiveMessage();
     defer response.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);

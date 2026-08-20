@@ -901,15 +901,50 @@ pub fn compressMessageVortInto(
         allocator,
         output,
         payload,
-        .{
-            .parser = .hash,
-            .lz77_options = .{
-                .window_len = 16 * 1024,
-                .max_chain = 4,
-                .nice_len = 32,
-            },
-        },
-    ) catch return error.WriteFailed;
+        vort_websocket_compression_options,
+    ) catch |err| return mapVortCompressionError(err);
+    return removeVortCompressionTail(output);
+}
+
+/// Encode discontiguous RFC 7692 input without joining caller plaintext.
+///
+/// Vort emits one non-final fixed-Huffman block per non-empty slice and one
+/// sync-flush block for the message. Match search is slice-local, but DEFLATE
+/// bit packing and the WebSocket message stream remain continuous.
+pub fn compressMessageFragmentsVortInto(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    fragments: []const []const u8,
+) Error![]const u8 {
+    output.clearRetainingCapacity();
+    _ = vort.encodeRawFixedSyncFlushChunksAppend(
+        allocator,
+        output,
+        fragments,
+        vort_websocket_compression_options,
+    ) catch |err| return mapVortCompressionError(err);
+    return removeVortCompressionTail(output);
+}
+
+const vort_websocket_compression_options: vort.CompressionOptions = .{
+    .parser = .hash,
+    .lz77_options = .{
+        .window_len = 16 * 1024,
+        .max_chain = 4,
+        .nice_len = 32,
+    },
+};
+
+fn mapVortCompressionError(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.WriteFailed,
+    };
+}
+
+fn removeVortCompressionTail(
+    output: *std.ArrayList(u8),
+) Error![]const u8 {
     const tail = "\x00\x00\xff\xff";
     if (!std.mem.endsWith(u8, output.items, tail)) {
         return error.WriteFailed;

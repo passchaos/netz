@@ -81,25 +81,18 @@ pub fn main() !void {
     }
     var compression_output: std.ArrayList(u8) = .empty;
     defer compression_output.deinit(allocator);
-    const compression_window = try allocator.alloc(
-        u8,
-        std.compress.flate.max_window_len,
-    );
-    defer allocator.free(compression_window);
-    _ = try netz.websocket.compressMessageInto(
+    _ = try netz.websocket.compressMessageVortInto(
         &compression_output,
         allocator,
-        compression_window,
         &compressible,
     );
     const compressed_bytes = compression_output.items.len;
     const compression_started = nowNs(io);
     var compression_checksum: u64 = 0;
     for (0..compression_iterations) |_| {
-        const compressed = try netz.websocket.compressMessageInto(
+        const compressed = try netz.websocket.compressMessageVortInto(
             &compression_output,
             allocator,
-            compression_window,
             &compressible,
         );
         compression_checksum +%= checksum(compressed);
@@ -112,14 +105,19 @@ pub fn main() !void {
         const end = (index + 1) * payload_len / compression_fragments;
         fragment.* = compressible[start..end];
     }
+    _ = try netz.websocket.compressMessageFragmentsVortInto(
+        &compression_output,
+        allocator,
+        &fragment_storage,
+    );
+    const fragmented_bytes = compression_output.items.len;
     const fragmented_started = nowNs(io);
     var fragmented_checksum: u64 = 0;
     for (0..compression_iterations) |_| {
         const compressed = try netz.websocket
-            .compressMessageFragmentsInto(
+            .compressMessageFragmentsVortInto(
             &compression_output,
             allocator,
-            compression_window,
             &fragment_storage,
         );
         fragmented_checksum +%= checksum(compressed);
@@ -143,7 +141,7 @@ pub fn main() !void {
         \\  caller-buffer speedup: {d}.{d:0>2}x
         \\  header-only speedup: {d}.{d:0>2}x
         \\  permessage-deflate: {d} ns/message, {d} -> {d} wire bytes
-        \\  fragmented deflate ({d} slices): {d} ns/message, no plaintext join
+        \\  fragmented deflate ({d} slices): {d} ns/message, {d} -> {d} wire bytes, no plaintext join
         \\  checksum: {d}
         \\
     , .{
@@ -162,6 +160,8 @@ pub fn main() !void {
         compressed_bytes,
         compression_fragments,
         fragmented_ns / compression_iterations,
+        compressible.len,
+        fragmented_bytes,
         allocating_checksum +%
             caller_buffer_checksum +%
             header_checksum +%
