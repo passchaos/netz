@@ -744,6 +744,64 @@ def outgoing_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def request_response_properties(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Wire-level request/response subset of Mosquitto
+    # 12-prop-response-topic-correlation-data.py. The request carries both
+    # properties through broker fanout; the responder then publishes on the
+    # advertised response topic and the requester receives the exact response.
+    normal_topic = "normal/topic"
+    response_topic = "response/topic"
+    properties = (
+        mqtt5_props.gen_string_prop(
+            mqtt5_props.RESPONSE_TOPIC, response_topic
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.CORRELATION_DATA, "45vyvynq30q3vt4 nuy893b4v3"
+        )
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as responder, broker.connect() as requester:
+            connect_v5(responder, mqtt_packets, "response-client")
+            connect_v5(requester, mqtt_packets, "request-client")
+            responder.sendall(
+                mqtt_packets.gen_subscribe(1, normal_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                responder,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "request responder SUBACK",
+            )
+            requester.sendall(
+                mqtt_packets.gen_subscribe(1, response_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                requester,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "response requester SUBACK",
+            )
+            request = mqtt_packets.gen_publish(
+                normal_topic,
+                qos=0,
+                payload="2",
+                proto_ver=5,
+                properties=properties,
+            )
+            requester.sendall(request)
+            expect_packet(responder, request, "request property forwarding")
+            response = mqtt_packets.gen_publish(
+                response_topic,
+                qos=0,
+                payload="22",
+                proto_ver=5,
+            )
+            responder.sendall(response)
+            expect_packet(requester, response, "response topic delivery")
+            responder.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            requester.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
     # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
     # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
@@ -837,8 +895,9 @@ def main() -> None:
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
+    request_response_properties(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 10 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 11 scenarios")
 
 
 if __name__ == "__main__":

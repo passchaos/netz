@@ -766,7 +766,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs ten
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs eleven
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -804,9 +804,13 @@ Maximum 2, netz now automatically establishes alias 1 on the first forwarded
 PUBLISH and sends the repeated topic with an empty Topic Name plus alias 1.
 Alias assignment remains per Network Connection and is committed only after a
 successful write.
+The eleventh scenario ports Mosquitto's
+`12-prop-response-topic-correlation-data.py`: Response Topic and Correlation
+Data survive exact broker fanout to the responder, whose response on the
+advertised topic reaches the requester byte-for-byte.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all ten scenarios pass. This is deliberately described as a selected
+packets; all eleven scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -818,5 +822,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Ten passing packet-vector scenarios do not cover
+   persistence semantics. Eleven passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
