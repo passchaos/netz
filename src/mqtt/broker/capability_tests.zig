@@ -97,6 +97,79 @@ fn expectPublishCapabilityDisconnect(
     try joinServer(thread, &joined, &serve);
 }
 
+fn expectSubscribeCapabilityDisconnect(
+    subscription: mqtt.Subscription,
+    properties: []const mqtt.Property,
+    wildcard_available: bool,
+    subscription_identifier_available: bool,
+    shared_available: bool,
+    expected_reason: u8,
+) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{
+                .protocol = .v5,
+                .wildcard_subscription_available = wildcard_available,
+                .subscription_identifier_available = subscription_identifier_available,
+                .shared_subscription_available = shared_available,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "subscribe-capability" },
+    );
+    defer client.close();
+
+    // Bypass the high-level client capability guard so this exercises the
+    // server's response to a peer that violates the CONNACK contract.
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try mqtt.Subscribe.write(
+        &encoded,
+        allocator,
+        .v5,
+        1,
+        properties,
+        &.{subscription},
+    );
+    try client.transport.writePacket(encoded.items);
+
+    var disconnect = try client.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        expected_reason,
+        disconnect.disconnect.reason_code,
+    );
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker disconnects MQTT 5 publisher above Maximum QoS" {
     try expectPublishCapabilityDisconnect(
         .at_most_once,
@@ -114,6 +187,42 @@ test "broker disconnects MQTT 5 retained publish when retain is unavailable" {
         .at_most_once,
         true,
         0x9a,
+    );
+}
+
+test "broker disconnects MQTT 5 wildcard subscription when unavailable" {
+    try expectSubscribeCapabilityDisconnect(
+        .{ .topic_filter = "wildcard/+" },
+        &.{},
+        false,
+        true,
+        true,
+        0xa2,
+    );
+}
+
+test "broker disconnects MQTT 5 shared subscription when unavailable" {
+    try expectSubscribeCapabilityDisconnect(
+        .{ .topic_filter = "$share/workers/shared/topic" },
+        &.{},
+        true,
+        true,
+        false,
+        0x9e,
+    );
+}
+
+test "broker disconnects MQTT 5 subscription identifier when unavailable" {
+    try expectSubscribeCapabilityDisconnect(
+        .{ .topic_filter = "identifier/topic" },
+        &.{.{ .varint = .{
+            .id = .subscription_identifier,
+            .value = 7,
+        } }},
+        true,
+        false,
+        true,
+        0xa1,
     );
 }
 

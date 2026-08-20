@@ -19,6 +19,9 @@ pub const Error = packet_transport.Error || error{
     QoSNotSupported,
     RetainNotSupported,
     TopicAliasInvalid,
+    WildcardSubscriptionsNotSupported,
+    SubscriptionIdentifiersNotSupported,
+    SharedSubscriptionsNotSupported,
     OutgoingPacketTooLarge,
     PublishRefused,
     SubscriptionRefused,
@@ -1855,13 +1858,18 @@ pub const Connection = struct {
     }
 
     fn validateOutgoingSubscribe(self: Connection, subscriptions: []const mqtt.Subscription, properties: []const mqtt.Property) Error!void {
-        try validateSubscribeCapabilities(
+        validateSubscribeCapabilities(
             subscriptions,
             properties,
             self.peer_wildcard_subscription_available,
             self.peer_subscription_identifier_available,
             self.peer_shared_subscription_available,
-        );
+        ) catch |err| switch (err) {
+            error.WildcardSubscriptionsNotSupported,
+            error.SubscriptionIdentifiersNotSupported,
+            error.SharedSubscriptionsNotSupported,
+            => return error.SubscriptionRefused,
+        };
     }
 
     fn validateIncomingSubscribe(self: Connection, subscriptions: []const mqtt.Subscription, properties: []const mqtt.Property) Error!void {
@@ -1880,11 +1888,31 @@ pub const Connection = struct {
         wildcard_available: bool,
         subscription_identifier_available: bool,
         shared_available: bool,
-    ) Error!void {
-        if (!subscription_identifier_available and mqtt.subscriptionIdentifier(properties) != null) return error.SubscriptionRefused;
+    ) error{
+        WildcardSubscriptionsNotSupported,
+        SubscriptionIdentifiersNotSupported,
+        SharedSubscriptionsNotSupported,
+    }!void {
+        if (!subscription_identifier_available and
+            mqtt.subscriptionIdentifier(properties) != null)
+        {
+            return error.SubscriptionIdentifiersNotSupported;
+        }
         for (subscriptions) |subscription| {
-            if (!wildcard_available and mqtt.hasWildcards(subscription.topic_filter)) return error.SubscriptionRefused;
-            if (!shared_available and std.mem.startsWith(u8, subscription.topic_filter, "$share/")) return error.SubscriptionRefused;
+            if (!shared_available and
+                std.mem.startsWith(
+                    u8,
+                    subscription.topic_filter,
+                    "$share/",
+                ))
+            {
+                return error.SharedSubscriptionsNotSupported;
+            }
+            if (!wildcard_available and
+                mqtt.hasWildcards(subscription.topic_filter))
+            {
+                return error.WildcardSubscriptionsNotSupported;
+            }
         }
     }
 
@@ -3097,9 +3125,9 @@ test "MQTT connection enforces negotiated subscribe capabilities" {
     connection.local_subscription_identifier_available = false;
     connection.local_shared_subscription_available = false;
     try connection.validateIncomingSubscribe(&exact, &.{});
-    try std.testing.expectError(error.SubscriptionRefused, connection.validateIncomingSubscribe(&wildcard, &.{}));
-    try std.testing.expectError(error.SubscriptionRefused, connection.validateIncomingSubscribe(&shared, &.{}));
-    try std.testing.expectError(error.SubscriptionRefused, connection.validateIncomingSubscribe(&exact, &sub_id));
+    try std.testing.expectError(error.WildcardSubscriptionsNotSupported, connection.validateIncomingSubscribe(&wildcard, &.{}));
+    try std.testing.expectError(error.SharedSubscriptionsNotSupported, connection.validateIncomingSubscribe(&shared, &.{}));
+    try std.testing.expectError(error.SubscriptionIdentifiersNotSupported, connection.validateIncomingSubscribe(&exact, &sub_id));
 }
 
 test "MQTT connection rejects topic aliases beyond negotiated maximum" {

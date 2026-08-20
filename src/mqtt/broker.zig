@@ -2494,11 +2494,14 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.RetainNotSupported => 0x9a,
         error.TopicAliasInvalid => 0x94,
         error.ReceiveMaximumExceeded => 0x93,
+        error.SharedSubscriptionsNotSupported => 0x9e,
+        error.SubscriptionIdentifiersNotSupported => 0xa1,
+        error.WildcardSubscriptionsNotSupported => 0xa2,
         else => null,
     };
 }
 
-test "broker maps only negotiated publish violations to DISCONNECT reasons" {
+test "broker maps negotiated capability violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x9b),
         disconnectReasonForReadViolation(error.QoSNotSupported),
@@ -2514,6 +2517,24 @@ test "broker maps only negotiated publish violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x94),
         disconnectReasonForReadViolation(error.TopicAliasInvalid),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x9e),
+        disconnectReasonForReadViolation(
+            error.SharedSubscriptionsNotSupported,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0xa1),
+        disconnectReasonForReadViolation(
+            error.SubscriptionIdentifiersNotSupported,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0xa2),
+        disconnectReasonForReadViolation(
+            error.WildcardSubscriptionsNotSupported,
+        ),
     );
     try std.testing.expectEqual(
         @as(?u8, null),
