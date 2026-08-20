@@ -1496,6 +1496,43 @@ def qos2_repeated_pubrel(executable: Path, mqtt_packets) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def reject_publish_subscription_identifier(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Subscription Identifier is server-generated on forwarded PUBLISH only.
+    # A client-to-server occurrence is a protocol error; reject it before
+    # routing and prove the finite broker remains healthy for a later client.
+    illegal = mqtt5_props.gen_varint_prop(
+        mqtt5_props.SUBSCRIPTION_IDENTIFIER, 7
+    )
+    with NetzBroker(
+        executable, connections=2, ignore_errors=True
+    ) as broker:
+        with broker.connect() as bad:
+            connect_v5(bad, mqtt_packets, "illegal-publish-subid")
+            bad.sendall(mqtt_packets.gen_publish(
+                "illegal/subid", qos=0, payload="bad", proto_ver=5,
+                properties=illegal,
+            ))
+            try:
+                response = bad.recv(1)
+                if response:
+                    raise AssertionError(
+                        "illegal Subscription Identifier got response: "
+                        + response.hex()
+                    )
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+        with broker.connect() as healthy:
+            connect_v5(healthy, mqtt_packets, "after-illegal-subid")
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after illegal Subscription Identifier",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1525,7 +1562,10 @@ def main() -> None:
     shared_subscription_rotation(args.broker, mqtt_packets)
     qos2_duplicate_publish(args.broker, mqtt_packets)
     qos2_repeated_pubrel(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 19 scenarios")
+    reject_publish_subscription_identifier(
+        args.broker, mqtt_packets, mqtt5_props
+    )
+    print("Mosquitto-derived MQTT wire vectors passed: 20 scenarios")
 
 
 if __name__ == "__main__":
