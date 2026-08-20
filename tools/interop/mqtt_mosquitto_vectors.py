@@ -84,6 +84,32 @@ def expect_packets_unordered(
             ) from exc
 
 
+def expected_connack(
+    mqtt_packets,
+    mqtt5_props,
+    *,
+    maximum_packet_size: int = 16 * 1024 * 1024,
+    topic_alias_maximum: int = 16,
+    extra_properties: bytes = b"",
+) -> bytes:
+    # Keep this in the exact property order emitted by runtime.writeConnAck.
+    # Centralizing it makes each negative vector state only the capability it
+    # changes while retaining a byte-for-byte CONNACK assertion.
+    properties = (
+        mqtt5_props.gen_uint16_prop(mqtt5_props.RECEIVE_MAXIMUM, 64)
+        + mqtt5_props.gen_uint32_prop(
+            mqtt5_props.MAXIMUM_PACKET_SIZE, maximum_packet_size
+        )
+        + mqtt5_props.gen_uint16_prop(
+            mqtt5_props.TOPIC_ALIAS_MAXIMUM, topic_alias_maximum
+        )
+        + extra_properties
+    )
+    return mqtt_packets.gen_connack(
+        rc=0, proto_ver=5, properties=properties, property_helper=False
+    )
+
+
 class NetzBroker:
     def __init__(
         self,
@@ -403,24 +429,12 @@ def publish_capability_disconnects(
                         "publish-capability", proto_ver=5
                     )
                 )
-                expected_connack = mqtt_packets.gen_connack(
-                    rc=0,
-                    proto_ver=5,
-                    properties=(
-                        mqtt5_props.gen_uint16_prop(
-                            mqtt5_props.RECEIVE_MAXIMUM, 64
-                        )
-                        + mqtt5_props.gen_uint32_prop(
-                            mqtt5_props.MAXIMUM_PACKET_SIZE, 16 * 1024 * 1024
-                        )
-                        + mqtt5_props.gen_uint16_prop(
-                            mqtt5_props.TOPIC_ALIAS_MAXIMUM, 16
-                        )
-                        + advertised_property
-                    ),
-                    property_helper=False,
+                expected = expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    extra_properties=advertised_property,
                 )
-                expect_packet(sock, expected_connack, f"{label} CONNACK")
+                expect_packet(sock, expected, f"{label} CONNACK")
                 sock.sendall(publish)
                 expect_packet(
                     sock,
@@ -446,21 +460,10 @@ def maximum_packet_size_disconnect(
             )
             expect_packet(
                 sock,
-                mqtt_packets.gen_connack(
-                    rc=0,
-                    proto_ver=5,
-                    properties=(
-                        mqtt5_props.gen_uint16_prop(
-                            mqtt5_props.RECEIVE_MAXIMUM, 64
-                        )
-                        + mqtt5_props.gen_uint32_prop(
-                            mqtt5_props.MAXIMUM_PACKET_SIZE, 50
-                        )
-                        + mqtt5_props.gen_uint16_prop(
-                            mqtt5_props.TOPIC_ALIAS_MAXIMUM, 16
-                        )
-                    ),
-                    property_helper=False,
+                expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    maximum_packet_size=50,
                 ),
                 "maximum packet size CONNACK",
             )
@@ -499,21 +502,10 @@ def topic_alias_disconnect(
             )
             expect_packet(
                 sock,
-                mqtt_packets.gen_connack(
-                    rc=0,
-                    proto_ver=5,
-                    properties=(
-                        mqtt5_props.gen_uint16_prop(
-                            mqtt5_props.RECEIVE_MAXIMUM, 64
-                        )
-                        + mqtt5_props.gen_uint32_prop(
-                            mqtt5_props.MAXIMUM_PACKET_SIZE, 16 * 1024 * 1024
-                        )
-                        + mqtt5_props.gen_uint16_prop(
-                            mqtt5_props.TOPIC_ALIAS_MAXIMUM, 1
-                        )
-                    ),
-                    property_helper=False,
+                expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    topic_alias_maximum=1,
                 ),
                 "topic alias limit CONNACK",
             )
@@ -608,23 +600,12 @@ def subscription_capability_disconnects(
                 )
                 expect_packet(
                     sock,
-                    mqtt_packets.gen_connack(
-                        rc=0,
-                        proto_ver=5,
-                        properties=(
-                            mqtt5_props.gen_uint16_prop(
-                                mqtt5_props.RECEIVE_MAXIMUM, 64
-                            )
-                            + mqtt5_props.gen_uint32_prop(
-                                mqtt5_props.MAXIMUM_PACKET_SIZE,
-                                16 * 1024 * 1024,
-                            )
-                            + mqtt5_props.gen_uint16_prop(
-                                mqtt5_props.TOPIC_ALIAS_MAXIMUM, 16
-                            )
-                            + mqtt5_props.gen_byte_prop(advertised_id, 0)
+                    expected_connack(
+                        mqtt_packets,
+                        mqtt5_props,
+                        extra_properties=mqtt5_props.gen_byte_prop(
+                            advertised_id, 0
                         ),
-                        property_helper=False,
                     ),
                     f"{label} CONNACK",
                 )
