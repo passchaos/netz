@@ -150,21 +150,25 @@ pub const ExtensionNegotiation = struct {
         const raw = offer_header orelse return null;
         const offer = try parseOffer(raw);
         if (!offer.permessage_deflate) return null;
-        if (offer.server_max_window_bits) |bits| {
-            // Our compressor currently uses std.compress.flate's default 32 KiB
-            // window.  Like websocket.zig, decline offers that require the
-            // server-to-client direction to use a smaller LZ77 window instead
-            // of negotiating an extension we cannot faithfully satisfy.
-            if (bits != 15) return null;
-        }
 
         var value: std.ArrayList(u8) = .empty;
         errdefer value.deinit(allocator);
         try value.appendSlice(allocator, "permessage-deflate");
-        // `std.compress.flate` exposes a normal 32 KiB history window.  Until
-        // smaller sliding windows are implemented, negotiate no-context-takeover
-        // on both directions and ignore smaller *_max_window_bits offers.
+        // Both directions deliberately reset at message boundaries. This keeps
+        // the runtime's bounded per-message scratch model while Vort's explicit
+        // LZ77 window lets the sender honor a smaller server_max_window_bits.
         try value.appendSlice(allocator, "; server_no_context_takeover; client_no_context_takeover");
+        if (offer.server_max_window_bits) |bits| {
+            var writer = std.Io.Writer.Allocating.fromArrayList(
+                allocator,
+                &value,
+            );
+            defer value = writer.toArrayList();
+            try writer.writer.print(
+                "; server_max_window_bits={d}",
+                .{bits},
+            );
+        }
         return try value.toOwnedSlice(allocator);
     }
 
@@ -192,8 +196,6 @@ pub const ExtensionNegotiation = struct {
             if (!parsed.permessage_deflate) return error.InvalidExtension;
             if (negotiated != null) return error.InvalidExtension;
             if (!parsed.client_no_context_takeover or !parsed.server_no_context_takeover) return error.InvalidExtension;
-            if (parsed.client_max_window_bits) |bits| if (bits != 15) return error.InvalidExtension;
-            if (parsed.server_max_window_bits) |bits| if (bits != 15) return error.InvalidExtension;
             negotiated = parsed;
         }
         return negotiated orelse error.InvalidExtension;
@@ -896,12 +898,30 @@ pub fn compressMessageVortInto(
     allocator: std.mem.Allocator,
     payload: []const u8,
 ) Error![]const u8 {
+    return compressMessageVortIntoWindow(
+        output,
+        allocator,
+        payload,
+        15,
+    );
+}
+
+/// Encode one no-context-takeover message while bounding every LZ77 distance
+/// to the window negotiated by RFC 7692. Using a smaller search window is
+/// sufficient for raw DEFLATE because the format carries distances, not an
+/// independent window declaration.
+pub fn compressMessageVortIntoWindow(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    max_window_bits: u8,
+) Error![]const u8 {
     output.clearRetainingCapacity();
     _ = vort.encodeRawFixedSyncFlushAppend(
         allocator,
         output,
         payload,
-        vort_websocket_compression_options,
+        try vortWebSocketCompressionOptions(max_window_bits),
     ) catch |err| return mapVortCompressionError(err);
     return removeVortCompressionTail(output);
 }
@@ -917,12 +937,26 @@ pub fn compressMessageFragmentsVortInto(
     allocator: std.mem.Allocator,
     fragments: []const []const u8,
 ) Error![]const u8 {
+    return compressMessageFragmentsVortIntoWindow(
+        output,
+        allocator,
+        fragments,
+        15,
+    );
+}
+
+pub fn compressMessageFragmentsVortIntoWindow(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    fragments: []const []const u8,
+    max_window_bits: u8,
+) Error![]const u8 {
     output.clearRetainingCapacity();
     _ = vort.encodeRawFixedSyncFlushChunksAppend(
         allocator,
         output,
         fragments,
-        vort_websocket_compression_options,
+        try vortWebSocketCompressionOptions(max_window_bits),
     ) catch |err| return mapVortCompressionError(err);
     return removeVortCompressionTail(output);
 }
@@ -935,6 +969,21 @@ const vort_websocket_compression_options: vort.CompressionOptions = .{
         .nice_len = 32,
     },
 };
+
+fn vortWebSocketCompressionOptions(
+    max_window_bits: u8,
+) Error!vort.CompressionOptions {
+    if (max_window_bits < 8 or max_window_bits > 15) {
+        return error.InvalidExtension;
+    }
+    var options = vort_websocket_compression_options;
+    const negotiated_window = @as(usize, 1) << @intCast(max_window_bits);
+    options.lz77_options.window_len = @min(
+        options.lz77_options.window_len,
+        negotiated_window,
+    );
+    return options;
+}
 
 fn mapVortCompressionError(err: anyerror) Error {
     return switch (err) {
@@ -1494,20 +1543,36 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expect(accepted_split != null);
     try std.testing.expect(std.mem.startsWith(u8, accepted_split.?, "permessage-deflate"));
 
-    const unsupported_window = try ExtensionNegotiation.accept(
+    const small_window = try ExtensionNegotiation.accept(
         allocator,
         "permessage-deflate; server_max_window_bits=12",
         true,
     );
-    try std.testing.expect(unsupported_window == null);
+    defer if (small_window) |value| allocator.free(value);
+    try std.testing.expectEqualStrings(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=12",
+        small_window.?,
+    );
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse("permessage-deflate"));
     const quoted_window_response = try ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"15\"",
     );
     try std.testing.expectEqual(@as(?u8, 15), quoted_window_response.client_max_window_bits);
-    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+    const small_window_response = try ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"12\"",
-    ));
+    );
+    try std.testing.expectEqual(@as(?u8, 12), small_window_response.client_max_window_bits);
+    var invalid_window_output: std.ArrayList(u8) = .empty;
+    defer invalid_window_output.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidExtension,
+        compressMessageVortIntoWindow(
+            &invalid_window_output,
+            allocator,
+            "invalid compression window",
+            7,
+        ),
+    );
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"1\\5\"",
     ));
@@ -1535,6 +1600,48 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     const decoded = try decompressMessage(allocator, compressed, 1024);
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(payload, decoded);
+
+    // Two identical pseudo-random halves have no useful local repetition, so
+    // a 512-byte window cannot refer back to the first half while a 32-KiB
+    // window can. This guards the negotiated bound in the actual encoder, not
+    // merely the extension response text.
+    var distant_repeat: [2048]u8 = undefined;
+    var state: u32 = 0x9e37_79b9;
+    for (distant_repeat[0..1024]) |*byte| {
+        state = state *% 1_664_525 +% 1_013_904_223;
+        byte.* = @truncate(state >> 24);
+    }
+    @memcpy(distant_repeat[1024..], distant_repeat[0..1024]);
+    var small_window_encoded: std.ArrayList(u8) = .empty;
+    defer small_window_encoded.deinit(allocator);
+    _ = try compressMessageVortIntoWindow(
+        &small_window_encoded,
+        allocator,
+        &distant_repeat,
+        9,
+    );
+    var full_window_encoded: std.ArrayList(u8) = .empty;
+    defer full_window_encoded.deinit(allocator);
+    _ = try compressMessageVortIntoWindow(
+        &full_window_encoded,
+        allocator,
+        &distant_repeat,
+        15,
+    );
+    try std.testing.expect(
+        small_window_encoded.items.len > full_window_encoded.items.len + 512,
+    );
+    const small_window_decoded = try decompressMessage(
+        allocator,
+        small_window_encoded.items,
+        distant_repeat.len,
+    );
+    defer allocator.free(small_window_decoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        &distant_repeat,
+        small_window_decoded,
+    );
 
     const repeated_payload = "fragmented compressed message fragmented compressed message";
     const repeated_compressed = try compressMessage(allocator, repeated_payload);

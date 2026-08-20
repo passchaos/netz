@@ -262,16 +262,18 @@ these counts explain submission shape but are not timing samples.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
    long-lived netz echo endpoint. On 2026-08-21, all 517 cases completed with
-   behavior counts `OK=456`, `NON-STRICT=4`, `INFORMATIONAL=3`, and
-   `UNIMPLEMENTED=54`; close-behavior counts were `OK=514` and
-   `INFORMATIONAL=3`. Thus this is not a 517-case pass result. The runner
-   accepts only the explicit `OK`, `NON-STRICT`, and `INFORMATIONAL` behavior
-   statuses and `OK` and `INFORMATIONAL` close statuses, reports every non-OK
-   case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing, or
-   unknown statuses. The full-suite run therefore remains a failing gate until
-   the 54 unimplemented cases are supported. Optional case IDs select a faster
-   focused run. This is external RFC 6455 conformance evidence for the HTTP/1.1
-   transport, not for RFC 8441 or WSS.
+   behavior counts `OK=510`, `NON-STRICT=4`, and `INFORMATIONAL=3`;
+   close-behavior counts were `OK=514` and `INFORMATIONAL=3`. The 54
+   compression cases previously reported as `UNIMPLEMENTED` now complete as
+   `OK`: the server echoes `server_max_window_bits=9` when offered and bounds
+   every emitted Vort LZ77 distance to that negotiated 512-byte window. The
+   runner accepts only the explicit `OK`, `NON-STRICT`, and `INFORMATIONAL`
+   behavior statuses and `OK` and `INFORMATIONAL` close statuses, reports every
+   non-OK case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing,
+   or unknown statuses. Optional case IDs select a faster focused run. This is
+   external RFC 6455/RFC 7692 conformance evidence for the HTTP/1.1 transport,
+   not for RFC 8441 or WSS; the seven explicitly non-OK results are reported by
+   their Testsuite categories rather than inflated into a 517-case pass claim.
 4. Add an equal-wire compressed echo comparison if the reference re-enables
    its currently disabled outbound compressor; until then the netz timing is
    only an internal baseline.

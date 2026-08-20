@@ -372,6 +372,10 @@ fn acceptTransport(
             options.enable_permessage_deflate,
         );
     defer if (selected_extension) |extension| allocator.free(extension);
+    const negotiated_extension = if (selected_extension) |extension|
+        try websocket.ExtensionNegotiation.validateResponse(extension)
+    else
+        websocket.ExtensionNegotiation{};
 
     var response: std.ArrayList(u8) = .empty;
     defer response.deinit(allocator);
@@ -415,7 +419,8 @@ fn acceptTransport(
         .role = .server,
         .limits = limits,
         .selected_protocol = selected_protocol,
-        .permessage_deflate = selected_extension != null,
+        .permessage_deflate = negotiated_extension.permessage_deflate,
+        .compression_send_max_window_bits = negotiated_extension.server_max_window_bits orelse 15,
     };
 }
 
@@ -785,6 +790,7 @@ pub const Client = struct {
             .limits = options.limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = selected_extension.permessage_deflate,
+            .compression_send_max_window_bits = selected_extension.client_max_window_bits orelse 15,
             .inbuf = try std.ArrayList(u8).initCapacity(allocator, head.extra.len),
         };
         errdefer connection.inbuf.deinit(connection.allocator);
@@ -853,6 +859,9 @@ pub const Connection = struct {
     close_received: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    /// Maximum LZ77 distance for messages emitted by this endpoint. The field
+    /// follows the role-specific RFC 7692 direction selected at handshake.
+    compression_send_max_window_bits: u8 = 15,
     compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
 
@@ -1003,10 +1012,11 @@ pub const Connection = struct {
                     plain_len,
                 );
                 const compressed = try websocket
-                    .compressMessageFragmentsVortInto(
+                    .compressMessageFragmentsVortIntoWindow(
                     &self.compression_send.payload,
                     self.allocator,
                     fragments,
+                    self.compression_send_max_window_bits,
                 );
                 if (compressed.len < plain_len) {
                     try self.writeCompressedFragmentsLocked(
@@ -1292,10 +1302,11 @@ pub const Connection = struct {
             self.allocator,
             payload.len,
         );
-        return websocket.compressMessageVortInto(
+        return websocket.compressMessageVortIntoWindow(
             &self.compression_send.payload,
             self.allocator,
             payload,
+            self.compression_send_max_window_bits,
         );
     }
 
@@ -1514,6 +1525,7 @@ pub const H2Connection = struct {
     close_received: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_send_max_window_bits: u8 = 15,
     send_frame_buffer: std.ArrayList(u8) = .empty,
     message_buffer: std.ArrayList(u8) = .empty,
     compression_send: compression_scratch.SendScratch = .{},
@@ -1525,7 +1537,7 @@ pub const H2Connection = struct {
         role: Role,
         limits: Limits,
         selected_protocol: ?[]u8,
-        permessage_deflate: bool,
+        negotiated_extension: websocket.ExtensionNegotiation,
     ) H2Connection {
         return .{
             .allocator = allocator,
@@ -1533,7 +1545,11 @@ pub const H2Connection = struct {
             .role = role,
             .limits = limits,
             .selected_protocol = selected_protocol,
-            .permessage_deflate = permessage_deflate,
+            .permessage_deflate = negotiated_extension.permessage_deflate,
+            .compression_send_max_window_bits = switch (role) {
+                .client => negotiated_extension.client_max_window_bits orelse 15,
+                .server => negotiated_extension.server_max_window_bits orelse 15,
+            },
         };
     }
 
@@ -1632,10 +1648,11 @@ pub const H2Connection = struct {
                     plain_len,
                 );
                 const compressed = try websocket
-                    .compressMessageFragmentsVortInto(
+                    .compressMessageFragmentsVortIntoWindow(
                     &self.compression_send.payload,
                     self.allocator,
                     fragments,
+                    self.compression_send_max_window_bits,
                 );
                 if (compressed.len < plain_len) {
                     try self.writeCompressedFragmentsLocked(
@@ -1838,10 +1855,11 @@ pub const H2Connection = struct {
             self.allocator,
             payload.len,
         );
-        return websocket.compressMessageVortInto(
+        return websocket.compressMessageVortIntoWindow(
             &self.compression_send.payload,
             self.allocator,
             payload,
+            self.compression_send_max_window_bits,
         );
     }
 
@@ -2021,7 +2039,7 @@ pub const H2Client = struct {
             .client,
             options.limits,
             selected_protocol,
-            selected_extension.permessage_deflate,
+            selected_extension,
         );
     }
 };
@@ -2042,6 +2060,10 @@ pub const H2Server = struct {
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
         const selected_extension = try acceptH2Extensions(allocator, request.headers, options.enable_permessage_deflate);
         defer if (selected_extension) |extension| allocator.free(extension);
+        const negotiated_extension = if (selected_extension) |extension|
+            try websocket.ExtensionNegotiation.validateResponse(extension)
+        else
+            websocket.ExtensionNegotiation{};
 
         var response_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer response_headers.deinit(allocator);
@@ -2058,7 +2080,7 @@ pub const H2Server = struct {
             .server,
             options.limits,
             selected_protocol,
-            selected_extension != null,
+            negotiated_extension,
         );
     }
 };
