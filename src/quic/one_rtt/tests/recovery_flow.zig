@@ -714,6 +714,69 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     try std.testing.expectEqual(@as(u64, 2), client.recovery.pending.items[0].packetNumberAt(0).?);
 }
 
+test "QUIC 1-RTT ACK does not grow an underutilized congestion window" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x8a, 0x8b, 0x8c, 0x8d };
+    const server_cid = [_]u8{ 0x8e, 0x8f, 0x90, 0x91 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xba} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbb} ** quic.protection.secret_len,
+    );
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const initial_window = client.congestionWindow();
+    try client.sendAt(&.{.{ .ping = {} }}, 1);
+    try std.testing.expect(!client.congestion.isCongestionWindowUtilized());
+    var ping = try server.receivePacket();
+    defer ping.deinit(allocator);
+    try server.sendAck(0);
+    var ack = try client.receivePacketAt(100_000_001);
+    defer ack.deinit(allocator);
+
+    try std.testing.expect(client.rtt_stats.has_measurement);
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight());
+    try std.testing.expectEqual(initial_window, client.congestionWindow());
+}
+
 test "QUIC 1-RTT timer-servicing receive drains packet-threshold retransmissions" {
     const allocator = std.testing.allocator;
 

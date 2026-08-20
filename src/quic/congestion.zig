@@ -30,6 +30,10 @@ pub const CubicState = struct {
     w_est: f64 = 0,
     /// Fractional byte growth retained across ACK batches.
     window_increment: f64 = 0,
+    /// Start of an interval during which the sender was not congestion-window
+    /// limited. RFC 9438 excludes this wall-clock interval from the cubic
+    /// epoch so an idle application cannot earn a later burst of cwnd growth.
+    app_limited_start_time_ns: ?u64 = null,
     /// Additive factor starts at the RFC-recommended Reno-friendly value and
     /// changes to one after W_est recovers to W_max.
     alpha: f64 = reno_friendly_alpha,
@@ -95,6 +99,19 @@ pub const Controller = struct {
         return bytes <= self.available();
     }
 
+    /// Whether the current flight is large enough to justify cwnd growth.
+    ///
+    /// The thresholds match the audited quicz controller: half the window in
+    /// slow start and at most three datagrams of spare capacity in congestion
+    /// avoidance. The caller samples this before removing ACKed bytes.
+    pub fn isCongestionWindowUtilized(self: Controller) bool {
+        if (self.bytes_in_flight >= self.congestion_window) return true;
+        if (self.inSlowStart()) {
+            return self.bytes_in_flight >= self.congestion_window / 2;
+        }
+        return self.available() <= 3 *| self.max_datagram_size;
+    }
+
     pub fn reserve(self: *Controller, bytes: usize) Error!void {
         if (bytes == 0) return;
         if (!self.canSend(bytes)) return error.CongestionLimited;
@@ -121,6 +138,30 @@ pub const Controller = struct {
         now_ns: ?u64,
         smoothed_rtt_ns: ?u64,
     ) void {
+        self.onAckedWithContextAndUtilization(
+            bytes,
+            sent_time_ns,
+            now_ns,
+            smoothed_rtt_ns,
+            true,
+        );
+    }
+
+    /// Apply an ACK while preserving whether the sender was cwnd-limited.
+    ///
+    /// RTT sampling is owned by the connection, so this routine always removes
+    /// acknowledged bytes. Only congestion-window growth is suppressed for an
+    /// application- or flow-control-limited sender, as required by RFC 9002
+    /// section 7.8. CUBIC additionally pauses its wall-clock epoch during that
+    /// interval so resuming traffic cannot turn idle time into a cwnd jump.
+    pub fn onAckedWithContextAndUtilization(
+        self: *Controller,
+        bytes: usize,
+        sent_time_ns: ?u64,
+        now_ns: ?u64,
+        smoothed_rtt_ns: ?u64,
+        congestion_window_utilized: bool,
+    ) void {
         if (bytes == 0) return;
         self.discard(bytes);
 
@@ -128,6 +169,24 @@ pub const Controller = struct {
             const sent_time = sent_time_ns orelse return;
             if (sent_time <= recovery_start) return;
             self.congestion_recovery_start_time_ns = null;
+        }
+
+        if (!congestion_window_utilized) {
+            if (self.algorithm == .cubic and
+                self.cubic.app_limited_start_time_ns == null)
+            {
+                // The ACK only reveals that the flight was underfilled. Start
+                // the excluded interval at the acknowledged packet's send
+                // time, matching quicz and avoiding credit for the intervening
+                // idle RTT. Fall back to receipt time when callers lack sent
+                // metadata.
+                self.cubic.app_limited_start_time_ns =
+                    sent_time_ns orelse now_ns;
+            }
+            return;
+        }
+        if (self.algorithm == .cubic) {
+            self.resumeCubicEpoch(now_ns);
         }
 
         if (self.inSlowStart()) {
@@ -152,6 +211,17 @@ pub const Controller = struct {
                 };
                 self.growCubic(bytes, now, smoothed_rtt);
             },
+        }
+    }
+
+    fn resumeCubicEpoch(self: *Controller, now_ns: ?u64) void {
+        const app_limited_start =
+            self.cubic.app_limited_start_time_ns orelse return;
+        defer self.cubic.app_limited_start_time_ns = null;
+        const now = now_ns orelse return;
+        if (self.cubic.epoch_start_time_ns) |epoch_start| {
+            self.cubic.epoch_start_time_ns =
+                epoch_start +| (now -| app_limited_start);
         }
     }
 
@@ -269,6 +339,7 @@ pub const Controller = struct {
 
         if (self.algorithm == .cubic) {
             self.cubic.epoch_start_time_ns = event_time_ns;
+            self.cubic.app_limited_start_time_ns = null;
             self.cubic.w_est = @floatFromInt(self.congestion_window);
             self.cubic.alpha = CubicState.reno_friendly_alpha;
             self.cubic.window_increment = 0;
@@ -354,6 +425,69 @@ test "QUIC congestion controller gates sends and grows on ACK" {
     cc.onAcked(1200);
     try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 13_200), cc.congestion_window);
+}
+
+test "QUIC congestion controller does not grow for underutilized ACK" {
+    for ([_]Algorithm{ .new_reno, .cubic }) |algorithm| {
+        var cc = Controller.initWithAlgorithm(1200, algorithm);
+        const initial_window = cc.congestion_window;
+        try cc.reserve(1200);
+        try std.testing.expect(!cc.isCongestionWindowUtilized());
+        cc.onAckedWithContextAndUtilization(
+            1200,
+            1,
+            100_000_000,
+            100_000_000,
+            false,
+        );
+        try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
+        try std.testing.expectEqual(initial_window, cc.congestion_window);
+    }
+}
+
+test "QUIC CUBIC excludes application-limited time from its epoch" {
+    var cc = Controller.initWithAlgorithm(1200, .cubic);
+    cc.slow_start_threshold = cc.congestion_window;
+    try cc.reserve(cc.congestion_window);
+    try std.testing.expect(cc.isCongestionWindowUtilized());
+    cc.onAckedWithContextAndUtilization(
+        1200,
+        1,
+        1_000_000_000,
+        100_000_000,
+        true,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1_000_000_000),
+        cc.cubic.epoch_start_time_ns,
+    );
+
+    cc.onAckedWithContextAndUtilization(
+        1200,
+        1_900_000_000,
+        2_000_000_000,
+        100_000_000,
+        false,
+    );
+    const before_resume = cc.congestion_window;
+    try std.testing.expectEqual(
+        @as(?u64, 1_900_000_000),
+        cc.cubic.app_limited_start_time_ns,
+    );
+
+    cc.onAckedWithContextAndUtilization(
+        1200,
+        4_900_000_000,
+        5_000_000_000,
+        100_000_000,
+        true,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 4_100_000_000),
+        cc.cubic.epoch_start_time_ns,
+    );
+    try std.testing.expectEqual(@as(?u64, null), cc.cubic.app_limited_start_time_ns);
+    try std.testing.expect(cc.congestion_window >= before_resume);
 }
 
 test "QUIC congestion controller reduces on loss" {

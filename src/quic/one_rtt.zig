@@ -5070,6 +5070,11 @@ pub const Connection = struct {
         for (frames) |frame| {
             switch (frame) {
                 .ack => {
+                    // Sample utilization before ACK accounting removes bytes
+                    // from flight. Otherwise every ACK would make the sender
+                    // look less utilized than it was while transmitting.
+                    const congestion_window_utilized =
+                        self.congestion.isCongestionWindowUtilized();
                     const handshake_done_group =
                         self.handshake_status.recoveryGroupId();
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
@@ -5092,11 +5097,12 @@ pub const Connection = struct {
                     if (acked.ecn_ce_delta > 0) {
                         self.congestion.onExplicitCongestion(now_ns);
                     }
-                    self.congestion.onAckedWithContext(
+                    self.congestion.onAckedWithContextAndUtilization(
                         acked.bytes,
                         acked.largest_sent_time_ns,
                         now_ns,
                         self.rtt_stats.smoothedOrInitial(),
+                        congestion_window_utilized,
                     );
                     self.congestion.endAck();
                     if (acked.largest_acknowledged_sent) |acknowledged| {
