@@ -2174,6 +2174,22 @@ fn ensureIncomingFrameBuffered(
     header: websocket.FrameHeader,
     total_len: usize,
 ) Error!void {
+    const parse_options: websocket.ParseFrameOptions = switch (connection.role) {
+        .client => .{
+            .expect_mask = .unmasked,
+            .allow_rsv1 = connection.permessage_deflate,
+            .validate_utf8 = false,
+        },
+        .server => .{
+            .expect_mask = .masked,
+            .allow_rsv1 = connection.permessage_deflate,
+            .validate_utf8 = false,
+        },
+    };
+    // Header errors take precedence over payload validation and are known as
+    // soon as the complete header is buffered. The full frame parser repeats
+    // this check after the payload arrives as a defensive codec boundary.
+    try websocket.validateFrameHeader(header, parse_options);
     const message_kind: IncomingDataKind = switch (header.opcode) {
         .text => blk: {
             if (connection.incoming_data_kind != .none) {
