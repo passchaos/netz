@@ -1713,6 +1713,57 @@ def retained_publish_property_bundle(
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_tombstone_properties(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    topic = "retained/tombstone/properties"
+    old_property = mqtt5_props.gen_string_pair_prop(
+        mqtt5_props.USER_PROPERTY, "state", "old"
+    )
+    tombstone_property = mqtt5_props.gen_string_pair_prop(
+        mqtt5_props.USER_PROPERTY, "state", "deleted"
+    )
+    new_property = mqtt5_props.gen_string_pair_prop(
+        mqtt5_props.USER_PROPERTY, "state", "new"
+    )
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "retained-tombstone")
+            for mid, payload, properties in (
+                (1, "old", old_property),
+                (2, None, tombstone_property),
+            ):
+                sock.sendall(mqtt_packets.gen_publish(
+                    topic, qos=1, mid=mid, payload=payload, retain=True,
+                    proto_ver=5, properties=properties,
+                ))
+                expect_packet(
+                    sock, mqtt_packets.gen_puback(
+                        mid, proto_ver=5, reason_code=0x10
+                    ), f"tombstone PUBACK {mid}",
+                )
+            sock.sendall(mqtt_packets.gen_subscribe(3, topic, 0, proto_ver=5))
+            expect_packet(sock, mqtt_packets.gen_suback(3, 0, proto_ver=5), "tombstone empty SUBACK")
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(sock, mqtt_packets.gen_pingresp(), "tombstone empty replay")
+            sock.sendall(mqtt_packets.gen_publish(
+                topic, qos=1, mid=4, payload="new", retain=True,
+                proto_ver=5, properties=new_property,
+            ))
+            expect_packets_unordered(
+                sock,
+                [
+                    mqtt_packets.gen_puback(4, proto_ver=5),
+                    mqtt_packets.gen_publish(
+                        topic, qos=0, payload="new", retain=False,
+                        proto_ver=5, properties=new_property,
+                    ),
+                ],
+                "tombstone new live publish",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1749,7 +1800,8 @@ def main() -> None:
     retain_as_published_live(args.broker, mqtt_packets, mqtt5_opts)
     retained_replacement(args.broker, mqtt_packets, mqtt5_props)
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 24 scenarios")
+    retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 25 scenarios")
 
 
 if __name__ == "__main__":
