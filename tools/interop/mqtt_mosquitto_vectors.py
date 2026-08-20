@@ -294,23 +294,27 @@ def multiple_subscription_identifiers(
         with broker.connect() as sock:
             connect_v5(sock, mqtt_packets, "multi-subscription-id")
             subscriptions = (
-                (1, "multi/subid/value", 3),
-                (2, "multi/subid/+", 9),
+                (1, "multi/subid/value", 3, 0),
+                (2, "multi/subid/+", 9, 1),
             )
-            for mid, topic_filter, identifier in subscriptions:
+            for mid, topic_filter, identifier, qos in subscriptions:
                 properties = mqtt5_props.gen_varint_prop(
                     mqtt5_props.SUBSCRIPTION_IDENTIFIER, identifier
                 )
                 sock.sendall(mqtt_packets.gen_subscribe(
-                    mid, topic_filter, 0, proto_ver=5, properties=properties
+                    mid, topic_filter, qos, proto_ver=5, properties=properties
                 ))
                 expect_packet(
-                    sock, mqtt_packets.gen_suback(mid, 0, proto_ver=5),
+                    sock, mqtt_packets.gen_suback(mid, qos, proto_ver=5),
                     f"multi-subid SUBACK {mid}",
                 )
             sock.sendall(mqtt_packets.gen_publish(
-                topic, qos=0, payload="both", proto_ver=5
+                topic, qos=1, mid=10, payload="both", proto_ver=5
             ))
+            expect_packet(
+                sock, mqtt_packets.gen_puback(10, proto_ver=5),
+                "multi-subid publisher PUBACK",
+            )
             properties = (
                 mqtt5_props.gen_varint_prop(
                     mqtt5_props.SUBSCRIPTION_IDENTIFIER, 3
@@ -321,10 +325,11 @@ def multiple_subscription_identifiers(
             )
             expect_packet(
                 sock, mqtt_packets.gen_publish(
-                    topic, qos=0, payload="both", proto_ver=5,
+                    topic, qos=1, mid=1, payload="both", proto_ver=5,
                     properties=properties,
                 ), "multi-subid forwarded PUBLISH",
             )
+            sock.sendall(mqtt_packets.gen_puback(1, proto_ver=5))
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 

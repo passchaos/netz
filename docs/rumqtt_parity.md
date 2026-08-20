@@ -867,7 +867,9 @@ then verifies a replacement live PUBLISH contains only its new User Property.
 The twenty-sixth scenario overlaps an exact and wildcard subscription for one
 client. Netz now merges the router matches into one PUBLISH and appends both
 Subscription Identifier properties (3 then 9), instead of emitting duplicate
-Application Messages with one identifier each.
+Application Messages with one identifier each. The gate also gives the two
+subscriptions QoS 0 and QoS 1 and verifies the merged delivery takes the maximum
+granted QoS.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets; all twenty-six scenarios pass. This is deliberately described as a selected

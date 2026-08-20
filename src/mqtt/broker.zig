@@ -1707,6 +1707,13 @@ pub const Broker = struct {
                     self.allocator,
                     match.subscription_identifier,
                 );
+                delivery.qos = maxQos(
+                    delivery.qos,
+                    minQos(publish.qos, match.subscription.qos),
+                );
+                delivery.retain = delivery.retain or
+                    (match.subscription.retain_as_published and
+                        publish.retain);
                 continue;
             }
             const delivery_qos = minQos(
@@ -2383,6 +2390,10 @@ fn ungracefulTransportClose(err: anyerror) bool {
 
 fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
+}
+
+fn maxQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
+    return if (@intFromEnum(a) >= @intFromEnum(b)) a else b;
 }
 
 fn protocolReason(
