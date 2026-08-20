@@ -14,6 +14,7 @@ const client_id_mod = @import("broker/client_id.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
+const session_delivery = @import("broker/session_delivery.zig");
 const session_route = @import("broker/session_route.zig");
 const will_driver_mod = @import("broker/will_driver.zig");
 const retained_mod = @import("retained/mod.zig");
@@ -1565,74 +1566,76 @@ pub const Broker = struct {
                 publish.topic,
             );
         }
+        var session_plan = try session_delivery.Plan.init(
+            self.allocator,
+            matches,
+            publish.qos,
+            publish.retain,
+        );
+        defer session_plan.deinit();
+        for (session_plan.routes) |*route| {
+            const handle = self.sessions.handleForRouteId(
+                route.route_id,
+            ) orelse {
+                // A stable route without Session State can only be a rollback
+                // residue. Its raw matches are discarded in the rewrite pass
+                // below.
+                continue;
+            };
+            has_matching_subscriber = true;
+            const owner_id = self.session_owners.get(route.route_id);
+            const destination_index = if (owner_id) |id|
+                subscriberIndex(id, self.slots.len)
+            else
+                null;
+            const destination = if (destination_index) |index|
+                &self.slots[index]
+            else
+                null;
+            const online = if (destination) |slot|
+                self.slotOwnsSessionRoute(
+                    destination_index.?,
+                    slot,
+                    owner_id.?,
+                    route.route_id,
+                )
+            else
+                false;
+            if (route.qos == .at_most_once or
+                (online and !destination.?.session_persistent))
+            {
+                // Mosquitto delivers QoS 0 directly to an online
+                // persistent client, but drops it while that client is
+                // offline unless its non-default queue_qos0 option is
+                // enabled. QoS 1/2 can take the same shared-Publication
+                // path when Session Expiry is zero: the runtime keeps the
+                // Packet Identifier state until ACK, and no payload is
+                // allowed to survive this Network Connection.
+                if (online) route.output_subscriber_id = owner_id.?;
+                continue;
+            }
+            try self.enqueueSessionDeliveryManyLocked(
+                handle,
+                session_plan.identifiersFor(route),
+                route.retain,
+                route.qos,
+                publish,
+                now,
+            );
+            if (online) {
+                route.output_subscriber_id =
+                    sessionSubscriberId(route.route_id);
+            }
+        }
+        // Apply one route decision to every overlapping raw match. Keeping all
+        // online transient matches lets the existing live Delivery merge
+        // preserve their identifiers. Durable routes have already been reduced
+        // to one Session enqueue, so only their first raw match remains as a
+        // flush target.
         for (matches) |*match| {
             if (sessionRouteId(match.subscriber_id)) |route_id| {
-                const handle = self.sessions.handleForRouteId(
-                    route_id,
-                ) orelse {
-                    // A stable route without Session State can only be a
-                    // rollback residue. Do not report it as a matching
-                    // subscriber, and make it ineligible for both partitions
-                    // below.
-                    match.subscriber_id = 0;
-                    continue;
-                };
-                has_matching_subscriber = true;
-                const delivery_qos = minQos(
-                    publish.qos,
-                    match.subscription.qos,
-                );
-                const owner_id = self.session_owners.get(route_id);
-                const destination_index = if (owner_id) |id|
-                    subscriberIndex(id, self.slots.len)
-                else
-                    null;
-                const destination = if (destination_index) |index|
-                    &self.slots[index]
-                else
-                    null;
-                const online = if (destination) |slot|
-                    self.slotOwnsSessionRoute(
-                        destination_index.?,
-                        slot,
-                        owner_id.?,
-                        route_id,
-                    )
-                else
-                    false;
-                if (delivery_qos == .at_most_once or
-                    (online and !destination.?.session_persistent))
-                {
-                    // Mosquitto delivers QoS 0 directly to an online
-                    // persistent client, but drops it while that client is
-                    // offline unless its non-default queue_qos0 option is
-                    // enabled. QoS 1/2 can take the same shared-Publication
-                    // path when Session Expiry is zero: the runtime keeps the
-                    // Packet Identifier state until ACK, and no payload is
-                    // allowed to survive this Network Connection.
-                    if (!online) {
-                        match.subscriber_id = 0;
-                        continue;
-                    }
-                    match.subscriber_id = owner_id.?;
-                    continue;
-                }
-                try self.enqueueSessionDeliveryLocked(
-                    handle,
-                    match.subscription_identifier,
-                    if (match.subscription.retain_as_published)
-                        publish.retain
-                    else
-                        false,
-                    delivery_qos,
-                    publish,
-                    now,
-                );
-                if (!online) {
-                    match.subscriber_id = 0;
-                    continue;
-                }
-                continue;
+                match.subscriber_id =
+                    session_plan.nextOutputSubscriberId(route_id);
             }
         }
 
@@ -1812,12 +1815,36 @@ pub const Broker = struct {
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
     ) Error!void {
+        var identifier_storage: [1]usize = undefined;
+        const identifiers: []const usize = if (subscription_identifier) |id| blk: {
+            identifier_storage[0] = id;
+            break :blk &identifier_storage;
+        } else &.{};
+        return self.enqueueSessionDeliveryManyLocked(
+            handle,
+            identifiers,
+            retain,
+            qos,
+            publish,
+            now,
+        );
+    }
+
+    fn enqueueSessionDeliveryManyLocked(
+        self: *Broker,
+        handle: session_mod.Handle,
+        subscription_identifiers: []const usize,
+        retain: bool,
+        qos: mqtt.QoS,
+        publish: mqtt.Publish,
+        now: std.Io.Timestamp,
+    ) Error!void {
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         try properties.ensureTotalCapacity(
             self.allocator,
             publish.properties.len +
-                @intFromBool(subscription_identifier != null),
+                subscription_identifiers.len,
         );
         for (publish.properties) |property| {
             if ((property == .two_byte and
@@ -1829,7 +1856,7 @@ pub const Broker = struct {
             }
             properties.appendAssumeCapacity(property);
         }
-        if (subscription_identifier) |identifier| {
+        for (subscription_identifiers) |identifier| {
             properties.appendAssumeCapacity(.{ .varint = .{
                 .id = .subscription_identifier,
                 .value = identifier,

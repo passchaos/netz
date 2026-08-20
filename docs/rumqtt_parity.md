@@ -871,6 +871,10 @@ Application Messages with one identifier each. The gate also gives the two
 subscriptions QoS 0 and QoS 1 and verifies the merged delivery takes the maximum
 granted QoS. One match also enables Retain As Published, proving the merged
 retained source preserves RETAIN when any matching subscription requests it.
+The same reduction now happens before durable Session enqueueing. An in-process
+reconnect regression proves that an offline persistent client receives one
+queued PUBLISH with both identifiers, the maximum effective QoS, and Retain As
+Published combined from all matching subscriptions.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets; all twenty-six scenarios pass. This is deliberately described as a selected

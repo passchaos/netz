@@ -554,6 +554,129 @@ test "broker queues offline QoS 1 and drains on resume" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker merges overlapping subscriptions in an offline Session" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 3, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 3,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "offline-overlap",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer subscriber.close();
+    var exact_suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "offline/overlap/value",
+            .qos = .at_most_once,
+        }},
+        .{ .properties = &.{.{ .varint = .{
+            .id = .subscription_identifier,
+            .value = 3,
+        } }} },
+    );
+    defer exact_suback.deinit(allocator);
+    var wildcard_suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "offline/overlap/+",
+            .qos = .at_least_once,
+            .retain_as_published = true,
+        }},
+        .{ .properties = &.{.{ .varint = .{
+            .id = .subscription_identifier,
+            .value = 9,
+        } }} },
+    );
+    defer wildcard_suback.deinit(allocator);
+    try subscriber.disconnect(0);
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "offline-overlap-publisher",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "offline/overlap/value",
+        "merged",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+
+    var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "offline-overlap",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+
+    var delivered = try resumed.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "merged",
+        delivered.publish.payload,
+    );
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        delivered.publish.qos,
+    );
+    try std.testing.expect(delivered.publish.retain);
+    var identifiers: [2]usize = undefined;
+    var identifier_count: usize = 0;
+    for (delivered.publish.properties) |property| {
+        if (property == .varint and
+            property.varint.id == .subscription_identifier)
+        {
+            if (identifier_count >= identifiers.len) {
+                return error.TestUnexpectedResult;
+            }
+            identifiers[identifier_count] = property.varint.value;
+            identifier_count += 1;
+        }
+    }
+    try std.testing.expectEqualSlices(
+        usize,
+        &.{ 3, 9 },
+        identifiers[0..identifier_count],
+    );
+    try resumed.writePubAck(delivered.publish.packet_id.?, 0);
+    // A second durable enqueue would precede PINGRESP and make ping fail with
+    // UnexpectedPacket, so this also verifies one queued Application Message.
+    try resumed.ping();
+
+    try disconnectAll(&.{ &publisher, &resumed });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker retransmits persistent QoS 1 with DUP and original id" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
