@@ -907,6 +907,19 @@ original captured 638.0 conn/s sample, the current 824.1-830.7 conn/s pair is
 CertificateVerify validation, so this is an internal improvement rather than
 a cross-stack superiority claim.
 
+`--skip-server-verification` now exposes that policy difference explicitly
+without removing the server Certificate or its fresh P-256 CertificateVerify
+signature. Five CPU-0-pinned 200-connection runs measured p50
+657.9-833.0 us, p99 1.328-9.971 ms, and 449.6-1426.7 conn/s; the middle samples
+were 668.8 us and 881.9 conn/s. Three matching runs of the audited quicz
+handshake-only artifact measured p50 800.3-811.9 us, p99 3.005-5.813 ms and
+538.4-788.6 conn/s. Netz is therefore faster at p50 in four of five captured
+runs and has the higher median rate, but host scheduling still produces enough
+tail/rate variance that this is evidence of a closed verification-cost gap, not
+a universal handshake-superiority claim. A 100-connection `--stats` run ended
+with zero live bytes and used 9,001 allocations, 14,985,675 cumulative bytes
+and an 88,276-byte peak.
+
 ### Raw QUIC real-handshake 1 KiB echo latency
 
 Captured on 2026-08-20 with one real authenticated handshake followed by 5,000

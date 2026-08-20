@@ -169,6 +169,7 @@ const Config = struct {
     rtt_us: u64 = 0,
     reorder_every: usize = 0,
     corrupt_every: usize = 0,
+    verify_server: bool = true,
 };
 
 const IterationResult = struct {
@@ -523,12 +524,13 @@ fn runIteration(
             // netz's default post-quantum hybrid offer in this comparison.
             .key_exchange_groups = &.{.x25519},
             .cipher_suites = &.{.aes_128_gcm_sha256},
-            // A raw SEC1 public key is valid for this benchmark's pinned-key
-            // identity and avoids making certificate-chain policy part of the
-            // transport handshake measurement.
-            .server_auth = .{
+            // The default measures CertificateVerify validation against a
+            // pinned key. `--skip-server-verification` retains the server's
+            // Certificate and fresh signature but aligns client work with the
+            // audited quicz benchmark's `skip_cert_verify = true` mode.
+            .server_auth = if (config.verify_server) .{
                 .pinned_ecdsa_p256_public_key = benchmark_server_public,
-            },
+            } else null,
             .local_transport_parameters = transport_parameters,
             .initial_one_rtt_config = one_rtt_config,
             .max_crypto_buffer = 64 * 1024,
@@ -1086,6 +1088,12 @@ fn parseArgs(
             config.enable_hystart = false;
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
             config.enable_pacing = false;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--skip-server-verification",
+        )) {
+            config.verify_server = false;
         } else {
             return error.InvalidArgument;
         }
@@ -1401,12 +1409,14 @@ fn runHandshakeBenchmark(
             @as(f64, @floatFromInt(std.time.ns_per_s)) /
             @as(f64, @floatFromInt(elapsed));
     std.debug.print("QUIC real TLS 1.3 handshake benchmark\n" ++
+        "  server verification: {s}\n" ++
         "  iterations: {d}\n" ++
         "  total elapsed ns: {d}\n" ++
         "  connections/s: {d:.1}\n" ++
         "  p50 ns: {d}\n" ++
         "  p99 ns: {d}\n" ++
         "  p99.9 ns: {d}\n", .{
+        if (config.verify_server) "pinned P-256 CertificateVerify" else "skipped (quicz-aligned)",
         config.iterations,
         elapsed,
         connections_per_second,

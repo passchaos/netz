@@ -582,6 +582,7 @@ zig build bench-quic-lb -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=1 --verbose
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=4 --verbose
+taskset -c 0 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=handshake --iterations=200 --skip-server-verification
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast

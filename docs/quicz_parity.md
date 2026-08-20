@@ -54,7 +54,8 @@ netz QUIC DATAGRAM:        297.06 MiB/s, 1200B payload, 16 MiB transfer
 netz Stream Upload:        311.69 MiB/s mean, 3.1% stddev, 3 x 64 MiB
 netz Multi-Stream (4x):    314.68 MiB/s mean, 0.6% stddev, 3 x 64 MiB
 quicz Handshake:           P50 563.4us, P99 775.3us, 1131.3 conn/s
-netz Handshake:            P50 1172.1us, P99 1367.8us, 830.7 conn/s
+netz Handshake verified:   P50 1172.1us, P99 1367.8us, 830.7 conn/s
+netz Handshake skip-verify:P50 657.9-833.0us, P99 1327.7-9971.1us, median 881.9 conn/s
 quicz Stream Open:         48.1-52.0M streams/s, 100k streams
 netz Stream Open:          680.2-778.0M streams/s, 100k streams
 quicz Aggregate (4 conn):  503.2-533.1 MB/s, 4 x 64 MiB
@@ -65,7 +66,7 @@ quicz Loss +100us RTT:     98.7-105.0 / 95.9-98.4 MB/s
 netz Loss +100us RTT:      121.1-131.2 / 116.4-127.6 MiB/s
 ```
 
-The handshake values are fresh same-host ReleaseFast runs. Latency uses 200
+The original handshake values are fresh same-host ReleaseFast runs. Latency uses 200
 fresh real TLS 1.3 connections and rate uses 100. The netz mode pins X25519
 and TLS_AES_128_GCM_SHA256, reuses one immutable deterministic P-256 long-term
 identity, and reports P50/P99/P99.9 plus aggregate connections/s. Every sample
@@ -74,6 +75,13 @@ key, whereas the current quicz workload sets `skip_cert_verify = true`. Netz
 also uses an executor worker around its blocking public accept/connect API.
 Those security and scheduling differences make this a concrete optimization
 baseline, not a performance-superiority verdict.
+The netz benchmark now also accepts `--skip-server-verification`, which retains
+the server's Certificate and fresh P-256 CertificateVerify signature but skips
+the client verification exactly like the audited quicz configuration. Five
+CPU-0 runs put netz p50 at 657.9-833.0 us and median rate at 881.9 conn/s; three
+quicz runs put p50 at 800.3-811.9 us and median rate at 749.3 conn/s. The broad
+netz p99/rate ranges show host scheduling noise, so the result closes the
+verification-policy mismatch but does not support a universal handshake claim.
 
 The echo rows use the same 1 KiB/5,000-round real-handshake workload. A fresh
 CPU-0-pinned three-run comparison measured netz at P50 10.44-10.57 us, P99
@@ -129,7 +137,7 @@ benchmarks.
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered and faster at p99/p99.9 while tied at p50 | `examples/quic_echo.zig`, `examples/quic_handshake_echo.zig`, `examples/bench_quic_handshake_stream.zig`, `--mode=echo`; CPU-0-pinned netz P50/P99/P99.9 ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The benchmark verifies 5,120,000 bytes and needs only 159 allocations across 5,000 rounds. | Raw 64 MiB throughput still needs equivalent endpoint CPU placement before a general STREAM verdict. |
-| QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered and improved; current authenticated netz sample remains slower | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; consecutive 200-connection samples sustained 824.1-830.7 conn/s, with the best sample at P50 1172.1 us / P99 1367.8 us. Exact Initial sizing also cut allocator calls from 167.0 to 92.0 per connection. | Equalize verification/scheduling policy before a direct verdict; quicz's 563.4 us / 775.3 us and 1131.3 conn/s sample skips CertificateVerify validation. |
+| QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered with authenticated and quicz-aligned modes | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; verified samples sustained 824.1-830.7 conn/s with P50 1172.1 us. `--skip-server-verification` retains Certificate/signing while matching quicz client policy; five CPU-0 runs measured P50 657.9-833.0 us and median 881.9 conn/s versus three quicz runs at P50 800.3-811.9 us and median 749.3 conn/s. Exact Initial sizing cut allocator calls from 167.0 to 92.0 per connection. | Equalize worker scheduling and reduce p99 variance before a whole-surface handshake claim. |
 | QUIC stream-open churn (`quic_bench_hs`) | Covered and faster for the reference reservation workload | `examples/bench_quic_handshake_stream.zig`, `--mode=stream-churn`; CPU-0-pinned netz sustained 680.2-778.0M streams/s versus quicz 48.1-52.0M streams/s, a 13.1-16.2x range. IDs, limit enforcement, both endpoint roles, zero timed-loop allocation, final ID and checksum are validated. | Add a separate on-wire FIN/reset/recycling workload before generalizing this to full stream lifecycle churn. |
 | QUIC concurrent aggregate (`quic_bench_hs`) | Covered and faster for four independent connections | `examples/bench_quic_handshake_stream.zig`, `--mode=aggregate --connections=4 --transfer-bytes=67108864`; netz completed at 730.35-900.57 MiB/s versus quicz 503.23-533.10 MB/s, a conservative 1.37-1.79x range, while verifying 4 x 64 MiB at receiver completion. | Add connection-count scaling curves and shared-event-loop comparison before generalizing beyond the four-worker shape. |
 | QUIC simulated loss (`quic_bench_hs`) | Covered and faster for all four reference scenarios | `examples/bench_quic_handshake_stream.zig`, `--mode=loss`; 1%/5% loopback and 1%/5% with 100 us RTT were conservatively 1.08-1.45x faster than quicz, with deterministic injected-drop counts, full 4 MiB receiver completion, transport loss counters and optional memory telemetry. | Add bidirectional loss, reordering and corruption cases before generalizing beyond the reference one-way loss model. |
@@ -176,10 +184,9 @@ benchmarks.
    connection aggregate throughput, and stream reservation have direct faster
    artifacts, but on-wire stream lifecycle churn remains open. Echo latency
    now has a controlled artifact that is tied/faster across percentiles. Handshake
-   latency/rate now has a real artifact and a smaller netz optimization gap,
-   but the two workloads still need equal certificate-verification and worker
-   scheduling policies before the whole quicz benchmark surface can be
-   considered surpassed.
+   latency/rate now has a verification-policy-aligned artifact, but the two
+   workloads still need equal worker scheduling and lower tail variance before
+   the whole quicz benchmark surface can be considered surpassed.
 
 ## Next recommended work
 
