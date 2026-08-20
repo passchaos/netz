@@ -1664,6 +1664,55 @@ def retained_replacement(executable: Path, mqtt_packets, mqtt5_props) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_publish_property_bundle(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # In-process wire subset of Mosquitto 11-pub-props.py. The complete
+    # Application Message property bundle must survive retained storage/replay.
+    topic = "retained/property/bundle"
+    properties = (
+        mqtt5_props.gen_byte_prop(
+            mqtt5_props.PAYLOAD_FORMAT_INDICATOR, 1
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.CONTENT_TYPE, "plain/text"
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.RESPONSE_TOPIC, "response/property/bundle"
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.CORRELATION_DATA, "2357289375902345"
+        )
+        + mqtt5_props.gen_string_pair_prop(
+            mqtt5_props.USER_PROPERTY, "name", "value"
+        )
+    )
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "retained-property-bundle")
+            sock.sendall(mqtt_packets.gen_publish(
+                topic, qos=1, mid=1, payload="message", retain=True,
+                proto_ver=5, properties=properties,
+            ))
+            expect_packet(
+                sock, mqtt_packets.gen_puback(
+                    1, proto_ver=5, reason_code=0x10
+                ), "property bundle PUBACK",
+            )
+            sock.sendall(mqtt_packets.gen_subscribe(2, topic, 0, proto_ver=5))
+            expect_packet(
+                sock, mqtt_packets.gen_suback(2, 0, proto_ver=5),
+                "property bundle SUBACK",
+            )
+            expect_packet(
+                sock, mqtt_packets.gen_publish(
+                    topic, qos=0, payload="message", retain=True,
+                    proto_ver=5, properties=properties,
+                ), "property bundle retained PUBLISH",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1699,7 +1748,8 @@ def main() -> None:
     unsubscribe_reason_codes(args.broker, mqtt_packets)
     retain_as_published_live(args.broker, mqtt_packets, mqtt5_opts)
     retained_replacement(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 23 scenarios")
+    retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 24 scenarios")
 
 
 if __name__ == "__main__":
