@@ -1450,6 +1450,52 @@ def qos2_duplicate_publish(executable: Path, mqtt_packets) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def qos2_repeated_pubrel(executable: Path, mqtt_packets) -> None:
+    # Mosquitto treats a repeated/unknown PUBREL as idempotent because PUBCOMP
+    # may have been lost. Complete one routed transaction, repeat PUBREL, then
+    # send a wholly unknown Packet Identifier; both receive PUBCOMP and neither
+    # can create another downstream PUBLISH.
+    topic = "qos2/repeated/pubrel"
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_v5(subscriber, mqtt_packets, "repeat-rel-sub")
+            subscriber.sendall(mqtt_packets.gen_subscribe(1, topic, 2, proto_ver=5))
+            expect_packet(subscriber, mqtt_packets.gen_suback(1, 2, proto_ver=5), "repeat PUBREL SUBACK")
+            connect_v5(publisher, mqtt_packets, "repeat-rel-pub")
+            publisher.sendall(mqtt_packets.gen_publish(
+                topic, qos=2, mid=9, payload="once", proto_ver=5
+            ))
+            expect_packet(publisher, mqtt_packets.gen_pubrec(9, proto_ver=5), "repeat PUBREL PUBREC")
+            publisher.sendall(mqtt_packets.gen_pubrel(9, proto_ver=5))
+            expect_packet(publisher, mqtt_packets.gen_pubcomp(9, proto_ver=5), "repeat PUBREL first PUBCOMP")
+            expect_packet(subscriber, mqtt_packets.gen_publish(
+                topic, qos=2, mid=1, payload="once", proto_ver=5
+            ), "repeat PUBREL downstream PUBLISH")
+            subscriber.sendall(mqtt_packets.gen_pubrec(1, proto_ver=5))
+            expect_packet(subscriber, mqtt_packets.gen_pubrel(1, proto_ver=5), "repeat PUBREL downstream PUBREL")
+            subscriber.sendall(mqtt_packets.gen_pubcomp(1, proto_ver=5))
+
+            for mid in (9, 77):
+                publisher.sendall(mqtt_packets.gen_pubrel(mid, proto_ver=5))
+                expect_packet(
+                    publisher, mqtt_packets.gen_pubcomp(mid, proto_ver=5),
+                    f"idempotent PUBCOMP {mid}",
+                )
+            subscriber.settimeout(0.05)
+            try:
+                duplicate = subscriber.recv(1)
+                if duplicate:
+                    raise AssertionError(
+                        "repeated PUBREL duplicated delivery: " + duplicate.hex()
+                    )
+            except socket.timeout:
+                pass
+            finally:
+                subscriber.settimeout(5)
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1478,7 +1524,8 @@ def main() -> None:
     retained_multilevel_clear(args.broker, mqtt_packets)
     shared_subscription_rotation(args.broker, mqtt_packets)
     qos2_duplicate_publish(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 18 scenarios")
+    qos2_repeated_pubrel(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 19 scenarios")
 
 
 if __name__ == "__main__":
