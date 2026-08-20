@@ -1185,6 +1185,21 @@ control. Thus wire-visible fragmentation retains a 16.8-19.4% latency cost but
 no longer multiplies transport submissions by the frame count. Each run
 verified checksum 51,000.
 
+The RFC 8441 counterpart is:
+
+```sh
+taskset -c 14 zig build bench-websocket-h2-echo \
+  -Doptimize=ReleaseFast -- --fragmented
+```
+
+Three complete-message controls measured 37.91-38.44 us/roundtrip and
+203.23-206.05 logical MiB/s. Three sixteen-slice runs measured 43.66-44.00 us
+and 177.56-178.94 MiB/s, versus 98.55-137.68 us before H2 batching. Encoding
+the RFC 6455 frames into retained connection scratch and calling the existing
+flow-controlled tunnel writer once yields a 2.2-3.2x fragmented-path gain; the
+remaining 15.1-16.0% cost against the one-frame control represents actual
+frame header/mask handling. All samples verified checksum 51,000.
+
 ## MQTT 5 windowed QoS 1 broker fanout
 
 Captured on 2026-08-20 with one external client binary driving both brokers:

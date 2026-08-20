@@ -144,6 +144,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark persistent WebSocket 4 KiB binary echo",
         },
         .{
+            .exe_name = "netz-bench-websocket-h2-echo",
+            .path = "examples/bench_websocket_h2_echo.zig",
+            .run_step = "bench-websocket-h2-echo",
+            .description = "Benchmark RFC 8441 WebSocket 4 KiB binary echo",
+        },
+        .{
             .exe_name = "netz-bench-mqtt-router",
             .path = "examples/bench_mqtt_router.zig",
             .run_step = "bench-mqtt-router",

@@ -114,6 +114,16 @@ The complete-message control measured 30.65-30.91 us/roundtrip, so preserving
 sixteen RFC 6455 frame boundaries costs 16.8-19.4% rather than multiplying
 socket writes sixteenfold. All runs verified checksum 51,000.
 
+RFC 8441 has a separate `bench-websocket-h2-echo` gate with the same warmup,
+iteration, payload and compression shape. Three CPU-14 complete-message runs
+measured 37.91-38.44 us/roundtrip and 203.23-206.05 logical MiB/s; sixteen-
+slice runs measured 43.66-44.00 us and 177.56-178.94 MiB/s. Before coalescing
+the RFC 6455 frame sequence into one flow-controlled tunnel write, the same
+fragmented gate took 98.55-137.68 us. The batch therefore reduces latency by
+2.2-3.2x while preserving every WebSocket frame boundary; its remaining
+15.1-16.0% cost versus one frame is the real framing/masking work. Each run
+verified checksum 51,000.
+
 The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw
 inflater may overwrite output before consuming aliased input. A regression test
