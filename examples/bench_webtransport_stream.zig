@@ -88,7 +88,9 @@ pub fn main(init: std.process.Init) !void {
             .context = &loss_state,
             .should_drop = LossState.shouldDrop,
         };
-    } else if (config.reorder_every != 0) {
+    } else if (config.reorder_every != 0 and
+        config.fault_direction == .server)
+    {
         server_limits.http3.quic.send_interceptor = .{
             .context = &reorder_state,
             .should_hold = ReorderState.shouldHold,
@@ -225,6 +227,11 @@ pub fn main(init: std.process.Init) !void {
                     .quic = .{
                         .max_datagram_size = config.one_rtt_datagram_size,
                         .max_frames_per_datagram = 8,
+                        .send_interceptor = if (config.reorder_every != 0 and
+                            config.fault_direction == .client) .{
+                            .context = &reorder_state,
+                            .should_hold = ReorderState.shouldHold,
+                        } else null,
                     },
                 },
             },
@@ -348,6 +355,7 @@ pub fn main(init: std.process.Init) !void {
         \\  datagrams considered: {d}
         \\  datagrams dropped: {d}
         \\  reorder every: {d}
+        \\  fault direction: {s}
         \\  reorder datagrams considered: {d}
         \\  datagrams held: {d}
         \\  caller buffer: {d}
@@ -369,6 +377,7 @@ pub fn main(init: std.process.Init) !void {
         loss_state.considered.load(.monotonic),
         loss_state.dropped.load(.monotonic),
         config.reorder_every,
+        @tagName(config.fault_direction),
         reorder_state.considered.load(.monotonic),
         reorder_state.held.load(.monotonic),
         read_buffer_bytes,
@@ -390,7 +399,10 @@ const Config = struct {
     reset_after_bytes: usize = 1024,
     loss_pct: u8 = 0,
     reorder_every: usize = 0,
+    fault_direction: FaultDirection = .server,
 };
+
+const FaultDirection = enum { client, server };
 
 fn parseArgs(
     init: std.process.Init,
@@ -446,6 +458,11 @@ fn parseArgs(
             config.reorder_every = try parsePositiveUsize(
                 arg["--reorder-every=".len..],
             );
+        } else if (std.mem.startsWith(u8, arg, "--fault-direction=")) {
+            config.fault_direction = std.meta.stringToEnum(
+                FaultDirection,
+                arg["--fault-direction=".len..],
+            ) orelse return error.InvalidArgument;
         } else return error.InvalidArgument;
     }
     if (config.streams > max_streams or config.loss_pct > 100) {

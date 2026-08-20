@@ -280,6 +280,10 @@ pub const Endpoint = struct {
             for (datagrams) |bytes| {
                 try self.sendBytesWithEcn(to, bytes, .not_ect);
             }
+            // A batch ending exactly on a selected packet has no later call
+            // inside this batch to release it. Flush at the batch boundary so
+            // deterministic reordering never silently becomes packet loss.
+            try self.flushHeldSend();
             return .{ .sent_count = datagrams.len };
         }
         try self.applyOutgoingEcnMark(.not_ect);

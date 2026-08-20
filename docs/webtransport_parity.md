@@ -187,6 +187,10 @@ lightweight protected transport does not own a stateful recovery connection.
    loss: `--reorder-every=5` held exactly 112 of 561 datagrams in three 8-stream
    runs, then sent each after its successor while preserving QUIC packet-number
    state. Every run verified 2,097,152 bytes/checksum 267,386,880 at 175-183
-   MiB/s. The remaining gap is
+   MiB/s. With `--fault-direction=client`, three runs reordered the actual
+   STREAM/FIN direction: 121-123 of 605-615 client datagrams were held, all
+   bytes/checksum still matched, and throughput was 153-161 MiB/s. Batch-tail
+   holds are flushed explicitly so reordering cannot become hidden loss. The
+   remaining gap is
    external wtransport/browser interop rather than basic cancellation recovery
    at the benchmark's maximum stream count.

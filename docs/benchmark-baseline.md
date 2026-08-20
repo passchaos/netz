@@ -1375,6 +1375,14 @@ held exactly 112 of 561 considered server datagrams per run, verified all
 loss, and rejects combining both injectors so the network shape remains
 unambiguous.
 
+The benchmark also accepts `--fault-direction=client`, placing the same hook on
+the sender of WebTransport STREAM/FIN packets rather than on server ACKs. Three
+runs of the command above plus `--fault-direction=client` considered 605-615
+client datagrams, held 121-123, verified the same 2,097,152 bytes/checksum
+267,386,880, and completed in 12.37-13.07 ms (153-161 MiB/s). A held packet at
+the end of a batch is now explicitly flushed, preventing the emulator from
+turning an intended reorder into accidental loss.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is
