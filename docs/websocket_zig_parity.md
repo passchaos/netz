@@ -275,8 +275,11 @@ these counts explain submission shape but are not timing samples.
    non-OK case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing,
    or unknown statuses. Optional case IDs select a faster focused run. This is
    external RFC 6455/RFC 7692 conformance evidence for the HTTP/1.1 transport,
-   not for RFC 8441 or WSS; the seven explicitly non-OK results are reported by
-   their Testsuite categories rather than inflated into a 517-case pass claim.
+   not for RFC 8441 or WSS. The remaining three non-OK results are inherently
+   informational in Testsuite source: 7.1.6 explicitly allows implementation-
+   defined close ordering, while 7.13.1 and 7.13.2 state that behavior for
+   private-use close codes 5000 and 65535 is undefined. They are reported by
+   that category rather than inflated into a 517-case pass claim.
 4. Add an equal-wire compressed echo comparison if the reference re-enables
    its currently disabled outbound compressor; until then the netz timing is
    only an internal baseline.
