@@ -869,7 +869,8 @@ client. Netz now merges the router matches into one PUBLISH and appends both
 Subscription Identifier properties (3 then 9), instead of emitting duplicate
 Application Messages with one identifier each. The gate also gives the two
 subscriptions QoS 0 and QoS 1 and verifies the merged delivery takes the maximum
-granted QoS.
+granted QoS. One match also enables Retain As Published, proving the merged
+retained source preserves RETAIN when any matching subscription requests it.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets; all twenty-six scenarios pass. This is deliberately described as a selected

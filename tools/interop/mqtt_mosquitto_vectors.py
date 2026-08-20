@@ -287,7 +287,7 @@ def subscription_identifiers(executable: Path, mqtt_packets, mqtt5_props) -> Non
 
 
 def multiple_subscription_identifiers(
-    executable: Path, mqtt_packets, mqtt5_props
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_opts
 ) -> None:
     topic = "multi/subid/value"
     with NetzBroker(executable) as broker:
@@ -295,21 +295,26 @@ def multiple_subscription_identifiers(
             connect_v5(sock, mqtt_packets, "multi-subscription-id")
             subscriptions = (
                 (1, "multi/subid/value", 3, 0),
-                (2, "multi/subid/+", 9, 1),
+                (
+                    2,
+                    "multi/subid/+",
+                    9,
+                    1 | mqtt5_opts.MQTT_SUB_OPT_RETAIN_AS_PUBLISHED,
+                ),
             )
-            for mid, topic_filter, identifier, qos in subscriptions:
+            for mid, topic_filter, identifier, options in subscriptions:
                 properties = mqtt5_props.gen_varint_prop(
                     mqtt5_props.SUBSCRIPTION_IDENTIFIER, identifier
                 )
                 sock.sendall(mqtt_packets.gen_subscribe(
-                    mid, topic_filter, qos, proto_ver=5, properties=properties
+                    mid, topic_filter, options, proto_ver=5, properties=properties
                 ))
                 expect_packet(
-                    sock, mqtt_packets.gen_suback(mid, qos, proto_ver=5),
+                    sock, mqtt_packets.gen_suback(mid, options & 0x03, proto_ver=5),
                     f"multi-subid SUBACK {mid}",
                 )
             sock.sendall(mqtt_packets.gen_publish(
-                topic, qos=1, mid=10, payload="both", proto_ver=5
+                topic, qos=1, mid=10, payload="both", retain=True, proto_ver=5
             ))
             expect_packet(
                 sock, mqtt_packets.gen_puback(10, proto_ver=5),
@@ -325,7 +330,7 @@ def multiple_subscription_identifiers(
             )
             expect_packet(
                 sock, mqtt_packets.gen_publish(
-                    topic, qos=1, mid=1, payload="both", proto_ver=5,
+                    topic, qos=1, mid=1, payload="both", retain=True, proto_ver=5,
                     properties=properties,
                 ), "multi-subid forwarded PUBLISH",
             )
@@ -1821,7 +1826,9 @@ def main() -> None:
 
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
-    multiple_subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
+    multiple_subscription_identifiers(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_opts
+    )
     hostile_initial_packets(args.broker, mqtt_packets)
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
