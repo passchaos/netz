@@ -615,6 +615,65 @@ def retained_subscription_handling(
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def incoming_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Direct wire port of Mosquitto 02-subpub-qos0-topic-alias.py. Establish an
+    # alias before the subscriber exists, then publish with an empty Topic Name
+    # and require the forwarded packet to contain the resolved topic and no
+    # connection-scoped Topic Alias property.
+    topic = "02/subpub/topic-alias/alias"
+    alias_property = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.TOPIC_ALIAS, 3
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as publisher, broker.connect() as subscriber:
+            connect_v5(
+                publisher, mqtt_packets, "02-subpub-qos0-topic-alias"
+            )
+            connect_v5(
+                subscriber,
+                mqtt_packets,
+                "02-subpub-qos0-topic-alias-helper",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload="message",
+                    proto_ver=5,
+                    properties=alias_property,
+                )
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "topic alias SUBACK",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    "",
+                    qos=0,
+                    payload="message",
+                    proto_ver=5,
+                    properties=alias_property,
+                )
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload="message",
+                    proto_ver=5,
+                ),
+                "resolved topic alias PUBLISH",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -630,7 +689,8 @@ def main() -> None:
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
-    print("Mosquitto-derived MQTT wire vectors passed: 7 scenarios")
+    incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 8 scenarios")
 
 
 if __name__ == "__main__":

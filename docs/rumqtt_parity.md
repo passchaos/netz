@@ -766,7 +766,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs seven
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs eight
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -790,9 +790,14 @@ subscription matched. The seventh scenario directly ports Mosquitto's
 `02-subpub-qos0-send-retain.py`: retained messages are installed before
 SUBSCRIBE, then Retain Handling 0/1/2 are each exercised twice to prove
 always-send, new-subscription-only and never-send behavior with exact RETAIN
-bits. The gate builds a finite netz broker,
+bits. The eighth scenario directly ports Mosquitto's
+`02-subpub-qos0-topic-alias.py`: a publisher establishes alias 3, then reuses
+it with an empty Topic Name; the subscriber receives the resolved full Topic
+Name with the connection-scoped alias removed. The gate builds a finite netz broker,
+Name with the connection-scoped alias removed. The gate builds a finite netz
+broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all seven scenarios pass. This is deliberately described as a selected
+packets; all eight scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -804,5 +809,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Seven passing packet-vector scenarios do not cover
+   persistence semantics. Eight passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
