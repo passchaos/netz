@@ -485,6 +485,161 @@ def maximum_packet_size_disconnect(
             )
 
 
+def topic_alias_disconnect(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Mosquitto handle_publish.c returns TOPIC_ALIAS_INVALID when the peer uses
+    # an alias above the limit advertised by this listener.
+    with NetzBroker(executable, extra_args=("--topic-alias-maximum=1",)) as broker:
+        with broker.connect() as sock:
+            sock.sendall(
+                mqtt_packets.gen_connect(
+                    "topic-alias-invalid", proto_ver=5
+                )
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_connack(
+                    rc=0,
+                    proto_ver=5,
+                    properties=(
+                        mqtt5_props.gen_uint16_prop(
+                            mqtt5_props.RECEIVE_MAXIMUM, 64
+                        )
+                        + mqtt5_props.gen_uint32_prop(
+                            mqtt5_props.MAXIMUM_PACKET_SIZE, 16 * 1024 * 1024
+                        )
+                        + mqtt5_props.gen_uint16_prop(
+                            mqtt5_props.TOPIC_ALIAS_MAXIMUM, 1
+                        )
+                    ),
+                    property_helper=False,
+                ),
+                "topic alias limit CONNACK",
+            )
+            properties = mqtt5_props.gen_uint16_prop(
+                mqtt5_props.TOPIC_ALIAS, 2
+            )
+            sock.sendall(mqtt_packets.gen_publish(
+                "alias/too-large", qos=0, payload="blocked",
+                proto_ver=5, properties=properties,
+            ))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.TOPIC_ALIAS_INVALID, proto_ver=5
+                ),
+                "topic alias invalid DISCONNECT",
+            )
+
+
+def receive_maximum_disconnect(
+    executable: Path, mqtt_packets, mqtt5_rc
+) -> None:
+    # Bounded port of Mosquitto 03-publish-qos2-max-inflight-exceeded.py.
+    with NetzBroker(
+        executable, extra_args=("--max-outgoing-inflight=1",)
+    ) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "receive-maximum-exceeded")
+            sock.sendall(mqtt_packets.gen_publish(
+                "receive/maximum/one", qos=2, mid=1, proto_ver=5
+            ))
+            sock.sendall(mqtt_packets.gen_publish(
+                "receive/maximum/two", qos=2, mid=2, proto_ver=5
+            ))
+            expect_packet(
+                sock, mqtt_packets.gen_pubrec(1, proto_ver=5),
+                "receive maximum first PUBREC",
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.RECEIVE_MAXIMUM_EXCEEDED,
+                    proto_ver=5,
+                ),
+                "receive maximum DISCONNECT",
+            )
+
+
+def subscription_capability_disconnects(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    cases = (
+        (
+            ("--no-wildcard-subscriptions",),
+            "wildcard/+",
+            b"",
+            mqtt5_props.WILDCARD_SUB_AVAILABLE,
+            mqtt5_rc.WILDCARD_SUBS_NOT_SUPPORTED,
+            "wildcard subscription unavailable",
+        ),
+        (
+            ("--no-shared-subscriptions",),
+            "$share/workers/shared/topic",
+            b"",
+            mqtt5_props.SHARED_SUB_AVAILABLE,
+            mqtt5_rc.SHARED_SUBS_NOT_SUPPORTED,
+            "shared subscription unavailable",
+        ),
+        (
+            ("--no-subscription-identifiers",),
+            "identifier/topic",
+            mqtt5_props.gen_varint_prop(
+                mqtt5_props.SUBSCRIPTION_IDENTIFIER, 7
+            ),
+            mqtt5_props.SUBSCRIPTION_ID_AVAILABLE,
+            mqtt5_rc.SUBSCRIPTION_IDS_NOT_SUPPORTED,
+            "subscription identifier unavailable",
+        ),
+    )
+    for args, topic, subscribe_props, advertised_id, reason, label in cases:
+        # The broker counts rejected protocol connections as completed serve
+        # slots, so run one finite process per negative case instead of asking
+        # a single process to survive intentional connection failures.
+        with NetzBroker(
+            executable, ignore_errors=True, extra_args=args
+        ) as broker:
+            with broker.connect() as sock:
+                sock.sendall(
+                    mqtt_packets.gen_connect(
+                        "subscription-capability", proto_ver=5
+                    )
+                )
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_connack(
+                        rc=0,
+                        proto_ver=5,
+                        properties=(
+                            mqtt5_props.gen_uint16_prop(
+                                mqtt5_props.RECEIVE_MAXIMUM, 64
+                            )
+                            + mqtt5_props.gen_uint32_prop(
+                                mqtt5_props.MAXIMUM_PACKET_SIZE,
+                                16 * 1024 * 1024,
+                            )
+                            + mqtt5_props.gen_uint16_prop(
+                                mqtt5_props.TOPIC_ALIAS_MAXIMUM, 16
+                            )
+                            + mqtt5_props.gen_byte_prop(advertised_id, 0)
+                        ),
+                        property_helper=False,
+                    ),
+                    f"{label} CONNACK",
+                )
+                sock.sendall(mqtt_packets.gen_subscribe(
+                    1, topic, 0, proto_ver=5, properties=subscribe_props
+                ))
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_disconnect(
+                        reason_code=reason, proto_ver=5
+                    ),
+                    f"{label} DISCONNECT",
+                )
+
+
 def qos2_routes_at_pubrel(executable: Path, mqtt_packets) -> None:
     # Mosquitto's QoS 2 regression vectors require that the Application
     # Message is invisible until PUBREL and then completes an independent
@@ -1959,6 +2114,13 @@ def main() -> None:
     maximum_packet_size_disconnect(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
+    topic_alias_disconnect(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
+    receive_maximum_disconnect(args.broker, mqtt_packets, mqtt5_rc)
+    subscription_capability_disconnects(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
@@ -1985,7 +2147,7 @@ def main() -> None:
     retained_replacement(args.broker, mqtt_packets, mqtt5_props)
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 29 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 34 scenarios")
 
 
 if __name__ == "__main__":

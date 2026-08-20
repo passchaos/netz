@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs twenty-nine
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs thirty-four
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -917,9 +917,14 @@ Three additional negative cases directly port Mosquitto's
 `12-prop-maximum-packet-size-broker.py` boundary behavior. They compare the
 advertised CONNACK properties and exact DISCONNECT `0x9b`, `0x9a`, and `0x95`
 packets after raw clients deliberately ignore those limits.
+Five more raw cases verify exact `0x94`, `0x93`, `0x9e`, `0xa1`, and `0xa2`
+DISCONNECT packets for Topic Alias, Receive Maximum, shared-subscription,
+Subscription Identifier, and wildcard-subscription violations. The latter
+three cover capability controls that rumqtt's codecs model but the audited
+Mosquitto broker does not expose as listener switches.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all twenty-nine scenarios pass. This is deliberately described as a selected
+packets; all thirty-four scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
