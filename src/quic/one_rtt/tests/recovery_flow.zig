@@ -481,7 +481,13 @@ test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
     });
     defer connection.deinit();
 
-    connection.rtt_stats.updateAt(100_000_000, 0, true, 100_000_000);
+    connection.rtt_stats.updateAt(
+        100_000_000,
+        0,
+        true,
+        // This synthetic RTT sample represents a packet sent at time zero.
+        0,
+    );
     try connection.sent.sentAt(0, true, 1200, .not_ect, 0);
     _ = try connection.recovery.trackSent(0, "zero");
     try connection.sent.sentAt(1, true, 1200, .not_ect, 200_000_000);
@@ -596,7 +602,13 @@ test "QUIC 1-RTT ACK processing detects time-threshold losses" {
 
     // Use already-populated RTT state so ACK-driven time loss uses the real
     // RFC 9002 9/8 loss delay instead of the larger initial fallback.
-    client.rtt_stats.updateAt(100_000_000, 0, true, 100_000_000);
+    client.rtt_stats.updateAt(
+        100_000_000,
+        0,
+        true,
+        // This synthetic RTT sample represents a packet sent at time zero.
+        0,
+    );
     const loss_delay = client.rtt_stats.lossDelay();
 
     const ping = [_]quic.Frame{.{ .ping = {} }};
@@ -907,7 +919,7 @@ test "QUIC 1-RTT connection applies persistent congestion response" {
     var first_ack = try client.receivePacketAt(100_000_000);
     defer first_ack.deinit(allocator);
     try std.testing.expect(client.rtt_stats.has_measurement);
-    try std.testing.expectEqual(@as(?u64, 100_000_000), client.rtt_stats.first_rtt_sample_time_ns);
+    try std.testing.expectEqual(@as(?u64, 0), client.rtt_stats.first_rtt_sample_sent_time_ns);
 
     try client.sendAt(&ping, 200_000_000); // packet 1, first lost boundary after the RTT sample.
     try client.sendAt(&ping, 500_000_000); // packet 2, interior lost packet.
@@ -938,12 +950,19 @@ test "QUIC 1-RTT connection applies persistent congestion response" {
     try std.testing.expect(client.sent.packets.items[2].lost);
     try std.testing.expect(client.sent.packets.items[3].lost);
     try std.testing.expectEqual(quic.congestion.minimumWindow(client.config.max_datagram_size), client.congestion.congestion_window);
-    try std.testing.expectEqual(@as(?u64, null), client.rtt_stats.first_rtt_sample_time_ns);
+    try std.testing.expectEqual(@as(?u64, null), client.rtt_stats.first_rtt_sample_sent_time_ns);
     try std.testing.expectEqual(@as(?u64, 3), client.last_persistent_congestion_packet_number);
 
-    var retransmitted = try server.receivePacket();
-    defer retransmitted.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 5), retransmitted.packet.packet_number);
+    // Each distinct lost recovery group is retransmitted. Drain all three so
+    // the next ACK targets the fresh RTT probe rather than an older datagram.
+    for (5..8) |packet_number| {
+        var retransmitted = try server.receivePacket();
+        defer retransmitted.deinit(allocator);
+        try std.testing.expectEqual(
+            @as(u64, packet_number),
+            retransmitted.packet.packet_number,
+        );
+    }
 
     const old_min = client.rtt_stats.min_rtt;
     try client.sendAt(&ping, 1_500_000_000);
@@ -956,7 +975,7 @@ test "QUIC 1-RTT connection applies persistent congestion response" {
     try std.testing.expect(old_min != 200_000_000);
     try std.testing.expectEqual(@as(u64, 200_000_000), client.rtt_stats.min_rtt);
     try std.testing.expectEqual(@as(u64, 200_000_000), client.rtt_stats.smoothed_rtt);
-    try std.testing.expectEqual(@as(?u64, 1_700_000_000), client.rtt_stats.first_rtt_sample_time_ns);
+    try std.testing.expectEqual(@as(?u64, 1_500_000_000), client.rtt_stats.first_rtt_sample_sent_time_ns);
 }
 
 test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {

@@ -971,11 +971,11 @@ pub const SentPacketTracker = struct {
     /// for a period ending at or before that packet number.
     pub fn persistentCongestionPeriod(
         self: SentPacketTracker,
-        first_rtt_sample_time_ns: ?u64,
+        first_rtt_sample_sent_time_ns: ?u64,
         largest_acknowledged: ?u64,
         after_packet_number: ?u64,
     ) ?PersistentCongestionPeriod {
-        const first_sample_time = first_rtt_sample_time_ns orelse return null;
+        const first_sample_time = first_rtt_sample_sent_time_ns orelse return null;
         if (after_packet_number) |after| {
             if (largest_acknowledged) |largest| {
                 if (after >= largest) return null;

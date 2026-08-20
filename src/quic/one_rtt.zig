@@ -2639,7 +2639,13 @@ pub const Connection = struct {
             _ = self.applyPersistentCongestionIfDetected();
         }
         var retransmitted = false;
-        for (self.sent.packets.items) |packet| {
+        const scan_count = self.sent.packets.items.len;
+        var packet_index: usize = 0;
+        while (packet_index < scan_count) : (packet_index += 1) {
+            // retransmitCandidate appends a SentPacket and may reallocate the
+            // backing list. Copy this record before the mutation rather than
+            // retaining a `for` iterator into potentially invalid storage.
+            const packet = self.sent.packets.items[packet_index];
             if (!packet.lost) continue;
             const candidate = self.recovery.packetNumberCandidate(packet.packet_number) orelse continue;
             if (candidate.packet_number != packet.packet_number) continue;
@@ -3565,7 +3571,7 @@ pub const Connection = struct {
             sample.latest_rtt_ns,
             sample.ack_delay_ns,
             self.handshake_status.isConfirmed(),
-            now_ns,
+            sample.sent_time_ns,
         );
         self.congestion.onRttSample(sample.largest_acknowledged, sample.latest_rtt_ns);
         return true;
@@ -3574,7 +3580,7 @@ pub const Connection = struct {
     pub fn persistentCongestionPeriod(self: Connection) ?quic.packet_space.SentPacketTracker.PersistentCongestionPeriod {
         const largest = self.sent.largestAcknowledged() orelse return null;
         const period = self.sent.persistentCongestionPeriod(
-            self.rtt_stats.first_rtt_sample_time_ns,
+            self.rtt_stats.first_rtt_sample_sent_time_ns,
             largest,
             self.last_persistent_congestion_packet_number,
         ) orelse return null;
