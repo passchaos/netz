@@ -24,7 +24,18 @@ pub const Limits = struct {
         /// socket. This narrow hook supports deterministic benchmark/test
         /// network emulation while production endpoints pay one predictable
         /// null check and keep all QUIC recovery state unchanged.
-        should_drop: *const fn (context: *anyopaque, bytes: []const u8) bool,
+        should_drop: ?*const fn (
+            context: *anyopaque,
+            bytes: []const u8,
+        ) bool = null,
+        /// Return true to consume this datagram now and send it immediately
+        /// after the next non-dropped datagram. Endpoint-owned storage keeps
+        /// the caller's packet buffer lifetime unchanged while exercising
+        /// genuine UDP/QUIC packet reordering.
+        should_hold: ?*const fn (
+            context: *anyopaque,
+            bytes: []const u8,
+        ) bool = null,
     };
 
     max_datagram_size: usize = 65_535,
@@ -56,6 +67,12 @@ pub const SendManyBytesResult = struct {
     /// for the next datagram. Keeping that progress lets stateful transports
     /// commit consumed packet numbers instead of accidentally reusing them.
     send_error: ?net.Socket.SendError = null,
+};
+
+const HeldSend = struct {
+    to: net.IpAddress,
+    bytes: []u8,
+    ecn: quic.packet_space.EcnCodepoint,
 };
 
 pub const Server = struct {
@@ -137,6 +154,7 @@ pub const Endpoint = struct {
     pending_receive_mutex: std.Io.Mutex = .init,
     pending_received: std.ArrayList(OwnedBytes) = .empty,
     pending_receive_index: usize = 0,
+    held_send: ?HeldSend = null,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Endpoint {
         var endpoint = Endpoint{
@@ -158,6 +176,7 @@ pub const Endpoint = struct {
             pending.deinit(self.allocator);
         }
         self.pending_received.deinit(self.allocator);
+        if (self.held_send) |held| self.allocator.free(held.bytes);
         self.socket.close(self.io);
         self.* = undefined;
     }
@@ -186,10 +205,46 @@ pub const Endpoint = struct {
         if (bytes.len == 0) return error.EmptyDatagram;
         if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
         if (self.limits.send_interceptor) |interceptor| {
-            if (interceptor.should_drop(interceptor.context, bytes)) return;
+            if (interceptor.should_drop) |should_drop| {
+                if (should_drop(interceptor.context, bytes)) {
+                    try self.flushHeldSend();
+                    return;
+                }
+            }
+            if (self.held_send != null) {
+                try self.sendSocketDatagram(to, bytes, ecn);
+                try self.flushHeldSend();
+                return;
+            }
+            if (interceptor.should_hold) |should_hold| {
+                if (should_hold(interceptor.context, bytes)) {
+                    self.held_send = .{
+                        .to = to,
+                        .bytes = try self.allocator.dupe(u8, bytes),
+                        .ecn = ecn,
+                    };
+                    return;
+                }
+            }
         }
+        try self.sendSocketDatagram(to, bytes, ecn);
+    }
+
+    fn sendSocketDatagram(
+        self: *Endpoint,
+        to: net.IpAddress,
+        bytes: []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!void {
         try self.applyOutgoingEcnMark(ecn);
         try self.socket.send(self.io, &to, bytes);
+    }
+
+    fn flushHeldSend(self: *Endpoint) Error!void {
+        const held = self.held_send orelse return;
+        self.held_send = null;
+        defer self.allocator.free(held.bytes);
+        try self.sendSocketDatagram(held.to, held.bytes, held.ecn);
     }
 
     /// Send multiple UDP datagrams through the backend's batch primitive.
@@ -2225,6 +2280,51 @@ test "QUIC endpoint send interceptor drops selected single and batch datagrams" 
     try std.testing.expectEqualSlices(u8, &.{0xcc}, received.bytes);
     try std.testing.expectEqual(@as(usize, 4), calls);
     received.deinit(allocator);
+}
+
+test "QUIC endpoint send interceptor reorders one datagram pair" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var held_once = false;
+    const Interceptor = struct {
+        fn hold(context: *anyopaque, _: []const u8) bool {
+            const held: *bool = @ptrCast(@alignCast(context));
+            if (held.*) return false;
+            held.* = true;
+            return true;
+        }
+    };
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 64,
+            .send_interceptor = .{
+                .context = &held_once,
+                .should_hold = Interceptor.hold,
+            },
+        },
+    );
+    defer sender.deinit();
+
+    try sender.sendBytes(receiver.address(), "first");
+    try sender.sendBytes(receiver.address(), "second");
+    var second = try receiver.receiveBytes();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("second", second.bytes);
+    var first = try receiver.receiveBytes();
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("first", first.bytes);
 }
 
 test "QUIC UDP endpoint routes protected short datagrams by DCID" {

@@ -42,6 +42,22 @@ const LossState = struct {
     }
 };
 
+const ReorderState = struct {
+    enabled: std.atomic.Value(bool) = .init(false),
+    considered: std.atomic.Value(usize) = .init(0),
+    held: std.atomic.Value(usize) = .init(0),
+    every: usize,
+
+    fn shouldHold(context: *anyopaque, _: []const u8) bool {
+        const self: *ReorderState = @ptrCast(@alignCast(context));
+        if (!self.enabled.load(.acquire) or self.every == 0) return false;
+        const index = self.considered.fetchAdd(1, .monotonic) + 1;
+        if (index % self.every != 0) return false;
+        _ = self.held.fetchAdd(1, .monotonic);
+        return true;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const io = init.io;
@@ -55,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(payload);
     for (payload, 0..) |*byte, index| byte.* = payloadByte(index);
     var loss_state = LossState{ .drop_pct = config.loss_pct };
+    var reorder_state = ReorderState{ .every = config.reorder_every };
     var server_limits: netz.webtransport.runtime.Limits = .{
         .http3 = .{
             .quic = .{
@@ -63,10 +80,20 @@ pub fn main(init: std.process.Init) !void {
             },
         },
     };
-    if (config.loss_pct != 0) server_limits.http3.quic.send_interceptor = .{
-        .context = &loss_state,
-        .should_drop = LossState.shouldDrop,
-    };
+    if (config.loss_pct != 0 and config.reorder_every != 0) {
+        return error.InvalidArgument;
+    }
+    if (config.loss_pct != 0) {
+        server_limits.http3.quic.send_interceptor = .{
+            .context = &loss_state,
+            .should_drop = LossState.shouldDrop,
+        };
+    } else if (config.reorder_every != 0) {
+        server_limits.http3.quic.send_interceptor = .{
+            .context = &reorder_state,
+            .should_hold = ReorderState.shouldHold,
+        };
+    }
 
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
         allocator,
@@ -228,6 +255,7 @@ pub fn main(init: std.process.Init) !void {
     // associated stream phase so repeated runs share one authenticated state
     // and deterministic RESET_STREAM/ACK loss decisions.
     loss_state.enabled.store(true, .release);
+    reorder_state.enabled.store(true, .release);
     const stream_ids = try allocator.alloc(u62, config.streams);
     defer allocator.free(stream_ids);
     for (stream_ids) |*stream_id| {
@@ -319,6 +347,9 @@ pub fn main(init: std.process.Init) !void {
         \\  simulated loss percent: {d}
         \\  datagrams considered: {d}
         \\  datagrams dropped: {d}
+        \\  reorder every: {d}
+        \\  reorder datagrams considered: {d}
+        \\  datagrams held: {d}
         \\  caller buffer: {d}
         \\  partial writes: {d}
         \\  read events: {d}
@@ -337,6 +368,9 @@ pub fn main(init: std.process.Init) !void {
         config.loss_pct,
         loss_state.considered.load(.monotonic),
         loss_state.dropped.load(.monotonic),
+        config.reorder_every,
+        reorder_state.considered.load(.monotonic),
+        reorder_state.held.load(.monotonic),
         read_buffer_bytes,
         write_calls,
         shared.events,
@@ -355,6 +389,7 @@ const Config = struct {
     reset_every: usize = 0,
     reset_after_bytes: usize = 1024,
     loss_pct: u8 = 0,
+    reorder_every: usize = 0,
 };
 
 fn parseArgs(
@@ -406,6 +441,10 @@ fn parseArgs(
                 u8,
                 arg["--loss-pct=".len..],
                 10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--reorder-every=")) {
+            config.reorder_every = try parsePositiveUsize(
+                arg["--reorder-every=".len..],
             );
         } else return error.InvalidArgument;
     }

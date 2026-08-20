@@ -182,6 +182,11 @@ lightweight protected transport does not own a stateful recovery connection.
    until the server validates completion, fixing the prior large-stream
    teardown deadlock. Five 64-stream runs each considered 320 server datagrams,
    dropped the same 21, delivered all 32 RESET_STREAM and 32 FIN terminal
-   events, and verified 532,480 bytes/checksum 67,891,200. The remaining gap is
+   events, and verified 532,480 bytes/checksum 67,891,200.
+   The same endpoint hook now supports real packet reordering rather than only
+   loss: `--reorder-every=5` held exactly 112 of 561 datagrams in three 8-stream
+   runs, then sent each after its successor while preserving QUIC packet-number
+   state. Every run verified 2,097,152 bytes/checksum 267,386,880 at 175-183
+   MiB/s. The remaining gap is
    external wtransport/browser interop rather than basic cancellation recovery
    at the benchmark's maximum stream count.

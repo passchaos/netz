@@ -1358,6 +1358,23 @@ from the exact terminal/byte result. This is deterministic
 cancellation/recovery evidence, not an equal-wire wtransport throughput
 comparison.
 
+`--reorder-every=N` now exercises the complementary non-loss case. The endpoint
+owns every selected datagram, sends the next packet first, then releases the
+held packet; QUIC packet numbers and recovery metadata are therefore committed
+normally rather than rewritten by the harness. Three CPU 0-7 runs of:
+
+```sh
+zig build bench-webtransport-stream -Doptimize=ReleaseFast -- \
+  --streams=8 --transfer-bytes=262144 --stream-window=65536 \
+  --one-rtt-datagram-size=4096 --reorder-every=5
+```
+
+held exactly 112 of 561 considered server datagrams per run, verified all
+2,097,152 bytes and checksum 267,386,880, and completed in 10.92-11.40 ms
+(175-183 MiB/s). The benchmark reports held/considered counts separately from
+loss, and rejects combining both injectors so the network shape remains
+unambiguous.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is
