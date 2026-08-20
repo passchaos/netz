@@ -1391,6 +1391,65 @@ def shared_subscription_rotation(executable: Path, mqtt_packets) -> None:
                 sock.close()
 
 
+def qos2_duplicate_publish(executable: Path, mqtt_packets) -> None:
+    # Core wire semantics from Mosquitto 03-c2b-qos2-disconnect.py without the
+    # process-specific reconnect harness: a DUP PUBLISH with the same Packet
+    # Identifier receives the same PUBREC, does not replace/route early, and
+    # one PUBREL releases exactly one downstream QoS 2 transaction.
+    topic = "03/c2b/qos2/duplicate/test"
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_v5(subscriber, mqtt_packets, "qos2-dup-subscriber")
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 2, proto_ver=5)
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 2, proto_ver=5),
+                "QoS2 DUP SUBACK",
+            )
+            connect_v5(publisher, mqtt_packets, "qos2-dup-publisher")
+            for dup in (False, True):
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=2, mid=7, payload="original",
+                    dup=dup, proto_ver=5,
+                ))
+                expect_packet(
+                    publisher, mqtt_packets.gen_pubrec(7, proto_ver=5),
+                    f"QoS2 DUP PUBREC {dup}",
+                )
+                subscriber.settimeout(0.05)
+                try:
+                    early = subscriber.recv(1)
+                    if early:
+                        raise AssertionError(
+                            "QoS2 DUP routed before PUBREL: " + early.hex()
+                        )
+                except socket.timeout:
+                    pass
+                finally:
+                    subscriber.settimeout(5)
+
+            publisher.sendall(mqtt_packets.gen_pubrel(7, proto_ver=5))
+            expect_packet(
+                publisher, mqtt_packets.gen_pubcomp(7, proto_ver=5),
+                "QoS2 DUP publisher PUBCOMP",
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_publish(
+                    topic, qos=2, mid=1, payload="original", proto_ver=5
+                ),
+                "QoS2 DUP downstream PUBLISH",
+            )
+            subscriber.sendall(mqtt_packets.gen_pubrec(1, proto_ver=5))
+            expect_packet(
+                subscriber, mqtt_packets.gen_pubrel(1, proto_ver=5),
+                "QoS2 DUP downstream PUBREL",
+            )
+            subscriber.sendall(mqtt_packets.gen_pubcomp(1, proto_ver=5))
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1418,7 +1477,8 @@ def main() -> None:
     retained_repeated_lifecycle(args.broker, mqtt_packets)
     retained_multilevel_clear(args.broker, mqtt_packets)
     shared_subscription_rotation(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 17 scenarios")
+    qos2_duplicate_publish(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 18 scenarios")
 
 
 if __name__ == "__main__":
