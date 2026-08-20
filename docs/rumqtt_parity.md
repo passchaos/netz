@@ -766,7 +766,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs eight
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs nine
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -793,11 +793,14 @@ always-send, new-subscription-only and never-send behavior with exact RETAIN
 bits. The eighth scenario directly ports Mosquitto's
 `02-subpub-qos0-topic-alias.py`: a publisher establishes alias 3, then reuses
 it with an empty Topic Name; the subscriber receives the resolved full Topic
-Name with the connection-scoped alias removed. The gate builds a finite netz broker,
 Name with the connection-scoped alias removed. The gate builds a finite netz
-broker,
+broker. The ninth scenario ports Mosquitto's MQTT 5
+`04-retain-qos0-repeated.py` lifecycle and its clear boundary: retained replay
+survives UNSUBSCRIBE/resubscribe, UNSUBACK bytes are exact, and a zero-length
+retained PUBLISH removes the value so a later subscription receives nothing.
+The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all eight scenarios pass. This is deliberately described as a selected
+packets; all nine scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -809,5 +812,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Eight passing packet-vector scenarios do not cover
+   persistence semantics. Nine passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

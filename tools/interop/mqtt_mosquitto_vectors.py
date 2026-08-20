@@ -674,6 +674,82 @@ def incoming_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
+    # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
+    # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
+    # resubscribe replay, and removal from the retained index on one connection.
+    topic = "retain/qos0/repeated"
+    retained = mqtt_packets.gen_publish(
+        topic,
+        qos=0,
+        payload="retained message",
+        retain=True,
+        proto_ver=5,
+    )
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "retain-qos0-rep-test")
+            sock.sendall(retained)
+            for attempt in (1, 2):
+                sock.sendall(
+                    mqtt_packets.gen_subscribe(16, topic, 0, proto_ver=5)
+                )
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_suback(16, 0, proto_ver=5),
+                    f"retained repeated SUBACK {attempt}",
+                )
+                expect_packet(
+                    sock, retained, f"retained repeated replay {attempt}"
+                )
+                if attempt == 1:
+                    sock.sendall(
+                        mqtt_packets.gen_unsubscribe(
+                            13, topic, proto_ver=5
+                        )
+                    )
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_unsuback(13, proto_ver=5),
+                        "retained repeated UNSUBACK",
+                    )
+
+            # Remove the live subscription before publishing the tombstone,
+            # matching Mosquitto's separate send_retain helper and avoiding an
+            # unrelated live empty-PUBLISH delivery.
+            sock.sendall(
+                mqtt_packets.gen_unsubscribe(14, topic, proto_ver=5)
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_unsuback(14, proto_ver=5),
+                "retained clear UNSUBACK",
+            )
+            sock.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload=None,
+                    retain=True,
+                    proto_ver=5,
+                )
+            )
+            # Re-add the subscription to force a retained lookup.
+            sock.sendall(
+                mqtt_packets.gen_subscribe(17, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_suback(17, 0, proto_ver=5),
+                "retained clear SUBACK",
+            )
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(), "retained clear PINGRESP"
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -690,7 +766,8 @@ def main() -> None:
     persistent_no_local(args.broker, mqtt_packets)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 8 scenarios")
+    retained_repeated_lifecycle(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 9 scenarios")
 
 
 if __name__ == "__main__":
