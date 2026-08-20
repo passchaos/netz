@@ -2492,6 +2492,7 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
     return switch (err) {
         error.QoSNotSupported => 0x9b,
         error.RetainNotSupported => 0x9a,
+        error.TopicAliasInvalid => 0x94,
         error.ReceiveMaximumExceeded => 0x93,
         else => null,
     };
@@ -2509,6 +2510,10 @@ test "broker maps only negotiated publish violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x93),
         disconnectReasonForReadViolation(error.ReceiveMaximumExceeded),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x94),
+        disconnectReasonForReadViolation(error.TopicAliasInvalid),
     );
     try std.testing.expectEqual(
         @as(?u8, null),

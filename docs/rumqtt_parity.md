@@ -282,7 +282,8 @@ receive reason `0x9b` or `0x9a`, respectively.
 Post-CONNECT PUBLISH violations receive the same precise MQTT 5 DISCONNECT
 reasons before the broker closes the Network Connection. Receive Maximum
 overflow is likewise mapped to DISCONNECT `0x93`; MQTT 3.1.1 peers receive the
-only representation available to that protocol, a connection close.
+only representation available to that protocol, a connection close. A Topic
+Alias outside the negotiated inbound range receives DISCONNECT `0x94`.
 
 This matches the audited Mosquitto control points: `src/handle_subscribe.c`
 caps requested subscription QoS, `src/database.c` caps outbound delivery QoS,
@@ -292,7 +293,7 @@ to the same MQTT 5 DISCONNECT reasons.
 Focused tests cover the advertised property and SUBACK, live delivery, durable
 Session reconnect delivery, Session packet encoding, and both Will refusal
 reason codes, plus raw non-compliant PUBLISH packets for both capabilities and
-Receive Maximum overflow.
+Receive Maximum overflow, and an out-of-range Topic Alias.
 
 ## MQTT 5 Enhanced Authentication
 

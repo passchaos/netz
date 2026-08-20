@@ -251,3 +251,68 @@ test "broker disconnects MQTT 5 publisher that exceeds Receive Maximum" {
     );
     try joinServer(thread, &joined, &serve);
 }
+
+test "broker disconnects MQTT 5 publisher with invalid Topic Alias" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{
+                .protocol = .v5,
+                .topic_alias_maximum = 1,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "topic-alias-violation" },
+    );
+    defer client.close();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try mqtt.writePublish(
+        &encoded,
+        allocator,
+        .v5,
+        "topic/alias",
+        "blocked",
+        .{ .properties = &.{.{ .two_byte = .{
+            .id = .topic_alias,
+            .value = 2,
+        } }} },
+    );
+    try client.transport.writePacket(encoded.items);
+
+    var disconnect = try client.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x94),
+        disconnect.disconnect.reason_code,
+    );
+    try joinServer(thread, &joined, &serve);
+}

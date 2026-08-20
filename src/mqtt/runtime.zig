@@ -18,6 +18,7 @@ pub const Error = packet_transport.Error || error{
     ReceiveMaximumExceeded,
     QoSNotSupported,
     RetainNotSupported,
+    TopicAliasInvalid,
     OutgoingPacketTooLarge,
     PublishRefused,
     SubscriptionRefused,
@@ -1779,7 +1780,7 @@ pub const Connection = struct {
             try mqtt.validateTopicName(publish_packet.topic);
             return;
         };
-        if (alias == 0 or alias > self.incoming_topic_alias_maximum or alias > self.incoming_topic_aliases.len) return error.InvalidProperty;
+        if (alias == 0 or alias > self.incoming_topic_alias_maximum or alias > self.incoming_topic_aliases.len) return error.TopicAliasInvalid;
         const index = alias - 1;
         if (publish_packet.topic.len != 0) {
             try mqtt.validateTopicName(publish_packet.topic);
@@ -3132,7 +3133,7 @@ test "MQTT connection rejects topic aliases beyond negotiated maximum" {
         .properties = @constCast(&[_]mqtt.Property{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }}),
         .payload = "payload",
     };
-    try std.testing.expectError(error.InvalidProperty, connection.applyIncomingTopicAlias(&incoming));
+    try std.testing.expectError(error.TopicAliasInvalid, connection.applyIncomingTopicAlias(&incoming));
 }
 
 test "MQTT connection automatically establishes and reuses outgoing aliases" {
