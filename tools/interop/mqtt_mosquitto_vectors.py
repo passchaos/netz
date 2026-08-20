@@ -1345,6 +1345,52 @@ def retained_multilevel_clear(executable: Path, mqtt_packets) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def shared_subscription_rotation(executable: Path, mqtt_packets) -> None:
+    # Direct wire port of Mosquitto 02-shared-qos0-v5.py. One ordinary
+    # subscriber sees every message while each shared group selects exactly one
+    # member and advances its own cursor independently.
+    topic = "02A/share/test"
+    with NetzBroker(executable, connections=5) as broker:
+        sockets = [broker.connect() for _ in range(5)]
+        try:
+            for index, sock in enumerate(sockets, start=1):
+                connect_v5(sock, mqtt_packets, f"02-shared-client{index}")
+            filters = [
+                (0, "02A/#"),
+                (1, "$share/one/02A/share/test"),
+                (2, "$share/one/02A/share/test"),
+                (2, "$share/two/02A/share/test"),
+                (3, "$share/two/02A/share/test"),
+                (4, "$share/one/02A/share/test"),
+            ]
+            for socket_index, topic_filter in filters:
+                sock = sockets[socket_index]
+                sock.sendall(mqtt_packets.gen_subscribe(1, topic_filter, 0, proto_ver=5))
+                expect_packet(
+                    sock, mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                    f"shared SUBACK {socket_index}/{topic_filter}",
+                )
+
+            expected_receivers = ((0, 1, 2), (0, 2, 3), (0, 2, 4))
+            for message_index, receivers in enumerate(
+                expected_receivers, start=1
+            ):
+                packet = mqtt_packets.gen_publish(
+                    topic, qos=0, payload=f"message{message_index}", proto_ver=5
+                )
+                sockets[0].sendall(packet)
+                for receiver in receivers:
+                    expect_packet(
+                        sockets[receiver], packet,
+                        f"shared publish {message_index}/{receiver}",
+                    )
+            for sock in sockets:
+                sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+        finally:
+            for sock in sockets:
+                sock.close()
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1371,7 +1417,8 @@ def main() -> None:
     maximum_packet_size_qos2(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
     retained_multilevel_clear(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 16 scenarios")
+    shared_subscription_rotation(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 17 scenarios")
 
 
 if __name__ == "__main__":
