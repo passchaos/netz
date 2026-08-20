@@ -68,21 +68,21 @@ The same command also measures one 4 KiB repeated telemetry-like message
 through no-context-takeover compression. Complete and discontiguous messages
 now use project-local vort fixed-DEFLATE sync-flush encoders, whose small-input
 hash paths avoid clearing Zig flate's roughly 224 KiB compressor state per
-message. The chunked encoder keeps plaintext discontiguous and deliberately
-limits match search to each caller slice.
+message. The chunked encoder keeps plaintext discontiguous while a bounded
+16 KiB rolling dictionary preserves matches across caller slices.
 
 ```text
-permessage-deflate: 5.45-5.51 us/message, 4096 -> 69 wire bytes
-16-slice streaming: 8.28-8.37 us/message, 4096 -> 463 wire bytes, no join
+permessage-deflate: 5.86-5.87 us/message, 4096 -> 69 wire bytes
+16-slice streaming: 8.07-8.19 us/message, 4096 -> 88 wire bytes, no join
 ```
 
-These are three stable CPU-14-pinned `ReleaseFast` runs on 2026-08-20; a
-separate cold/noisy sample was 5.81/9.62 us. Compared with the previous standard-
-library encoder baseline, the fragmented path is 6.1-6.2x faster, while its
-slice-local match search makes the wire payload larger (463 versus 54 bytes).
-This is an explicit speed/ratio trade-off rather than a claim that boundaries
-are free. This remains an internal encoder baseline and compression-ratio
-example, not a cross-library
+These are three CPU-14-pinned `ReleaseFast` runs on 2026-08-20. Compared with
+the original standard-library encoder baseline, the fragmented path is
+6.2-6.3x faster. Rolling history also reduces the first vort chunked path's
+463-byte payload to 88 bytes with no measurable latency regression; the
+remaining 34-byte difference from the old 54-byte stream is chiefly the fixed
+block header/end marker retained for each caller slice. This remains an
+internal encoder baseline and compression-ratio example, not a cross-library
 speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
 `compressed = false`, so no equal compressed-send workload exists there.
 
@@ -119,8 +119,9 @@ directly in the caller buffer. TCP and RFC 8441 connections retain bounded
 compressed-wire scratch plus a reusable receive DEFLATE history window. Both
 complete and fragmented sends use vort's native raw fixed-block sync flush;
 the fragmented form emits one block per non-empty caller slice without joining
-plaintext. Both paths remove the RFC 7692 suffix and set RSV1 only when the
-wire payload is strictly smaller; incompressible/small input is sent unchanged rather than
+plaintext and carries up to 16 KiB of prior plaintext as match history. Both
+paths remove the RFC 7692 suffix and set RSV1 only when the wire payload is
+strictly smaller; incompressible/small input is sent unchanged rather than
 paying expansion, and payloads below 32 bytes skip compressor setup entirely.
 No-context-takeover resets codec state for every message
 while retaining wire buffers. Vort's current hash parser allocates temporary
