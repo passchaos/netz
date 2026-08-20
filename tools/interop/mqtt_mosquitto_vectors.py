@@ -124,11 +124,18 @@ class NetzBroker:
             )
 
 
-def connect_v5(sock: socket.socket, mqtt_packets, client_id: str) -> None:
-    sock.sendall(mqtt_packets.gen_connect(client_id, proto_ver=5))
+def connect_client(
+    sock: socket.socket, mqtt_packets, client_id: str, proto_ver: int
+) -> None:
+    sock.sendall(mqtt_packets.gen_connect(client_id, proto_ver=proto_ver))
     connack = read_packet(sock)
-    if connack[0] != 0x20 or len(connack) < 5 or connack[3] >= 0x80:
+    minimum_len = 5 if proto_ver == 5 else 4
+    if connack[0] != 0x20 or len(connack) < minimum_len or connack[3] >= 0x80:
         raise AssertionError(f"invalid successful CONNACK: {connack.hex()}")
+
+
+def connect_v5(sock: socket.socket, mqtt_packets, client_id: str) -> None:
+    connect_client(sock, mqtt_packets, client_id, 5)
 
 
 def no_matching_subscribers(executable: Path, mqtt_packets, mqtt5_rc) -> None:
@@ -345,6 +352,50 @@ def qos2_routes_at_pubrel(executable: Path, mqtt_packets) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def mixed_version_qos1(executable: Path, mqtt_packets) -> None:
+    topic = "mixed/version/qos1"
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_client(subscriber, mqtt_packets, "mixed-v3-sub", 4)
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 1, proto_ver=4)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 1, proto_ver=4),
+                "MQTT 3.1.1 SUBACK",
+            )
+            connect_v5(publisher, mqtt_packets, "mixed-v5-pub")
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=77,
+                    payload="cross-version",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                publisher,
+                mqtt_packets.gen_puback(77, proto_ver=5),
+                "MQTT 5 publisher PUBACK",
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=1,
+                    payload="cross-version",
+                    proto_ver=4,
+                ),
+                "MQTT 3.1.1 forwarded PUBLISH",
+            )
+            subscriber.sendall(mqtt_packets.gen_puback(1, proto_ver=4))
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -356,7 +407,8 @@ def main() -> None:
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
     hostile_initial_packets(args.broker, mqtt_packets)
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT 5 wire vectors passed: 4 scenarios")
+    mixed_version_qos1(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 5 scenarios")
 
 
 if __name__ == "__main__":
