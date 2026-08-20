@@ -1568,6 +1568,57 @@ def unsubscribe_reason_codes(executable: Path, mqtt_packets) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retain_as_published_live(
+    executable: Path, mqtt_packets, mqtt5_opts
+) -> None:
+    topic = "retain/as/published/live"
+    with NetzBroker(executable, connections=3) as broker:
+        with (
+            broker.connect() as cleared,
+            broker.connect() as preserved,
+            broker.connect() as publisher,
+        ):
+            connect_v5(cleared, mqtt_packets, "rap-clear")
+            connect_v5(preserved, mqtt_packets, "rap-preserve")
+            for sock, options, label in (
+                (cleared, 0, "clear"),
+                (
+                    preserved,
+                    mqtt5_opts.MQTT_SUB_OPT_RETAIN_AS_PUBLISHED,
+                    "preserve",
+                ),
+            ):
+                sock.sendall(mqtt_packets.gen_subscribe(1, topic, options, proto_ver=5))
+                expect_packet(
+                    sock, mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                    f"RAP {label} SUBACK",
+                )
+            connect_v5(publisher, mqtt_packets, "rap-publisher")
+            publisher.sendall(mqtt_packets.gen_publish(
+                topic, qos=1, mid=1, payload="retained-live",
+                retain=True, proto_ver=5,
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(1, proto_ver=5),
+                "RAP publisher PUBACK",
+            )
+            expect_packet(
+                cleared, mqtt_packets.gen_publish(
+                    topic, qos=0, payload="retained-live",
+                    retain=False, proto_ver=5,
+                ), "RAP cleared PUBLISH",
+            )
+            expect_packet(
+                preserved, mqtt_packets.gen_publish(
+                    topic, qos=0, payload="retained-live",
+                    retain=True, proto_ver=5,
+                ), "RAP preserved PUBLISH",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            cleared.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            preserved.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1601,7 +1652,8 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     unsubscribe_reason_codes(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 21 scenarios")
+    retain_as_published_live(args.broker, mqtt_packets, mqtt5_opts)
+    print("Mosquitto-derived MQTT wire vectors passed: 22 scenarios")
 
 
 if __name__ == "__main__":

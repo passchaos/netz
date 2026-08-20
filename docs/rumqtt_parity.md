@@ -772,7 +772,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs twenty-one
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs twenty-two
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -852,9 +852,12 @@ accepts a fresh MQTT 5 client/PING, proving the finite broker remains healthy.
 The twenty-first scenario unsubscribes an existing and missing filter in one
 packet, checks ordered MQTT 5 reason codes 0x00/0x11, then proves the removed
 route stays silent while PING remains usable.
+The twenty-second scenario gives two live subscribers opposite Retain As
+Published settings, then verifies the same retained QoS 1 source PUBLISH is
+forwarded with RETAIN cleared for one and preserved for the other.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all twenty-one scenarios pass. This is deliberately described as a selected
+packets; all twenty-two scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -866,5 +869,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Twenty-one passing packet-vector scenarios do not cover
+   persistence semantics. Twenty-two passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
