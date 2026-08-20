@@ -1490,7 +1490,19 @@ pub const Broker = struct {
         // time would advance their round-robin cursor twice. It also makes the
         // publication's reference count exactly equal to transferred queue
         // ownership.
-        var has_matching_subscriber = false;
+        var has_matching_subscriber = matches.len != 0;
+        if (!has_matching_subscriber and
+            route_publisher_id != null)
+        {
+            // No Local suppresses delivery, but Mosquitto still treats the
+            // underlying subscription as a match and returns a successful
+            // PUBACK rather than reason 0x10. Keep the publisher-aware route
+            // allocation (and shared cursor) single-pass; this count-only
+            // query cannot advance shared-subscription selection.
+            has_matching_subscriber = self.router.hasTopicMatch(
+                publish.topic,
+            );
+        }
         for (matches) |*match| {
             if (sessionRouteId(match.subscriber_id)) |route_id| {
                 const handle = self.sessions.handleForRouteId(

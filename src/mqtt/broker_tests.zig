@@ -275,7 +275,7 @@ test "transient Session fanout does not consume durable queue bytes" {
     try joinServer(thread, &joined, &serve);
 }
 
-test "broker applies No Local and returns MQTT 5 no-match PUBACK" {
+test "broker applies No Local while acknowledging the matched subscription" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -313,7 +313,7 @@ test "broker applies No Local and returns MQTT 5 no-match PUBACK" {
     var puback = try client.readPubAck();
     defer puback.deinit(allocator);
     try std.testing.expectEqual(packet_id, puback.ack.packet_id);
-    try std.testing.expectEqual(@as(u8, 0x10), puback.ack.reason_code);
+    try std.testing.expectEqual(@as(u8, 0), puback.ack.reason_code);
     try client.applyPubAck(puback.ack);
 
     try disconnectAll(&.{&client});

@@ -766,7 +766,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs five
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs six
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -779,9 +779,16 @@ routed before PUBREL, then checks publisher PUBREC/PUBCOMP plus the independent
 subscriber PUBLISH/PUBREC/PUBREL/PUBCOMP sequence byte-for-byte. A mixed-version
 case uses a Mosquitto-generated MQTT 3.1.1 subscriber and MQTT 5 publisher on
 the same listener, checking exact v5 PUBACK plus property-free v3 QoS 1
-PUBLISH/PUBACK translation. The gate builds a finite netz broker,
+PUBLISH/PUBACK translation. The sixth scenario ports the wire-observable
+subset of Mosquitto's
+`11-persistent-subscription-no-local.py`: reconnect reports Session Present,
+the restored No Local subscription suppresses self-delivery while PUBACK stays
+successful, and re-subscribing replaces the option so the next self-publish is
+forwarded with an independent Packet Identifier. This also corrected netz's
+prior 0x10 PUBACK: No Local suppresses delivery but does not mean that no
+subscription matched. The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all five scenarios pass. This is deliberately described as a selected
+packets; all six scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.

@@ -371,6 +371,19 @@ pub const Router = struct {
         return exact;
     }
 
+    /// Return whether the topic has any matching subscription before applying
+    /// publisher-aware No Local filtering. MQTT 5 PUBACK reason 0x10 describes
+    /// subscription existence, not whether this particular publisher receives
+    /// a loopback delivery. This query deliberately does not emit matches, so
+    /// shared-subscription round-robin cursors are not advanced.
+    pub fn hasTopicMatch(self: *Router, topic: []const u8) bool {
+        if (self.matchTrie(topic, null, null, null)) |counts| {
+            return counts.normal != 0 or counts.shared != 0;
+        }
+        return self.matchNormalLinear(topic, null, null) != 0 or
+            self.matchSharedLinear(topic, null) != 0;
+    }
+
     const MatchCounts = struct {
         normal: usize = 0,
         shared: usize = 0,

@@ -69,6 +69,21 @@ def expect_packet(sock: socket.socket, expected: bytes, label: str) -> None:
         )
 
 
+def expect_packets_unordered(
+    sock: socket.socket, expected: list[bytes], label: str
+) -> None:
+    remaining = expected.copy()
+    for _ in expected:
+        actual = read_packet(sock)
+        try:
+            remaining.remove(actual)
+        except ValueError as exc:
+            raise AssertionError(
+                f"{label}: unexpected {actual.hex()}, remaining "
+                + ", ".join(packet.hex() for packet in remaining)
+            ) from exc
+
+
 class NetzBroker:
     def __init__(
         self, executable: Path, connections: int = 1, ignore_errors: bool = False
@@ -136,6 +151,30 @@ def connect_client(
 
 def connect_v5(sock: socket.socket, mqtt_packets, client_id: str) -> None:
     connect_client(sock, mqtt_packets, client_id, 5)
+
+
+def connect_persistent_v5(
+    sock: socket.socket, mqtt_packets, client_id: str, session_present: bool
+) -> None:
+    sock.sendall(
+        mqtt_packets.gen_connect(
+            client_id,
+            clean_session=False,
+            proto_ver=5,
+            session_expiry=60,
+        )
+    )
+    connack = read_packet(sock)
+    if (
+        connack[0] != 0x20
+        or len(connack) < 5
+        or connack[2] != int(session_present)
+        or connack[3] != 0
+    ):
+        raise AssertionError(
+            f"invalid persistent CONNACK (present={session_present}): "
+            f"{connack.hex()}"
+        )
 
 
 def no_matching_subscribers(executable: Path, mqtt_packets, mqtt5_rc) -> None:
@@ -396,6 +435,96 @@ def mixed_version_qos1(executable: Path, mqtt_packets) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
 
 
+def persistent_no_local(executable: Path, mqtt_packets) -> None:
+    # Portable wire subset of Mosquitto 11-persistent-subscription-no-local.py.
+    # It keeps the broker process alive, but still proves both Session Present
+    # restoration and that the no-local option survives disconnect/reconnect.
+    client_id = "persistent-subscription-test"
+    topic = "subpub/nolocal"
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as first:
+            connect_persistent_v5(
+                first, mqtt_packets, client_id, session_present=False
+            )
+            first.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 5, proto_ver=5)
+            )
+            expect_packet(
+                first,
+                mqtt_packets.gen_suback(1, 1, proto_ver=5),
+                "persistent no-local SUBACK",
+            )
+            first.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with broker.connect() as resumed:
+            connect_persistent_v5(
+                resumed, mqtt_packets, client_id, session_present=True
+            )
+            resumed.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=1,
+                    payload="message",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                resumed,
+                mqtt_packets.gen_puback(1, proto_ver=5),
+                "persistent no-local PUBACK",
+            )
+            resumed.settimeout(0.05)
+            try:
+                local = resumed.recv(1)
+                if local:
+                    raise AssertionError(
+                        "restored no-local subscription forwarded self "
+                        f"publish: {local.hex()}"
+                    )
+            except socket.timeout:
+                pass
+            finally:
+                resumed.settimeout(5)
+
+            # Re-subscribing to the same filter replaces its options. The next
+            # self-publish must therefore produce both PUBACK and one forwarded
+            # QoS 1 PUBLISH, in either scheduler order.
+            resumed.sendall(
+                mqtt_packets.gen_subscribe(2, topic, 1, proto_ver=5)
+            )
+            expect_packet(
+                resumed,
+                mqtt_packets.gen_suback(2, 1, proto_ver=5),
+                "local replacement SUBACK",
+            )
+            resumed.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=3,
+                    payload="message",
+                    proto_ver=5,
+                )
+            )
+            expect_packets_unordered(
+                resumed,
+                [
+                    mqtt_packets.gen_puback(3, proto_ver=5),
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=1,
+                        mid=1,
+                        payload="message",
+                        proto_ver=5,
+                    ),
+                ],
+                "local replacement publish/PUBACK",
+            )
+            resumed.sendall(mqtt_packets.gen_puback(1, proto_ver=5))
+            resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -408,7 +537,8 @@ def main() -> None:
     hostile_initial_packets(args.broker, mqtt_packets)
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 5 scenarios")
+    persistent_no_local(args.broker, mqtt_packets)
+    print("Mosquitto-derived MQTT wire vectors passed: 6 scenarios")
 
 
 if __name__ == "__main__":
