@@ -1883,15 +1883,61 @@ pub const H2Connection = struct {
         compressed_payload: []const u8,
         frame_count: usize,
     ) Error!void {
+        const header_bound = std.math.mul(
+            usize,
+            frame_count,
+            websocket.max_frame_header_len,
+        ) catch return error.PayloadTooLarge;
+        const required = std.math.add(
+            usize,
+            header_bound,
+            compressed_payload.len,
+        ) catch return error.PayloadTooLarge;
+        self.send_frame_buffer.clearRetainingCapacity();
+        try self.send_frame_buffer.ensureTotalCapacity(
+            self.allocator,
+            required,
+        );
         for (0..frame_count) |index| {
             const range = compressedFragmentRange(compressed_payload.len, frame_count, index);
-            try self.writeFrameLockedExtended(
+            const payload = compressed_payload[range.start..range.end];
+            const mask_key = if (self.role == .client) blk: {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.tunnel.connection.io, &key);
+                break :blk key;
+            } else null;
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderInto(
+                &header_storage,
                 if (index == 0) opcode else .continuation,
-                compressed_payload[range.start..range.end],
-                index + 1 == frame_count,
-                .{ .rsv1 = index == 0 },
+                payload,
+                .{
+                    .fin = index + 1 == frame_count,
+                    .mask_key = mask_key,
+                    .rsv1 = index == 0,
+                },
             );
+            try self.send_frame_buffer.appendSlice(self.allocator, header);
+            const encoded_payload = try self.send_frame_buffer.addManyAsSlice(
+                self.allocator,
+                payload.len,
+            );
+            if (mask_key) |mask| {
+                try websocket.applyMaskCopy(
+                    encoded_payload,
+                    payload,
+                    mask,
+                    0,
+                );
+            } else {
+                @memcpy(encoded_payload, payload);
+            }
         }
+        // RFC 8441 carries an RFC 6455 byte stream inside DATA. Coalescing the
+        // continuation frames into one tunnel write preserves every WebSocket
+        // boundary while letting HTTP/2 apply flow control and frame sizing to
+        // the complete batch rather than repeating that work per fragment.
+        try self.tunnel.write(self.send_frame_buffer.items, false);
     }
 
     fn ensureBuffered(self: *H2Connection, len: usize) Error!void {
@@ -3255,14 +3301,37 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
             try std.testing.expectEqualStrings("chat.v1", ws.selected_protocol.?);
             try std.testing.expect(ws.permessage_deflate);
 
-            var request_storage: [4096]u8 = undefined;
-            const request = try ws.receiveMessageInto(
-                &request_storage,
+            var compressed: std.ArrayList(u8) = .empty;
+            defer compressed.deinit(server_ptr.allocator);
+            for (0..3) |index| {
+                var frame = try ws.receiveFrame();
+                defer frame.deinit(server_ptr.allocator);
+                try std.testing.expectEqual(
+                    if (index == 0) websocket.Opcode.text else .continuation,
+                    frame.header.opcode,
+                );
+                try std.testing.expectEqual(index == 0, frame.header.rsv1);
+                try std.testing.expectEqual(index == 2, frame.header.fin);
+                try compressed.appendSlice(
+                    server_ptr.allocator,
+                    frame.payload,
+                );
+            }
+            const request = try websocket.decompressMessage(
+                server_ptr.allocator,
+                compressed.items,
+                4096,
             );
-            try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
-            try std.testing.expectEqualStrings("hello over h2 websocket", request.payload);
+            defer server_ptr.allocator.free(request);
+            try std.testing.expectEqualStrings(
+                "hello \xe2\x82\xac over h2 websocket hello over h2 websocket",
+                request,
+            );
 
-            try ws.sendFragmented(.text, &.{ "world over ", "h2 websocket" });
+            try ws.sendFragmented(.text, &.{
+                "world over h2 websocket ",
+                "world over h2 websocket",
+            });
 
             // The h2 WebSocket adapter still runs the normal RFC 6455 close
             // handshake inside DATA frames and maps the final Close write to
@@ -3293,13 +3362,20 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
     try std.testing.expectEqualStrings("chat.v1", ws_client.selected_protocol.?);
     try std.testing.expect(ws_client.permessage_deflate);
 
-    try ws_client.sendFragmented(.text, &.{ "hello over ", "h2 websocket" });
+    try ws_client.sendFragmented(.text, &.{
+        "hello \xe2",
+        "\x82",
+        "\xac over h2 websocket hello over h2 websocket",
+    });
     var response_storage: [4096]u8 = undefined;
     const response = try ws_client.receiveMessageInto(
         &response_storage,
     );
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
-    try std.testing.expectEqualStrings("world over h2 websocket", response.payload);
+    try std.testing.expectEqualStrings(
+        "world over h2 websocket world over h2 websocket",
+        response.payload,
+    );
 
     try ws_client.sendClose(.normal_closure, "bye");
     try std.testing.expectError(error.ConnectionClosed, ws_client.receiveMessage());
