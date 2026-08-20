@@ -133,6 +133,16 @@ parser still invokes the callback at each wire-chunk boundary and commits only
 the current message. This removes repeated exact-boundary reads without
 aggregating a whole body. Both modes demonstrate an advantage in these named
 loopback workloads; neither establishes whole-library superiority.
+
+The same gate also covers a finer streaming shape without changing either
+implementation: 1 MiB each direction as 1,024 x 1-KiB chunks, 10 warmups and
+100 measured round trips. Three CPU-0 runs measured netz at 581.64-590.26 us
+(3,388-3,438 aggregate MiB/s) versus Hyper at 2.031-2.653 ms
+(753-984 MiB/s), a conservative 3.44-4.56x latency advantage. This stresses
+boundary preservation rather than bulk copy: netz renders descriptors into
+retained scratch and submits borrowed slices up to the POSIX IOV limit, while
+the callback reader still observes every application chunk.
+
 `bench-http1-body --stats` now adds the same thread-safe allocator telemetry as
 the H2/WebSocket benchmarks. A short 1-MiB smoke used 37 allocations and
 1,063,364 peak live bytes for fixed framing, versus 45 allocations and

@@ -25,6 +25,7 @@ Build mode: -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=fixed --warmup=20 --iterations=200
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=chunked --warmup=20 --iterations=200
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=chunked --chunk-bytes=1024 --warmup=10 --iterations=100
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
