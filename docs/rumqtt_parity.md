@@ -766,7 +766,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs fourteen
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs fifteen
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -821,9 +821,13 @@ PUBACK/PING keep the socket live, then a boundary-fitting PUBLISH is forwarded.
 This exposed and fixed netz closing transient live connections on
 `OutgoingPacketTooLarge`; durable Session and live delivery queues now share
 the same discard-and-continue policy.
+The fifteenth scenario ports Mosquitto's QoS 2 Maximum Packet Size companion:
+an oversized released message completes publisher PUBREC/PUBREL/PUBCOMP but
+creates no downstream transaction, then a fitting message completes both the
+publisher and independent subscriber QoS 2 handshakes.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all fourteen scenarios pass. This is deliberately described as a selected
+packets; all fifteen scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -835,5 +839,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Fourteen passing packet-vector scenarios do not cover
+   persistence semantics. Fifteen passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

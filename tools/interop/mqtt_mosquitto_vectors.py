@@ -1123,6 +1123,90 @@ def maximum_packet_size_qos1(
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def maximum_packet_size_qos2(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto's QoS 2 companion vector. The first
+    # released Application Message is too large for the subscriber and must be
+    # discarded without leaving an outgoing QoS2 transaction; the next fitting
+    # message completes the full independent downstream handshake.
+    topic = "12/max/publish/qos2/test/topic"
+    maximum = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.MAXIMUM_PACKET_SIZE, 40
+    )
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            sock.sendall(
+                mqtt_packets.gen_connect(
+                    "12-max-publish-qos2",
+                    proto_ver=5,
+                    properties=maximum,
+                )
+            )
+            connack = read_packet(sock)
+            if connack[0] != 0x20 or connack[3] != 0:
+                raise AssertionError(
+                    f"invalid max-packet QoS2 CONNACK: {connack.hex()}"
+                )
+            sock.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 2, proto_ver=5)
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_suback(1, 2, proto_ver=5),
+                "maximum packet QoS2 SUBACK",
+            )
+
+            for mid, payload in ((1, "1234"), (2, "789")):
+                publish = mqtt_packets.gen_publish(
+                    topic,
+                    mid=mid,
+                    qos=2,
+                    payload=payload,
+                    proto_ver=5,
+                )
+                sock.sendall(publish)
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_pubrec(mid, proto_ver=5),
+                    f"maximum packet QoS2 publisher PUBREC {mid}",
+                )
+                sock.sendall(mqtt_packets.gen_pubrel(mid, proto_ver=5))
+                if mid == 1:
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_pubcomp(mid, proto_ver=5),
+                        "maximum packet QoS2 oversized PUBCOMP",
+                    )
+                    sock.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_pingresp(),
+                        "maximum packet QoS2 PINGRESP",
+                    )
+                else:
+                    expect_packets_unordered(
+                        sock,
+                        [
+                            mqtt_packets.gen_pubcomp(mid, proto_ver=5),
+                            publish,
+                        ],
+                        "maximum packet QoS2 fitting release",
+                    )
+                    sock.sendall(
+                        mqtt_packets.gen_pubrec(mid, proto_ver=5)
+                    )
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_pubrel(mid, proto_ver=5),
+                        "maximum packet QoS2 downstream PUBREL",
+                    )
+                    sock.sendall(
+                        mqtt_packets.gen_pubcomp(mid, proto_ver=5)
+                    )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
     # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
     # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
@@ -1222,8 +1306,9 @@ def main() -> None:
     )
     qos2_receive_maximum_one(args.broker, mqtt_packets, mqtt5_props)
     maximum_packet_size_qos1(args.broker, mqtt_packets, mqtt5_props)
+    maximum_packet_size_qos2(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 14 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 15 scenarios")
 
 
 if __name__ == "__main__":
