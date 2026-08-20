@@ -471,6 +471,10 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    three runs; stable samples were 7.08-7.10 ms/batch and peak live memory
    remained about 1.29 MB. Push-promise ownership uses the same block-aware
    deinitializer, and tests cover both ordinary and pushed headers.
-3. Add external h2spec and broad HTTP conformance/interoperability evidence.
+3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
+   in h2spec v2.6.0 strict server mode (`H2SPEC=/tmp/h2spec-download/h2spec zig
+   build interop-http2-h2spec -Doptimize=ReleaseFast -- --strict`, 2026-08-20).
+   This covers the external wire checks but does not replace TLS/ALPN or
+   broader HTTP client interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.

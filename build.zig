@@ -95,6 +95,28 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_vectors_step.dependOn(&mqtt_vectors.step);
 
+    const h2spec_server = b.addExecutable(.{
+        .name = "netz-h2spec-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_h2spec_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const h2spec = b.addSystemCommand(&.{
+        "tools/interop/http2_h2spec.sh",
+    });
+    h2spec.addArtifactArg(h2spec_server);
+    if (b.args) |args| h2spec.addArgs(args);
+    const h2spec_step = b.step(
+        "interop-http2-h2spec",
+        "Run the external h2spec conformance suite against netz h2c",
+    );
+    h2spec_step.dependOn(&h2spec.step);
+
     const webtransport_wtransport_server = b.addExecutable(.{
         .name = "netz-webtransport-wtransport-server",
         .root_module = b.createModule(.{

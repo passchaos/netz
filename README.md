@@ -537,6 +537,8 @@ zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
+# Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec.
+zig build interop-http2-h2spec -Doptimize=ReleaseFast
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
@@ -552,7 +554,10 @@ zig build run-linux-io-uring-websocket
 `run-http3-handshake` is the self-contained local HTTP/3 counterpart to the
 public fetch tool: it binds a QUIC/H3 server on loopback, performs a protected
 client handshake, exchanges one request/response, and exits.
-The public HTTP/3 URI client resolves all same-family DNS answers and retries
+The HTTP/2 interop step starts a loopback h2c server and runs the external
+h2spec server suite. Additional h2spec selectors can be passed after `--`, for
+example `-- generic/3.4`. The public HTTP/3 URI client resolves all same-family
+DNS answers and retries
 transient UDP path failures such as QUIC handshake timeouts on the next
 address, which makes CDN-backed origins more robust when one anycast edge is
 temporarily dropping UDP/443.

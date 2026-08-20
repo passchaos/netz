@@ -120,6 +120,19 @@ pub const Server = struct {
 
     pub fn accept(self: *Server) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStream(stream);
+    }
+
+    /// Complete the HTTP/2 server handshake on an already-accepted stream.
+    ///
+    /// Separating transport acceptance from the handshake lets event loops
+    /// dispatch each socket independently: a peer that opens TCP but delays
+    /// its connection preface must not prevent the listener from accepting
+    /// other peers. Ownership of `stream` transfers to this function.
+    pub fn acceptStream(
+        self: *Server,
+        stream: net.Stream,
+    ) Error!Connection {
         errdefer stream.close(self.io);
         if (self.limits.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
@@ -127,7 +140,20 @@ pub const Server = struct {
 
         var preface_buf: [http2.connection_preface.len]u8 = undefined;
         try readExact(self.io, stream, &preface_buf);
-        try http2.validateClientPreface(&preface_buf);
+        http2.validateClientPreface(&preface_buf) catch |err| {
+            // The preface failure happens before a Connection can be returned
+            // to the application, so Server owns the RFC 9113 connection-error
+            // response. Sending GOAWAY also lets peers distinguish a protocol
+            // rejection from an abortive TCP close with unread input.
+            writeConnectionErrorGoAway(
+                self.allocator,
+                self.io,
+                stream,
+                .protocol_error,
+                "invalid-preface",
+            ) catch {};
+            return err;
+        };
 
         var client_settings = try readFrame(self.allocator, self.io, stream, self.limits);
         defer client_settings.deinit(self.allocator);
@@ -2526,6 +2552,16 @@ pub const Connection = struct {
                         .priority = request_priority,
                     };
                 },
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    if (self.streamIsIdle(reset.stream_id)) {
+                        return error.InvalidFrame;
+                    }
+                    self.recordResetStream(reset);
+                    continue;
+                },
                 .goaway => continue,
                 else => return error.UnexpectedFrame,
             }
@@ -2684,7 +2720,13 @@ pub const Connection = struct {
                                             );
                                             break;
                                         },
-                                        .rst_stream => return error.StreamReset,
+                                        .rst_stream => {
+                                            const reset = try http2.ResetStreamPayload.parse(
+                                                owned.frame,
+                                            );
+                                            self.recordResetStream(reset);
+                                            return error.StreamReset;
+                                        },
                                         else => return error.UnexpectedFrame,
                                     }
                                 },
@@ -2716,6 +2758,16 @@ pub const Connection = struct {
                         .trailers = trailers,
                         .priority = request_priority,
                     };
+                },
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    if (self.streamIsIdle(reset.stream_id)) {
+                        return error.InvalidFrame;
+                    }
+                    self.recordResetStream(reset);
+                    continue;
                 },
                 .goaway => continue,
                 else => return error.UnexpectedFrame,
@@ -2913,7 +2965,13 @@ pub const Connection = struct {
                             );
                             break;
                         },
-                        .rst_stream => return error.StreamReset,
+                        .rst_stream => {
+                            const reset = try http2.ResetStreamPayload.parse(
+                                frame,
+                            );
+                            self.recordResetStream(reset);
+                            return error.StreamReset;
+                        },
                         else => return error.UnexpectedFrame,
                     }
                 }
@@ -3157,7 +3215,11 @@ pub const Connection = struct {
                         completed += 1;
                     }
                 },
-                .rst_stream => return error.StreamReset,
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(frame);
+                    self.recordResetStream(reset);
+                    return error.StreamReset;
+                },
                 else => return error.UnexpectedFrame,
             }
         }
@@ -4605,6 +4667,34 @@ pub const Connection = struct {
             self.active_peer_index.contains(stream_id);
     }
 
+    fn streamIsIdle(self: Connection, stream_id: u31) bool {
+        std.debug.assert(stream_id != 0);
+        if (self.outboundStreamIsActive(stream_id)) return false;
+
+        if (clientInitiatedStreamId(stream_id)) {
+            // Client-created stream IDs are monotonically allocated. IDs below
+            // the relevant cursor have existed and are now closed; IDs at or
+            // above it have never been opened.
+            return if (self.role == .server)
+                stream_id > self.last_peer_client_stream_id
+            else
+                stream_id >= self.next_client_stream_id;
+        }
+
+        if (self.role == .server) {
+            if (self.push_state.localStatus(stream_id) != null) return false;
+            return stream_id >= self.push_state.next_local_stream_id;
+        }
+        if (self.push_state.isRemoteReserved(stream_id)) return false;
+        const last = self.push_state.last_peer_stream_id orelse return true;
+        return stream_id > last;
+    }
+
+    fn lastPeerProcessedStreamId(self: Connection) u31 {
+        if (self.role == .server) return self.last_peer_client_stream_id;
+        return self.push_state.last_peer_stream_id orelse 0;
+    }
+
     fn releaseLocalStream(self: *Connection, stream_id: u31) void {
         if (!self.removeActiveLocalStream(stream_id)) return;
         _ = self.priority_state.remove(
@@ -5502,9 +5592,42 @@ pub const Connection = struct {
             .window_update => {
                 const update = try http2.WindowUpdatePayload.parse(frame);
                 if (update.stream_id == 0) {
-                    try self.send_connection_window.update(update.increment);
+                    self.send_connection_window.update(
+                        update.increment,
+                    ) catch |err| {
+                        if (err != error.FlowControlViolation) return err;
+                        // A connection-window overflow terminates the whole
+                        // HTTP/2 connection with FLOW_CONTROL_ERROR. Emit the
+                        // precise wire code here rather than forcing adapters
+                        // to reverse-map a generic runtime error.
+                        try self.sendGoAway(
+                            self.lastPeerProcessedStreamId(),
+                            .flow_control_error,
+                            "connection-window-overflow",
+                        );
+                        return error.ConnectionGoAway;
+                    };
+                } else if (self.streamIsIdle(update.stream_id)) {
+                    // WINDOW_UPDATE on an idle stream is a connection-level
+                    // protocol error. Updates for closed streams remain
+                    // ignorable, while active streams adjust send credit.
+                    return error.InvalidFrame;
                 } else if (self.outboundStreamIsActive(update.stream_id)) {
-                    try (try self.sendStreamWindow(update.stream_id)).update(update.increment);
+                    (try self.sendStreamWindow(update.stream_id)).update(
+                        update.increment,
+                    ) catch |err| {
+                        if (err != error.FlowControlViolation) return err;
+                        // Stream-window overflow is isolated to that stream.
+                        // Close it with RST_STREAM and retain the connection
+                        // for other streams.
+                        try self.writeResetStreamFrame(
+                            update.stream_id,
+                            .flow_control_error,
+                        );
+                        self.releaseLocalStream(update.stream_id);
+                        self.releasePeerStream(update.stream_id);
+                        self.forgetStreamWindows(update.stream_id);
+                    };
                 }
                 return true;
             },
@@ -5612,7 +5735,17 @@ pub const Connection = struct {
                 );
                 return true;
             },
-            else => return false,
+            // RFC 9113 section 5.5 requires unknown extension frame types to
+            // be ignored. Keep known stream/message frames visible to the
+            // caller, while consuming only values that this runtime does not
+            // assign protocol semantics to.
+            .data,
+            .headers,
+            .push_promise,
+            .goaway,
+            .continuation,
+            => return false,
+            _ => return true,
         }
     }
 
@@ -6867,6 +7000,25 @@ fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limit
     const frame = try http2.Frame.parse(bytes);
     try validateFrameEnvelope(frame);
     return .{ .bytes = bytes, .frame = frame };
+}
+
+fn writeConnectionErrorGoAway(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    error_code: http2.ErrorCode,
+    debug_data: []const u8,
+) Error!void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try http2.GoAwayPayload.write(
+        &encoded,
+        allocator,
+        0,
+        error_code,
+        debug_data,
+    );
+    try writeAll(io, stream, encoded.items);
 }
 
 fn validateFrameEnvelope(frame: http2.Frame) Error!void {
@@ -13957,12 +14109,138 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
     try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
 }
 
+test "HTTP/2 stream idle classification follows initiator cursors" {
+    var server_connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+        .last_peer_client_stream_id = 3,
+    };
+    defer server_connection.push_state.deinit(std.testing.allocator);
+
+    try std.testing.expect(!server_connection.streamIsIdle(1));
+    try std.testing.expect(!server_connection.streamIsIdle(3));
+    try std.testing.expect(server_connection.streamIsIdle(5));
+    try std.testing.expect(server_connection.streamIsIdle(2));
+    const reserved = try server_connection.push_state.reserveLocal(
+        std.testing.allocator,
+    );
+    try std.testing.expectEqual(@as(u31, 2), reserved);
+    try std.testing.expect(!server_connection.streamIsIdle(2));
+    try std.testing.expect(server_connection.streamIsIdle(4));
+
+    var client_connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .next_client_stream_id = 5,
+    };
+    try std.testing.expect(!client_connection.streamIsIdle(1));
+    try std.testing.expect(!client_connection.streamIsIdle(3));
+    try std.testing.expect(client_connection.streamIsIdle(5));
+    try std.testing.expect(client_connection.streamIsIdle(2));
+}
+
+test "HTTP/2 continues after RST_STREAM on a half-closed request" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            try std.testing.expectEqual(@as(u31, 1), request.stream_id);
+            request.deinit(server_ptr.allocator);
+
+            // readRequest must consume the intervening reset rather than
+            // terminating the connection before the next request stream.
+            var next_request = try connection.readRequest();
+            defer next_request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u31, 3), next_request.stream_id);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    const first = try client.sendCompleteRequest(.{
+        .path = "/reset",
+        .authority = "localhost",
+    });
+    try client.sendResetStream(first.stream_id, .cancel);
+    const second = try client.sendCompleteRequest(.{
+        .path = "/after-reset",
+        .authority = "localhost",
+    });
+    try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 ignores unknown extension connection frames" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+
+    try std.testing.expect(try connection.handleConnectionFrame(.{
+        .header = .{
+            .length = 3,
+            .frame_type = @enumFromInt(0xff),
+            .flags = 0xa5,
+            .stream_id = 0,
+        },
+        .payload = "ext",
+    }));
+    try std.testing.expect(!try connection.handleConnectionFrame(.{
+        .header = .{
+            .length = 0,
+            .frame_type = .data,
+            .flags = flag_end_stream,
+            .stream_id = 1,
+        },
+        .payload = &.{},
+    }));
+}
+
 test "HTTP/2 ignores WINDOW_UPDATE for inactive streams" {
     var connection = Connection{
         .io = undefined,
         .allocator = std.testing.allocator,
         .stream = undefined,
         .role = .client,
+        .next_client_stream_id = 3,
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
