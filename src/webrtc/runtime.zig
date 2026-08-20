@@ -1063,7 +1063,7 @@ fn writeBindingSuccess(endpoint: anytype, request: StunDatagram) Error!void {
     var value: std.ArrayList(u8) = .empty;
     defer value.deinit(endpoint.allocator);
     const parts = ipAddressParts(request.from) orelse return error.UnsupportedAddressFamily;
-    try stun.writeXorMappedAddress(&value, endpoint.allocator, parts.family, parts.port, parts.bytes(), request.message.transaction_id);
+    try stun.writeXorMappedAddress(&value, endpoint.allocator, parts.family, parts.port, parts.address[0..parts.address_len], request.message.transaction_id);
     const attrs = [_]stun.Attribute{.{ .attr_type = .xor_mapped_address, .value = value.items }};
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(endpoint.allocator);
@@ -1075,7 +1075,7 @@ fn writeAuthenticatedBindingSuccess(endpoint: anytype, request: StunDatagram, pa
     var value: std.ArrayList(u8) = .empty;
     defer value.deinit(endpoint.allocator);
     const parts = ipAddressParts(request.from) orelse return error.UnsupportedAddressFamily;
-    try stun.writeXorMappedAddress(&value, endpoint.allocator, parts.family, parts.port, parts.bytes(), request.message.transaction_id);
+    try stun.writeXorMappedAddress(&value, endpoint.allocator, parts.family, parts.port, parts.address[0..parts.address_len], request.message.transaction_id);
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(endpoint.allocator);
     try stun.writeAuthenticatedBindingSuccess(&encoded, endpoint.allocator, request.message.transaction_id, value.items, password);
@@ -1096,10 +1096,6 @@ const StunAddressParts = struct {
     address: [16]u8,
     address_len: usize,
     port: u16,
-
-    fn bytes(self: *const StunAddressParts) []const u8 {
-        return self.address[0..self.address_len];
-    }
 };
 
 fn ipAddressParts(address: net.IpAddress) ?StunAddressParts {

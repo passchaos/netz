@@ -77,7 +77,10 @@ pub const stun = struct {
         address: [16]u8,
         address_len: u8,
 
-        pub fn bytes(self: XorMappedAddress) []const u8 {
+        pub fn bytes(self: *const XorMappedAddress) []const u8 {
+            // The returned slice borrows the address stored in `self`; taking
+            // the receiver by value would instead point into a temporary copy
+            // whose lifetime ends when this method returns.
             return self.address[0..self.address_len];
         }
     };
