@@ -1619,6 +1619,51 @@ def retain_as_published_live(
             preserved.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_replacement(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    topic = "retained/replacement"
+    old_property = mqtt5_props.gen_string_pair_prop(
+        mqtt5_props.USER_PROPERTY, "version", "old"
+    )
+    new_property = mqtt5_props.gen_string_pair_prop(
+        mqtt5_props.USER_PROPERTY, "version", "new"
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as publisher, broker.connect() as subscriber:
+            connect_v5(publisher, mqtt_packets, "retained-replace-pub")
+            for mid, payload, properties in (
+                (1, "old-value", old_property),
+                (2, "new-value", new_property),
+            ):
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=1, mid=mid, payload=payload, retain=True,
+                    proto_ver=5, properties=properties,
+                ))
+                expect_packet(
+                    publisher, mqtt_packets.gen_puback(
+                        mid, proto_ver=5, reason_code=0x10
+                    ), f"retained replacement PUBACK {mid}",
+                )
+            connect_v5(subscriber, mqtt_packets, "retained-replace-sub")
+            subscriber.sendall(mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "retained replacement SUBACK",
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_publish(
+                    topic, qos=0, payload="new-value", retain=True,
+                    proto_ver=5, properties=new_property,
+                ), "retained replacement latest PUBLISH",
+            )
+            subscriber.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                subscriber, mqtt_packets.gen_pingresp(),
+                "retained replacement single replay",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -1653,7 +1698,8 @@ def main() -> None:
     )
     unsubscribe_reason_codes(args.broker, mqtt_packets)
     retain_as_published_live(args.broker, mqtt_packets, mqtt5_opts)
-    print("Mosquitto-derived MQTT wire vectors passed: 22 scenarios")
+    retained_replacement(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 23 scenarios")
 
 
 if __name__ == "__main__":
