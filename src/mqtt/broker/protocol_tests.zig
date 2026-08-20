@@ -27,6 +27,93 @@ fn connectV311(
     );
 }
 
+test "broker caps MQTT 5 subscriptions and live delivery at Maximum QoS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{
+                .protocol = .v5,
+                .max_outgoing_inflight = 64,
+                .maximum_qos = .at_least_once,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber_result =
+        try context.runtime_mod.Client.connectWithConnAck(
+            allocator,
+            io,
+            broker.address(),
+            .{ .protocol = .v5, .client_id = "maximum-qos-sub" },
+        );
+    var subscriber = subscriber_result.connection;
+    defer subscriber.close();
+    defer subscriber_result.connack.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        mqtt.maximumQoS(subscriber_result.connack.connack.properties).?,
+    );
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "maximum/qos",
+            .qos = .exactly_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{@intFromEnum(mqtt.QoS.at_least_once)},
+        suback.suback.reason_codes,
+    );
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "maximum-qos-pub" },
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "maximum/qos",
+        "capped",
+        .{ .qos = .at_least_once },
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        delivered.publish.qos,
+    );
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+
+    try subscriber.disconnect(0);
+    try publisher.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker Keep Alive zero disables inactivity timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

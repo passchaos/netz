@@ -16,6 +16,110 @@ const session_expiry = [_]mqtt.Property{
     } },
 };
 
+test "broker caps durable Session delivery at Maximum QoS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.TestContext.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{
+                .protocol = .v5,
+                .max_outgoing_inflight = 64,
+                .maximum_qos = .at_least_once,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 3,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "maximum-qos-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "maximum/session",
+            .qos = .exactly_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{@intFromEnum(mqtt.QoS.at_least_once)},
+        suback.suback.reason_codes,
+    );
+    try subscriber.disconnect(0);
+    try waitForPeerClose(&subscriber);
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "maximum-qos-session-pub",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "maximum/session",
+        "queued",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.ping();
+
+    var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "maximum-qos-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    var delivered = try resumed.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        delivered.publish.qos,
+    );
+    try resumed.writePubAck(delivered.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &publisher, &resumed });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker returns Session Present and restores persistent subscription" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

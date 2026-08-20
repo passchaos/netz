@@ -1169,9 +1169,14 @@ pub const Broker = struct {
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         for (subscribe.subscriptions, 0..) |subscription, index| {
+            var granted = subscription;
+            granted.qos = minQos(
+                granted.qos,
+                self.maximumQoS(),
+            );
             const session_existed = self.sessions.setSubscription(
                 session_handle,
-                subscription,
+                granted,
                 subscription_identifier,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
@@ -1180,17 +1185,17 @@ pub const Broker = struct {
             const route_id = try self.sessions.routeId(session_handle);
             const existed = self.router.subscribeWithIdentifierStatus(
                 sessionSubscriberId(route_id),
-                subscription,
+                granted,
                 subscription_identifier,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
                 return err;
             };
             std.debug.assert(existed == session_existed);
-            reasons[index] = @intFromEnum(subscription.qos);
+            reasons[index] = @intFromEnum(granted.qos);
             const deliveries = self.retained.deliveriesAlloc(
                 self.allocator,
-                subscription,
+                granted,
                 .{
                     .subscription_existed = existed,
                     .subscriber_id = sessionSubscriberId(session_route_id),
@@ -1601,6 +1606,10 @@ pub const Broker = struct {
                 )
             else
                 false;
+            // Persisted Sessions can outlive a broker configuration change.
+            // Cap the route even if the stored subscription predates the
+            // listener's current Maximum QoS setting.
+            route.qos = minQos(route.qos, self.maximumQoS());
             if (route.qos == .at_most_once or
                 (online and !destination.?.session_persistent))
             {
@@ -1738,6 +1747,10 @@ pub const Broker = struct {
                     break;
                 }
             }
+            const delivery_qos = minQos(
+                minQos(publish.qos, match.subscription.qos),
+                self.maximumQoS(),
+            );
             if (duplicate) |delivery| {
                 try delivery.appendSubscriptionIdentifier(
                     self.allocator,
@@ -1745,17 +1758,13 @@ pub const Broker = struct {
                 );
                 delivery.qos = maxQos(
                     delivery.qos,
-                    minQos(publish.qos, match.subscription.qos),
+                    delivery_qos,
                 );
                 delivery.retain = delivery.retain or
                     (match.subscription.retain_as_published and
                         publish.retain);
                 continue;
             }
-            const delivery_qos = minQos(
-                publish.qos,
-                match.subscription.qos,
-            );
             const delivery = Delivery{
                 .publication = publication.?,
                 .qos = delivery_qos,
@@ -1922,6 +1931,13 @@ pub const Broker = struct {
         }
         const handle = slot.session_handle orelse return false;
         return (self.sessions.routeId(handle) catch return false) == route_id;
+    }
+
+    fn maximumQoS(self: Broker) mqtt.QoS {
+        // MQTT 3.1.1 cannot advertise this limit in CONNACK, but Mosquitto
+        // still applies its listener-wide cap to subscription grants and
+        // forwarded deliveries.
+        return self.options.accept.maximum_qos orelse .exactly_once;
     }
 
     fn releaseRouteReservations(
@@ -2144,6 +2160,7 @@ pub const Broker = struct {
             self.allocator,
             connection.protocol,
             transmissions[0],
+            self.maximumQoS(),
         );
     }
 

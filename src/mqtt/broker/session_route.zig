@@ -32,6 +32,7 @@ pub fn encodeTransmission(
     allocator: std.mem.Allocator,
     protocol: mqtt.ProtocolVersion,
     transmission: session.Transmission,
+    maximum_qos: mqtt.QoS,
 ) session.Error!EncodedPacket {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
@@ -49,11 +50,15 @@ pub fn encodeTransmission(
         },
     };
     switch (transmission) {
-        .publish => |publish| try publish.write(
-            &encoded,
-            allocator,
-            protocol,
-        ),
+        .publish => |publish| {
+            var capped = publish;
+            capped.qos = minQos(capped.qos, maximum_qos);
+            try capped.write(
+                &encoded,
+                allocator,
+                protocol,
+            );
+        },
         .pubrel => |pubrel| try pubrel.write(
             &encoded,
             allocator,
@@ -66,6 +71,39 @@ pub fn encodeTransmission(
         .packet_id = metadata.packet_id,
         .kind = metadata.kind,
     };
+}
+
+fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
+    return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
+}
+
+test "Session transmission encoding caps publish QoS" {
+    const allocator = std.testing.allocator;
+    const transmission = session.Transmission{ .publish = .{
+        .topic = "maximum/qos",
+        .payload = "payload",
+        .qos = .exactly_once,
+        .retain = false,
+        .dup = false,
+        .packet_id = 7,
+        .properties = &.{},
+        .message_expiry_interval = null,
+    } };
+    var encoded = try encodeTransmission(
+        allocator,
+        .v5,
+        transmission,
+        .at_least_once,
+    );
+    defer encoded.deinit();
+    var parsed = try mqtt.Publish.parse(
+        allocator,
+        .v5,
+        encoded.bytes,
+    );
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, parsed.qos);
+    try std.testing.expectEqual(@as(?u16, 7), parsed.packet_id);
 }
 
 pub fn connectionSubscriberId(

@@ -13,7 +13,7 @@ and equal-wire broker results are kept separate.
 | --- | --- | --- |
 | MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
-| QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL | Both brokers support QoS 0/1/2 |
+| QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
@@ -267,6 +267,25 @@ MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
 
 These paths are covered with mixed-version, multi-filter UNSUBACK, persistent
 Session/offline QoS 1, and QoS 2 end-to-end tests.
+
+## Broker capability enforcement
+
+The broker now treats its advertised MQTT 5 capabilities as inbound policy,
+not only CONNACK metadata. Maximum QoS caps SUBACK grants and the subscription
+state stored in both the router and durable Session Store. Live fanout, queued
+Session routes, and Session retransmission encoding apply the same cap as a
+defense against state restored or retained across a stricter configuration.
+The listener-wide cap also applies to MQTT 3.1.1 connections even though that
+protocol cannot advertise it in CONNACK. CONNECT rejects a Will above Maximum
+QoS, and rejects a retained Will when Retain Available is false; MQTT 5 peers
+receive reason `0x9b` or `0x9a`, respectively.
+
+This matches the audited Mosquitto control points: `src/handle_subscribe.c`
+caps requested subscription QoS, `src/database.c` caps outbound delivery QoS,
+and `src/handle_connect.c` rejects unsupported Will QoS and retain settings.
+Focused tests cover the advertised property and SUBACK, live delivery, durable
+Session reconnect delivery, Session packet encoding, and both Will refusal
+reason codes.
 
 ## MQTT 5 Enhanced Authentication
 

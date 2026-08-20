@@ -70,7 +70,8 @@ pub const Server = struct {
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
-        errdefer stream.close(self.io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.io);
         if (self.limits.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch
                 return error.SocketOptionFailed;
@@ -84,8 +85,14 @@ pub const Server = struct {
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
         };
-        errdefer connection.close();
-        return connection.acceptPending(options);
+        stream_owned = false;
+        // After construction, `connection` is the sole stream owner. Its
+        // cleanup subsumes the raw accepted-stream cleanup above.
+        var connection_owned = true;
+        defer if (connection_owned) connection.close();
+        const pending = try connection.acceptPending(options);
+        connection_owned = false;
+        return pending;
     }
 
     pub fn serveConcurrent(
@@ -720,9 +727,24 @@ pub const Connection = struct {
         self: *Connection,
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
-        _ = options;
         var connect = try self.readConnect();
         errdefer connect.deinit(self.allocator);
+        const maximum_qos = options.maximum_qos orelse
+            mqtt.QoS.exactly_once;
+        if (connect.connect.will) |will| {
+            if (@intFromEnum(will.qos) > @intFromEnum(maximum_qos)) {
+                if (connect.connect.protocol == .v5) {
+                    try self.writeConnAck(.{ .reason_code = 0x9b });
+                }
+                return error.InvalidQoS;
+            }
+            if (will.retain and !options.retain_available) {
+                if (connect.connect.protocol == .v5) {
+                    try self.writeConnAck(.{ .reason_code = 0x9a });
+                }
+                return error.InvalidProperty;
+            }
+        }
         if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| {
             self.max_outgoing_inflight = negotiatedOutgoingInflightLimit(
                 self.max_outgoing_inflight,
@@ -966,6 +988,8 @@ pub const Connection = struct {
         }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try self.writePacket(encoded.items);
+        self.local_maximum_qos = options.maximum_qos orelse .exactly_once;
+        self.local_retain_available = options.retain_available;
         if (self.protocol == .v5) {
             // Server Keep Alive replaces the CONNECT value for both peers.
             // Updating the accepting endpoint here is essential now that the
@@ -976,8 +1000,8 @@ pub const Connection = struct {
             ) orelse self.keep_alive_seconds;
             self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
             self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(properties.items) orelse self.incoming_topic_alias_maximum;
-            self.local_maximum_qos = mqtt.maximumQoS(properties.items) orelse options.maximum_qos orelse .exactly_once;
-            self.local_retain_available = mqtt.retainAvailable(properties.items) orelse options.retain_available;
+            self.local_maximum_qos = mqtt.maximumQoS(properties.items) orelse self.local_maximum_qos;
+            self.local_retain_available = mqtt.retainAvailable(properties.items) orelse self.local_retain_available;
             self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(properties.items) orelse options.wildcard_subscription_available;
             self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(properties.items) orelse options.subscription_identifier_available;
             self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(properties.items) orelse options.shared_subscription_available;
@@ -2392,6 +2416,116 @@ test "MQTT runtime exposes CONNACK session present" {
     defer result.deinit(allocator);
     try std.testing.expect(result.connack.connack.session_present);
     try result.connection.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT server rejects Will above its advertised Maximum QoS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            _ = shared.server.accept(.{
+                .protocol = .v5,
+                .maximum_qos = .at_most_once,
+            }) catch |err| {
+                if (err != error.InvalidQoS) shared.err = err;
+                return;
+            };
+            shared.err = error.TestUnexpectedResult;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var attempt = try Client.connectAttempt(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "maximum-qos-will",
+            .will = .{
+                .topic = "will/maximum-qos",
+                .payload = "blocked",
+                .qos = .at_least_once,
+            },
+            .limits = .{ .max_packet_size = 4096 },
+        },
+    );
+    defer attempt.deinit(allocator);
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u8, 0x9b), attempt.connack.connack.reason_code);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT server rejects retained Will when retain is unavailable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            _ = shared.server.accept(.{
+                .protocol = .v5,
+                .retain_available = false,
+            }) catch |err| {
+                if (err != error.InvalidProperty) shared.err = err;
+                return;
+            };
+            shared.err = error.TestUnexpectedResult;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var attempt = try Client.connectAttempt(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "retained-will",
+            .will = .{
+                .topic = "will/retain",
+                .payload = "blocked",
+                .retain = true,
+            },
+            .limits = .{ .max_packet_size = 4096 },
+        },
+    );
+    defer attempt.deinit(allocator);
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u8, 0x9a), attempt.connack.connack.reason_code);
 
     thread.join();
     if (shared.err) |err| return err;
