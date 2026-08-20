@@ -525,11 +525,102 @@ def persistent_no_local(executable: Path, mqtt_packets) -> None:
             resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_subscription_handling(
+    executable: Path, mqtt_packets, mqtt5_opts
+) -> None:
+    # Direct wire port of Mosquitto 02-subpub-qos0-send-retain.py. The three
+    # retained messages are installed before subscribing; each option is then
+    # exercised twice to distinguish always/new/never behavior.
+    topics = {
+        "always": "02/subpub/send-retain/always",
+        "new": "02/subpub/send-retain/new",
+        "never": "02/subpub/send-retain/never",
+    }
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "02-subpub-qos0-send-retain")
+            for topic in topics.values():
+                sock.sendall(
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=0,
+                        retain=True,
+                        payload="message",
+                        proto_ver=5,
+                    )
+                )
+
+            cases = [
+                (
+                    532,
+                    topics["never"],
+                    mqtt5_opts.MQTT_SUB_OPT_SEND_RETAIN_NEVER,
+                    False,
+                    False,
+                ),
+                (
+                    531,
+                    topics["new"],
+                    mqtt5_opts.MQTT_SUB_OPT_SEND_RETAIN_NEW,
+                    True,
+                    False,
+                ),
+                (
+                    530,
+                    topics["always"],
+                    mqtt5_opts.MQTT_SUB_OPT_SEND_RETAIN_ALWAYS,
+                    True,
+                    True,
+                ),
+            ]
+            for mid, topic, option, first_delivery, second_delivery in cases:
+                for attempt, expect_delivery in enumerate(
+                    (first_delivery, second_delivery), start=1
+                ):
+                    sock.sendall(
+                        mqtt_packets.gen_subscribe(
+                            mid, topic, option, proto_ver=5
+                        )
+                    )
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_suback(mid, 0, proto_ver=5),
+                        f"retain handling SUBACK {mid}/{attempt}",
+                    )
+                    if expect_delivery:
+                        expect_packet(
+                            sock,
+                            mqtt_packets.gen_publish(
+                                topic,
+                                qos=0,
+                                retain=True,
+                                payload="message",
+                                proto_ver=5,
+                            ),
+                            f"retained delivery {mid}/{attempt}",
+                        )
+                    else:
+                        sock.settimeout(0.05)
+                        try:
+                            unexpected = sock.recv(1)
+                            if unexpected:
+                                raise AssertionError(
+                                    f"retain handling {mid}/{attempt} "
+                                    f"received {unexpected.hex()}"
+                                )
+                        except socket.timeout:
+                            pass
+                        finally:
+                            sock.settimeout(5)
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
     import mqtt5_props  # type: ignore
     import mqtt5_rc  # type: ignore
+    import mqtt5_opts  # type: ignore
     import mqtt_packets  # type: ignore
 
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
@@ -538,7 +629,8 @@ def main() -> None:
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 6 scenarios")
+    retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
+    print("Mosquitto-derived MQTT wire vectors passed: 7 scenarios")
 
 
 if __name__ == "__main__":
