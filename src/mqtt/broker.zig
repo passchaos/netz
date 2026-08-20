@@ -1939,6 +1939,14 @@ pub const Broker = struct {
                     self.state_mutex.unlock(self.io);
                     return;
                 },
+                error.OutgoingPacketTooLarge => {
+                    // A live/transient delivery is not backed by Session
+                    // packet state, but MQTT 5 Maximum Packet Size has the
+                    // same semantics: discard this Application Message and
+                    // keep draining/using the Network Connection.
+                    delivery.deinit();
+                    continue;
+                },
                 else => {
                     delivery.deinit();
                     return err;

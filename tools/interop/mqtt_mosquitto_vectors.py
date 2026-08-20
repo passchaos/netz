@@ -1039,6 +1039,90 @@ def qos2_receive_maximum_one(
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def maximum_packet_size_qos1(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto
+    # 12-prop-maximum-packet-size-publish-qos1.py. Oversized self-deliveries
+    # are discarded without stalling publisher ACKs or poisoning the socket; a
+    # boundary-fitting third PUBLISH is forwarded.
+    topic = "12/max/publish/qos1/test/topic"
+    maximum = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.MAXIMUM_PACKET_SIZE, 40
+    )
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            sock.sendall(
+                mqtt_packets.gen_connect(
+                    "12-max-publish-qos1",
+                    proto_ver=5,
+                    properties=maximum,
+                )
+            )
+            connack = read_packet(sock)
+            if connack[0] != 0x20 or connack[3] != 0:
+                raise AssertionError(
+                    f"invalid max-packet CONNACK: {connack.hex()}"
+                )
+            sock.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 1, proto_ver=5)
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_suback(1, 1, proto_ver=5),
+                "maximum packet SUBACK",
+            )
+
+            oversized = [
+                mqtt_packets.gen_publish(
+                    topic,
+                    mid=1,
+                    qos=1,
+                    payload="1234",
+                    proto_ver=5,
+                ),
+                mqtt_packets.gen_publish(
+                    topic,
+                    mid=2,
+                    qos=1,
+                    payload="56",
+                    proto_ver=5,
+                    properties=mqtt5_props.gen_byte_prop(
+                        mqtt5_props.PAYLOAD_FORMAT_INDICATOR, 1
+                    ),
+                ),
+            ]
+            for mid, packet in enumerate(oversized, start=1):
+                sock.sendall(packet)
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_puback(mid, proto_ver=5),
+                    f"maximum packet PUBACK {mid}",
+                )
+                sock.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_pingresp(),
+                    f"maximum packet PINGRESP {mid}",
+                )
+
+            fitting = mqtt_packets.gen_publish(
+                topic,
+                mid=3,
+                qos=1,
+                payload="789",
+                proto_ver=5,
+            )
+            sock.sendall(fitting)
+            expect_packets_unordered(
+                sock,
+                [mqtt_packets.gen_puback(3, proto_ver=5), fitting],
+                "maximum packet fitting publish/PUBACK",
+            )
+            sock.sendall(mqtt_packets.gen_puback(3, proto_ver=5))
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
     # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
     # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
@@ -1137,8 +1221,9 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     qos2_receive_maximum_one(args.broker, mqtt_packets, mqtt5_props)
+    maximum_packet_size_qos1(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 13 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 14 scenarios")
 
 
 if __name__ == "__main__":
