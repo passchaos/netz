@@ -2323,6 +2323,26 @@ pub const HandshakeServerSession = struct {
         return stream_id;
     }
 
+    /// Advertise local HTTP/3 settings before waiting for a request.
+    ///
+    /// Some event-driven clients wait for the server control stream before
+    /// opening their first extended CONNECT. Ordinary request/response calls
+    /// invoke the same idempotent helper automatically, while protocol
+    /// adapters can use this to avoid a peer-settings/request deadlock.
+    pub fn ensureSettingsSent(self: *HandshakeServerSession) Error!void {
+        try sendConnectionSettings(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            server_control_stream_id,
+        );
+    }
+
     pub fn deinit(self: *HandshakeServerSession) void {
         self.outbound_bodies.deinit();
         self.sent_push_ids.deinit(

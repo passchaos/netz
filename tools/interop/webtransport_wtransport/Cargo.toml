@@ -1,0 +1,10 @@
+[package]
+name = "netz-webtransport-wtransport"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wtransport = { path = "../../../../../Work/wtransport/wtransport", features = ["dangerous-configuration"] }

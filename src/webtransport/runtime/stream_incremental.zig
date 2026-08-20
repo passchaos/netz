@@ -110,11 +110,9 @@ fn poll(
             &stream_ids,
         );
         for (ids) |stream_id| {
-            if (stream_id == session_id.value or
-                isHttp3CriticalOrPushStream(stream_id))
-            {
-                continue;
-            }
+            // Association-prefix parsing, rather than numeric guesses,
+            // distinguishes HTTP/3 critical/push streams from WebTransport.
+            if (stream_id == session_id.value) continue;
             if (try pollStream(
                 connection,
                 registry,
@@ -266,11 +264,4 @@ fn stoppedEvent(
         .locally_initiated = stream.locally_initiated,
         .error_info = stream.stopped.?,
     } };
-}
-
-fn isHttp3CriticalOrPushStream(stream_id: u62) bool {
-    return switch (stream_id) {
-        2, 3, 6, 7, 10, 11 => true,
-        else => false,
-    };
 }

@@ -217,6 +217,7 @@ pub const HandshakeServer = struct {
     pub fn accept(self: *HandshakeServer) Error!AcceptedHandshakeSession {
         var session = try self.h3.accept();
         errdefer session.deinit();
+        try session.ensureSettingsSent();
 
         const request = try receiveHandshakeConnectRequest(&session);
         var request_head = request.head;
@@ -1405,9 +1406,7 @@ fn validateConnectRequest(request: anytype) Error!void {
     if (!std.mem.eql(u8, findHeader(request.headers, ":protocol") orelse "", "webtransport")) {
         return error.InvalidConnect;
     }
-    if (!(http3.capsule.protocolEnabled(request.headers) catch return error.InvalidConnect)) {
-        return error.InvalidConnect;
-    }
+    try validateOptionalCapsuleProtocol(request.headers);
 }
 
 fn connectResponse() http3.Response {
@@ -1416,7 +1415,20 @@ fn connectResponse() http3.Response {
 
 fn validateConnectResponse(response: anytype) Error!void {
     if (response.status < 200 or response.status >= 300) return error.InvalidConnect;
-    if (!(http3.capsule.protocolEnabled(response.headers) catch return error.InvalidConnect)) {
+    try validateOptionalCapsuleProtocol(response.headers);
+}
+
+fn validateOptionalCapsuleProtocol(
+    headers: []const http3.Qpack.HeaderField,
+) Error!void {
+    // Modern WebTransport peers such as wtransport use DATA capsules as an
+    // intrinsic part of the extended CONNECT protocol and omit the older
+    // Capsule-Protocol field. Continue advertising it for draft peers, but if
+    // a peer explicitly supplies the field it must still be the true item.
+    if (findHeader(headers, http3.capsule.header_name) == null) return;
+    if (!(http3.capsule.protocolEnabled(headers) catch
+        return error.InvalidConnect))
+    {
         return error.InvalidConnect;
     }
 }
@@ -1697,18 +1709,29 @@ test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
     const missing_capsule = [_]http3.Qpack.HeaderField{
         .{ .name = ":protocol", .value = "webtransport" },
     };
+    try validateConnectRequest(.{
+        .method = "CONNECT",
+        .headers = &missing_capsule,
+    });
+    const false_capsule = [_]http3.Qpack.HeaderField{
+        .{ .name = ":protocol", .value = "webtransport" },
+        .{ .name = "capsule-protocol", .value = "?0" },
+    };
     try std.testing.expectError(
         error.InvalidConnect,
-        validateConnectRequest(.{ .method = "CONNECT", .headers = &missing_capsule }),
+        validateConnectRequest(.{
+            .method = "CONNECT",
+            .headers = &false_capsule,
+        }),
     );
 
     const response = connectResponse();
     try validateConnectResponse(response);
     try std.testing.expect(try http3.capsule.protocolEnabled(response.headers));
-    try std.testing.expectError(error.InvalidConnect, validateConnectResponse(.{
+    try validateConnectResponse(.{
         .status = 200,
         .headers = &[_]http3.Qpack.HeaderField{},
-    }));
+    });
 }
 
 test "WebTransport cleartext accept validates CONNECT session id direction" {

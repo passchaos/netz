@@ -513,15 +513,6 @@ test "QUIC client filters non-target datagrams while waiting for server Initial"
     try std.testing.expectEqualSlices(u8, &dcid, info.destination_connection_id);
 }
 
-fn isHandshakeDatagram(bytes: []const u8) bool {
-    const info =
-        quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-            bytes,
-            true,
-        ) catch return false;
-    return info.packet_type == .handshake;
-}
-
 const EarlyDataFlight = struct {
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
@@ -1764,19 +1755,19 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         options.handshake_recovery,
         &send_context,
         retransmit.InitialHandshakeFlight.send,
-        isHandshakeDatagram,
+        containsHandshakePacket,
     );
     defer client_handshake_datagram.deinit(endpoint.allocator);
-    var client_handshake =
-        try quic.initial_exchange.openHandshakeCryptoWithFixedBitPolicy(
-            endpoint,
-            client_handshake_datagram.from,
-            client_handshake_datagram.bytes,
-            handshake.client_quic,
-            0,
-            options.max_crypto_buffer,
-            local_transport_parameters.grease_quic_bit,
-        );
+    var client_handshake = try openClientHandshakeCryptoFromDatagram(
+        endpoint,
+        client_handshake_datagram.from,
+        client_handshake_datagram.bytes,
+        handshake.client_quic,
+        0,
+        options.max_crypto_buffer,
+        local_transport_parameters.grease_quic_bit,
+        options.client_auth != null,
+    );
     defer client_handshake.deinit(endpoint.allocator);
     const client_flight = try splitClientFlight(
         client_handshake.crypto_data,
@@ -1876,6 +1867,179 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         );
     }
     return established;
+}
+
+fn containsHandshakePacket(datagram: []const u8) bool {
+    var tail = datagram;
+    return (nextHandshakePacketFromCoalescedTail(
+        &tail,
+        true,
+    ) catch return false) != null;
+}
+
+fn openClientHandshakeCryptoFromDatagram(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    datagram: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+    allow_zero_fixed_bit: bool,
+    require_client_certificate: bool,
+) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
+    var reassembler = quic.crypto_stream.Reassembler.init(
+        endpoint.allocator,
+        max_crypto_buffer,
+    );
+    defer reassembler.deinit();
+    var first_packet: ?quic.protection.OpenedHandshakePacket = null;
+    errdefer if (first_packet) |*packet| {
+        packet.deinit(endpoint.allocator);
+    };
+    var tail = datagram;
+    var next_expected = expected_packet_number;
+    while (try nextHandshakePacketFromCoalescedTail(
+        &tail,
+        allow_zero_fixed_bit,
+    )) |packet| {
+        var opened = try quic.protection
+            .openHandshakePacketWithFixedBitPolicy(
+            endpoint.allocator,
+            keys,
+            packet,
+            next_expected,
+            allow_zero_fixed_bit,
+        );
+        var opened_owned = true;
+        errdefer if (opened_owned) opened.deinit(endpoint.allocator);
+        next_expected = opened.packet_number + 1;
+        quic.initial_exchange.insertCryptoPayload(
+            endpoint.allocator,
+            &reassembler,
+            opened.payload,
+            .handshake,
+        ) catch |err| switch (err) {
+            error.MissingCryptoFrame => {
+                opened.deinit(endpoint.allocator);
+                opened_owned = false;
+                continue;
+            },
+            else => |other| return other,
+        };
+        if (first_packet == null) {
+            first_packet = opened;
+            opened_owned = false;
+        } else {
+            opened.deinit(endpoint.allocator);
+            opened_owned = false;
+        }
+        if (splitClientFlight(
+            reassembler.available(),
+            require_client_certificate,
+        )) |_| {
+            const crypto_data = try endpoint.allocator.dupe(
+                u8,
+                reassembler.available(),
+            );
+            const result = quic.initial_exchange.ReceivedHandshakeCrypto{
+                .from = from,
+                .packet = first_packet.?,
+                .crypto_data = crypto_data,
+            };
+            first_packet = null;
+            return result;
+        } else |err| switch (err) {
+            error.InvalidHandshakeFlight => continue,
+            else => |other| return other,
+        }
+    }
+    return error.MissingCryptoFrame;
+}
+
+test "QUIC server finds Client Finished behind coalesced Initial" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = "server01";
+    const scid = "client01";
+    const initial_keys = quic.protection
+        .deriveInitialSecrets(dcid).client;
+    var initial_payload: std.ArrayList(u8) = .empty;
+    defer initial_payload.deinit(allocator);
+    try quic.appendPadding(&initial_payload, allocator, 1);
+    const initial = try quic.protection.sealInitialPacket(
+        allocator,
+        initial_keys,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+            .packet_number = 1,
+            .payload = initial_payload.items,
+        },
+    );
+    defer allocator.free(initial);
+
+    const handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x5a} ** quic.protection.secret_len,
+    );
+    const finished = [_]u8{
+        0x14, // TLS Finished handshake message.
+        0,
+        0,
+        32,
+    } ++ ([_]u8{0xa5} ** 32);
+    var handshake_payload: std.ArrayList(u8) = .empty;
+    defer handshake_payload.deinit(allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &handshake_payload,
+        allocator,
+        0,
+        &finished,
+        finished.len,
+    );
+    const handshake = try quic.protection.sealHandshakePacket(
+        allocator,
+        handshake_keys,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+            .packet_number = 0,
+            .payload = handshake_payload.items,
+        },
+    );
+    defer allocator.free(handshake);
+
+    const coalesced = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ initial, handshake },
+    );
+    defer allocator.free(coalesced);
+    try std.testing.expect(containsHandshakePacket(coalesced));
+    var opened = try openClientHandshakeCryptoFromDatagram(
+        &endpoint,
+        .{ .ip4 = .loopback(4433) },
+        coalesced,
+        handshake_keys,
+        0,
+        1024,
+        false,
+        false,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &finished,
+        opened.crypto_data,
+    );
 }
 
 fn serverOriginalDestinationConnectionId(received_destination_connection_id: []const u8, options: ServerOptions) []const u8 {

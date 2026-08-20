@@ -39,25 +39,61 @@ pub fn initRegistry(
         role,
         .{
             .max_local_bidi = @min(
-                peer.webtransport_initial_max_streams_bidi,
+                webTransportStreamLimit(
+                    peer.webtransport_initial_max_streams_bidi,
+                    max_streams,
+                ),
                 max_streams,
             ),
             .max_local_uni = @min(
-                peer.webtransport_initial_max_streams_uni,
+                webTransportStreamLimit(
+                    peer.webtransport_initial_max_streams_uni,
+                    max_streams,
+                ),
                 max_streams,
             ),
             .max_peer_bidi = @min(
-                local.webtransport_initial_max_streams_bidi,
+                webTransportStreamLimit(
+                    local.webtransport_initial_max_streams_bidi,
+                    max_streams,
+                ),
                 max_streams,
             ),
             .max_peer_uni = @min(
-                local.webtransport_initial_max_streams_uni,
+                webTransportStreamLimit(
+                    local.webtransport_initial_max_streams_uni,
+                    max_streams,
+                ),
                 max_streams,
             ),
             .first_local_bidi = first_local_bidi,
             .first_local_uni = first_local_uni,
         },
     );
+}
+
+fn webTransportStreamLimit(advertised: u64, fallback: u64) u64 {
+    // Current wtransport/browser peers rely on QUIC MAX_STREAMS and omit the
+    // older WebTransport-specific 0x2b64/0x2b65 settings. Zero therefore means
+    // "no extra protocol-layer limit" here; the negotiated QUIC limits and
+    // `max_session_streams` remain hard bounds.
+    return if (advertised == 0) fallback else advertised;
+}
+
+test "WebTransport registry accepts peers without legacy stream settings" {
+    var registry = try initRegistry(
+        std.testing.allocator,
+        .init(0),
+        .server,
+        .{ .enable_connect_protocol = true, .enable_webtransport = true },
+        .{ .enable_connect_protocol = true, .enable_webtransport = true },
+        8,
+        null,
+        null,
+    );
+    defer registry.deinit();
+    try std.testing.expectEqual(@as(u62, 1), (try registry.openLocal(.bidirectional)).stream_id);
+    try std.testing.expectEqual(@as(u62, 15), (try registry.openLocal(.unidirectional)).stream_id);
 }
 
 pub fn send(
@@ -287,11 +323,12 @@ pub fn receive(
                 &stream_ids,
             );
             for (ids) |stream_id| {
-                if (stream_id == session_id.value or
-                    isHttp3CriticalOrPushStream(stream_id))
-                {
-                    continue;
-                }
+                // Critical/push streams are not prefiltered by numeric ID. The
+                // HTTP/3 layer has already consumed them into connection stream
+                // state, and association parsing rejects every prefix except
+                // the WebTransport 0x41/0x54 forms. This also permits a valid
+                // WebTransport stream to use an ID once guessed to be reserved.
+                if (stream_id == session_id.value) continue;
                 if (try takeHandshakeSessionStream(
                     connection,
                     registry,
@@ -370,11 +407,4 @@ fn writeUnidirectionalHeaderInto(
         session_id.value,
     );
     return storage[0 .. stream_type.len + session.len];
-}
-
-fn isHttp3CriticalOrPushStream(stream_id: u62) bool {
-    return switch (stream_id) {
-        2, 3, 6, 7, 10, 11 => true,
-        else => false,
-    };
 }

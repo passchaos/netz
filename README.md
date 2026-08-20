@@ -536,6 +536,7 @@ zig build run-http2-h2c
 zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
+zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify

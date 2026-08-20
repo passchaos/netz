@@ -95,6 +95,31 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_vectors_step.dependOn(&mqtt_vectors.step);
 
+    const webtransport_wtransport_server = b.addExecutable(.{
+        .name = "netz-webtransport-wtransport-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/webtransport_wtransport_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const webtransport_wtransport = b.addSystemCommand(&.{
+        "tools/interop/webtransport_wtransport.sh",
+    });
+    webtransport_wtransport.addArtifactArg(
+        webtransport_wtransport_server,
+    );
+    const webtransport_wtransport_step = b.step(
+        "interop-webtransport-wtransport",
+        "Exercise WebTransport CONNECT, datagrams, streams, and close with wtransport",
+    );
+    webtransport_wtransport_step.dependOn(
+        &webtransport_wtransport.step,
+    );
+
     const example_specs = [_]struct {
         exe_name: []const u8,
         path: []const u8,
