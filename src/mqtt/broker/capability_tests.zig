@@ -476,3 +476,108 @@ test "broker disconnects MQTT 5 peer after malformed control flags" {
     );
     try joinServer(thread, &joined, &serve);
 }
+
+test "broker disconnects MQTT 5 peer after malformed UTF-8" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "malformed-utf8" },
+    );
+    defer client.close();
+
+    // QoS 0 PUBLISH: two-byte Topic Name containing one invalid UTF-8 byte,
+    // then an empty MQTT 5 property section.
+    var malformed = [_]u8{ 0x30, 0x04, 0x00, 0x01, 0xff, 0x00 };
+    try client.transport.writePacket(&malformed);
+    var disconnect = try client.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x81),
+        disconnect.disconnect.reason_code,
+    );
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker disconnects MQTT 5 peer after oversized packet declaration" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 1,
+                // CONNECT must fit, while the post-CONNECT declaration below
+                // exceeds this limit before the broker allocates its body.
+                .runtime = .{ .max_packet_size = 128 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "oversized-packet" },
+    );
+    defer client.close();
+
+    // Remaining Length 128 makes the complete packet 131 bytes. The body is
+    // intentionally omitted: the broker rejects the declared size before it
+    // waits for or allocates the payload.
+    var oversized_header = [_]u8{ 0x30, 0x80, 0x01 };
+    try client.transport.writePacket(&oversized_header);
+    var disconnect = try client.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x95),
+        disconnect.disconnect.reason_code,
+    );
+    try joinServer(thread, &joined, &serve);
+}
