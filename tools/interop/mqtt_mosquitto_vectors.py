@@ -802,6 +802,144 @@ def request_response_properties(
             requester.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def retained_message_expiry(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Timing-tolerant MQTT 5 port of Mosquitto
+    # 02-subpub-qos1-message-expiry-retain.py. Immediate retained replay may
+    # legitimately report either two or one seconds remaining; after three
+    # seconds the expiring value must be absent while the control remains.
+    expired_topic = "subpub/expired"
+    kept_topic = "subpub/kept"
+    expiry_two = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.MESSAGE_EXPIRY_INTERVAL, 2
+    )
+    with NetzBroker(executable, connections=3) as broker:
+        with broker.connect() as publisher:
+            connect_v5(publisher, mqtt_packets, "expiry-helper")
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    expired_topic,
+                    qos=1,
+                    mid=1,
+                    retain=True,
+                    payload="message1",
+                    proto_ver=5,
+                    properties=expiry_two,
+                )
+            )
+            expect_packet(
+                publisher,
+                mqtt_packets.gen_puback(
+                    1,
+                    proto_ver=5,
+                    reason_code=mqtt5_rc.NO_MATCHING_SUBSCRIBERS,
+                ),
+                "expiring retained PUBACK",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    kept_topic,
+                    qos=1,
+                    mid=2,
+                    retain=True,
+                    payload="message2",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                publisher,
+                mqtt_packets.gen_puback(
+                    2,
+                    proto_ver=5,
+                    reason_code=mqtt5_rc.NO_MATCHING_SUBSCRIBERS,
+                ),
+                "kept retained PUBACK",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with broker.connect() as immediate:
+            connect_v5(immediate, mqtt_packets, "expiry-immediate")
+            immediate.sendall(
+                mqtt_packets.gen_subscribe(1, expired_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                immediate,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "immediate expiry SUBACK",
+            )
+            actual = read_packet(immediate)
+            expiry_variants = [
+                mqtt_packets.gen_publish(
+                    expired_topic,
+                    qos=0,
+                    retain=True,
+                    payload="message1",
+                    proto_ver=5,
+                    properties=mqtt5_props.gen_uint32_prop(
+                        mqtt5_props.MESSAGE_EXPIRY_INTERVAL, remaining
+                    ),
+                )
+                for remaining in (2, 1)
+            ]
+            if actual not in expiry_variants:
+                raise AssertionError(
+                    "immediate retained expiry mismatch: " + actual.hex()
+                )
+            immediate.sendall(
+                mqtt_packets.gen_subscribe(2, kept_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                immediate,
+                mqtt_packets.gen_suback(2, 0, proto_ver=5),
+                "immediate kept SUBACK",
+            )
+            expect_packet(
+                immediate,
+                mqtt_packets.gen_publish(
+                    kept_topic,
+                    qos=0,
+                    retain=True,
+                    payload="message2",
+                    proto_ver=5,
+                ),
+                "immediate kept replay",
+            )
+            immediate.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        time.sleep(3)
+        with broker.connect() as expired:
+            connect_v5(expired, mqtt_packets, "expiry-late")
+            expired.sendall(
+                mqtt_packets.gen_subscribe(1, expired_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                expired,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "late expiry SUBACK",
+            )
+            expired.sendall(
+                mqtt_packets.gen_subscribe(2, kept_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                expired,
+                mqtt_packets.gen_suback(2, 0, proto_ver=5),
+                "late kept SUBACK",
+            )
+            expect_packet(
+                expired,
+                mqtt_packets.gen_publish(
+                    kept_topic,
+                    qos=0,
+                    retain=True,
+                    payload="message2",
+                    proto_ver=5,
+                ),
+                "late kept replay",
+            )
+            expired.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_repeated_lifecycle(executable: Path, mqtt_packets) -> None:
     # Direct MQTT 5 port of Mosquitto 04-retain-qos0-repeated.py plus a final
     # zero-length retained PUBLISH clear. It covers SUBSCRIBE replay, UNSUBACK,
@@ -896,8 +1034,11 @@ def main() -> None:
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     request_response_properties(args.broker, mqtt_packets, mqtt5_props)
+    retained_message_expiry(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     retained_repeated_lifecycle(args.broker, mqtt_packets)
-    print("Mosquitto-derived MQTT wire vectors passed: 11 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 12 scenarios")
 
 
 if __name__ == "__main__":
