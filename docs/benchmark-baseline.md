@@ -1047,6 +1047,16 @@ MiB/s. A no-drop control through the same fault-mode path measured 313.00-
 a speed claim; the durable result is successful byte-exact recovery under real
 client STREAM packet reordering.
 
+`--mode=corrupt --corrupt-every=20` covers authenticated corruption rather than
+ordinary loss. The endpoint copies every selected client datagram, flips one
+ciphertext bit and leaves caller storage/recovery metadata untouched; the peer
+discards `AuthenticationFailed` packets and normal PTO/ACK recovery restores
+their STREAM ranges. Three CPU 0-7 runs corrupted exactly 25 of 504 datagrams,
+reported exactly 25 transport losses, verified all 4,194,304 bytes, and
+completed at 276.51-464.70 MiB/s. As with reordering, the wide scheduling range
+precludes a speed verdict; this is deterministic AEAD-rejection/recovery
+evidence.
+
 ## WebSocket frame encoding comparison
 
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary

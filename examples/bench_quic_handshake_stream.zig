@@ -53,7 +53,7 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake, echo, stream_churn, aggregate, loss, reorder };
+const Mode = enum { upload, handshake, echo, stream_churn, aggregate, loss, reorder, corrupt };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
@@ -62,7 +62,9 @@ pub fn main(init: std.process.Init) !void {
         try runAggregateBenchmark(config, server_key);
         return;
     }
-    if (config.mode == .loss or config.mode == .reorder) {
+    if (config.mode == .loss or config.mode == .reorder or
+        config.mode == .corrupt)
+    {
         try runLossBenchmark(
             std.heap.smp_allocator,
             config,
@@ -166,6 +168,7 @@ const Config = struct {
     loss_pct: u8 = 0,
     rtt_us: u64 = 0,
     reorder_every: usize = 0,
+    corrupt_every: usize = 0,
 };
 
 const IterationResult = struct {
@@ -177,6 +180,8 @@ const IterationResult = struct {
     loss_dropped: usize = 0,
     reorder_considered: usize = 0,
     reorder_held: usize = 0,
+    corrupt_considered: usize = 0,
+    corrupted: usize = 0,
 };
 
 const Summary = struct {
@@ -263,6 +268,25 @@ const ReorderState = struct {
     }
 };
 
+const CorruptState = struct {
+    enabled: std.atomic.Value(bool) = .init(false),
+    considered: std.atomic.Value(usize) = .init(0),
+    corrupted: std.atomic.Value(usize) = .init(0),
+    every: usize,
+
+    fn corrupt(context: *anyopaque, bytes: []u8) bool {
+        const self: *CorruptState = @ptrCast(@alignCast(context));
+        if (!self.enabled.load(.acquire)) return false;
+        const index = self.considered.fetchAdd(1, .monotonic) + 1;
+        if (index % self.every != 0) return false;
+        // Flip authenticated ciphertext rather than invariant routing bits so
+        // the peer reaches AEAD verification and drops the packet normally.
+        bytes[bytes.len - 1] ^= 0x01;
+        _ = self.corrupted.fetchAdd(1, .monotonic);
+        return true;
+    }
+};
+
 fn runIteration(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -277,6 +301,7 @@ fn runIteration(
         .io = io,
     };
     var reorder_state = ReorderState{ .every = config.reorder_every };
+    var corrupt_state = CorruptState{ .every = config.corrupt_every };
     const endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = max_datagram_size,
         .max_frames_per_datagram = 32,
@@ -292,6 +317,10 @@ fn runIteration(
     if (config.mode == .reorder) client_endpoint_limits.send_interceptor = .{
         .context = &reorder_state,
         .should_hold = ReorderState.shouldHold,
+    };
+    if (config.mode == .corrupt) client_endpoint_limits.send_interceptor = .{
+        .context = &corrupt_state,
+        .corrupt = CorruptState.corrupt,
     };
     const one_rtt_config: netz.quic.handshake.OneRttConfig = .{
         .max_datagram_size = max_datagram_size,
@@ -399,6 +428,10 @@ fn runIteration(
                     progressPollTimeout(),
                 ) catch |err| switch (err) {
                     error.Timeout => continue,
+                    // Undecryptable 1-RTT packets are discarded by QUIC. The
+                    // deterministic corruption mode deliberately exercises
+                    // this path; recovery will retransmit their STREAM data.
+                    error.AuthenticationFailed => continue,
                     else => return err,
                 };
                 packet.deinit(shared.endpoint.allocator);
@@ -564,6 +597,7 @@ fn runIteration(
     const started_ns = nowNs(io);
     if (config.mode == .loss) loss_state.enabled.store(true, .release);
     if (config.mode == .reorder) reorder_state.enabled.store(true, .release);
+    if (config.mode == .corrupt) corrupt_state.enabled.store(true, .release);
     const deadline_ns = started_ns +| transfer_timeout_ns;
     try sendTransfer(
         &established.connection,
@@ -597,6 +631,8 @@ fn runIteration(
         .loss_dropped = loss_state.dropped.load(.monotonic),
         .reorder_considered = reorder_state.considered.load(.monotonic),
         .reorder_held = reorder_state.held.load(.monotonic),
+        .corrupt_considered = corrupt_state.considered.load(.monotonic),
+        .corrupted = corrupt_state.corrupted.load(.monotonic),
     };
 }
 
@@ -999,6 +1035,8 @@ fn parseArgs(
             config.mode = .loss;
         } else if (std.mem.eql(u8, arg, "--mode=reorder")) {
             config.mode = .reorder;
+        } else if (std.mem.eql(u8, arg, "--mode=corrupt")) {
+            config.mode = .corrupt;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try parsePositiveUsize(
                 arg["--iterations=".len..],
@@ -1036,6 +1074,10 @@ fn parseArgs(
             config.reorder_every = try parsePositiveUsize(
                 arg["--reorder-every=".len..],
             );
+        } else if (std.mem.startsWith(u8, arg, "--corrupt-every=")) {
+            config.corrupt_every = try parsePositiveUsize(
+                arg["--corrupt-every=".len..],
+            );
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
@@ -1054,7 +1096,8 @@ fn parseArgs(
     if (config.mode == .stream_churn and !iterations_set) {
         config.iterations = default_stream_churn_iterations;
     }
-    if ((config.mode == .loss or config.mode == .reorder) and
+    if ((config.mode == .loss or config.mode == .reorder or
+        config.mode == .corrupt) and
         config.transfer_bytes == default_transfer_bytes)
     {
         config.transfer_bytes = default_loss_transfer_bytes;
@@ -1075,6 +1118,9 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     if (config.mode == .reorder and config.reorder_every < 2) {
+        return error.InvalidArgument;
+    }
+    if (config.mode == .corrupt and config.corrupt_every < 2) {
         return error.InvalidArgument;
     }
     return config;
@@ -1242,6 +1288,9 @@ fn runLossBenchmark(
             "  datagrams dropped: {d}\n" ++
             "  reorder datagrams considered: {d}\n" ++
             "  datagrams held: {d}\n" ++
+            "  corrupt every: {d}\n" ++
+            "  corruption datagrams considered: {d}\n" ++
+            "  datagrams corrupted: {d}\n" ++
             "  transport packets lost: {d}\n" ++
             "  payload bytes verified: {d}\n",
         .{
@@ -1256,6 +1305,9 @@ fn runLossBenchmark(
             result.loss_dropped,
             result.reorder_considered,
             result.reorder_held,
+            config.corrupt_every,
+            result.corrupt_considered,
+            result.corrupted,
             result.client_stats.packets_lost,
             result.payload_bytes_received,
         },

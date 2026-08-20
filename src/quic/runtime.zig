@@ -36,6 +36,14 @@ pub const Limits = struct {
             context: *anyopaque,
             bytes: []const u8,
         ) bool = null,
+        /// Mutate an endpoint-owned datagram copy before socket submission.
+        /// Return true when the copy should replace the caller's bytes. This
+        /// supports deterministic corruption while preserving caller lifetime
+        /// and QUIC's original packet-number/recovery bookkeeping.
+        corrupt: ?*const fn (
+            context: *anyopaque,
+            bytes: []u8,
+        ) bool = null,
     };
 
     max_datagram_size: usize = 65_535,
@@ -223,6 +231,14 @@ pub const Endpoint = struct {
                         .bytes = try self.allocator.dupe(u8, bytes),
                         .ecn = ecn,
                     };
+                    return;
+                }
+            }
+            if (interceptor.corrupt) |corrupt| {
+                const copy = try self.allocator.dupe(u8, bytes);
+                defer self.allocator.free(copy);
+                if (corrupt(interceptor.context, copy)) {
+                    try self.sendSocketDatagram(to, copy, ecn);
                     return;
                 }
             }
@@ -2329,6 +2345,50 @@ test "QUIC endpoint send interceptor reorders one datagram pair" {
     var first = try receiver.receiveBytes();
     defer first.deinit(allocator);
     try std.testing.expectEqualStrings("first", first.bytes);
+}
+
+test "QUIC endpoint send interceptor corrupts an owned datagram copy" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var corrupted_once = false;
+    const Interceptor = struct {
+        fn corrupt(context: *anyopaque, bytes: []u8) bool {
+            const corrupted: *bool = @ptrCast(@alignCast(context));
+            if (corrupted.*) return false;
+            corrupted.* = true;
+            bytes[0] ^= 0xff;
+            return true;
+        }
+    };
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 64,
+            .send_interceptor = .{
+                .context = &corrupted_once,
+                .corrupt = Interceptor.corrupt,
+            },
+        },
+    );
+    defer sender.deinit();
+
+    const source = [_]u8{ 0x11, 0x22 };
+    try sender.sendBytes(receiver.address(), &source);
+    var received = try receiver.receiveBytes();
+    defer received.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 0xee, 0x22 }, received.bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22 }, &source);
 }
 
 test "QUIC UDP endpoint routes protected short datagrams by DCID" {
