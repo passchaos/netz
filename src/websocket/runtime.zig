@@ -1042,6 +1042,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveFrame(self: *Connection) Error!websocket.Frame {
+        errdefer |err| closeAfterReceiveError(self, err);
         if (self.close_sent and self.close_received) return error.ConnectionClosed;
         try self.ensureBuffered(2);
         const second = self.inbuf.items[1];
@@ -1094,6 +1095,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveMessage(self: *Connection) Error!OwnedMessage {
+        errdefer |err| closeAfterReceiveError(self, err);
         var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
@@ -1125,6 +1127,7 @@ pub const Connection = struct {
         self: *Connection,
         out: []u8,
     ) Error!Message {
+        errdefer |err| closeAfterReceiveError(self, err);
         if (out.len < self.limits.max_message_bytes) {
             return error.BufferTooShort;
         }
@@ -1668,6 +1671,7 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveFrame(self: *H2Connection) Error!websocket.Frame {
+        errdefer |err| closeAfterReceiveError(self, err);
         if (self.close_sent and self.close_received) return error.ConnectionClosed;
         try self.ensureBuffered(2);
         const second = self.inbuf.items[1];
@@ -1715,6 +1719,7 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveMessage(self: *H2Connection) Error!OwnedMessage {
+        errdefer |err| closeAfterReceiveError(self, err);
         var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
@@ -1744,6 +1749,7 @@ pub const H2Connection = struct {
         self: *H2Connection,
         out: []u8,
     ) Error!Message {
+        errdefer |err| closeAfterReceiveError(self, err);
         if (out.len < self.limits.max_message_bytes) {
             return error.BufferTooShort;
         }
@@ -2099,6 +2105,31 @@ fn canSendOpcode(opcode: websocket.Opcode, close_sent: bool, close_received: boo
     if (close_sent) return false;
     if (close_received and opcode != .close) return false;
     return true;
+}
+
+fn closeAfterReceiveError(connection: anytype, err: anyerror) void {
+    const code = closeCodeForReceiveError(err) orelse return;
+    // Nested receive helpers may observe the same failure. Only the first
+    // layer sends a Close frame; later errdefers preserve the original error.
+    if (connection.close_sent) return;
+    connection.sendClose(code, "") catch {};
+}
+
+fn closeCodeForReceiveError(err: anyerror) ?websocket.CloseCode {
+    return switch (err) {
+        error.InvalidUtf8 => .invalid_payload_data,
+        error.MessageTooLarge, error.PayloadTooLarge => .message_too_big,
+        error.InvalidOpcode,
+        error.InvalidFrame,
+        error.InvalidControlFrame,
+        error.UnmaskedClientFrame,
+        error.MaskedServerFrame,
+        error.UnexpectedRsv,
+        error.NonMinimalLength,
+        error.InvalidCloseCode,
+        => .protocol_error,
+        else => null,
+    };
 }
 
 fn finishIncomingMessage(
@@ -3871,7 +3902,7 @@ test "WebSocket receiveMessage enforces aggregate fragmented message limit" {
             defer connection.close();
 
             try std.testing.expectError(error.PayloadTooLarge, connection.receiveMessage());
-            try connection.sendClose(.message_too_big, "too big");
+            try std.testing.expect(connection.close_sent);
         }
     };
 
@@ -3891,6 +3922,10 @@ test "WebSocket receiveMessage enforces aggregate fragmented message limit" {
     var close = try client.receiveFrame();
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+    try std.testing.expectEqual(
+        websocket.CloseCode.message_too_big,
+        (try websocket.parseClosePayload(close.payload)).?.code,
+    );
 
     thread.join();
     if (shared.err) |err| return err;
@@ -4285,6 +4320,7 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 }
 
 test {
+    _ = @import("runtime/error_close_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/wss_tests.zig");
 }
