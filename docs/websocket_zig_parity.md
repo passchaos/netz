@@ -261,7 +261,12 @@ these counts explain submission shape but are not timing samples.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
-   long-lived netz echo endpoint. On 2026-08-21, all 517 cases completed with
+   long-lived netz echo endpoint. Passing `--tls` runs the identical cases over
+   native TLS 1.3 WSS using the checked-in localhost test identity. On
+   2026-08-21, the full WSS run completed all 517 cases with the same result as
+   cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
+   counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed
+   all 517 cases with
    behavior counts `OK=514` and `INFORMATIONAL=3`;
    close-behavior counts were `OK=514` and `INFORMATIONAL=3`. The 54
    compression cases previously reported as `UNIMPLEMENTED` now complete as
@@ -274,8 +279,9 @@ these counts explain submission shape but are not timing samples.
    behavior statuses and `OK` and `INFORMATIONAL` close statuses, reports every
    non-OK case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing,
    or unknown statuses. Optional case IDs select a faster focused run. This is
-   external RFC 6455/RFC 7692 conformance evidence for the HTTP/1.1 transport,
-   not for RFC 8441 or WSS. The remaining three non-OK results are inherently
+   external RFC 6455/RFC 7692 conformance evidence for both cleartext HTTP/1.1
+   Upgrade and WSS, not for RFC 8441. The remaining three non-OK results are
+   inherently
    informational in Testsuite source: 7.1.6 explicitly allows implementation-
    defined close ordering, while 7.13.1 and 7.13.2 state that behavior for
    private-use close codes 5000 and 65535 is undefined. They are reported by

@@ -4,6 +4,11 @@ set -euo pipefail
 server=${1:?server executable path}
 shift
 image=${AUTOBAHN_IMAGE:-crossbario/autobahn-testsuite:latest}
+use_tls=false
+if [[ ${1:-} == "--tls" ]]; then
+  use_tls=true
+  shift
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker not found; install it or run the Autobahn container manually" >&2
@@ -33,7 +38,13 @@ with socket.socket() as sock:
 PY
 )
 
-"$server" "$port" >"$work/server.log" 2>&1 &
+server_args=("$port")
+scheme=ws
+if [[ $use_tls == true ]]; then
+  server_args+=(--tls)
+  scheme=wss
+fi
+"$server" "${server_args[@]}" >"$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
   if grep -q 'Autobahn WebSocket server listening' "$work/server.log"; then
@@ -62,7 +73,7 @@ cat >"$work/config.json" <<EOF
   "outdir": "/work/reports",
   "options": {"failByDrop": false},
   "servers": [
-    {"agent": "netz", "url": "ws://127.0.0.1:$port"}
+    {"agent": "netz", "url": "$scheme://localhost:$port"}
   ],
   "cases": $cases,
   "exclude-cases": [],

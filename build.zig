@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| websocket_autobahn.addArgs(args);
     const websocket_autobahn_step = b.step(
         "interop-websocket-autobahn",
-        "Run the external Autobahn WebSocket server suite against netz",
+        "Run external Autobahn against netz (pass --tls for WSS)",
     );
     websocket_autobahn_step.dependOn(&websocket_autobahn.step);
 
