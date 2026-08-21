@@ -172,6 +172,39 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const http3_quic_go_client = b.addExecutable(.{
+        .name = "netz-http3-quic-go-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_quic_go_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_quic_go_server = b.addExecutable(.{
+        .name = "netz-http3-quic-go-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_quic_go_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_quic_go = b.addSystemCommand(
+        &.{"tools/interop/http3_quic_go.sh"},
+    );
+    http3_quic_go.addArtifactArg(http3_quic_go_client);
+    http3_quic_go.addArtifactArg(http3_quic_go_server);
+    const http3_quic_go_step = b.step(
+        "interop-http3-quic-go",
+        "Run bidirectional HTTP/3 body and trailer interop with quic-go",
+    );
+    http3_quic_go_step.dependOn(&http3_quic_go.step);
+
     const websocket_hyper_h2_client = b.addExecutable(.{
         .name = "netz-websocket-hyper-h2-client",
         .root_module = b.createModule(.{

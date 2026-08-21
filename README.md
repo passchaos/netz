@@ -555,6 +555,9 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Build the locked local Hyper reference offline, then verify POST headers,
 # multi-frame bodies and trailers between netz and Hyper in both directions.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
+# Build the audited quic-go fixture and verify HTTP/3 POST bodies/trailers and
+# streamed responses/trailers over certificate-checked QUIC in both directions.
+zig build interop-http3-quic-go -Doptimize=ReleaseFast
 # Use Hyper's HTTP/2 Extended CONNECT server to validate netz RFC 8441 frame
 # masking, text exchange, Ping/Pong, and the WebSocket Close handshake.
 zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
