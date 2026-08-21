@@ -146,6 +146,11 @@ const RoutePlan = struct {
     has_matching_subscriber: bool,
 };
 
+const Registration = struct {
+    subscriber_id: router_mod.SubscriberId,
+    replaced_owner_id: ?router_mod.SubscriberId,
+};
+
 const EncodedSessionPacket = session_route.EncodedPacket;
 const subscriberId = session_route.connectionSubscriberId;
 const nextConnectionGeneration = session_route.nextConnectionGeneration;
@@ -605,10 +610,11 @@ pub const Broker = struct {
                     return error.AuthenticationInProgress;
                 }
             }
-            const subscriber_id = try self.register(
+            const registration = try self.register(
                 index,
                 pending.connect.connect,
             );
+            const subscriber_id = registration.subscriber_id;
             var accept_options = self.options.accept;
             accept_options.session_present =
                 self.slots[index].session_present;
@@ -620,6 +626,12 @@ pub const Broker = struct {
                 self.abortRegistration(index, subscriber_id);
                 return err;
             };
+            // MQTT requires the replacement to be accepted before the old
+            // Network Connection is terminated. Sending its CONNACK first
+            // also prevents a slow displaced writer from delaying acceptance.
+            if (registration.replaced_owner_id) |owner_id| {
+                self.disconnectReplacedSessionOwner(owner_id);
+            }
             var accepted_owns_connection = true;
             errdefer if (accepted_owns_connection) {
                 accepted.deinit(self.allocator);
@@ -669,7 +681,7 @@ pub const Broker = struct {
         self: *Broker,
         slot_index: usize,
         connect: mqtt.Connect,
-    ) Error!router_mod.SubscriberId {
+    ) Error!Registration {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         const slot = &self.slots[slot_index];
@@ -737,10 +749,12 @@ pub const Broker = struct {
         if (previous_route_id) |route_id| {
             _ = self.session_owners.remove(route_id);
         }
-        if (opened_session.replaced_connection) {
-            if (previous_session_owner) |owner_id| {
-                self.detachReplacedSessionOwner(owner_id);
-            }
+        const replaced_owner_id = if (opened_session.replaced_connection)
+            previous_session_owner
+        else
+            null;
+        if (replaced_owner_id) |owner_id| {
+            self.detachReplacedSessionOwnerLocked(owner_id);
         }
         if (previous_route_id) |route_id| {
             if (route_id != opened_session.route_id) {
@@ -814,7 +828,10 @@ pub const Broker = struct {
             );
         }
         self.will_driver.notify(self.io);
-        return id;
+        return .{
+            .subscriber_id = id,
+            .replaced_owner_id = replaced_owner_id,
+        };
     }
 
     fn assignClientIdLocked(
@@ -860,7 +877,7 @@ pub const Broker = struct {
         }
     }
 
-    fn detachReplacedSessionOwner(
+    fn detachReplacedSessionOwnerLocked(
         self: *Broker,
         owner_id: router_mod.SubscriberId,
     ) void {
@@ -876,11 +893,36 @@ pub const Broker = struct {
         }
         owner.session_handle = null;
         owner.session_persistent = false;
-        // Wake its reader without closing the descriptor under it. The task
-        // remains the owning closer and sees its invalidated Session handle.
-        if (owner.connection) |*connection| {
-            connection.shutdown() catch {};
+    }
+
+    fn disconnectReplacedSessionOwner(
+        self: *Broker,
+        owner_id: router_mod.SubscriberId,
+    ) void {
+        const owner_index = subscriberIndex(
+            owner_id,
+            self.slots.len,
+        ) orelse return;
+        const owner = &self.slots[owner_index];
+        // Serialize the terminal frame with every other writer, then verify
+        // that unregister did not retire or reuse this slot while waiting.
+        owner.writer_mutex.lockUncancelable(self.io);
+        defer owner.writer_mutex.unlock(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        const still_replaced = owner.active and
+            subscriberId(owner_index, owner.generation) == owner_id and
+            owner.session_handle == null and
+            owner.connection != null;
+        self.state_mutex.unlock(self.io);
+        if (!still_replaced) return;
+
+        const connection = &owner.connection.?;
+        if (connection.protocol == .v5) {
+            connection.writeDisconnectWithProperties(0x8e, &.{}) catch {};
         }
+        // The reader task remains the sole eventual close owner. Full shutdown
+        // wakes its blocked read only after the final frame has been written.
+        connection.shutdown() catch {};
     }
 
     fn attachConnection(

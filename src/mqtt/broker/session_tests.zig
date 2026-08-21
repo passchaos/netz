@@ -561,6 +561,12 @@ test "broker duplicate ClientID takeover has one subscription owner" {
     try std.testing.expect(
         replacement_result.connack.connack.session_present,
     );
+    var takeover_disconnect = try old.readDisconnect();
+    defer takeover_disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x8e),
+        takeover_disconnect.disconnect.reason_code,
+    );
 
     var publisher = try connect(
         allocator,

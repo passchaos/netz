@@ -310,6 +310,41 @@ def server_keep_alive(executable: Path, mqtt_packets, mqtt5_props) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def duplicate_client_takeover(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Direct wire port of Mosquitto 01-connect-take-over.py. The replacement
+    # connection must receive a normal CONNACK, while the displaced MQTT 5
+    # connection receives the specified Session Taken Over reason rather than
+    # an unexplained EOF.
+    client_id = "take-over"
+    connect_packet = mqtt_packets.gen_connect(client_id, proto_ver=5)
+    connack_packet = expected_connack(mqtt_packets, mqtt5_props)
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as first, broker.connect() as replacement:
+            first.sendall(connect_packet)
+            expect_packet(first, connack_packet, "initial takeover CONNACK")
+            replacement.sendall(connect_packet)
+            expect_packet(
+                replacement, connack_packet, "replacement takeover CONNACK"
+            )
+            expect_packet(
+                first,
+                mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.SESSION_TAKEN_OVER,
+                    proto_ver=5,
+                ),
+                "displaced client DISCONNECT",
+            )
+            replacement.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                replacement,
+                mqtt_packets.gen_pingresp(),
+                "replacement PINGRESP",
+            )
+            replacement.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def connect_persistent_v5(
     sock: socket.socket, mqtt_packets, client_id: str, session_present: bool
 ) -> None:
@@ -2333,7 +2368,10 @@ def main() -> None:
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
     assigned_client_identifier(args.broker, mqtt_packets, mqtt5_props)
     server_keep_alive(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 37 scenarios")
+    duplicate_client_takeover(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
+    print("Mosquitto-derived MQTT wire vectors passed: 38 scenarios")
 
 
 if __name__ == "__main__":
