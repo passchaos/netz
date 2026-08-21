@@ -9,6 +9,29 @@ const stream_receive_window = 8 * 1024;
 const connection_receive_window = 24 * 1024;
 const read_before_cancel = 12 * 1024;
 
+const CancellationLoss = struct {
+    armed: bool = false,
+    sends_after_arm: usize = 0,
+    dropped: usize = 0,
+
+    fn arm(self: *CancellationLoss) void {
+        self.armed = true;
+    }
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *CancellationLoss = @ptrCast(@alignCast(context));
+        if (!self.armed) return false;
+        self.sends_after_arm += 1;
+        // HandshakeClient.cancelRequest writes RESET_STREAM first and
+        // STOP_SENDING second. Losing only the latter forces QUIC recovery to
+        // retransmit the response-direction cancellation while leaving the
+        // request-direction reset independently observable on the wire.
+        if (self.sends_after_arm != 2) return false;
+        self.dropped += 1;
+        return true;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3) return error.InvalidArgument;
@@ -46,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
         stream_receive_window;
     local_transport_parameters.initial_max_stream_data_bidi_remote =
         stream_receive_window;
+    var cancellation_loss = CancellationLoss{};
     var client = try netz.http3.runtime.HandshakeClient.connect(
         allocator,
         io,
@@ -54,6 +78,10 @@ pub fn main(init: std.process.Init) !void {
         .{ .quic = .{
             .max_datagram_size = 4096,
             .max_frames_per_datagram = 16,
+            .send_interceptor = .{
+                .context = &cancellation_loss,
+                .should_drop = CancellationLoss.shouldDrop,
+            },
         } },
         .{
             .handshake = .{
@@ -165,6 +193,7 @@ pub fn main(init: std.process.Init) !void {
                             }
                             canceled_bytes += read;
                             if (canceled_bytes >= read_before_cancel) {
+                                cancellation_loss.arm();
                                 try client.cancelRequest(
                                     canceled_stream_id,
                                     netz.http3.ApplicationErrorCode
@@ -202,14 +231,15 @@ pub fn main(init: std.process.Init) !void {
             },
         }
     }
-    if (!cancellation_sent or canceled_bytes < read_before_cancel or
+    if (!cancellation_sent or cancellation_loss.dropped != 1 or
+        canceled_bytes < read_before_cancel or
         !sibling_head or !sibling_trailer or
         !std.mem.eql(u8, sibling_body.items, "quic-go-response"))
     {
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with quic-go: cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window={d} read_before_cancel>={d} large_response={d} request_body=12 request_trailers=1 response_body=16 response_trailers=1\n",
+        "netz HTTP/3 client interoperated with quic-go: cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window={d} read_before_cancel>={d} large_response={d} request_body=12 request_trailers=1 response_body=16 response_trailers=1\n",
         .{ stream_receive_window, read_before_cancel, cancellation_response_size },
     );
 }
