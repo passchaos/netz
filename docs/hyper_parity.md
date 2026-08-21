@@ -69,16 +69,20 @@ benchmark response:
 - borrowed head parsing scans CRLF-delimited lines once instead of first
   scanning for CRLFCRLF and then rescanning every header line.
 
-The parser also mirrors two explicitly opt-in Hyper HTTP/1 compatibility
+The parser also mirrors Hyper's explicitly opt-in HTTP/1 compatibility
 controls while preserving strict defaults.
 `allow_multiple_spaces_in_request_line_delimiters` accepts repeated ASCII SP
 between method, target and version, and
 `allow_spaces_after_header_name_in_responses` accepts SP/HTAB immediately
-before a response field colon. The latter never relaxes request or trailer
-fields, preserving the direction-specific request-smuggling boundary described
-by Hyper's public API. Both owned and caller-buffer head parsers share these
-rules. The corresponding local Hyper tests and the netz parity test pass on
-the same malformed/default and accepted/opt-in wire forms:
+before a response field colon. Direction-specific
+`ignore_invalid_headers_in_requests` and
+`ignore_invalid_headers_in_responses` can skip an otherwise malformed header
+line, but still reject NUL and bare CR rather than permitting ambiguous line
+boundaries. Response whitespace tolerance never affects requests or trailers,
+preserving the request-smuggling boundary described by Hyper's public API.
+Both owned and caller-buffer head parsers share these rules. The corresponding
+local Hyper/httparse tests and netz parity tests pass on the same
+malformed/default and accepted/opt-in wire forms:
 
 ```sh
 cd ~/Work/hyper
@@ -86,10 +90,15 @@ cargo test --features full \
   test_parse_allow_request_with_multiple_spaces_in_request_line
 cargo test --features full \
   test_parse_allow_response_with_spaces_before_colons
+cd ~/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/httparse-1.10.1
+cargo test test_ignore_header_line_with_whitespaces_after_header_name_in_request
+cargo test test_ignore_header_line_with_whitespaces_after_header_name_in_response
 
 cd ~/project-z/netz
 zig test -ODebug \
   --test-filter 'HTTP/1 Hyper-shaped parser compatibility' ...
+zig test -ODebug \
+  --test-filter 'HTTP/1 invalid-header compatibility' ...
 ```
 
 The batch read path intentionally rejects chunked bodies because their complete

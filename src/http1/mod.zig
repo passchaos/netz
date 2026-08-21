@@ -90,6 +90,12 @@ pub const ParseOptions = struct {
     /// such as `Name : value`. Requests and trailers remain strict even when
     /// this is enabled, matching Hyper's direction-specific policy.
     allow_spaces_after_header_name_in_responses: bool = false,
+    /// Ignore malformed request header lines that do not contain NUL or a
+    /// bare carriage return. This is intentionally opt-in and mirrors Hyper's
+    /// compatibility mode for peers with unrelated broken extension fields.
+    ignore_invalid_headers_in_requests: bool = false,
+    /// Response-side counterpart to `ignore_invalid_headers_in_requests`.
+    ignore_invalid_headers_in_responses: bool = false,
 };
 
 pub const ResponseContext = struct {
@@ -253,7 +259,9 @@ pub fn parseRequestHead(
     header_storage: []Header,
     options: ParseOptions,
 ) Error!RequestHead {
-    const parsed = try parseHeadLines(bytes, header_storage, options, false);
+    const parsed = try parseHeadLines(bytes, header_storage, options, .{
+        .ignore_invalid = options.ignore_invalid_headers_in_requests,
+    });
     const request_line = try parseRequestLine(
         parsed.start_line,
         options.allow_multiple_spaces_in_request_line_delimiters,
@@ -289,7 +297,10 @@ pub fn parseResponseHead(
         bytes,
         header_storage,
         options,
-        options.allow_spaces_after_header_name_in_responses,
+        .{
+            .allow_spaces_before_colon = options.allow_spaces_after_header_name_in_responses,
+            .ignore_invalid = options.ignore_invalid_headers_in_responses,
+        },
     );
     var parts = std.mem.splitScalar(u8, parsed.start_line, ' ');
     const version_s = parts.next() orelse return error.MalformedStartLine;
@@ -333,11 +344,16 @@ const BorrowedHead = struct {
     head_len: usize,
 };
 
+const HeaderParsePolicy = struct {
+    allow_spaces_before_colon: bool = false,
+    ignore_invalid: bool = false,
+};
+
 fn parseHeadLines(
     bytes: []const u8,
     header_storage: []Header,
     options: ParseOptions,
-    allow_spaces_before_colon: bool,
+    policy: HeaderParsePolicy,
 ) Error!BorrowedHead {
     // Walk CRLF-delimited lines once and stop at the empty line. The previous
     // implementation first scanned the complete head for CRLFCRLF and then
@@ -367,13 +383,28 @@ fn parseHeadLines(
             // Even when allocating parse allows obs-fold, this borrowed API
             // cannot expose a contiguous unfolded value without copying.
             _ = options.allow_obs_fold;
-            return error.MalformedHeader;
+            if (!policy.ignore_invalid or hasFatalInvalidHeaderByte(line)) {
+                return error.MalformedHeader;
+            }
+            pos += line_end_rel + 2;
+            continue;
         }
-        if (count >= options.max_headers or count >= header_storage.len) return error.TooManyHeaders;
-        header_storage[count] = try parseHeaderLine(
+        const header = parseHeaderLine(
             line,
-            allow_spaces_before_colon,
-        );
+            policy.allow_spaces_before_colon,
+        ) catch |err| {
+            if (!policy.ignore_invalid or
+                hasFatalInvalidHeaderByte(line))
+            {
+                return err;
+            }
+            pos += line_end_rel + 2;
+            continue;
+        };
+        if (count >= options.max_headers or count >= header_storage.len) {
+            return error.TooManyHeaders;
+        }
+        header_storage[count] = header;
         count += 1;
         pos += line_end_rel + 2;
         if (pos > bytes.len) return error.BufferTooShort;
@@ -398,7 +429,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
         allocator,
         &lines,
         options,
-        false,
+        .{ .ignore_invalid = options.ignore_invalid_headers_in_requests },
     );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
@@ -460,7 +491,10 @@ pub fn parseResponseWithContext(
         allocator,
         &lines,
         options,
-        options.allow_spaces_after_header_name_in_responses,
+        .{
+            .allow_spaces_before_colon = options.allow_spaces_after_header_name_in_responses,
+            .ignore_invalid = options.ignore_invalid_headers_in_responses,
+        },
     );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
@@ -524,14 +558,14 @@ fn parseHeaderLines(
     allocator: std.mem.Allocator,
     lines: *std.mem.SplitIterator(u8, .sequence),
     options: ParseOptions,
-    allow_spaces_before_colon: bool,
+    policy: HeaderParsePolicy,
 ) Error!ParsedHeaders {
     if (!options.allow_obs_fold) {
         return parseHeaderLinesNoFold(
             allocator,
             lines.*,
             options,
-            allow_spaces_before_colon,
+            policy,
         );
     }
 
@@ -543,20 +577,48 @@ fn parseHeaderLines(
         headers.deinit(allocator);
     }
 
+    var skip_continuations = false;
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         if (line[0] == ' ' or line[0] == '\t') {
-            if (!options.allow_obs_fold or headers.items.len == 0) return error.MalformedHeader;
+            if (skip_continuations) continue;
+            if (headers.items.len == 0) {
+                if (policy.ignore_invalid and
+                    !hasFatalInvalidHeaderByte(line))
+                {
+                    continue;
+                }
+                return error.MalformedHeader;
+            }
             const continuation = wire.trimOws(line);
-            try validateHeaderValue(continuation);
+            validateHeaderValue(continuation) catch |err| {
+                if (!policy.ignore_invalid or
+                    hasFatalInvalidHeaderByte(line))
+                {
+                    return err;
+                }
+                _ = headers.pop();
+                skip_continuations = true;
+                continue;
+            };
             try appendFoldedHeaderValue(allocator, &headers, &value_storage, continuation);
             continue;
         }
+        const header = parseHeaderLine(
+            line,
+            policy.allow_spaces_before_colon,
+        ) catch |err| {
+            if (!policy.ignore_invalid or
+                hasFatalInvalidHeaderByte(line))
+            {
+                return err;
+            }
+            skip_continuations = true;
+            continue;
+        };
         if (headers.items.len >= options.max_headers) return error.TooManyHeaders;
-        try headers.append(
-            allocator,
-            try parseHeaderLine(line, allow_spaces_before_colon),
-        );
+        try headers.append(allocator, header);
+        skip_continuations = false;
     }
 
     if (headers.items.len == 0 and value_storage.items.len == 0) {
@@ -575,15 +637,32 @@ fn parseHeaderLinesNoFold(
     allocator: std.mem.Allocator,
     lines: std.mem.SplitIterator(u8, .sequence),
     options: ParseOptions,
-    allow_spaces_before_colon: bool,
+    policy: HeaderParsePolicy,
 ) Error!ParsedHeaders {
     var scan = lines;
     var count: usize = 0;
     while (scan.next()) |line| {
         if (line.len == 0) continue;
-        if (line[0] == ' ' or line[0] == '\t') return error.MalformedHeader;
+        if (line[0] == ' ' or line[0] == '\t') {
+            if (policy.ignore_invalid and
+                !hasFatalInvalidHeaderByte(line))
+            {
+                continue;
+            }
+            return error.MalformedHeader;
+        }
+        _ = parseHeaderLine(
+            line,
+            policy.allow_spaces_before_colon,
+        ) catch |err| {
+            if (!policy.ignore_invalid or
+                hasFatalInvalidHeaderByte(line))
+            {
+                return err;
+            }
+            continue;
+        };
         if (count >= options.max_headers) return error.TooManyHeaders;
-        _ = try parseHeaderLine(line, allow_spaces_before_colon);
         count += 1;
     }
 
@@ -600,10 +679,12 @@ fn parseHeaderLinesNoFold(
     var index: usize = 0;
     while (fill.next()) |line| {
         if (line.len == 0) continue;
-        headers[index] = parseHeaderLine(
+        if (line[0] == ' ' or line[0] == '\t') continue;
+        const header = parseHeaderLine(
             line,
-            allow_spaces_before_colon,
-        ) catch unreachable;
+            policy.allow_spaces_before_colon,
+        ) catch continue;
+        headers[index] = header;
         index += 1;
     }
     return .{
@@ -667,6 +748,14 @@ fn parseHeaderLine(
     try validateHeaderName(name);
     try validateHeaderValue(value);
     return .{ .name = name, .value = value };
+}
+
+fn hasFatalInvalidHeaderByte(line: []const u8) bool {
+    // httparse deliberately refuses to recover from NUL and bare CR because
+    // they can change the line boundary seen by another HTTP implementation.
+    return std.mem.indexOfScalar(u8, line, 0) != null or
+        std.mem.indexOfScalar(u8, line, '\r') != null or
+        std.mem.indexOfScalar(u8, line, '\n') != null;
 }
 
 fn appendFoldedHeaderValue(
@@ -1419,7 +1508,7 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         allocator,
         &lines,
         options,
-        false,
+        .{},
     );
     errdefer parsed_trailers.deinit(allocator);
     try validateTrailers(parsed_trailers.headers);
@@ -1818,6 +1907,87 @@ test "HTTP/1 Hyper-shaped parser compatibility switches remain scoped" {
             "0\r\nDigest : value\r\n\r\n",
             .{ .allow_spaces_after_header_name_in_responses = true },
         ),
+    );
+}
+
+test "HTTP/1 invalid-header compatibility skips only non-fatal lines" {
+    const allocator = std.testing.allocator;
+    const request_bytes =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Bad Header: ignored\r\n" ++
+        "X-Bad: value\x01ignored\r\n" ++
+        "Bread: baguette\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseRequest(allocator, request_bytes, .{}),
+    );
+    var request = try parseRequest(allocator, request_bytes, .{
+        .ignore_invalid_headers_in_requests = true,
+    });
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), request.headers.len);
+    try std.testing.expectEqualStrings(
+        "example.com",
+        request.header("host").?,
+    );
+    try std.testing.expectEqualStrings("baguette", request.header("bread").?);
+
+    var request_headers: [2]Header = undefined;
+    const borrowed_request = try parseRequestHead(
+        request_bytes,
+        &request_headers,
+        .{ .ignore_invalid_headers_in_requests = true },
+    );
+    try std.testing.expectEqual(@as(usize, 2), borrowed_request.headers.len);
+
+    const response_bytes =
+        "HTTP/1.1 204 No Content\r\n" ++
+        "Missing-Colon\r\n" ++
+        "Bread: baguette\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseResponse(allocator, response_bytes, .{}),
+    );
+    var response = try parseResponse(allocator, response_bytes, .{
+        .ignore_invalid_headers_in_responses = true,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), response.headers.len);
+    try std.testing.expectEqualStrings(
+        "baguette",
+        response.header("bread").?,
+    );
+
+    var response_headers: [1]Header = undefined;
+    const borrowed_response = try parseResponseHead(
+        response_bytes,
+        &response_headers,
+        .{ .ignore_invalid_headers_in_responses = true },
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, 1), borrowed_response.headers.len);
+
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseRequest(allocator, request_bytes, .{
+            .ignore_invalid_headers_in_responses = true,
+        }),
+    );
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseResponse(allocator, response_bytes, .{
+            .ignore_invalid_headers_in_requests = true,
+        }),
+    );
+
+    const nul_response =
+        "HTTP/1.1 204 No Content\r\nBad\x00Name: value\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseResponse(allocator, nul_response, .{
+            .ignore_invalid_headers_in_responses = true,
+        }),
     );
 }
 
