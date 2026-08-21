@@ -1855,7 +1855,20 @@ pub const Connection = struct {
                 _ = try self.serviceLossDetectionTimer(now_ns);
             },
             .path_validation => {
-                _ = try self.checkPathValidationTimeouts(now_ns);
+                const expired = try self.checkPathValidationTimeouts(now_ns);
+                // Retrying only by moving an expired challenge back to the
+                // pending queue leaves a blocking receive with no next path
+                // deadline, so it can sleep forever after a lost
+                // PATH_RESPONSE. Emit the retry immediately and arm it for the
+                // current PTO; subsequent receive waits remain timer-driven.
+                if (expired != 0 and
+                    self.path_validation.pendingChallengeCount() != 0)
+                {
+                    _ = try self.sendPendingPathChallengesAt(
+                        now_ns,
+                        self.ptoPeriod(),
+                    );
+                }
             },
             .keep_alive => {
                 _ = try self.serviceKeepAliveAt(nanosToMillisFloor(now_ns));

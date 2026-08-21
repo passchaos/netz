@@ -2051,7 +2051,12 @@ test "QUIC 1-RTT next timer deadline selects earliest work" {
     try std.testing.expectEqual(@as(?one_rtt.TimerDeadline, null), try connection.serviceNextTimerAt(29));
     const serviced = (try connection.serviceNextTimerAt(30)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.path_validation, serviced.kind);
-    try std.testing.expectEqual(@as(usize, 1), connection.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), connection.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(
+        @as(?u64, 30 + connection.ptoPeriod()),
+        connection.pathValidationDeadline(),
+    );
 }
 
 test "QUIC 1-RTT next timer deadline includes key discard" {

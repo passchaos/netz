@@ -31,6 +31,7 @@ const Mode = enum {
     initial_pto,
     peer_close,
     migration,
+    migration_loss,
     nat_rebinding,
 };
 
@@ -249,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidAlpn;
     }
 
-    if (mode == .migration) {
+    if (mode == .migration or mode == .migration_loss) {
         const original_peer = established.connection.peerAddress();
         const original_port = try expectIpv4Address(
             original_peer,
@@ -281,6 +282,7 @@ pub fn main(init: std.process.Init) !void {
             migration_initial_payload,
         );
         var previous_port = original_port;
+        var path_challenge_retries: usize = 0;
         for (migration_payloads, migration_addresses, 0..) |
             payload,
             expected_address,
@@ -309,9 +311,24 @@ pub fn main(init: std.process.Init) !void {
             // Receiving non-probing traffic selected the new path but did not
             // validate it. Challenge it in the reverse direction and require
             // the authenticated response before returning application data.
-            try established.connection.sendPendingPathChallenge();
-            while (!established.connection.peerAddressValidated()) {
-                try receivePacket(&established.connection, allocator);
+            if (mode == .migration_loss) {
+                const timeout_ns = established.connection.ptoPeriod();
+                const send_time_ns: u64 = @intCast(
+                    std.Io.Clock.awake.now(io).nanoseconds,
+                );
+                try established.connection.sendPendingPathChallengeAt(
+                    send_time_ns,
+                    timeout_ns,
+                );
+                while (!established.connection.peerAddressValidated()) {
+                    try receivePacket(&established.connection, allocator);
+                }
+                path_challenge_retries += 1;
+            } else {
+                try established.connection.sendPendingPathChallenge();
+                while (!established.connection.peerAddressValidated()) {
+                    try receivePacket(&established.connection, allocator);
+                }
             }
             try sendEcho(
                 &established.connection,
@@ -321,10 +338,20 @@ pub fn main(init: std.process.Init) !void {
             previous_port = migrated_port;
         }
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
-        std.debug.print(
-            "netz QUIC migration server interoperated with quic-go: alpn=hq-interop path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true paths_validated=2 echo_streams=4,8 echo_bytes=22\n",
-            .{},
-        );
+        if (mode == .migration_loss) {
+            if (path_challenge_retries != migration_payloads.len) {
+                return error.UnexpectedPathValidationRetries;
+            }
+            std.debug.print(
+                "netz QUIC lossy migration server interoperated with quic-go: alpn=hq-interop path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true paths_validated=2 dropped_probe_datagrams=2 probe_retries=2 echo_streams=4,8 echo_bytes=22\n",
+                .{},
+            );
+        } else {
+            std.debug.print(
+                "netz QUIC migration server interoperated with quic-go: alpn=hq-interop path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true paths_validated=2 echo_streams=4,8 echo_bytes=22\n",
+                .{},
+            );
+        }
         return;
     }
 
@@ -502,6 +529,7 @@ pub fn main(init: std.process.Init) !void {
             );
         },
         .migration => unreachable,
+        .migration_loss => unreachable,
         .nat_rebinding => unreachable,
     }
 
@@ -554,6 +582,7 @@ pub fn main(init: std.process.Init) !void {
         ),
         .peer_close => unreachable,
         .migration => unreachable,
+        .migration_loss => unreachable,
         .nat_rebinding => unreachable,
     }
 }

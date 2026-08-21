@@ -579,7 +579,9 @@ zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 # Connection IDs, rejects a pre-probe switch, validates PATH_CHALLENGE /
 # PATH_RESPONSE, migrates from 127.0.0.1 through 127.0.0.2 to 127.0.0.3
 # with distinct source ports, and completes a stream after each switch. A
-# separate same-IP source-port rebinding drops four datagrams, recovers by PTO,
+# loss variant drops the first PATH_RESPONSE on both candidate paths and
+# requires timer-driven PATH_CHALLENGE retries before either switch. A separate
+# same-IP source-port rebinding drops four datagrams, recovers by PTO,
 # and verifies that NAT rebinding does not start active path validation.
 zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
