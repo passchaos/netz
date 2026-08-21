@@ -1700,6 +1700,93 @@ def delayed_will_reconnect_cancels(
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def will_delay_session_expiry_minimum(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire coverage for Mosquitto's paired
+    # 07-will-delay-session-expiry{,2}.py cases. The Will fires at the earlier
+    # of its own delay and Session Expiry, including the immediate-zero edge.
+    cases = (
+        ("expiry-first", 4, 2, 1.0),
+        ("delay-first", 2, 4, 1.0),
+        ("zero-expiry", 60, 0, 0.0),
+    )
+    for label, delay_seconds, expiry_seconds, disconnect_after in cases:
+        topic = f"will/session-expiry/{label}"
+        source_id = f"will-session-expiry-{label}"
+        connect_properties = mqtt5_props.gen_uint32_prop(
+            mqtt5_props.SESSION_EXPIRY_INTERVAL, expiry_seconds
+        )
+        will_properties = mqtt5_props.gen_uint32_prop(
+            mqtt5_props.WILL_DELAY_INTERVAL, delay_seconds
+        )
+        with NetzBroker(executable, connections=2) as broker:
+            with broker.connect() as subscriber, broker.connect() as source:
+                connect_v5(
+                    subscriber, mqtt_packets, f"will-min-subscriber-{label}"
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        1, topic, 0, proto_ver=5
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                    f"Will minimum {label} SUBACK",
+                )
+                source.sendall(
+                    mqtt_packets.gen_connect(
+                        source_id,
+                        proto_ver=5,
+                        clean_session=False,
+                        properties=connect_properties,
+                        will_topic=topic,
+                        will_payload=b"will delay",
+                        will_qos=2,
+                        will_properties=will_properties,
+                    )
+                )
+                expect_packet(
+                    source,
+                    expected_connack(mqtt_packets, mqtt5_props),
+                    f"Will minimum {label} source CONNACK",
+                )
+                if disconnect_after != 0:
+                    time.sleep(disconnect_after)
+                source.close()
+
+                started = time.monotonic()
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=0,
+                        payload="will delay",
+                        proto_ver=5,
+                    ),
+                    f"Will minimum {label} PUBLISH",
+                )
+                elapsed = time.monotonic() - started
+                if expiry_seconds == 0:
+                    if elapsed >= 1.0:
+                        raise AssertionError(
+                            f"zero Session Expiry delayed Will for {elapsed:.3f}s"
+                        )
+                else:
+                    expected_remaining = min(
+                        delay_seconds, expiry_seconds
+                    ) - disconnect_after
+                    if not (expected_remaining - 0.5 <= elapsed <=
+                            expected_remaining + 1.5):
+                        raise AssertionError(
+                            f"Will minimum {label} fired after {elapsed:.3f}s"
+                        )
+                subscriber.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=5)
+                )
+
+
 def retained_message_expiry(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -2704,6 +2791,9 @@ def main() -> None:
     delayed_will_reconnect_cancels(
         args.broker, mqtt_packets, mqtt5_props
     )
+    will_delay_session_expiry_minimum(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     retained_message_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -2729,7 +2819,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 42 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 45 scenarios")
 
 
 if __name__ == "__main__":
