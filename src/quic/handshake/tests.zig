@@ -1150,6 +1150,7 @@ test "QUIC integrated client automatically processes one valid Retry" {
                 .x25519_secret_key = [_]u8{0xa4} ** 32,
             });
             defer established.deinit();
+            try std.testing.expect(established.retry_processed);
             var request = try established.connection.receivePacket();
             defer request.deinit(shared.endpoint.allocator);
         }
@@ -1168,6 +1169,7 @@ test "QUIC integrated client automatically processes one valid Retry" {
         },
     );
     defer established.deinit();
+    try std.testing.expect(established.retry_processed);
     try established.connection.send(&.{.{ .ping = {} }});
     thread.join();
     if (shared.err) |err| return err;
@@ -1397,6 +1399,10 @@ test "QUIC integrated server automatically issues Retry" {
                 return;
             };
             defer established.deinit();
+            std.testing.expect(established.retry_processed) catch |err| {
+                shared.err = err;
+                return;
+            };
             var ping = established.connection.receivePacket() catch |err| {
                 shared.err = err;
                 return;
@@ -1418,6 +1424,7 @@ test "QUIC integrated server automatically issues Retry" {
         },
     );
     defer established.deinit();
+    try std.testing.expect(established.retry_processed);
     try established.connection.send(&.{.{ .ping = {} }});
     thread.join();
     if (shared.err) |err| return err;

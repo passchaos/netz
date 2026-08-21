@@ -8,11 +8,16 @@ const payloads = [_][]const u8{ "hello", "world" };
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
+    const expect_retry = if (args.len == 4)
+        std.mem.eql(u8, args[3], "--expect-retry")
+    else
+        false;
+    if (args.len == 4 and !expect_retry) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -69,6 +74,9 @@ pub fn main(init: std.process.Init) !void {
     defer established.deinit();
     if (!std.mem.eql(u8, established.alpn, "hq-interop")) {
         return error.InvalidAlpn;
+    }
+    if (established.retry_processed != expect_retry) {
+        return error.UnexpectedRetryState;
     }
 
     var stream_ids: [payloads.len]u64 = undefined;
@@ -143,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz QUIC client interoperated with quic-go: verified=true alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
-        .{},
+        "netz QUIC client interoperated with quic-go: verified=true retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
+        .{expect_retry},
     );
 }

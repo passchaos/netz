@@ -275,6 +275,10 @@ pub const EstablishedConnection = struct {
     local_connection_id: []u8,
     peer_connection_id: []u8,
     alpn: []u8,
+    /// Whether this handshake authenticated and followed a Retry exchange.
+    /// Exposing the fact lets process-level interop gates prove address
+    /// validation instead of inferring it from a successful connection.
+    retry_processed: bool = false,
     resumed: bool = false,
     early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
     resumption_master_secret: quic.tls.secret.Secret,
@@ -1242,6 +1246,7 @@ fn connectAttempt(
         local_transport_parameters,
         peer_transport_parameters,
         encrypted_extensions.alpn,
+        retry_processed,
         parsed_server.selected_psk,
         early_data_status,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
@@ -1846,6 +1851,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         local_transport_parameters,
         peer_transport_parameters,
         alpn,
+        effective_options.retry_source_connection_id.len != 0,
         selected_psk != null,
         if (early_data_accepted) .accepted else if (client_offered_early_data) .rejected else .not_offered,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
@@ -2604,6 +2610,7 @@ fn establishedConnection(
     local_transport_parameters: quic.TransportParameters,
     peer_transport_parameters: quic.TransportParameters,
     alpn: []const u8,
+    retry_processed: bool,
     resumed: bool,
     early_data_status: quic.zero_rtt.handshake.Status,
     resumption_master_secret: quic.tls.secret.Secret,
@@ -2630,6 +2637,7 @@ fn establishedConnection(
         .local_connection_id = local_owned,
         .peer_connection_id = peer_owned,
         .alpn = alpn_owned,
+        .retry_processed = retry_processed,
         .resumed = resumed,
         .early_data_status = early_data_status,
         .resumption_master_secret = resumption_master_secret,

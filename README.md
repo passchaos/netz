@@ -572,6 +572,7 @@ zig build interop-http3-quic-go -Doptimize=ReleaseFast
 zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 # Build the quic-go fixtures from the audited local quicz checkout and run
 # certificate-verified, ALPN-checked two-stream echoes in both directions,
+# including a quic-go server that forces a Retry/address-validation round trip,
 # followed by quic-go RESET_STREAM, STOP_SENDING, and rolling flow-control
 # and stream-limit renewal probes, client/server unidirectional streams,
 # four-datagram Initial/application loss recovery, and exact application-close

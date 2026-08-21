@@ -25,17 +25,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-(cd "$go_server_dir" && go build \
-  -o "$work/quic-go-server" ./echo_server)
-(cd "$go_server_dir" && go build \
-  -o "$work/quic-go-client" .)
-port=$(python3 - <<'PY'
+free_udp_port() {
+  python3 - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
     sock.bind(("127.0.0.1", 0))
     print(sock.getsockname()[1])
 PY
-)
+}
+
+(cd "$go_server_dir" && go build \
+  -o "$work/quic-go-server" ./echo_server)
+(cd "$go_server_dir" && go build \
+  -o "$work/quic-go-client" .)
+port=$(free_udp_port)
 
 "$work/quic-go-server" \
   -addr "127.0.0.1:$port" \
@@ -63,23 +66,55 @@ timeout 20s "$client" "$port" "$work/ca.pem"
 echo 'quic-go server -> netz client interop passed'
 wait "$server_pid"
 server_pid=
-grep -q 'handshake_done=true echo_streams=2 echo_bytes=10' \
+grep -q 'handshake_done=true retry=false echo_streams=2 echo_bytes=10' \
   "$work/server.log"
+
+port=$(free_udp_port)
+"$work/quic-go-server" \
+  -addr "127.0.0.1:$port" \
+  -ca-out "$work/retry-ca.pem" \
+  -force-retry \
+  >"$work/retry-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/retry-ca.pem" ]] && \
+      grep -q 'force_retry=true' "$work/retry-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/retry-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "$work/retry-ca.pem" ]] || ! \
+    grep -q 'force_retry=true' "$work/retry-server.log"; then
+  echo 'timed out waiting for forced-Retry quic-go server' >&2
+  cat "$work/retry-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$client" "$port" "$work/retry-ca.pem" \
+    --expect-retry >"$work/retry-client.log" 2>&1; then
+  cat "$work/retry-client.log" >&2
+  cat "$work/retry-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+cat "$work/retry-client.log"
+grep -Fq \
+  'netz QUIC client interoperated with quic-go: verified=true retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
+  "$work/retry-client.log"
+grep -Fq \
+  'handshake_done=true retry=true echo_streams=2 echo_bytes=10' \
+  "$work/retry-server.log"
+echo 'quic-go forced Retry server -> netz client interop passed'
 
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
 MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
 -----END CERTIFICATE-----
 EOF
-
-free_udp_port() {
-  python3 - <<'PY'
-import socket
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-}
 
 require_log() {
   local expected=$1
