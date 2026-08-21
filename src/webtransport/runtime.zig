@@ -1677,6 +1677,8 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
 
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
     var drop_enabled = false;
     var dropped: usize = 0;
     const DropFirst = struct {
@@ -1740,6 +1742,7 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
     try std.testing.expectEqual(@as(usize, 1), dropped);
 
     thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
