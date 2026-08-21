@@ -150,13 +150,25 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
+    const http2_hyper_server = b.addExecutable(.{
+        .name = "netz-http2-hyper-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_hyper_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
     const http2_hyper_interop = b.addSystemCommand(
         &.{"tools/interop/http2_hyper_client.sh"},
     );
     http2_hyper_interop.addArtifactArg(http2_hyper_client);
+    http2_hyper_interop.addArtifactArg(http2_hyper_server);
     const http2_hyper_interop_step = b.step(
         "interop-http2-hyper-client",
-        "Run a netz HTTP/2 client against the audited Hyper server",
+        "Run bidirectional netz HTTP/2 interop with audited Hyper fixtures",
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 

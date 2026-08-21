@@ -8,6 +8,10 @@ publish = false
 name = "netz-hyper-http2-interop-server"
 path = "src/bin/interop_server.rs"
 
+[[bin]]
+name = "netz-hyper-http2-interop-client"
+path = "src/bin/interop_client.rs"
+
 [dependencies]
 bytes = "1.2"
 futures-util = "0.3"
