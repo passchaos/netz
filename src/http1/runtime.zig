@@ -1003,6 +1003,7 @@ pub const Client = struct {
         return .{
             .client = self,
             .method = options.method,
+            .expects_continue = requestShouldSendContinue(prepared.head),
             .body = StreamingBodyWriter.init(
                 self.allocator,
                 &self.writer_state,
@@ -1579,6 +1580,10 @@ fn streamingResponseFromReader(
 pub const RequestWriter = struct {
     client: *Client,
     method: http1.Method,
+    /// True only when the serialized HTTP/1.1 request has a body and its sole
+    /// Expect value is 100-continue. This value is immutable across writer
+    /// copies; the one-shot observation state lives in shared connection state.
+    expects_continue: bool,
     body: StreamingBodyWriter,
 
     pub fn deinit(self: *RequestWriter) void {
@@ -1608,6 +1613,54 @@ pub const RequestWriter = struct {
         trailers: []const http1.Header,
     ) Error!void {
         try self.body.finishTrailers(trailers);
+    }
+
+    /// Wait for `100 Continue` before transmitting an expected request body.
+    ///
+    /// Other informational responses are consumed while waiting. A final
+    /// response is returned to the caller and makes the HTTP/1 connection
+    /// unusable: without sending the declared request body, the connection
+    /// cannot safely begin another exchange even if the peer advertises
+    /// keep-alive. The returned final response is owned by the caller.
+    pub fn waitForContinue(
+        self: *RequestWriter,
+    ) Error!ExpectContinueResult {
+        try self.body.ensureExchangeActive();
+        if (!self.expects_continue or
+            self.body.state.expect_continue_received or
+            self.body.isBodyFinished() or
+            self.body.state.phase != .writing or self.body.state.written != 0)
+        {
+            return error.InvalidWriterState;
+        }
+
+        while (true) {
+            var response = readOneResponseFromTransportBufferedForRequest(
+                self.client.allocator,
+                self.client.transport(),
+                self.client.limits,
+                .{},
+                &self.client.inbuf,
+                self.method,
+            ) catch |err| {
+                self.body.fail();
+                return err;
+            };
+            if (response.response.status == 100) {
+                response.deinit(self.client.allocator);
+                self.body.state.expect_continue_received = true;
+                return .proceed;
+            }
+            if (informationalResponseToSkip(response.response.status)) {
+                response.deinit(self.client.allocator);
+                continue;
+            }
+
+            // The peer rejected or otherwise answered the request before its
+            // body. Transfer response ownership while retiring this writer.
+            self.body.release(false);
+            return .{ .final_response = response };
+        }
     }
 
     /// Read the response and release the connection exchange slot exactly once.
@@ -1667,6 +1720,11 @@ pub const RequestWriter = struct {
         ));
         return response;
     }
+};
+
+pub const ExpectContinueResult = union(enum) {
+    proceed,
+    final_response: OwnedResponse,
 };
 
 pub const ResponseWriter = struct {
@@ -2358,18 +2416,50 @@ fn readResponseFromTransportBufferedForRequest(
     request_method: http1.Method,
 ) Error!OwnedResponse {
     while (true) {
-        const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, options, inbuf, request_method, false, true);
-        errdefer allocator.free(bytes);
-        var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
-        errdefer response.deinit(allocator);
-        applyCloseDelimitedResponseBody(&response, bytes, request_method);
-        if (informationalResponseToSkip(response.status)) {
+        var response = try readOneResponseFromTransportBufferedForRequest(
+            allocator,
+            transport,
+            limits,
+            options,
+            inbuf,
+            request_method,
+        );
+        if (informationalResponseToSkip(response.response.status)) {
             response.deinit(allocator);
-            allocator.free(bytes);
             continue;
         }
-        return .{ .bytes = bytes, .response = response };
+        return response;
     }
+}
+
+fn readOneResponseFromTransportBufferedForRequest(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    request_method: http1.Method,
+) Error!OwnedResponse {
+    const bytes = try readMessageBytesBufferedWithContext(
+        allocator,
+        transport,
+        limits,
+        options,
+        inbuf,
+        request_method,
+        false,
+        true,
+    );
+    errdefer allocator.free(bytes);
+    var response = try parseResponseForRuntime(
+        allocator,
+        bytes,
+        options,
+        request_method,
+    );
+    errdefer response.deinit(allocator);
+    applyCloseDelimitedResponseBody(&response, bytes, request_method);
+    return .{ .bytes = bytes, .response = response };
 }
 
 fn readMessageBytesBufferedWithContext(
@@ -3644,6 +3734,215 @@ test "HTTP/1 client skips interim responses before final response" {
 
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings("final", response.response.body);
+}
+
+test "HTTP/1 streaming client waits for 100 Continue before body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var head: [256]u8 = undefined;
+            var used: usize = 0;
+            while (std.mem.indexOf(u8, head[0..used], "\r\n\r\n") == null) {
+                if (used == head.len) return error.HeadersTooLarge;
+                const count = try readSome(
+                    server_ptr.io,
+                    connection.stream,
+                    head[used..],
+                );
+                if (count == 0) return error.ConnectionClosed;
+                used += count;
+            }
+            const head_end = std.mem.indexOf(
+                u8,
+                head[0..used],
+                "\r\n\r\n",
+            ).? + 4;
+            try std.testing.expectEqual(head_end, used);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                head[0..head_end],
+                "Expect: 100-continue\r\n",
+            ) != null);
+
+            // Send an unrelated hint first to prove waitForContinue consumes
+            // multiple informational heads rather than accepting any 1xx.
+            try writeAllToStream(
+                server_ptr.io,
+                connection.stream,
+                "HTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n" ++
+                    "HTTP/1.1 100 Continue\r\n\r\n",
+            );
+            var body: [4]u8 = undefined;
+            try readExactForTest(
+                server_ptr.io,
+                connection.stream,
+                &body,
+            );
+            try std.testing.expectEqualStrings("ping", &body);
+            try writeAllToStream(
+                server_ptr.io,
+                connection.stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\naccepted",
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .method = .POST,
+        .target = "/expect-client",
+        .host = "localhost",
+        .headers = &.{.{
+            .name = "Expect",
+            .value = "100-continue",
+        }},
+        .body_length = 4,
+    });
+    defer writer.deinit();
+    try std.testing.expect((try writer.waitForContinue()) == .proceed);
+    try std.testing.expectError(
+        error.InvalidWriterState,
+        writer.waitForContinue(),
+    );
+    try writer.write("ping");
+    try writer.finish();
+    var response = try writer.readResponse();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("accepted", response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 streaming client returns final response before expected body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var head: [256]u8 = undefined;
+            var used: usize = 0;
+            while (std.mem.indexOf(u8, head[0..used], "\r\n\r\n") == null) {
+                if (used == head.len) return error.HeadersTooLarge;
+                const count = try readSome(
+                    server_ptr.io,
+                    connection.stream,
+                    head[used..],
+                );
+                if (count == 0) return error.ConnectionClosed;
+                used += count;
+            }
+            try writeAllToStream(
+                server_ptr.io,
+                connection.stream,
+                "HTTP/1.1 417 Expectation Failed\r\n" ++
+                    "Content-Length: 8\r\nConnection: close\r\n\r\nrejected",
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .method = .POST,
+        .target = "/expect-reject",
+        .host = "localhost",
+        .headers = &.{.{
+            .name = "Expect",
+            .value = "100-continue",
+        }},
+        .body_length = 4,
+    });
+    defer writer.deinit();
+    switch (try writer.waitForContinue()) {
+        .proceed => return error.TestUnexpectedResult,
+        .final_response => |value| {
+            var response = value;
+            defer response.deinit(allocator);
+            try std.testing.expectEqual(
+                @as(u16, 417),
+                response.response.status,
+            );
+            try std.testing.expectEqualStrings(
+                "rejected",
+                response.response.body,
+            );
+        },
+    }
+    try std.testing.expectError(error.InvalidWriterState, writer.write("ping"));
+    try std.testing.expectError(
+        error.InvalidWriterState,
+        writer.readResponse(),
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 async std.Io server handles concurrent clients" {

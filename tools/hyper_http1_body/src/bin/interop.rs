@@ -5,6 +5,8 @@
 use std::convert::Infallible;
 use std::env;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -48,15 +50,32 @@ async fn run_server(port: u16) {
         .await
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
-    let (stream, _) = listener.accept().await.expect("accept netz client");
-    stream.set_nodelay(true).expect("server TCP_NODELAY");
-    server_http1::Builder::new()
-        .serve_connection(TokioIo::new(stream), service_fn(handle_request))
-        .await
-        .expect("serve netz HTTP/1 client");
+    let mut connections = Vec::new();
+    for connection_index in 0..2 {
+        let (stream, _) = listener.accept().await.expect("accept netz client");
+        stream.set_nodelay(true).expect("server TCP_NODELAY");
+        connections.push(tokio::spawn(async move {
+            server_http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |request| handle_request(request, connection_index)),
+                )
+                .await
+                .expect("serve netz HTTP/1 client");
+        }));
+    }
+    for connection in connections {
+        connection.await.expect("join Hyper HTTP/1 connection");
+    }
 }
 
-async fn handle_request(request: Request<Incoming>) -> Result<Response<Body>, std::io::Error> {
+async fn handle_request(
+    request: Request<Incoming>,
+    connection_index: usize,
+) -> Result<Response<Body>, std::io::Error> {
+    if connection_index == 1 {
+        return handle_expected_request(request).await;
+    }
     if request.method() != Method::POST
         || request.uri().path_and_query().map(|value| value.as_str()) != Some("/interop?from=netz")
         || request.version() != Version::HTTP_11
@@ -100,6 +119,39 @@ async fn handle_request(request: Request<Incoming>) -> Result<Response<Body>, st
     response
         .headers_mut()
         .insert("trailer", HeaderValue::from_static("x-hyper-trailer"));
+    Ok(response)
+}
+
+async fn handle_expected_request(
+    request: Request<Incoming>,
+) -> Result<Response<Body>, std::io::Error> {
+    if request.method() != Method::POST
+        || request.uri().path_and_query().map(|value| value.as_str()) != Some("/expect?from=netz")
+        || request.version() != Version::HTTP_11
+        || request.headers().get("expect") != Some(&HeaderValue::from_static("100-continue"))
+        || request.headers().get("content-length") != Some(&HeaderValue::from_static("11"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected netz expect request head",
+        ));
+    }
+    let (body, trailers) = collect_body(request.into_body()).await?;
+    if body != b"netz-expect" || trailers.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected netz expect request body",
+        ));
+    }
+
+    let mut response = Response::new(body_with_trailers(
+        b"hyper-",
+        b"continued",
+        HeaderMap::new(),
+    ));
+    response
+        .headers_mut()
+        .insert("x-hyper-continue", HeaderValue::from_static("observed"));
     Ok(response)
 }
 
@@ -151,6 +203,38 @@ async fn run_client(port: u16) {
         Some(&HeaderValue::from_static("response-trailer")),
     );
     println!("Hyper HTTP/1 client interoperated with netz: status=201 body=13 trailers=1");
+
+    let informational_count = Arc::new(AtomicUsize::new(0));
+    let observed = informational_count.clone();
+    let mut expected_request = Request::builder()
+        .method(Method::POST)
+        .uri("/expect?from=hyper")
+        .header("host", "localhost")
+        .header("expect", "100-continue")
+        .header("content-length", "12")
+        .body(body_with_trailers(b"hyper-", b"expect", HeaderMap::new()))
+        .expect("expect request");
+    hyper::ext::on_informational(&mut expected_request, move |response| {
+        assert_eq!(response.status(), StatusCode::CONTINUE);
+        assert_eq!(response.version(), Version::HTTP_11);
+        observed.fetch_add(1, Ordering::SeqCst);
+    });
+    let response = sender
+        .send_request(expected_request)
+        .await
+        .expect("send Hyper expect request");
+    assert_eq!(informational_count.load(Ordering::SeqCst), 1);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-netz-continue"),
+        Some(&HeaderValue::from_static("observed")),
+    );
+    let (body, trailers) = collect_body(response.into_body())
+        .await
+        .expect("read netz expect response");
+    assert_eq!(body, b"netz-continued");
+    assert!(trailers.is_none());
+    println!("Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14");
 }
 
 fn body_with_trailers(first: &'static [u8], second: &'static [u8], trailers: HeaderMap) -> Body {

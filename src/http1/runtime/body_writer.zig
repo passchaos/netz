@@ -7,6 +7,7 @@ pub const State = struct {
     generation: u64 = 0,
     written: usize = 0,
     reading: bool = false,
+    expect_continue_received: bool = false,
 
     pub const Phase = enum {
         idle,
@@ -31,6 +32,7 @@ pub const State = struct {
         }
         self.generation +%= 1;
         self.written = 0;
+        self.expect_continue_received = false;
         self.phase = .writing;
         return self.generation;
     }

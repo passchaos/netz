@@ -9,7 +9,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering with exact-message ownership transfer, allocation-free caller-storage request-pipeline batch parsing and one-prefix consumption, reusable runtime header/trailer/encoding scratch for persistent connections, non-chunked header/body vectored writes, transactional batched response validation and one-flush pipeline writes, method-aware response body
-  handling for HEAD and successful CONNECT, stateful incremental request/response writers with fixed-length or chunked framing, cross-write Content-Length enforcement, announced/merged trailers, exact response handoff, and connection-poisoning abandonment semantics, plus callback-based streaming request and response readers with owned heads/trailers, fixed/chunked/close-delimited framing, pipelined-suffix preservation, and no body-sized aggregation, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
+  handling for HEAD and successful CONNECT, stateful incremental request/response writers with fixed-length or chunked framing, cross-write Content-Length enforcement, announced/merged trailers, exact response handoff, client-side `Expect: 100-continue` gating with early-final-response handoff, and connection-poisoning abandonment semantics, plus callback-based streaming request and response readers with owned heads/trailers, fixed/chunked/close-delimited framing, pipelined-suffix preservation, and no body-sized aggregation, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read with invalid-head suppression, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
@@ -549,8 +549,8 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
 # Also run the same strict suite over TLS 1.3 with mandatory h2 ALPN.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
-# Build the locked local Hyper reference offline, then verify chunked bodies
-# and negotiated trailers between netz and Hyper HTTP/1.1 in both directions.
+# Build the locked local Hyper reference offline, then verify chunked bodies,
+# negotiated trailers, and Expect/100-continue handshakes in both directions.
 zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Build the locked local Hyper reference offline, then verify POST headers,
 # multi-frame bodies and trailers between netz and Hyper in both directions.

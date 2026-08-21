@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) void {
     http1_hyper_interop.addArtifactArg(http1_hyper_server);
     const http1_hyper_interop_step = b.step(
         "interop-http1-hyper",
-        "Run bidirectional netz HTTP/1 interop with audited Hyper fixtures",
+        "Run bidirectional HTTP/1 body, trailer, and 100-continue interop with Hyper",
     );
     http1_hyper_interop_step.dependOn(&http1_hyper_interop.step);
 

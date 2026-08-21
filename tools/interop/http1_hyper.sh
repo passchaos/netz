@@ -50,9 +50,18 @@ if ! grep -q 'Hyper HTTP/1 interop server listening' \
   cat "$work/hyper-server.log" >&2
   exit 1
 fi
-timeout 10s "$client" "$port"
+if ! timeout 10s "$client" "$port" \
+    >"$work/netz-client.log" 2>&1; then
+  cat "$work/netz-client.log" >&2
+  cat "$work/hyper-server.log" >&2
+  exit 1
+fi
 wait "$server_pid"
 server_pid=
+cat "$work/netz-client.log"
+grep -Fq \
+  'netz HTTP/1 client observed Hyper 100 Continue: interim=1 body=11 response_body=15' \
+  "$work/netz-client.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
 port=$(free_tcp_port)
@@ -88,6 +97,12 @@ grep -Fq \
   'Hyper HTTP/1 client interoperated with netz: status=201 body=13 trailers=1' \
   "$work/hyper-client.log"
 grep -Fq \
+  'Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14' \
+  "$work/hyper-client.log"
+grep -Fq \
   'method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
+  "$work/netz-server.log"
+grep -Fq \
+  'netz HTTP/1 server completed Hyper Expect exchange: interim=1 body=12 response_body=14' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/1 client -> netz server interop passed'

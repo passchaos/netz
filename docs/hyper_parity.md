@@ -191,8 +191,15 @@ Each peer sends a POST with two chunked DATA contributions, explicitly
 negotiates `TE: trailers`, and terminates with a request trailer. The receiving
 peer verifies method, query-bearing target, custom header, reconstructed body,
 and trailer. The response path repeats the two-chunk plus terminal-trailer
-shape with status 201 and exact response metadata. This is functional HTTP/1.1
-interoperability evidence rather than a benchmark proxy.
+shape with status 201 and exact response metadata. Each direction then performs
+an `Expect: 100-continue` exchange. The sender withholds its declared request
+body until the other implementation emits an HTTP/1.1 100 response, and the
+receiver verifies the body plus final response. Hyper observes netz's interim
+response through its `on_informational` extension; netz uses the new
+`RequestWriter.waitForContinue`, which also consumes preceding non-100 1xx
+responses and returns a typed owned final response if the server rejects the
+expectation before the body. This is functional HTTP/1.1 interoperability
+evidence rather than a benchmark proxy.
 
 ## HTTP/2 consecutive and parallel round trips
 
@@ -458,7 +465,7 @@ connection credit while a more urgent stream has no stream credit.
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers and callback-streaming fixed/chunked/close-delimited readers | Async runtime integration, mature ecosystem and generic Body polling |
+| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, and callback-streaming fixed/chunked/close-delimited readers | Async runtime integration, mature ecosystem and generic Body polling |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |

@@ -59,6 +59,35 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 server interoperated with Hyper: method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1\n",
         .{},
     );
+
+    // Reuse the connection for a second exchange. readRequest() emits the
+    // interim response after a valid Expect head and before it blocks for the
+    // fixed-size body, which Hyper records through its informational callback.
+    var expected = try connection.readRequest(.{});
+    defer expected.deinit(allocator);
+    if (expected.request.method != .POST or
+        !std.mem.eql(u8, expected.request.target, "/expect?from=hyper") or
+        !std.mem.eql(u8, expected.request.body, "hyper-expect") or
+        !headerEquals(
+            expected.request.headers,
+            "expect",
+            "100-continue",
+        ))
+    {
+        return error.InvalidExpectRequest;
+    }
+    try connection.writeResponse(.{
+        .headers = &.{.{
+            .name = "X-Netz-Continue",
+            .value = "observed",
+        }},
+        .body = "netz-continued",
+        .request_method = expected.request.method,
+    });
+    std.debug.print(
+        "netz HTTP/1 server completed Hyper Expect exchange: interim=1 body=12 response_body=14\n",
+        .{},
+    );
 }
 
 fn headerEquals(
