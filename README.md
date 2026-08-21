@@ -42,7 +42,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   status-forbidden response-body write rejection,
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
-  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`,
+  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`, and a native TLS 1.3 client/server runtime that requires negotiated `h2` ALPN,
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, allocation-free HTTP/2 runtime SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, SETTINGS payload length reuse with preallocation/direct-varint writes and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,
   RFC 9297 Capsule Protocol TLV parsing/writing with preallocated direct-varint ArrayList and allocation-free
@@ -544,6 +544,8 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
 # always enables strict mode and rejects empty, skipped, or failed test runs.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
+# Also run the same strict suite over TLS 1.3 with mandatory h2 ALPN.
+zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast

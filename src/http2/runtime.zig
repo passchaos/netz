@@ -10,10 +10,12 @@ const response_scheduler = @import(
 );
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
+const vail = @import("vail");
 
 const net = std.Io.net;
 
-pub const Error = http2.Error || http1_runtime.Error || error{
+pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || error{
     ConnectionClosed,
     UnexpectedFrame,
     InvalidFrame,
@@ -31,6 +33,7 @@ pub const Error = http2.Error || http1_runtime.Error || error{
     ConnectionGoAway,
     UnsupportedScheme,
     PriorityCapacityExceeded,
+    InvalidAlpn,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -48,6 +51,110 @@ const default_max_header_list_size: usize = 16 * 1024;
 // occupies the first pair and leaves room for three DATA frames.
 const max_data_frames_per_write: usize = 4;
 const max_data_frames_with_headers: usize = 3;
+
+fn readSome(
+    io: std.Io,
+    stream: net.Stream,
+    buffer: []u8,
+) net.Stream.Reader.Error!usize {
+    var buffers = [_][]u8{buffer};
+    return io.vtable.netRead(
+        io.userdata,
+        stream.socket.handle,
+        &buffers,
+    );
+}
+
+fn writeAllToStream(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+) net.Stream.Writer.Error!void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const n = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[written..],
+            &.{""},
+            0,
+        );
+        if (n == 0) return error.SocketUnconnected;
+        written += n;
+    }
+}
+
+const RuntimeTransport = union(enum) {
+    tcp: struct { io: std.Io, stream: net.Stream },
+    tls_client: *tls_stream.ClientConnection,
+    tls_server: *tls_stream.ServerConnection,
+
+    pub fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
+        return switch (self) {
+            .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
+            .tls_client => |connection| connection.read(buffer),
+            .tls_server => |connection| connection.read(buffer),
+        };
+    }
+
+    fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
+        return switch (self) {
+            .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
+            .tls_client => |connection| connection.writeAll(bytes),
+            .tls_server => |connection| connection.writeAll(bytes),
+        };
+    }
+
+    fn writeAllParts(
+        self: RuntimeTransport,
+        header: []const u8,
+        payload: []const u8,
+    ) Error!void {
+        return switch (self) {
+            .tcp => |tcp| stream_io.writeAllParts(
+                tcp.io,
+                tcp.stream,
+                header,
+                payload,
+            ),
+            .tls_client => |connection| connection.writeAllParts(
+                header,
+                payload,
+            ),
+            .tls_server => |connection| connection.writeAllParts(
+                header,
+                payload,
+            ),
+        };
+    }
+
+    fn writeAllSlices(
+        self: RuntimeTransport,
+        parts: []const []const u8,
+    ) Error!void {
+        return switch (self) {
+            .tcp => |tcp| stream_io.writeAllSlicesWide(
+                tcp.io,
+                tcp.stream,
+                parts,
+            ),
+            .tls_client => |connection| connection.writeAllSlices(parts),
+            .tls_server => |connection| connection.writeAllSlices(parts),
+        };
+    }
+
+    fn close(self: RuntimeTransport) void {
+        switch (self) {
+            .tcp => |tcp| tcp.stream.close(tcp.io),
+            .tls_client => |connection| connection.deinit(),
+            .tls_server => |connection| connection.deinit(),
+        }
+    }
+};
+
+fn tcpTransport(io: std.Io, stream: net.Stream) RuntimeTransport {
+    return .{ .tcp = .{ .io = io, .stream = stream } };
+}
 
 pub const Limits = struct {
     /// Local allocation/test ceiling for any inbound or outbound frame payload.
@@ -133,56 +240,19 @@ pub const Server = struct {
         self: *Server,
         stream: net.Stream,
     ) Error!Connection {
-        errdefer stream.close(self.io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.io);
         if (self.limits.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
-
-        var preface_buf: [http2.connection_preface.len]u8 = undefined;
-        try readExact(self.io, stream, &preface_buf);
-        http2.validateClientPreface(&preface_buf) catch |err| {
-            // The preface failure happens before a Connection can be returned
-            // to the application, so Server owns the RFC 9113 connection-error
-            // response. Sending GOAWAY also lets peers distinguish a protocol
-            // rejection from an abortive TCP close with unread input.
-            writeConnectionErrorGoAway(
-                self.allocator,
-                self.io,
-                stream,
-                .protocol_error,
-                "invalid-preface",
-            ) catch {};
-            return err;
-        };
-
-        var client_settings = try readFrame(self.allocator, self.io, stream, self.limits);
-        defer client_settings.deinit(self.allocator);
-        if (client_settings.frame.header.frame_type != .settings or (client_settings.frame.header.flags & flag_ack) != 0) {
-            return error.UnexpectedFrame;
-        }
-        const peer_settings = try http2.parseSettings(self.allocator, client_settings.frame.payload);
-        defer self.allocator.free(peer_settings);
-
-        try writeInitialSettings(self.allocator, self.io, stream, self.limits, .server);
-        try writeInitialConnectionWindow(
+        stream_owned = false;
+        return acceptConnectionTransport(
             self.allocator,
             self.io,
             stream,
+            tcpTransport(self.io, stream),
             self.limits,
         );
-        try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
-
-        var connection = Connection{
-            .io = self.io,
-            .allocator = self.allocator,
-            .stream = stream,
-            .role = .server,
-            .limits = self.limits,
-            .awaiting_settings_ack = true,
-        };
-        connection.applyLocalLimits();
-        try connection.applySettings(peer_settings);
-        return connection;
     }
 
     pub fn acceptUpgrade(self: *Server) Error!H2cUpgradeRequest {
@@ -249,6 +319,7 @@ pub const Server = struct {
             .io = self.io,
             .allocator = self.allocator,
             .stream = stream,
+            .transport = tcpTransport(self.io, stream),
             .role = .server,
             .limits = self.limits,
             .awaiting_settings_ack = false,
@@ -308,6 +379,161 @@ pub const Server = struct {
 
         try group.await(self.io);
         return .{ .allocator = self.allocator, .errors = results };
+    }
+};
+
+fn acceptConnectionTransport(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    transport: RuntimeTransport,
+    limits: Limits,
+) Error!Connection {
+    var preface_buf: [http2.connection_preface.len]u8 = undefined;
+    try readExactTransport(transport, &preface_buf);
+    http2.validateClientPreface(&preface_buf) catch |err| {
+        writeConnectionErrorGoAwayTransport(
+            allocator,
+            transport,
+            .protocol_error,
+            "invalid-preface",
+        ) catch {};
+        return err;
+    };
+
+    var client_settings = try readFrameTransport(allocator, transport, limits);
+    defer client_settings.deinit(allocator);
+    if (client_settings.frame.header.frame_type != .settings or
+        (client_settings.frame.header.flags & flag_ack) != 0)
+    {
+        return error.UnexpectedFrame;
+    }
+    const peer_settings = try http2.parseSettings(
+        allocator,
+        client_settings.frame.payload,
+    );
+    defer allocator.free(peer_settings);
+
+    try writeInitialSettingsTransport(allocator, transport, limits, .server);
+    try writeInitialConnectionWindowTransport(allocator, transport, limits);
+    try writeFrameTransport(
+        allocator,
+        transport,
+        .settings,
+        flag_ack,
+        0,
+        &.{},
+    );
+
+    var connection = Connection{
+        .io = io,
+        .allocator = allocator,
+        .stream = stream,
+        .transport = transport,
+        .role = .server,
+        .limits = limits,
+        .awaiting_settings_ack = true,
+    };
+    errdefer connection.close();
+    connection.applyLocalLimits();
+    try connection.applySettings(peer_settings);
+    return connection;
+}
+
+pub const TlsListenOptions = struct {
+    identity: vail.tls.auth.ServerIdentity,
+    limits: Limits = .{},
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    max_client_hello_size: usize = 64 * 1024,
+    max_client_handshake_size: usize = 256 * 1024,
+    client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    tcp_nodelay: bool = true,
+};
+
+/// Native TLS 1.3 HTTP/2 listener. ALPN is mandatory and restricted to `h2`,
+/// so HTTP/1 traffic can never enter the prior-knowledge HTTP/2 parser.
+pub const TlsServer = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    listener: net.Server,
+    limits: Limits,
+    tls: tls_stream.ServerOptions,
+    tcp_nodelay: bool,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        options: TlsListenOptions,
+    ) Error!TlsServer {
+        try validateLocalLimits(options.limits);
+        try options.identity.validate();
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .listener = try bind_address.listen(
+                io,
+                .{ .reuse_address = true },
+            ),
+            .limits = options.limits,
+            .tls = .{
+                .identity = options.identity,
+                .cipher_suites = options.cipher_suites,
+                .max_client_hello_size = options.max_client_hello_size,
+                .max_client_handshake_size = options.max_client_handshake_size,
+                .client_auth = options.client_auth,
+                .alpn_protocols = &.{"h2"},
+            },
+            .tcp_nodelay = options.tcp_nodelay,
+        };
+    }
+
+    pub fn deinit(self: *TlsServer) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn address(self: TlsServer) net.IpAddress {
+        return self.listener.socket.address;
+    }
+
+    pub fn accept(self: *TlsServer) Error!Connection {
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStream(stream);
+    }
+
+    /// Complete TLS and HTTP/2 handshakes on an already accepted socket.
+    /// Ownership transfers to the returned connection on success.
+    pub fn acceptStream(
+        self: *TlsServer,
+        stream: net.Stream,
+    ) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.io);
+        if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+        const tls_connection = try tls_stream.ServerConnection.init(
+            self.allocator,
+            self.io,
+            stream,
+            self.tls,
+        );
+        stream_owned = false;
+        var tls_owned = true;
+        errdefer if (tls_owned) tls_connection.deinit();
+        if (tls_connection.selected_alpn == null or
+            !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
+        {
+            return error.InvalidAlpn;
+        }
+        tls_owned = false;
+        return acceptConnectionTransport(
+            self.allocator,
+            self.io,
+            stream,
+            .{ .tls_server = tls_connection },
+            self.limits,
+        );
     }
 };
 
@@ -374,7 +600,6 @@ pub const Client = struct {
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Connection {
         try validateLocalLimits(limits);
         const stream = try address.connect(io, .{ .mode = .stream });
-        errdefer stream.close(io);
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_scheme = "http";
         return connection;
@@ -392,10 +617,65 @@ pub const Client = struct {
         const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         errdefer allocator.free(owned_host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
-        errdefer stream.close(io);
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_authority = owned_host;
         connection.default_scheme = "http";
+        return connection;
+    }
+
+    pub fn connectTlsHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        const host_name = try net.HostName.init(host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+        const tls_connection = try tls_stream.ClientConnection.initVerified(
+            allocator,
+            io,
+            stream,
+            .{
+                .server_name = host,
+                .verify_host = tls_options.verify_host,
+                .ca_bundle = tls_options.ca_bundle,
+                .server_verifier = tls_options.server_verifier,
+                .client_identity = tls_options.client_identity,
+                .alpn_protocols = &.{"h2"},
+                .cipher_suites = tls_options.cipher_suites,
+                .max_server_handshake_size = tls_options.max_server_handshake_size,
+            },
+        );
+        stream_owned = false;
+        var tls_owned = true;
+        errdefer if (tls_owned) tls_connection.deinit();
+        if (tls_connection.selected_alpn == null or
+            !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
+        {
+            return error.InvalidAlpn;
+        }
+        const owned_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
+        errdefer allocator.free(owned_host);
+        tls_owned = false;
+        var connection = try connectTransport(
+            allocator,
+            io,
+            stream,
+            .{ .tls_client = tls_connection },
+            limits,
+        );
+        connection.default_authority = owned_host;
+        connection.default_scheme = "https";
         return connection;
     }
 
@@ -466,6 +746,7 @@ pub const Client = struct {
             .io = io,
             .allocator = allocator,
             .stream = stream,
+            .transport = tcpTransport(io, stream),
             .role = .client,
             .limits = limits,
             .awaiting_settings_ack = true,
@@ -533,12 +814,31 @@ pub const Client = struct {
     }
 
     fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
-        try writeAll(io, stream, http2.connection_preface);
-        try writeInitialSettings(allocator, io, stream, limits, .client);
-        try writeInitialConnectionWindow(allocator, io, stream, limits);
+        stream_owned = false;
+        return connectTransport(
+            allocator,
+            io,
+            stream,
+            tcpTransport(io, stream),
+            limits,
+        );
+    }
+
+    fn connectTransport(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        transport: RuntimeTransport,
+        limits: Limits,
+    ) Error!Connection {
+        try transport.writeAll(http2.connection_preface);
+        try writeInitialSettingsTransport(allocator, transport, limits, .client);
+        try writeInitialConnectionWindowTransport(allocator, transport, limits);
 
         var saw_server_settings = false;
         var saw_settings_ack = false;
@@ -546,6 +846,7 @@ pub const Client = struct {
             .io = io,
             .allocator = allocator,
             .stream = stream,
+            .transport = transport,
             .role = .client,
             .limits = limits,
             .awaiting_settings_ack = true,
@@ -553,7 +854,7 @@ pub const Client = struct {
         connection.applyLocalLimits();
         errdefer connection.close();
         while (!saw_server_settings or !saw_settings_ack) {
-            var frame = try readFrame(allocator, io, stream, limits);
+            var frame = try readFrameTransport(allocator, transport, limits);
             defer frame.deinit(allocator);
             if (frame.frame.header.frame_type != .settings) {
                 if (try connection.handleConnectionOrGoAwayFrame(frame.frame)) continue;
@@ -567,7 +868,7 @@ pub const Client = struct {
                 const settings = try http2.parseSettings(allocator, frame.frame.payload);
                 defer allocator.free(settings);
                 try connection.applySettings(settings);
-                try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
+                try writeFrameTransport(allocator, transport, .settings, flag_ack, 0, &.{});
             }
         }
         return connection;
@@ -580,27 +881,79 @@ pub const Client = struct {
         request_options: RequestOptions,
         limits: Limits,
     ) Error!OwnedResponse {
+        return requestUriTls(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            .{},
+        );
+    }
+
+    pub fn requestUriTls(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+    ) Error!OwnedResponse {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (!is_http and !is_https) return error.UnsupportedScheme;
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
-        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
+        var endpoint = try http1_runtime.uriEndpoint(
+            allocator,
+            uri,
+            if (is_https) 443 else 80,
+        );
         defer endpoint.deinit();
 
         try validateLocalLimits(limits);
-        const stream = try endpoint.connect(io);
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        var connection = try connectStream(allocator, io, stream, limits);
-        stream_owned = false;
+        var connection = if (is_https)
+            try connectTlsHost(
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                tls_options,
+            )
+        else blk: {
+            const stream = try endpoint.connect(io);
+            var stream_owned = true;
+            errdefer if (stream_owned) stream.close(io);
+            const established = try connectStream(allocator, io, stream, limits);
+            stream_owned = false;
+            break :blk established;
+        };
         defer connection.close();
-        connection.default_authority = try allocator.dupe(u8, endpoint.authority);
+        if (connection.default_authority) |authority| {
+            allocator.free(authority);
+        }
+        connection.default_authority = try allocator.dupe(
+            u8,
+            endpoint.authority,
+        );
         connection.default_scheme = uri.scheme;
         var options = request_options;
         options.path = target;
         if (options.scheme == null) options.scheme = uri.scheme;
         return connection.request(options);
     }
+};
+
+pub const TlsConnectOptions = struct {
+    verify_host: bool = true,
+    ca_bundle: ?tls_stream.ClientCaBundle = null,
+    server_verifier: ?vail.tls.auth.ClientVerifier = null,
+    client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    max_server_handshake_size: usize = 256 * 1024,
 };
 
 pub const Role = enum {
@@ -695,6 +1048,7 @@ pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: net.Stream,
+    transport: ?RuntimeTransport = null,
     role: Role,
     limits: Limits = .{},
     next_client_stream_id: u31 = 1,
@@ -745,8 +1099,8 @@ pub const Connection = struct {
     alternative_service_index: AltSvcIndex = .empty,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
-    /// runtime constructors set this to "http"; a future ALPN/TLS constructor
-    /// can set it to "https" without changing request call sites.
+    /// constructors set this to `http`, while the ALPN-authenticated TLS
+    /// constructor sets it to `https`.
     default_scheme: ?[]const u8 = null,
 
     pub fn close(self: *Connection) void {
@@ -784,8 +1138,12 @@ pub const Connection = struct {
             frame.deinit(self.allocator);
         }
         self.frame_reader.deinit(self.allocator);
-        self.stream.close(self.io);
+        self.transportForIo().close();
         self.* = undefined;
+    }
+
+    fn transportForIo(self: *Connection) RuntimeTransport {
+        return self.transport orelse tcpTransport(self.io, self.stream);
     }
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
@@ -1131,7 +1489,7 @@ pub const Connection = struct {
             };
             started += 1;
         }
-        try writeAll(self.io, self.stream, batch.items);
+        try self.transportForIo().writeAll(batch.items);
         self.hpack_encoder.deinit(self.allocator);
         self.hpack_encoder = staged_encoder;
         staged_encoder_owned = false;
@@ -1226,7 +1584,7 @@ pub const Connection = struct {
             };
             started += 1;
         }
-        writeAll(self.io, self.stream, batch.items) catch |err| {
+        self.transportForIo().writeAll(batch.items) catch |err| {
             // Some HEADERS may already be visible. As with body-bearing
             // batches, retain advanced HPACK state and consumed stream IDs so
             // accidental reuse cannot pretend the transaction never started.
@@ -1392,7 +1750,7 @@ pub const Connection = struct {
             stream_credit_reserved.* = true;
         }
 
-        writeAll(self.io, self.stream, batch.items) catch |err| {
+        self.transportForIo().writeAll(batch.items) catch |err| {
             // A transport failure may expose only a prefix of the staged HPACK
             // sequence. It cannot be retried or rolled back; commit encoder
             // state and stream IDs so any accidental reuse fails closed.
@@ -1697,9 +2055,7 @@ pub const Connection = struct {
                 }
             }
             if (!has_data) return;
-            try stream_io.writeAllSlicesWide(
-                self.io,
-                self.stream,
+            try self.transportForIo().writeAllSlices(
                 self.batch_data_parts.items,
             );
         }
@@ -2210,7 +2566,7 @@ pub const Connection = struct {
             );
         }
         if (batch.items.len != 0) {
-            try writeAll(self.io, self.stream, batch.items);
+            try self.transportForIo().writeAll(batch.items);
         }
         for (states) |state| {
             if (!state.done) self.forgetStreamWindows(state.stream_id);
@@ -2400,7 +2756,7 @@ pub const Connection = struct {
             stream_id,
             field_value,
         );
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transportForIo().writeAll(encoded.items);
     }
 
     /// Read and apply the next peer PRIORITY_UPDATE, skipping ordinary
@@ -3257,10 +3613,9 @@ pub const Connection = struct {
     }
 
     fn readBufferedFrame(self: *Connection) Error!frame_io.BorrowedFrame {
-        const borrowed = try self.frame_reader.read(
+        const borrowed = try self.frame_reader.readTransport(
             self.allocator,
-            self.io,
-            self.stream,
+            self.transportForIo(),
             @min(
                 self.limits.max_frame_payload,
                 self.limits.max_frame_size,
@@ -3738,7 +4093,7 @@ pub const Connection = struct {
             );
         }
 
-        try writeAll(self.io, self.stream, batch.items);
+        try self.transportForIo().writeAll(batch.items);
         self.hpack_encoder.deinit(self.allocator);
         self.hpack_encoder = staged_encoder;
         staged_encoder_owned = false;
@@ -3852,7 +4207,7 @@ pub const Connection = struct {
             );
         }
 
-        writeAll(self.io, self.stream, batch.items) catch |err| {
+        self.transportForIo().writeAll(batch.items) catch |err| {
             // A transport failure may expose only a prefix of the staged HPACK
             // sequence. It cannot be retried or rolled back; commit encoder
             // state so accidental connection reuse fails closed.
@@ -3975,9 +4330,7 @@ pub const Connection = struct {
                 // credit. Keep the conservative reservation and require the
                 // caller to close rather than retry this response batch.
                 wire_write_started = true;
-                try stream_io.writeAllSlicesWide(
-                    self.io,
-                    self.stream,
+                try self.transportForIo().writeAllSlices(
                     self.batch_data_parts.items,
                 );
                 continue;
@@ -4340,7 +4693,7 @@ pub const Connection = struct {
     }
 
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
-        try writeFrame(self.allocator, self.io, self.stream, .ping, 0, 0, &data);
+        try writeFrameTransport(self.allocator, self.transportForIo(), .ping, 0, 0, &data);
         while (true) {
             var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
@@ -4350,7 +4703,7 @@ pub const Connection = struct {
             }
             if ((frame.frame.header.flags & flag_ack) == 0) {
                 const ping_payload = try http2.PingPayload.parse(frame.frame);
-                try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
+                try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
                 continue;
             }
             const ack_payload = (try http2.PingPayload.parse(frame.frame)).data;
@@ -4373,7 +4726,7 @@ pub const Connection = struct {
             }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
             if ((frame.frame.header.flags & flag_ack) != 0) continue;
-            try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
+            try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
             return ping_payload.data;
         }
     }
@@ -4383,7 +4736,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try http2.GoAwayPayload.write(&encoded, self.allocator, last_stream_id, error_code, debug_data);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transportForIo().writeAll(encoded.items);
         self.local_goaway_last_stream_id = last_stream_id;
     }
 
@@ -4399,7 +4752,7 @@ pub const Connection = struct {
             self.allocator,
             origins,
         );
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transportForIo().writeAll(encoded.items);
     }
 
     pub fn sendAlternativeService(
@@ -4418,7 +4771,7 @@ pub const Connection = struct {
             origin,
             field_value,
         );
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transportForIo().writeAll(encoded.items);
     }
 
     fn validateLocalGoAway(self: Connection, last_stream_id: u31) Error!void {
@@ -4484,7 +4837,7 @@ pub const Connection = struct {
             stream_id,
             error_code,
         );
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transportForIo().writeAll(encoded.items);
     }
 
     fn recordResetStream(
@@ -4591,7 +4944,7 @@ pub const Connection = struct {
             );
             encoded_len += http2.FrameHeader.encoded_len + 4;
         }
-        try writeAll(self.io, self.stream, encoded[0..encoded_len]);
+        try self.transportForIo().writeAll(encoded[0..encoded_len]);
     }
 
     fn addActiveLocalStream(self: *Connection, stream_id: u31) Error!void {
@@ -5499,9 +5852,7 @@ pub const Connection = struct {
             part_count += 2;
             offset = end;
         }
-        try stream_io.writeAllSlices(
-            self.io,
-            self.stream,
+        try self.transportForIo().writeAllSlices(
             parts[0..part_count],
         );
         if (first_data_len < data.len) {
@@ -5578,14 +5929,14 @@ pub const Connection = struct {
                     const settings = try http2.parseSettings(self.allocator, frame.payload);
                     defer self.allocator.free(settings);
                     try self.applySettings(settings);
-                    try writeFrame(self.allocator, self.io, self.stream, .settings, flag_ack, 0, &.{});
+                    try writeFrameTransport(self.allocator, self.transportForIo(), .settings, flag_ack, 0, &.{});
                 }
                 return true;
             },
             .ping => {
                 const ping_payload = try http2.PingPayload.parse(frame);
                 if ((frame.header.flags & flag_ack) == 0) {
-                    try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
+                    try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
                 }
                 return true;
             },
@@ -5753,10 +6104,9 @@ pub const Connection = struct {
         const chunk_size = self.outboundFramePayloadLimit();
         const first_len = @min(block.len, chunk_size);
         var offset = first_len;
-        try writeFrame(
+        try writeFrameTransport(
             self.allocator,
-            self.io,
-            self.stream,
+            self.transportForIo(),
             .headers,
             (if (offset == block.len) flag_end_headers else 0) | if (end_stream) flag_end_stream else 0,
             stream_id,
@@ -5764,10 +6114,9 @@ pub const Connection = struct {
         );
         while (offset < block.len) {
             const end = @min(block.len, offset + chunk_size);
-            try writeFrame(
+            try writeFrameTransport(
                 self.allocator,
-                self.io,
-                self.stream,
+                self.transportForIo(),
                 .continuation,
                 if (end == block.len) flag_end_headers else 0,
                 stream_id,
@@ -5830,14 +6179,13 @@ pub const Connection = struct {
             block[0..first_len],
             .{ .end_headers = first_len == block.len },
         );
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transportForIo().writeAll(encoded.items);
         var offset = first_len;
         while (offset < block.len) {
             const end = @min(block.len, offset + chunk_size);
-            try writeFrame(
+            try writeFrameTransport(
                 self.allocator,
-                self.io,
-                self.stream,
+                self.transportForIo(),
                 .continuation,
                 if (end == block.len) flag_end_headers else 0,
                 parent_stream_id,
@@ -5876,10 +6224,9 @@ pub const Connection = struct {
         written.* = 0;
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
-            try writeFrame(
+            try writeFrameTransport(
                 self.allocator,
-                self.io,
-                self.stream,
+                self.transportForIo(),
                 .data,
                 if (end_stream) flag_end_stream else 0,
                 stream_id,
@@ -5964,9 +6311,7 @@ pub const Connection = struct {
             part_count += 2;
             offset = end;
         }
-        try stream_io.writeAllSlices(
-            self.io,
-            self.stream,
+        try self.transportForIo().writeAllSlices(
             parts[0..part_count],
         );
     }
@@ -6534,10 +6879,9 @@ pub const RequestWriter = struct {
                 // buffered response frame for readResponse*. Use the raw frame
                 // writer because the tracked DATA helper intentionally refuses
                 // further request DATA once a response is pending.
-                writeFrame(
+                writeFrameTransport(
                     self.connection.allocator,
-                    self.connection.io,
-                    self.connection.stream,
+                    self.connection.transportForIo(),
                     .data,
                     flag_end_stream,
                     self.stream_id,
@@ -6566,10 +6910,9 @@ pub const RequestWriter = struct {
             error.ResponseAvailable => {
                 self.written += sent;
                 self.body_finished = true;
-                writeFrame(
+                writeFrameTransport(
                     self.connection.allocator,
-                    self.connection.io,
-                    self.connection.stream,
+                    self.connection.transportForIo(),
                     .data,
                     flag_end_stream,
                     self.stream_id,
@@ -6983,8 +7326,20 @@ pub const OwnedFrame = struct {
 };
 
 fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!OwnedFrame {
+    return readFrameTransport(
+        allocator,
+        tcpTransport(io, stream),
+        limits,
+    );
+}
+
+fn readFrameTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+) Error!OwnedFrame {
     var header_buf: [@intCast(http2.FrameHeader.encoded_len)]u8 = undefined;
-    try readExact(io, stream, &header_buf);
+    try readExactTransport(transport, &header_buf);
     const header = try http2.FrameHeader.parse(&header_buf);
     const payload_len: usize = header.length;
     // SETTINGS_MAX_FRAME_SIZE is the receive ceiling we advertise to the peer.
@@ -6996,7 +7351,7 @@ fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limit
     const bytes = try allocator.alloc(u8, header_buf.len + payload_len);
     errdefer allocator.free(bytes);
     @memcpy(bytes[0..header_buf.len], &header_buf);
-    try readExact(io, stream, bytes[header_buf.len..]);
+    try readExactTransport(transport, bytes[header_buf.len..]);
     const frame = try http2.Frame.parse(bytes);
     try validateFrameEnvelope(frame);
     return .{ .bytes = bytes, .frame = frame };
@@ -7009,6 +7364,20 @@ fn writeConnectionErrorGoAway(
     error_code: http2.ErrorCode,
     debug_data: []const u8,
 ) Error!void {
+    return writeConnectionErrorGoAwayTransport(
+        allocator,
+        tcpTransport(io, stream),
+        error_code,
+        debug_data,
+    );
+}
+
+fn writeConnectionErrorGoAwayTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    error_code: http2.ErrorCode,
+    debug_data: []const u8,
+) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try http2.GoAwayPayload.write(
@@ -7018,7 +7387,7 @@ fn writeConnectionErrorGoAway(
         error_code,
         debug_data,
     );
-    try writeAll(io, stream, encoded.items);
+    try transport.writeAll(encoded.items);
 }
 
 fn validateFrameEnvelope(frame: http2.Frame) Error!void {
@@ -7080,6 +7449,24 @@ fn writeFrame(
     stream_id: u31,
     payload: []const u8,
 ) Error!void {
+    return writeFrameTransport(
+        allocator,
+        tcpTransport(io, stream),
+        frame_type,
+        flags,
+        stream_id,
+        payload,
+    );
+}
+
+fn writeFrameTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    frame_type: http2.FrameType,
+    flags: u8,
+    stream_id: u31,
+    payload: []const u8,
+) Error!void {
     _ = allocator;
     var header: [http2.FrameHeader.encoded_len]u8 = undefined;
     try encodeFrameHeader(
@@ -7089,7 +7476,7 @@ fn writeFrame(
         stream_id,
         payload.len,
     );
-    try stream_io.writeAllParts(io, stream, &header, payload);
+    try transport.writeAllParts(&header, payload);
 }
 
 fn encodeFrameHeader(
@@ -7217,10 +7604,24 @@ fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
 }
 
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
+    return writeInitialSettingsTransport(
+        allocator,
+        tcpTransport(io, stream),
+        limits,
+        role,
+    );
+}
+
+fn writeInitialSettingsTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    role: Role,
+) Error!void {
     const settings = try settingsForLimits(limits, role);
     var payload_buf: [max_settings_payload_len]u8 = undefined;
     const payload = try encodeSettingsPayloadInto(&payload_buf, settings.buf[0..settings.count]);
-    try writeFrame(allocator, io, stream, .settings, 0, 0, payload);
+    try writeFrameTransport(allocator, transport, .settings, 0, 0, payload);
 }
 
 fn writeInitialConnectionWindow(
@@ -7229,16 +7630,27 @@ fn writeInitialConnectionWindow(
     stream: net.Stream,
     limits: Limits,
 ) Error!void {
+    return writeInitialConnectionWindowTransport(
+        allocator,
+        tcpTransport(io, stream),
+        limits,
+    );
+}
+
+fn writeInitialConnectionWindowTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+) Error!void {
     if (limits.initial_connection_window_size == default_flow_window) return;
     const increment: u31 = @intCast(
         limits.initial_connection_window_size - default_flow_window,
     );
     var payload: [4]u8 = undefined;
     std.mem.writeInt(u32, &payload, increment, .big);
-    try writeFrame(
+    try writeFrameTransport(
         allocator,
-        io,
-        stream,
+        transport,
         .window_update,
         0,
         0,
@@ -8197,8 +8609,24 @@ fn containsHttpToken(value: []const u8, needle: []const u8) bool {
 fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) ReadExactError!void {
     var offset: usize = 0;
     while (offset < buffer.len) {
-        var bufs = [_][]u8{buffer[offset..]};
-        const n = try io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
+        var buffers = [_][]u8{buffer[offset..]};
+        const n = try io.vtable.netRead(
+            io.userdata,
+            stream.socket.handle,
+            &buffers,
+        );
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+}
+
+fn readExactTransport(
+    transport: RuntimeTransport,
+    buffer: []u8,
+) Error!void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const n = try transport.read(buffer[offset..]);
         if (n == 0) return error.ConnectionClosed;
         offset += n;
     }
@@ -8808,7 +9236,7 @@ test "HTTP/2 client sends request to URI" {
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("h2-uri-ok", response.body);
 
-    try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "https://localhost/", .{}, .{}));
+    try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "ftp://localhost/", .{}, .{}));
     try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
 }
 
@@ -15049,6 +15477,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/tls_tests.zig");
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");

@@ -1,12 +1,10 @@
 const std = @import("std");
 const http2 = @import("../mod.zig");
 
-const net = std.Io.net;
-
 pub const Error = http2.Error || error{
     ConnectionClosed,
     MessageTooLarge,
-} || std.mem.Allocator.Error || net.Stream.Reader.Error;
+} || std.mem.Allocator.Error || std.Io.net.Stream.Reader.Error;
 
 pub const BorrowedFrame = struct {
     bytes: []const u8,
@@ -32,9 +30,44 @@ pub const Reader = struct {
         self: *Reader,
         allocator: std.mem.Allocator,
         io: std.Io,
-        stream: net.Stream,
+        stream: std.Io.net.Stream,
         inbound_payload_limit: usize,
     ) Error!BorrowedFrame {
+        const Source = struct {
+            io: std.Io,
+            stream: std.Io.net.Stream,
+
+            fn read(source: @This(), buffer: []u8) !usize {
+                var buffers = [_][]u8{buffer};
+                return source.io.vtable.netRead(
+                    source.io.userdata,
+                    source.stream.socket.handle,
+                    &buffers,
+                );
+            }
+        };
+        return self.readFrom(
+            allocator,
+            Source{ .io = io, .stream = stream },
+            inbound_payload_limit,
+        );
+    }
+
+    pub fn readTransport(
+        self: *Reader,
+        allocator: std.mem.Allocator,
+        transport: anytype,
+        inbound_payload_limit: usize,
+    ) !BorrowedFrame {
+        return self.readFrom(allocator, transport, inbound_payload_limit);
+    }
+
+    fn readFrom(
+        self: *Reader,
+        allocator: std.mem.Allocator,
+        source: anytype,
+        inbound_payload_limit: usize,
+    ) !BorrowedFrame {
         const read_size: usize = 64 * 1024;
         while (true) {
             const available = self.buffer.items[self.start..];
@@ -75,7 +108,7 @@ pub const Reader = struct {
                 allocator,
                 read_size,
             );
-            const count = readSome(io, stream, destination) catch |err| {
+            const count = source.read(destination) catch |err| {
                 self.buffer.items.len -= destination.len;
                 return err;
             };
@@ -87,16 +120,3 @@ pub const Reader = struct {
         }
     }
 };
-
-fn readSome(
-    io: std.Io,
-    stream: net.Stream,
-    buffer: []u8,
-) net.Stream.Reader.Error!usize {
-    var buffers = [_][]u8{buffer};
-    return io.vtable.netRead(
-        io.userdata,
-        stream.socket.handle,
-        &buffers,
-    );
-}

@@ -28,7 +28,15 @@ with socket.socket() as sock:
 PY
 )
 
-"$server" "$port" >"$work/server.log" 2>&1 &
+server_args=("$port")
+h2spec_transport_args=()
+if [[ ${1:-} == "--tls" ]]; then
+  shift
+  server_args+=(--tls)
+  h2spec_transport_args+=(--tls --insecure)
+fi
+
+"$server" "${server_args[@]}" >"$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
   if grep -q 'h2spec server listening' "$work/server.log"; then
@@ -50,7 +58,8 @@ log="$work/h2spec.log"
 # Strict mode adds the connection-error GOAWAY check that h2spec otherwise
 # skips. Keep it mandatory for the repository gate rather than relying on every
 # caller to remember an optional flag.
-"$h2spec" --host 127.0.0.1 --port "$port" --timeout 2 --strict "$@" \
+"$h2spec" --host 127.0.0.1 --port "$port" --timeout 2 --strict \
+  "${h2spec_transport_args[@]}" "$@" \
   2>&1 | tee "$log"
 
 # h2spec currently exits successfully when a selector matches no tests. Its

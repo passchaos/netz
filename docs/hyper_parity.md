@@ -418,7 +418,7 @@ connection credit while a more urgent stream has no stream credit.
 | --- | --- | --- |
 | HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers and callback-streaming fixed/chunked/close-delimited readers | Async runtime integration, mature ecosystem and generic Body polling |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
-| HTTP/2 | h2c client/server, Upgrade, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
+| HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
 | HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |
 | HTTP/1 chunked 1-MiB duplex | 284.04-286.06 us/op pinned | 414.64-417.45 us/op pinned |
@@ -476,7 +476,12 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-08-21).
    The gate now supplies `--strict` itself and parses h2spec's summary so an
    empty selection, skipped case, or failed case cannot be mistaken for a
-   successful conformance run. This covers the external wire checks but does
-   not replace TLS/ALPN or broader HTTP client interoperability evidence.
+   successful conformance run. This covers the external h2c wire checks but
+   does not replace broader HTTP client interoperability evidence. The native
+   TLS 1.3 HTTP/2 runtime separately has an end-to-end encrypted request test
+   that verifies `h2` ALPN and the transport-derived `https` pseudo-header,
+   plus a no-common-ALPN rejection test. Passing `--tls` to the same h2spec
+   command runs all 147 strict cases through TLS 1.3 and negotiated `h2` when
+   h2spec is built with a current Go TLS stack that offers an X25519 key share.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.

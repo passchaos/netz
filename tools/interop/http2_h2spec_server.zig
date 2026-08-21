@@ -9,9 +9,12 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const use_tls = args.len == 3 and
+        std.mem.eql(u8, args[2], "--tls");
+    if (args.len == 3 and !use_tls) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -19,17 +22,52 @@ pub fn main(init: std.process.Init) !void {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try netz.http2.runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(port) },
-        .{
-            .max_frame_payload = 16 * 1024,
-            .max_body_bytes = 1024 * 1024,
-            .max_concurrent_streams = 128,
-        },
-    );
-    defer server.deinit();
+    const limits: netz.http2.runtime.Limits = .{
+        .max_frame_payload = 16 * 1024,
+        .max_body_bytes = 1024 * 1024,
+        .max_concurrent_streams = 128,
+    };
+    if (use_tls) {
+        var certificate_der: [netz.tls.testing.certificate_der_len]u8 =
+            undefined;
+        try std.base64.standard.Decoder.decode(
+            &certificate_der,
+            netz.tls.testing.certificate_base64,
+        );
+        const key_pair = try netz.tls.testing.serverKeyPair();
+        var server = try netz.http2.runtime.TlsServer.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            .{
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .limits = limits,
+            },
+        );
+        defer server.deinit();
+        try serveForever(&server, io, allocator);
+    } else {
+        var server = try netz.http2.runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+        );
+        defer server.deinit();
+        try serveForever(&server, io, allocator);
+    }
+}
+
+fn serveForever(
+    server: anytype,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !void {
     std.debug.print(
         "netz h2spec server listening on {f}\n",
         .{server.address()},
@@ -40,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         const thread = std.Thread.spawn(
             .{},
             acceptAndServe,
-            .{ &server, io, allocator, stream },
+            .{ server, io, allocator, stream },
         ) catch {
             stream.close(io);
             continue;
@@ -50,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn acceptAndServe(
-    server: *netz.http2.runtime.Server,
+    server: anytype,
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
@@ -94,11 +132,13 @@ fn acceptAndServe(
     // h2spec's ServerDataLength probe does not close its helper connection.
     // Handling each accepted socket independently prevents that probe from
     // blocking the listener and therefore the remainder of the suite.
-    connection.stream.shutdown(io, .send) catch {};
-    var drain: [1024]u8 = undefined;
-    var reader = connection.stream.reader(io, &drain);
-    while (true) {
-        _ = reader.interface.takeByte() catch break;
+    if (@TypeOf(server.*) == netz.http2.runtime.Server) {
+        connection.stream.shutdown(io, .send) catch {};
+        var drain: [1024]u8 = undefined;
+        var reader = connection.stream.reader(io, &drain);
+        while (true) {
+            _ = reader.interface.takeByte() catch break;
+        }
     }
     connection.close();
 }
