@@ -189,7 +189,7 @@ pub fn build(b: *std.Build) void {
     quic_quic_go.addArtifactArg(quic_quic_go_server);
     const quic_quic_go_step = b.step(
         "interop-quic-quic-go",
-        "Run verified bidirectional QUIC interop with the local quic-go fixture",
+        "Run verified QUIC echo and cancellation interop with local quic-go fixtures",
     );
     quic_quic_go_step.dependOn(&quic_quic_go.step);
 

@@ -1,15 +1,80 @@
-//! One-shot QUIC v1 echo server for process-boundary interop with quic-go.
+//! One-shot QUIC v1 server for process-boundary interop with quic-go.
 
 const std = @import("std");
 const netz = @import("netz");
 
 const payloads = [_][]const u8{ "hello", "world" };
+const Mode = enum { echo, reset, stop };
+
+fn receiveExpectedStream(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    expected: []const u8,
+) !void {
+    var received: usize = 0;
+    while (received < expected.len or
+        !connection.receivedStreamComplete(stream_id))
+    {
+        if (connection.availableReceivedStream(stream_id)) |available| {
+            if (available.len != 0) {
+                const end = std.math.add(
+                    usize,
+                    received,
+                    available.len,
+                ) catch return error.UnexpectedRequest;
+                if (end > expected.len or !std.mem.eql(
+                    u8,
+                    available,
+                    expected[received..end],
+                )) return error.UnexpectedRequest;
+                try connection.releaseReceivedCapacity(
+                    stream_id,
+                    available.len,
+                );
+                received = end;
+            }
+        }
+        if (received == expected.len and
+            connection.receivedStreamComplete(stream_id))
+        {
+            break;
+        }
+        var packet = try connection.receivePacketServicingTimers();
+        defer packet.deinit(allocator);
+    }
+}
+
+fn sendEcho(
+    connection: *netz.quic.one_rtt.Connection,
+    stream_id: u64,
+    payload: []const u8,
+) !void {
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = 0,
+        .data = payload,
+        .fin = true,
+    } }});
+}
+
+fn receivePacket(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+) !void {
+    var packet = try connection.receivePacketServicingTimers();
+    defer packet.deinit(allocator);
+}
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const mode: Mode = if (args.len == 3)
+        std.meta.stringToEnum(Mode, args[2]) orelse return error.InvalidArgument
+    else
+        .echo;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -61,53 +126,90 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidAlpn;
     }
 
-    for (payloads, 0..) |expected, index| {
-        const stream_id: u64 = @intCast(index * 4);
-        var received: usize = 0;
-        while (received < expected.len or
-            !established.connection.receivedStreamComplete(stream_id))
-        {
-            if (established.connection.availableReceivedStream(
-                stream_id,
-            )) |available| {
-                if (available.len != 0) {
-                    const end = std.math.add(
-                        usize,
-                        received,
-                        available.len,
-                    ) catch return error.UnexpectedRequest;
-                    if (end > expected.len or !std.mem.eql(
-                        u8,
-                        available,
-                        expected[received..end],
-                    )) return error.UnexpectedRequest;
-                    try established.connection.releaseReceivedCapacity(
-                        stream_id,
-                        available.len,
-                    );
-                    received = end;
+    switch (mode) {
+        .echo => {
+            for (payloads, 0..) |expected, index| {
+                const stream_id: u64 = @intCast(index * 4);
+                try receiveExpectedStream(
+                    &established.connection,
+                    allocator,
+                    stream_id,
+                    expected,
+                );
+                try sendEcho(
+                    &established.connection,
+                    stream_id,
+                    expected,
+                );
+            }
+        },
+        .reset => {
+            while (established.connection.streamResetReceived(0) == null) {
+                try receivePacket(&established.connection, allocator);
+            }
+            const reset = established.connection.streamResetReceived(0).?;
+            if (reset.application_error_code != 41) {
+                return error.UnexpectedResetError;
+            }
+            try receiveExpectedStream(
+                &established.connection,
+                allocator,
+                4,
+                payloads[1],
+            );
+            try sendEcho(&established.connection, 4, payloads[1]);
+        },
+        .stop => {
+            // quic-go can append probe bytes immediately after "stop" while
+            // waiting for STOP_SENDING. Validate only the stable prefix before
+            // cancelling its send side; RESET_STREAM supplies the final size.
+            while (true) {
+                if (established.connection.availableReceivedStream(0)) |available| {
+                    const prefix_len = @min(available.len, "stop".len);
+                    if (!std.mem.eql(u8, available[0..prefix_len], "stop"[0..prefix_len])) {
+                        return error.UnexpectedRequest;
+                    }
+                    if (available.len >= "stop".len) {
+                        try established.connection.releaseReceivedCapacity(
+                            0,
+                            "stop".len,
+                        );
+                        break;
+                    }
                 }
+                try receivePacket(&established.connection, allocator);
             }
-            if (received == expected.len and
-                established.connection.receivedStreamComplete(stream_id))
-            {
-                break;
+            try established.connection.sendStopSending(0, 42);
+            while (established.connection.streamResetReceived(0) == null) {
+                try receivePacket(&established.connection, allocator);
             }
-            var packet = try established.connection
-                .receivePacketServicingTimers();
-            defer packet.deinit(allocator);
-        }
-        try established.connection.send(&.{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = 0,
-            .data = expected,
-            .fin = true,
-        } }});
+            const reset = established.connection.streamResetReceived(0).?;
+            if (reset.application_error_code != 42 or reset.final_size < 4) {
+                return error.UnexpectedResetError;
+            }
+            try receiveExpectedStream(
+                &established.connection,
+                allocator,
+                4,
+                payloads[1],
+            );
+            try sendEcho(&established.connection, 4, payloads[1]);
+        },
     }
 
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
-    std.debug.print(
-        "netz QUIC server interoperated with quic-go: alpn=hq-interop streams=2 bytes=10\n",
-        .{},
-    );
+    switch (mode) {
+        .echo => std.debug.print(
+            "netz QUIC server interoperated with quic-go: alpn=hq-interop streams=2 bytes=10\n",
+            .{},
+        ),
+        .reset => std.debug.print(
+            "netz QUIC reset server interoperated with quic-go: alpn=hq-interop reset_error=41 echo_stream=4 echo_bytes=5\n",
+            .{},
+        ),
+        .stop => std.debug.print(
+            "netz QUIC stop-sending server interoperated with quic-go: alpn=hq-interop stop_error=42 reset_error=42 echo_stream=4 echo_bytes=5\n",
+            .{},
+        ),
+    }
 }
