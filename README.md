@@ -546,9 +546,14 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
 # Also run the same strict suite over TLS 1.3 with mandatory h2 ALPN.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
+# Build the locked local Hyper reference offline, then verify a netz HTTP/2
+# client POST body/trailer and Hyper response DATA/trailer exchange.
+zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
-# arguments select individual case IDs; with none, all 517 cases run.
+# arguments select individual case IDs; with none, all 517 cases run. Pass
+# --tls before case IDs to run the same gate over native TLS 1.3 WSS.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast
+zig build interop-websocket-autobahn -Doptimize=ReleaseFast -- --tls
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify

@@ -139,6 +139,27 @@ pub fn build(b: *std.Build) void {
     );
     h2spec_step.dependOn(&h2spec.step);
 
+    const http2_hyper_client = b.addExecutable(.{
+        .name = "netz-http2-hyper-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_hyper_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http2_hyper_interop = b.addSystemCommand(
+        &.{"tools/interop/http2_hyper_client.sh"},
+    );
+    http2_hyper_interop.addArtifactArg(http2_hyper_client);
+    const http2_hyper_interop_step = b.step(
+        "interop-http2-hyper-client",
+        "Run a netz HTTP/2 client against the audited Hyper server",
+    );
+    http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
+
     const webtransport_wtransport_server = b.addExecutable(.{
         .name = "netz-webtransport-wtransport-server",
         .root_module = b.createModule(.{

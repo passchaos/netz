@@ -517,5 +517,16 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    the same h2spec command runs all 147 strict cases through TLS 1.3 and
    negotiated `h2` when h2spec is built with a current Go TLS stack that offers
    an X25519 key share.
+   Client-side interoperability now has a separate process boundary rather than
+   being inferred from those server-only results:
+   `zig build interop-http2-hyper-client -Doptimize=ReleaseFast` builds a
+   one-shot server from the audited `~/Work/hyper` checkout and drives it with
+   a netz client. Hyper verifies the POST method, query-bearing path, request
+   header, body, and request trailer; netz verifies Hyper's 201 status, response
+   header, two DATA frames joined into `hyper-response`, and terminal response
+   trailer. The gate builds the locked Rust harness offline after its crates are
+   cached and fails on either process or any exact value mismatch. This is
+   cleartext prior-knowledge HTTP/2 client evidence; TLS client interoperability
+   remains covered by native netz tests rather than this Hyper process gate.
 4. Compare cancellation, backpressure and fairness under concurrent streams;
    one synchronous loopback pipeline is not whole-library superiority.
