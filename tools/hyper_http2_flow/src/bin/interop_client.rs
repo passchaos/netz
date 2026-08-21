@@ -19,6 +19,9 @@ use tokio::net::TcpStream;
 mod tokiort;
 use tokiort::{TokioExecutor, TokioIo};
 
+type RequestBody =
+    StreamBody<stream::Iter<std::array::IntoIter<Result<Frame<Bytes>, Infallible>, 3>>>;
+
 fn main() {
     let port: u16 = env::args()
         .nth(1)
@@ -100,5 +103,71 @@ fn main() {
             Some(&HeaderValue::from_static("response-trailer")),
         );
         println!("Hyper HTTP/2 client interoperated with netz: status=201 body=13 trailers=1");
+
+        let cancel_request = Request::builder()
+            .method(Method::GET)
+            .uri(
+                Uri::builder()
+                    .scheme("http")
+                    .authority("localhost")
+                    .path_and_query("/cancel?from=hyper")
+                    .build()
+                    .expect("cancel request URI"),
+            )
+            .body(empty_body())
+            .expect("cancel request");
+        let cancel_response = sender
+            .send_request(cancel_request)
+            .await
+            .expect("send cancellation request");
+        assert_eq!(cancel_response.status(), StatusCode::OK);
+        let mut cancel_body = cancel_response.into_body();
+        let first = cancel_body
+            .frame()
+            .await
+            .expect("first cancellation body frame")
+            .expect("valid cancellation body frame")
+            .into_data()
+            .expect("cancellation DATA frame");
+        assert_eq!(first, Bytes::from_static(b"cancel-me"));
+        // Dropping an unfinished Incoming body emits RST_STREAM(CANCEL). The
+        // netz server waits for that exact reset before accepting this request.
+        drop(cancel_body);
+
+        let after_cancel_request = Request::builder()
+            .method(Method::GET)
+            .uri(
+                Uri::builder()
+                    .scheme("http")
+                    .authority("localhost")
+                    .path_and_query("/after-cancel?from=hyper")
+                    .build()
+                    .expect("post-cancel request URI"),
+            )
+            .body(empty_body())
+            .expect("post-cancel request");
+        let response = sender
+            .send_request(after_cancel_request)
+            .await
+            .expect("send post-cancel request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect post-cancel response")
+            .to_bytes();
+        assert_eq!(body, Bytes::from_static(b"after-cancel"));
+        println!(
+            "Hyper HTTP/2 client canceled netz stream and reused connection: rst=CANCEL status=200"
+        );
     });
+}
+
+fn empty_body() -> RequestBody {
+    StreamBody::new(stream::iter([
+        Ok::<_, Infallible>(Frame::data(Bytes::new())),
+        Ok(Frame::data(Bytes::new())),
+        Ok(Frame::data(Bytes::new())),
+    ]))
 }

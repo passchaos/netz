@@ -104,6 +104,12 @@ grep -Fq \
   'Hyper HTTP/2 client interoperated with netz: status=201 body=13 trailers=1' \
   "$work/hyper-client.log"
 grep -Fq \
+  'Hyper HTTP/2 client canceled netz stream and reused connection: rst=CANCEL status=200' \
+  "$work/hyper-client.log"
+grep -Fq \
   'method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
+  "$work/netz-server.log"
+grep -Fq \
+  'netz HTTP/2 server observed Hyper cancellation and reused connection: rst=CANCEL status=200' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/2 client -> netz server interop passed'

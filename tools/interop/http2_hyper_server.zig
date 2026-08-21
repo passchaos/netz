@@ -77,6 +77,50 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/2 server interoperated with Hyper: method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1\n",
         .{},
     );
+
+    var cancel_request = try connection.readRequest();
+    defer cancel_request.deinit(allocator);
+    if (!std.mem.eql(
+        u8,
+        cancel_request.path,
+        "/cancel?from=hyper",
+    )) return error.InvalidRequest;
+    var cancel_response = try connection.startResponse(
+        cancel_request.stream_id,
+        .{
+            .status = 200,
+            .request_method = cancel_request.method,
+        },
+    );
+    defer cancel_response.deinit();
+    try cancel_response.write("cancel-me");
+    var reset = try connection.readResetStream();
+    defer reset.deinit(allocator);
+    if (reset.reset.stream_id != cancel_request.stream_id or
+        reset.reset.error_code != .cancel)
+    {
+        return error.UnexpectedReset;
+    }
+    // readResetStream retires the stream. Mark the response writer terminal so
+    // its defer cannot emit a duplicate reset against the recycled state.
+    cancel_response.finished = true;
+
+    var after_cancel = try connection.readRequest();
+    defer after_cancel.deinit(allocator);
+    if (!std.mem.eql(
+        u8,
+        after_cancel.path,
+        "/after-cancel?from=hyper",
+    )) return error.InvalidRequest;
+    try connection.writeResponse(after_cancel.stream_id, .{
+        .status = 200,
+        .body = "after-cancel",
+        .request_method = after_cancel.method,
+    });
+    std.debug.print(
+        "netz HTTP/2 server observed Hyper cancellation and reused connection: rst=CANCEL status=200\n",
+        .{},
+    );
 }
 
 fn headerEquals(
