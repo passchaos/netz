@@ -88,6 +88,7 @@ def expected_connack(
     mqtt_packets,
     mqtt5_props,
     *,
+    session_present: bool = False,
     maximum_packet_size: int = 16 * 1024 * 1024,
     topic_alias_maximum: int = 16,
     extra_properties: bytes = b"",
@@ -106,7 +107,11 @@ def expected_connack(
         + extra_properties
     )
     return mqtt_packets.gen_connack(
-        rc=0, proto_ver=5, properties=properties, property_helper=False
+        flags=int(session_present),
+        rc=0,
+        proto_ver=5,
+        properties=properties,
+        property_helper=False,
     )
 
 
@@ -343,6 +348,70 @@ def duplicate_client_takeover(
                 "replacement PINGRESP",
             )
             replacement.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
+def disconnect_session_expiry(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Timing-tolerant subset of Mosquitto 05-session-expiry-v5.py. A
+    # DISCONNECT override extends the CONNECT value, later expires at that
+    # updated deadline, and a zero override removes the Session immediately.
+    client_id = "session-expiry"
+    connect_packet = mqtt_packets.gen_connect(
+        client_id,
+        clean_session=False,
+        proto_ver=5,
+        session_expiry=1,
+    )
+    expiry_three = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.SESSION_EXPIRY_INTERVAL, 3
+    )
+    expiry_zero = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.SESSION_EXPIRY_INTERVAL, 0
+    )
+
+    def connect(sock: socket.socket, session_present: bool, label: str) -> None:
+        sock.sendall(connect_packet)
+        expect_packet(
+            sock,
+            expected_connack(
+                mqtt_packets,
+                mqtt5_props,
+                session_present=session_present,
+            ),
+            label,
+        )
+
+    def disconnect(sock: socket.socket, properties: bytes) -> None:
+        sock.sendall(
+            mqtt_packets.gen_disconnect(
+                proto_ver=5, properties=properties
+            )
+        )
+        if sock.recv(1) != b"":
+            raise AssertionError("broker sent data after DISCONNECT")
+
+    with NetzBroker(executable, connections=4) as broker:
+        with broker.connect() as first:
+            connect(first, False, "initial Session Expiry CONNACK")
+            disconnect(first, expiry_three)
+
+        # The one-second CONNECT interval has elapsed, so Session Present here
+        # proves the DISCONNECT value replaced rather than merely supplemented
+        # it. Reapply three seconds to test that updated expiry itself fires.
+        time.sleep(2)
+        with broker.connect() as extended:
+            connect(extended, True, "extended Session Expiry CONNACK")
+            disconnect(extended, expiry_three)
+
+        time.sleep(4)
+        with broker.connect() as expired:
+            connect(expired, False, "expired Session CONNACK")
+            disconnect(expired, expiry_zero)
+
+        with broker.connect() as removed:
+            connect(removed, False, "zero Session Expiry CONNACK")
+            removed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
 def connect_persistent_v5(
@@ -2371,7 +2440,8 @@ def main() -> None:
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
-    print("Mosquitto-derived MQTT wire vectors passed: 38 scenarios")
+    disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 39 scenarios")
 
 
 if __name__ == "__main__":

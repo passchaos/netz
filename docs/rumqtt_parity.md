@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs thirty-eight
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs thirty-nine
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -945,9 +945,14 @@ displaced MQTT 5 peer now receives DISCONNECT `0x8e` (Session Taken Over)
 instead of an unexplained EOF, and the replacement remains responsive to
 PING. The in-process takeover test also verifies the reason code while
 retaining its existing single-subscription-owner assertion.
+The Session Expiry case ports the timing-observable core of Mosquitto's
+`05-session-expiry-v5.py`: a three-second DISCONNECT override keeps a Session
+present beyond the one-second CONNECT value, the Session is absent after the
+new deadline, and a zero DISCONNECT override removes the replacement
+immediately. Exact CONNACK bytes distinguish every Session Present transition.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all thirty-eight scenarios pass. This is deliberately described as a selected
+packets; all thirty-nine scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -959,5 +964,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Thirty-eight passing packet-vector scenarios do not cover
+   persistence semantics. Thirty-nine passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
