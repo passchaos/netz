@@ -175,3 +175,8 @@ run_quic_go_client_scenario \
   -expect-stream-limit \
   'go_quic_stream_limit_client: handshake_done=true initial_limit=1 released_stream=12 echo_bytes=19' \
   'alpn=hq-interop initial_limit=1 released_stream=12 streams=4 echo_bytes=19'
+run_quic_go_client_scenario \
+  uni \
+  -expect-uni \
+  'go_quic_uni_client: handshake_done=true client_stream=2 server_stream=3 reply_bytes=9' \
+  'alpn=hq-interop client_stream=2 server_stream=3 request_bytes=3 reply_bytes=9'

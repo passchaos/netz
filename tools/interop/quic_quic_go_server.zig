@@ -11,7 +11,9 @@ const stream_limit_payloads = [_][]const u8{
     "again",
     "more",
 };
-const Mode = enum { echo, reset, stop, flow, stream_limit };
+const client_uni_payload = "uni";
+const server_uni_payload = "uni-reply";
+const Mode = enum { echo, reset, stop, flow, stream_limit, uni };
 
 fn receiveExpectedStream(
     connection: *netz.quic.one_rtt.Connection,
@@ -293,6 +295,24 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         },
+        .uni => {
+            try receiveExpectedStream(
+                &established.connection,
+                allocator,
+                2,
+                client_uni_payload,
+            );
+            const response_stream_id =
+                try established.connection.openUnidirectionalStream();
+            if (response_stream_id != 3) {
+                return error.UnexpectedStreamId;
+            }
+            try sendEcho(
+                &established.connection,
+                response_stream_id,
+                server_uni_payload,
+            );
+        },
     }
 
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
@@ -315,6 +335,10 @@ pub fn main(init: std.process.Init) !void {
         ),
         .stream_limit => std.debug.print(
             "netz QUIC stream-limit server interoperated with quic-go: alpn=hq-interop initial_limit=1 released_stream=12 streams=4 echo_bytes=19\n",
+            .{},
+        ),
+        .uni => std.debug.print(
+            "netz QUIC unidirectional server interoperated with quic-go: alpn=hq-interop client_stream=2 server_stream=3 request_bytes=3 reply_bytes=9\n",
             .{},
         ),
     }
