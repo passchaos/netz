@@ -171,13 +171,25 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
+    const quic_quic_go_server = b.addExecutable(.{
+        .name = "netz-quic-quic-go-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_quic_go_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
     const quic_quic_go = b.addSystemCommand(
         &.{"tools/interop/quic_quic_go.sh"},
     );
     quic_quic_go.addArtifactArg(quic_quic_go_client);
+    quic_quic_go.addArtifactArg(quic_quic_go_server);
     const quic_quic_go_step = b.step(
         "interop-quic-quic-go",
-        "Run a verified netz QUIC client against the local quic-go fixture",
+        "Run verified bidirectional QUIC interop with the local quic-go fixture",
     );
     quic_quic_go_step.dependOn(&quic_quic_go.step);
 

@@ -43,6 +43,28 @@ pub const PeerPool = struct {
         try self.addWithLimit(sequence_number, connection_id, token, max_pool_size);
     }
 
+    /// Register the peer's Initial Source Connection ID. Unlike a
+    /// NEW_CONNECTION_ID value, RFC 9000 permits this initial CID to be empty.
+    /// A zero-length peer CID disables migration/stateless-reset rotation but
+    /// remains the active sequence-zero destination for short packets.
+    pub fn addInitial(
+        self: *PeerPool,
+        connection_id: []const u8,
+    ) Error!void {
+        if (connection_id.len > max_connection_id_len) {
+            return error.InvalidConnectionId;
+        }
+        const entry = &self.entries[0];
+        entry.* = .{
+            .sequence_number = 0,
+            .connection_id_len = @intCast(connection_id.len),
+            .occupied = true,
+            .in_use = true,
+        };
+        @memcpy(entry.connection_id[0..connection_id.len], connection_id);
+        self.in_use_count = 1;
+    }
+
     pub fn addWithRetirePriorTo(
         self: *PeerPool,
         sequence_number: u64,
@@ -398,6 +420,21 @@ test "QUIC peer CID pool stores retires and consumes IDs" {
     try std.testing.expectEqualStrings("cid-two", entry.slice());
     try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
     try std.testing.expect(pool.consumeUnused() == null);
+}
+
+test "QUIC peer CID pool permits only the initial ID to be empty" {
+    var pool = PeerPool{};
+    try pool.addInitial("");
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
+    try std.testing.expectEqualStrings("", pool.entries[0].slice());
+
+    // RFC 9000 section 19.15 requires connection_id_length to be non-zero in
+    // NEW_CONNECTION_ID, so the ordinary add path must stay strict.
+    try std.testing.expectError(
+        error.InvalidConnectionId,
+        pool.add(1, "", [_]u8{1} ** 16),
+    );
 }
 
 test "QUIC peer CID pool detects stateless reset token" {

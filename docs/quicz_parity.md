@@ -154,7 +154,7 @@ benchmarks.
 | HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 141.78 MiB/s mean and 2.76% stddev with ACK threshold 4 and adaptive DATA sizing; exact-size cross-stream body batching is also available but opt-in on this small-rmem host | Build an equal-wire quicz H3 reference before making a cross-stack ratio; then reduce netz per-packet recovery/framing cost. |
 | HTTP/3 real-handshake download and RFC 9218 response scheduling | Covered for current benchmark scale; feature coverage exceeds the local quicz H3 layer | `HandshakeServerSession.sendResponseBodiesPaced` schedules borrowed complete bodies by the request Priority field and live PRIORITY_UPDATE, serializes non-incremental peers, round-robins incremental peers, bypasses flow-blocked urgent streams, and replans after socket-visible packet prefixes; real-handshake tests cover all four behaviors and the benchmark sends `Priority: u=3, i`. `~/Work/quicz/src/h3` has no Priority field, PRIORITY_UPDATE, urgency, or incremental scheduler. The runtime now supports byte- or packet-cadence cooperative yielding; using a chunk-size-independent three-packet cadence raised five 64MiB/four-stream iterations from 11.35 MiB/s to a stable 44.15 MiB/s mean (3.47% stddev) while retaining full completion. | Continue apples-to-apples quicz throughput work before making a whole-stack performance claim; move same-process loopback pacing policy into a reusable event-loop benchmark harness. |
 | QPACK / Capsule / WebTransport | Covered by modules, benchmarks, real-handshake streams and lifecycle controls | QPACK dynamic entries use indexed lookup, FIFO head eviction and one contiguous string allocation versus quicz reverse scans, front insertion and two string allocations; WebTransport adds transactional cross-stream batches and modern 0x41 association | Add external wtransport/browser interop and cancellation-under-loss evidence. |
-| TLS backend/process interop examples | Covered in the client direction through a standalone, certificate-verified quic-go process gate | QUIC handshake tests, `examples/quic_handshake_echo.zig`, `zig build interop-quic-quic-go -Doptimize=ReleaseFast`, HTTP/3 public fetch with `--verify` | Add the reverse external-client/netz-server direction and broader peers before making a full interoperability claim. |
+| TLS backend/process interop examples | Covered in both directions through a standalone, certificate-verified quic-go process gate | QUIC handshake tests, `examples/quic_handshake_echo.zig`, `zig build interop-quic-quic-go -Doptimize=ReleaseFast`, HTTP/3 public fetch with `--verify` | Add broader peers and lifecycle cases before making a full interoperability claim. |
 
 ## Known blockers before declaring the goal complete
 
@@ -182,9 +182,14 @@ benchmarks.
    `zig build interop-quic-quic-go -Doptimize=ReleaseFast` builds quic-go
    v0.59.0 from the audited `~/Work/quicz` fixture, loads its generated
    localhost CA into netz's verifier, requires TLS 1.3 `hq-interop` ALPN, and
-   verifies two independent bidirectional STREAM echoes plus FIN. This is
-   direct netz-client/quic-go-server evidence, not a local loopback proxy for
-   the reverse direction or HTTP/3.
+   verifies two independent bidirectional STREAM echoes plus FIN. The same gate
+   also runs the fixture's certificate-verifying quic-go client against a
+   one-shot netz server and checks the same two stream IDs, payloads, FINs, and
+   `hq-interop` ALPN. Supporting that standard quic-go client required netz's
+   1-RTT connection state to distinguish a legal zero-length Initial Source
+   Connection ID from the non-empty IDs required in NEW_CONNECTION_ID frames.
+   This is direct two-way QUIC transport evidence, not a local loopback proxy
+   for HTTP/3.
 5. **Broader performance comparison against `~/Work/quicz`**: raw QUIC
    STREAM comparisons need equivalent endpoint CPU placement, and HTTP/3 still
    lacks an equal-wire quicz reference. DATAGRAM, loss simulation, four-

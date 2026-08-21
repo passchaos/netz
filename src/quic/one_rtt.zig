@@ -715,8 +715,9 @@ pub const Connection = struct {
         } else {
             try connection.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
         }
-        try connection.peer_connection_ids.add(0, config.peer_connection_id, [_]u8{0} ** 16);
-        try connection.peer_connection_ids.markInUse(0);
+        try connection.peer_connection_ids.addInitial(
+            config.peer_connection_id,
+        );
         if (config.tls_handshake_complete) {
             connection.handshake_status.onTlsComplete(switch (config.local_endpoint) {
                 .client => .client,
