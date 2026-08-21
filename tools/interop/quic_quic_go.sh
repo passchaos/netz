@@ -198,5 +198,5 @@ run_quic_go_client_scenario \
 run_quic_go_client_scenario \
   migration \
   -expect-migration \
-  'go_quic_migration_client: handshake_done=true pre_probe_rejected=true probe_validated=true switched_ip=127.0.0.2 source_port_changed=true echo_stream=4 echo_bytes=8' \
-  'alpn=hq-interop initial_ip=127.0.0.1 migrated_ip=127.0.0.2 source_port_changed=true path_validated=true echo_stream=4 echo_bytes=8'
+  'go_quic_migration_client: handshake_done=true pre_probe_rejected=2 probe_validated=2 path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true echo_streams=4,8 echo_bytes=22' \
+  'alpn=hq-interop path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true paths_validated=2 echo_streams=4,8 echo_bytes=22'

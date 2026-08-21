@@ -14,7 +14,11 @@ const stream_limit_payloads = [_][]const u8{
 const client_uni_payload = "uni";
 const server_uni_payload = "uni-reply";
 const migration_initial_payload = "hello";
-const migration_final_payload = "migrated";
+const migration_payloads = [_][]const u8{ "migrated", "migrated-again" };
+const migration_addresses = [_][4]u8{
+    .{ 127, 0, 0, 2 },
+    .{ 127, 0, 0, 3 },
+};
 const Mode = enum {
     echo,
     reset,
@@ -249,8 +253,10 @@ pub fn main(init: std.process.Init) !void {
             original_peer,
             .{ 127, 0, 0, 1 },
         );
-        var migration_cids: [2][8]u8 = undefined;
-        var reset_tokens: [2][16]u8 = undefined;
+        // quic-go rotates away from sequence zero after the handshake. Keep
+        // one active CID plus one unused CID for each candidate path.
+        var migration_cids: [3][8]u8 = undefined;
+        var reset_tokens: [3][16]u8 = undefined;
         for (&migration_cids, &reset_tokens) |*migration_cid, *reset_token| {
             try std.Io.randomSecure(io, migration_cid);
             try std.Io.randomSecure(io, reset_token);
@@ -260,9 +266,7 @@ pub fn main(init: std.process.Init) !void {
             );
         }
 
-        // quic-go rotates away from sequence zero after the handshake, so the
-        // first new CID becomes its active-path CID and the second remains
-        // available for AddPath. The echo synchronizes after both frames.
+        // The echo synchronizes after all NEW_CONNECTION_ID frames are sent.
         try receiveExpectedStream(
             &established.connection,
             allocator,
@@ -274,40 +278,49 @@ pub fn main(init: std.process.Init) !void {
             0,
             migration_initial_payload,
         );
-        try receiveExpectedStreamWithOptions(
-            &established.connection,
-            allocator,
-            4,
-            migration_final_payload,
-            .{ .service_path_responses = true },
-        );
+        var previous_port = original_port;
+        for (migration_payloads, migration_addresses, 0..) |
+            payload,
+            expected_address,
+            index,
+        | {
+            const stream_id: u64 = @intCast((index + 1) * 4);
+            try receiveExpectedStreamWithOptions(
+                &established.connection,
+                allocator,
+                stream_id,
+                payload,
+                .{ .service_path_responses = true },
+            );
 
-        const migrated_peer = established.connection.peerAddress();
-        const migrated_port = try expectIpv4Address(
-            migrated_peer,
-            .{ 127, 0, 0, 2 },
-        );
-        if (migrated_port == original_port or
-            established.connection.peerAddressValidated())
-        {
-            return error.MigrationNotObserved;
-        }
+            const migrated_port = try expectIpv4Address(
+                established.connection.peerAddress(),
+                expected_address,
+            );
+            if (migrated_port == original_port or
+                migrated_port == previous_port or
+                established.connection.peerAddressValidated())
+            {
+                return error.MigrationNotObserved;
+            }
 
-        // Receiving non-probing traffic selected the new path but did not
-        // validate it. Challenge it in the reverse direction and require the
-        // authenticated response before returning application data there.
-        try established.connection.sendPendingPathChallenge();
-        while (!established.connection.peerAddressValidated()) {
-            try receivePacket(&established.connection, allocator);
+            // Receiving non-probing traffic selected the new path but did not
+            // validate it. Challenge it in the reverse direction and require
+            // the authenticated response before returning application data.
+            try established.connection.sendPendingPathChallenge();
+            while (!established.connection.peerAddressValidated()) {
+                try receivePacket(&established.connection, allocator);
+            }
+            try sendEcho(
+                &established.connection,
+                stream_id,
+                payload,
+            );
+            previous_port = migrated_port;
         }
-        try sendEcho(
-            &established.connection,
-            4,
-            migration_final_payload,
-        );
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         std.debug.print(
-            "netz QUIC migration server interoperated with quic-go: alpn=hq-interop initial_ip=127.0.0.1 migrated_ip=127.0.0.2 source_port_changed=true path_validated=true echo_stream=4 echo_bytes=8\n",
+            "netz QUIC migration server interoperated with quic-go: alpn=hq-interop path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true paths_validated=2 echo_streams=4,8 echo_bytes=22\n",
             .{},
         );
         return;

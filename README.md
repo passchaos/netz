@@ -575,8 +575,8 @@ zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 # four-datagram Initial/application loss recovery, and exact application-close
 # codes/reasons in both directions. A separate path gate issues additional
 # Connection IDs, rejects a pre-probe switch, validates PATH_CHALLENGE /
-# PATH_RESPONSE, migrates from 127.0.0.1 to 127.0.0.2 with a new source port,
-# and completes another stream on the switched path.
+# PATH_RESPONSE, migrates from 127.0.0.1 through 127.0.0.2 to 127.0.0.3
+# with distinct source ports, and completes a stream after each switch.
 zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
