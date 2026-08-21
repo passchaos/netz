@@ -82,6 +82,14 @@ pub const Version = enum {
 pub const ParseOptions = struct {
     max_headers: usize = 100,
     allow_obs_fold: bool = false,
+    /// Compatibility switch matching Hyper's HTTP/1 server builder. Strict
+    /// parsing remains the default because accepting a different request-line
+    /// grammar at intermediaries can create routing ambiguity.
+    allow_multiple_spaces_in_request_line_delimiters: bool = false,
+    /// Client-side compatibility switch for non-conforming response fields
+    /// such as `Name : value`. Requests and trailers remain strict even when
+    /// this is enabled, matching Hyper's direction-specific policy.
+    allow_spaces_after_header_name_in_responses: bool = false,
 };
 
 pub const ResponseContext = struct {
@@ -245,21 +253,24 @@ pub fn parseRequestHead(
     header_storage: []Header,
     options: ParseOptions,
 ) Error!RequestHead {
-    const parsed = try parseHeadLines(bytes, header_storage, options);
-    var parts = std.mem.splitScalar(u8, parsed.start_line, ' ');
-    const method_s = parts.next() orelse return error.MalformedStartLine;
-    const target = parts.next() orelse return error.MalformedStartLine;
-    const version_s = parts.next() orelse return error.MalformedStartLine;
-    if (parts.next() != null or target.len == 0) return error.MalformedStartLine;
-    const method = try Method.parse(method_s);
-    try validateRequestTargetForMethod(method, target);
-    const version = try Version.parse(version_s);
+    const parsed = try parseHeadLines(bytes, header_storage, options, false);
+    const request_line = try parseRequestLine(
+        parsed.start_line,
+        options.allow_multiple_spaces_in_request_line_delimiters,
+    );
+    const method = try Method.parse(request_line.method);
+    try validateRequestTargetForMethod(method, request_line.target);
+    const version = try Version.parse(request_line.version);
     try validateTransferEncodingForVersion(version, parsed.headers);
-    try validateRequestHostParts(version, target, parsed.headers);
+    try validateRequestHostParts(
+        version,
+        request_line.target,
+        parsed.headers,
+    );
     const framing = try bodyFraming(parsed.headers);
     return .{
         .method = method,
-        .target = target,
+        .target = request_line.target,
         .version = version,
         .headers = parsed.headers,
         .body_framing = framing,
@@ -274,7 +285,12 @@ pub fn parseResponseHead(
     options: ParseOptions,
     context: ResponseContext,
 ) Error!ResponseHead {
-    const parsed = try parseHeadLines(bytes, header_storage, options);
+    const parsed = try parseHeadLines(
+        bytes,
+        header_storage,
+        options,
+        options.allow_spaces_after_header_name_in_responses,
+    );
     var parts = std.mem.splitScalar(u8, parsed.start_line, ' ');
     const version_s = parts.next() orelse return error.MalformedStartLine;
     const status_s = parts.next() orelse return error.MalformedStartLine;
@@ -317,7 +333,12 @@ const BorrowedHead = struct {
     head_len: usize,
 };
 
-fn parseHeadLines(bytes: []const u8, header_storage: []Header, options: ParseOptions) Error!BorrowedHead {
+fn parseHeadLines(
+    bytes: []const u8,
+    header_storage: []Header,
+    options: ParseOptions,
+    allow_spaces_before_colon: bool,
+) Error!BorrowedHead {
     // Walk CRLF-delimited lines once and stop at the empty line. The previous
     // implementation first scanned the complete head for CRLFCRLF and then
     // rescanned every line; pipelined runtimes already provide a complete
@@ -349,13 +370,10 @@ fn parseHeadLines(bytes: []const u8, header_storage: []Header, options: ParseOpt
             return error.MalformedHeader;
         }
         if (count >= options.max_headers or count >= header_storage.len) return error.TooManyHeaders;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
-        if (colon == 0) return error.MalformedHeader;
-        const name = line[0..colon];
-        const value = wire.trimOws(line[colon + 1 ..]);
-        try validateHeaderName(name);
-        try validateHeaderValue(value);
-        header_storage[count] = .{ .name = name, .value = value };
+        header_storage[count] = try parseHeaderLine(
+            line,
+            allow_spaces_before_colon,
+        );
         count += 1;
         pos += line_end_rel + 2;
         if (pos > bytes.len) return error.BufferTooShort;
@@ -368,16 +386,20 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const request_line = lines.next() orelse return error.MalformedStartLine;
 
-    var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method_s = parts.next() orelse return error.MalformedStartLine;
-    const target = parts.next() orelse return error.MalformedStartLine;
-    const version_s = parts.next() orelse return error.MalformedStartLine;
-    if (parts.next() != null or target.len == 0) return error.MalformedStartLine;
-    const method = try Method.parse(method_s);
-    try validateRequestTargetForMethod(method, target);
-    const version = try Version.parse(version_s);
+    const request_parts = try parseRequestLine(
+        request_line,
+        options.allow_multiple_spaces_in_request_line_delimiters,
+    );
+    const method = try Method.parse(request_parts.method);
+    try validateRequestTargetForMethod(method, request_parts.target);
+    const version = try Version.parse(request_parts.version);
 
-    var parsed_headers = try parseHeaderLines(allocator, &lines, options);
+    var parsed_headers = try parseHeaderLines(
+        allocator,
+        &lines,
+        options,
+        false,
+    );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
     const consumed_head = head_end + 4;
@@ -389,7 +411,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
 
     return .{
         .method = method,
-        .target = target,
+        .target = request_parts.target,
         .version = version,
         .headers = parsed_headers.headers,
         .body = parsed_body.body,
@@ -434,7 +456,12 @@ pub fn parseResponseWithContext(
     const version = try Version.parse(version_s);
     try validateReasonPhrase(reason);
 
-    var parsed_headers = try parseHeaderLines(allocator, &lines, options);
+    var parsed_headers = try parseHeaderLines(
+        allocator,
+        &lines,
+        options,
+        options.allow_spaces_after_header_name_in_responses,
+    );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
     const consumed_head = head_end + 4;
@@ -497,8 +524,16 @@ fn parseHeaderLines(
     allocator: std.mem.Allocator,
     lines: *std.mem.SplitIterator(u8, .sequence),
     options: ParseOptions,
+    allow_spaces_before_colon: bool,
 ) Error!ParsedHeaders {
-    if (!options.allow_obs_fold) return parseHeaderLinesNoFold(allocator, lines.*, options);
+    if (!options.allow_obs_fold) {
+        return parseHeaderLinesNoFold(
+            allocator,
+            lines.*,
+            options,
+            allow_spaces_before_colon,
+        );
+    }
 
     var headers: std.ArrayList(Header) = .empty;
     var value_storage: std.ArrayList([]u8) = .empty;
@@ -517,16 +552,11 @@ fn parseHeaderLines(
             try appendFoldedHeaderValue(allocator, &headers, &value_storage, continuation);
             continue;
         }
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
-        if (colon == 0) return error.MalformedHeader;
         if (headers.items.len >= options.max_headers) return error.TooManyHeaders;
-        try validateHeaderName(line[0..colon]);
-        const value = wire.trimOws(line[colon + 1 ..]);
-        try validateHeaderValue(value);
-        try headers.append(allocator, .{
-            .name = line[0..colon],
-            .value = value,
-        });
+        try headers.append(
+            allocator,
+            try parseHeaderLine(line, allow_spaces_before_colon),
+        );
     }
 
     if (headers.items.len == 0 and value_storage.items.len == 0) {
@@ -545,6 +575,7 @@ fn parseHeaderLinesNoFold(
     allocator: std.mem.Allocator,
     lines: std.mem.SplitIterator(u8, .sequence),
     options: ParseOptions,
+    allow_spaces_before_colon: bool,
 ) Error!ParsedHeaders {
     var scan = lines;
     var count: usize = 0;
@@ -552,11 +583,7 @@ fn parseHeaderLinesNoFold(
         if (line.len == 0) continue;
         if (line[0] == ' ' or line[0] == '\t') return error.MalformedHeader;
         if (count >= options.max_headers) return error.TooManyHeaders;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
-        if (colon == 0) return error.MalformedHeader;
-        try validateHeaderName(line[0..colon]);
-        const value = wire.trimOws(line[colon + 1 ..]);
-        try validateHeaderValue(value);
+        _ = try parseHeaderLine(line, allow_spaces_before_colon);
         count += 1;
     }
 
@@ -573,17 +600,73 @@ fn parseHeaderLinesNoFold(
     var index: usize = 0;
     while (fill.next()) |line| {
         if (line.len == 0) continue;
-        const colon = std.mem.indexOfScalar(u8, line, ':').?;
-        headers[index] = .{
-            .name = line[0..colon],
-            .value = wire.trimOws(line[colon + 1 ..]),
-        };
+        headers[index] = parseHeaderLine(
+            line,
+            allow_spaces_before_colon,
+        ) catch unreachable;
         index += 1;
     }
     return .{
         .headers = headers,
         .value_storage = @constCast(&[_][]u8{}),
     };
+}
+
+const RequestLineParts = struct {
+    method: []const u8,
+    target: []const u8,
+    version: []const u8,
+};
+
+fn parseRequestLine(
+    line: []const u8,
+    allow_multiple_spaces: bool,
+) Error!RequestLineParts {
+    var fields: [3][]const u8 = undefined;
+    var field_count: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < line.len) {
+        const start = cursor;
+        while (cursor < line.len and line[cursor] != ' ') : (cursor += 1) {}
+        if (field_count == fields.len) return error.MalformedStartLine;
+        fields[field_count] = line[start..cursor];
+        field_count += 1;
+        if (cursor == line.len) break;
+
+        const delimiter_start = cursor;
+        while (cursor < line.len and line[cursor] == ' ') : (cursor += 1) {}
+        if (!allow_multiple_spaces and cursor - delimiter_start != 1) {
+            return error.MalformedStartLine;
+        }
+        if (cursor == line.len) return error.MalformedStartLine;
+    }
+    if (field_count != fields.len) return error.MalformedStartLine;
+    return .{
+        .method = fields[0],
+        .target = fields[1],
+        .version = fields[2],
+    };
+}
+
+fn parseHeaderLine(
+    line: []const u8,
+    allow_spaces_before_colon: bool,
+) Error!Header {
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse
+        return error.MalformedHeader;
+    var name_end = colon;
+    if (allow_spaces_before_colon) {
+        while (name_end != 0 and
+            (line[name_end - 1] == ' ' or line[name_end - 1] == '\t'))
+        {
+            name_end -= 1;
+        }
+    }
+    const name = line[0..name_end];
+    const value = wire.trimOws(line[colon + 1 ..]);
+    try validateHeaderName(name);
+    try validateHeaderValue(value);
+    return .{ .name = name, .value = value };
 }
 
 fn appendFoldedHeaderValue(
@@ -1331,7 +1414,13 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
     }
 
     var lines = std.mem.splitSequence(u8, bytes[scan.trailer_start..trailer_block_end], "\r\n");
-    var parsed_trailers = try parseHeaderLines(allocator, &lines, options);
+    // Response-only compatibility must never relax trailer field syntax.
+    var parsed_trailers = try parseHeaderLines(
+        allocator,
+        &lines,
+        options,
+        false,
+    );
     errdefer parsed_trailers.deinit(allocator);
     try validateTrailers(parsed_trailers.headers);
     return .{
@@ -1658,6 +1747,78 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, writeRequestChecked(&encoded, allocator, .GET, "/\r\nHost: evil", .http_1_1, &.{}, ""));
     try std.testing.expectError(error.MalformedStartLine, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK\r\nX: evil", &.{}, ""));
     try std.testing.expectError(error.InvalidStatus, writeResponseChecked(&encoded, allocator, .http_1_1, 42, "Nope", &.{}, ""));
+}
+
+test "HTTP/1 Hyper-shaped parser compatibility switches remain scoped" {
+    const allocator = std.testing.allocator;
+    const spaced_request =
+        "GET  /echo  HTTP/1.1\r\nHost: hyper.rs\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedStartLine,
+        parseRequest(allocator, spaced_request, .{}),
+    );
+    var request = try parseRequest(allocator, spaced_request, .{
+        .allow_multiple_spaces_in_request_line_delimiters = true,
+    });
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(Method.GET, request.method);
+    try std.testing.expectEqualStrings("/echo", request.target);
+
+    var request_headers: [2]Header = undefined;
+    const borrowed_request = try parseRequestHead(
+        spaced_request,
+        &request_headers,
+        .{ .allow_multiple_spaces_in_request_line_delimiters = true },
+    );
+    try std.testing.expectEqualStrings("/echo", borrowed_request.target);
+
+    const spaced_response =
+        "HTTP/1.1 204 No Content\r\n" ++
+        "Access-Control-Allow-Credentials \t: true\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseResponse(allocator, spaced_response, .{}),
+    );
+    var response = try parseResponse(allocator, spaced_response, .{
+        .allow_spaces_after_header_name_in_responses = true,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "true",
+        response.header("access-control-allow-credentials").?,
+    );
+
+    var response_headers: [2]Header = undefined;
+    const borrowed_response = try parseResponseHead(
+        spaced_response,
+        &response_headers,
+        .{ .allow_spaces_after_header_name_in_responses = true },
+        .{},
+    );
+    try std.testing.expectEqualStrings(
+        "Access-Control-Allow-Credentials",
+        borrowed_response.headers[0].name,
+    );
+
+    // Hyper deliberately exposes this tolerance only for responses. A server
+    // must still reject whitespace before the colon in requests, and trailer
+    // parsing remains strict for the same request-smuggling reason.
+    const bad_request =
+        "GET / HTTP/1.1\r\nHost : example.com\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseRequest(allocator, bad_request, .{
+            .allow_spaces_after_header_name_in_responses = true,
+        }),
+    );
+    try std.testing.expectError(
+        error.MalformedHeader,
+        decodeChunked(
+            allocator,
+            "0\r\nDigest : value\r\n\r\n",
+            .{ .allow_spaces_after_header_name_in_responses = true },
+        ),
+    );
 }
 
 test "HTTP/1 validates Host authority rules" {

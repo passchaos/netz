@@ -69,6 +69,29 @@ benchmark response:
 - borrowed head parsing scans CRLF-delimited lines once instead of first
   scanning for CRLFCRLF and then rescanning every header line.
 
+The parser also mirrors two explicitly opt-in Hyper HTTP/1 compatibility
+controls while preserving strict defaults.
+`allow_multiple_spaces_in_request_line_delimiters` accepts repeated ASCII SP
+between method, target and version, and
+`allow_spaces_after_header_name_in_responses` accepts SP/HTAB immediately
+before a response field colon. The latter never relaxes request or trailer
+fields, preserving the direction-specific request-smuggling boundary described
+by Hyper's public API. Both owned and caller-buffer head parsers share these
+rules. The corresponding local Hyper tests and the netz parity test pass on
+the same malformed/default and accepted/opt-in wire forms:
+
+```sh
+cd ~/Work/hyper
+cargo test --features full \
+  test_parse_allow_request_with_multiple_spaces_in_request_line
+cargo test --features full \
+  test_parse_allow_response_with_spaces_before_colons
+
+cd ~/project-z/netz
+zig test -ODebug \
+  --test-filter 'HTTP/1 Hyper-shaped parser compatibility' ...
+```
+
 The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the
 general path.
