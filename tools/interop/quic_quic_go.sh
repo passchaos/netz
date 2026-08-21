@@ -200,3 +200,8 @@ run_quic_go_client_scenario \
   -expect-migration \
   'go_quic_migration_client: handshake_done=true pre_probe_rejected=2 probe_validated=2 path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true echo_streams=4,8 echo_bytes=22' \
   'alpn=hq-interop path_sequence=127.0.0.1,127.0.0.2,127.0.0.3 source_ports_distinct=true paths_validated=2 echo_streams=4,8 echo_bytes=22'
+run_quic_go_client_scenario \
+  nat_rebinding \
+  -expect-nat-rebinding \
+  'go_quic_nat_rebinding_client: handshake_done=true same_ip=true source_port_changed=true dropped_datagrams=4 echo_stream=4 echo_bytes=7' \
+  'alpn=hq-interop same_ip=true source_port_changed=true dropped_datagrams=4 path_validation_queued=false echo_stream=4 echo_bytes=7'

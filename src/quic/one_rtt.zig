@@ -3463,6 +3463,14 @@ pub const Connection = struct {
         return self.path_validation.earliestChallengeDeadline();
     }
 
+    /// Number of path challenges queued or awaiting a response. This exposes
+    /// whether a selected path is being validated without leaking the internal
+    /// challenge payloads or queue representation.
+    pub fn pendingPathValidationCount(self: Connection) usize {
+        return self.path_validation.pendingChallengeCount() +
+            self.path_validation.outstandingChallengeCount();
+    }
+
     pub fn checkPathValidationTimeouts(self: *Connection, now_ns: u64) Error!usize {
         return try self.path_validation.checkTimeouts(now_ns);
     }

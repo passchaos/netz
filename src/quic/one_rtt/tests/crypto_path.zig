@@ -818,6 +818,10 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
     try std.testing.expectEqual(rebound_client_endpoint.address(), server.config.peer);
     try std.testing.expect(server.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 0), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.pendingPathValidationCount(),
+    );
     try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
 }
 
@@ -869,6 +873,10 @@ test "QUIC 1-RTT receive starts validation for new peer IP" {
     try std.testing.expect(!server.peerAddressValidated());
     try std.testing.expect(server.antiAmplificationLimitRemaining().? > 0);
     try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.pendingPathValidationCount(),
+    );
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, server.pmtudCurrentSize());
     try std.testing.expectEqual(server.pacer.maxBurstSize(), server.pacer.budget);
 }

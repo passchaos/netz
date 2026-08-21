@@ -14,6 +14,7 @@ const stream_limit_payloads = [_][]const u8{
 const client_uni_payload = "uni";
 const server_uni_payload = "uni-reply";
 const migration_initial_payload = "hello";
+const nat_rebinding_payload = "rebound";
 const migration_payloads = [_][]const u8{ "migrated", "migrated-again" };
 const migration_addresses = [_][4]u8{
     .{ 127, 0, 0, 2 },
@@ -30,6 +31,7 @@ const Mode = enum {
     initial_pto,
     peer_close,
     migration,
+    nat_rebinding,
 };
 
 fn receiveExpectedStream(
@@ -326,6 +328,57 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (mode == .nat_rebinding) {
+        const original_peer = established.connection.peerAddress();
+        const original_port = try expectIpv4Address(
+            original_peer,
+            .{ 127, 0, 0, 1 },
+        );
+        try receiveExpectedStream(
+            &established.connection,
+            allocator,
+            0,
+            migration_initial_payload,
+        );
+        try sendEcho(
+            &established.connection,
+            0,
+            migration_initial_payload,
+        );
+        try receiveExpectedStream(
+            &established.connection,
+            allocator,
+            4,
+            nat_rebinding_payload,
+        );
+        const rebound_port = try expectIpv4Address(
+            established.connection.peerAddress(),
+            .{ 127, 0, 0, 1 },
+        );
+        if (rebound_port == original_port or
+            !established.connection.peerAddressValidated())
+        {
+            return error.NatRebindingNotObserved;
+        }
+        // NAT rebinding keeps congestion/validation state and does not queue
+        // an active-migration PATH_CHALLENGE. The four dropped client packets
+        // force quic-go's PTO retransmission to reveal the new source tuple.
+        if (established.connection.pendingPathValidationCount() != 0) {
+            return error.UnexpectedPathValidation;
+        }
+        try sendEcho(
+            &established.connection,
+            4,
+            nat_rebinding_payload,
+        );
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        std.debug.print(
+            "netz QUIC NAT rebinding server interoperated with quic-go: alpn=hq-interop same_ip=true source_port_changed=true dropped_datagrams=4 path_validation_queued=false echo_stream=4 echo_bytes=7\n",
+            .{},
+        );
+        return;
+    }
+
     switch (mode) {
         .echo, .application_pto, .initial_pto, .peer_close => {
             for (payloads, 0..) |expected, index| {
@@ -449,6 +502,7 @@ pub fn main(init: std.process.Init) !void {
             );
         },
         .migration => unreachable,
+        .nat_rebinding => unreachable,
     }
 
     if (mode == .peer_close) {
@@ -500,5 +554,6 @@ pub fn main(init: std.process.Init) !void {
         ),
         .peer_close => unreachable,
         .migration => unreachable,
+        .nat_rebinding => unreachable,
     }
 }
