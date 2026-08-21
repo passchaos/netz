@@ -65,12 +65,12 @@ fn main() {
                 config.alpn_protocols = vec![b"h2".to_vec()];
                 let server_name = rustls::pki_types::ServerName::try_from("localhost")
                     .expect("valid server name");
-                MaybeTls::Client(
-                    tokio_rustls::TlsConnector::from(Arc::new(config))
-                        .connect(server_name, stream)
-                        .await
-                        .expect("connect TLS with h2 ALPN"),
-                )
+                let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+                    .connect(server_name, stream)
+                    .await
+                    .expect("connect TLS with h2 ALPN");
+                assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                MaybeTls::Client(tls)
             }
             None => MaybeTls::Clear(stream),
         };

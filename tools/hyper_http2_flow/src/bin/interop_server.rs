@@ -61,12 +61,14 @@ fn main() {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let io = match tls_paths {
-            Some((cert, key)) => MaybeTls::Server(
-                TlsAcceptor::from(tls_server_config(&cert, &key))
+            Some((cert, key)) => {
+                let tls = TlsAcceptor::from(tls_server_config(&cert, &key))
                     .accept(stream)
                     .await
-                    .expect("accept TLS with h2 ALPN"),
-            ),
+                    .expect("accept TLS with h2 ALPN");
+                assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                MaybeTls::Server(tls)
+            }
             None => MaybeTls::Clear(stream),
         };
         let canceled = Arc::new(CancelSignal::default());
