@@ -1175,6 +1175,100 @@ def clean_session_qos1(executable: Path, mqtt_packets, mqtt5_props) -> None:
             fresh.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def offline_message_expiry(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Direct wire port of Mosquitto 02-subpub-qos1-message-expiry.py. Keep a
+    # persistent subscriber offline while two QoS 1 messages are queued, then
+    # prove the expired message is removed and the surviving message carries a
+    # reduced interval when the Session reconnects.
+    client_id = "02-offline-message-expiry"
+    topic = "subpub/qos1/message-expiry"
+    persistent_connect = mqtt_packets.gen_connect(
+        client_id,
+        clean_session=False,
+        proto_ver=5,
+        session_expiry=60,
+    )
+    with NetzBroker(executable, connections=3) as broker:
+        with broker.connect() as subscriber:
+            subscriber.sendall(persistent_connect)
+            expect_packet(
+                subscriber,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "message expiry initial CONNACK",
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(53, topic, 1, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(53, 1, proto_ver=5),
+                "message expiry SUBACK",
+            )
+
+        with broker.connect() as publisher:
+            connect_v5(publisher, mqtt_packets, "message-expiry-helper")
+            for mid, payload, expiry in (
+                (1, "message1", 1),
+                (2, "message2", 10),
+            ):
+                properties = mqtt5_props.gen_uint32_prop(
+                    mqtt5_props.MESSAGE_EXPIRY_INTERVAL, expiry
+                )
+                publisher.sendall(
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=1,
+                        mid=mid,
+                        payload=payload,
+                        proto_ver=5,
+                        properties=properties,
+                    )
+                )
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_puback(mid, proto_ver=5),
+                    f"message expiry publisher PUBACK {mid}",
+                )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        time.sleep(2)
+        with broker.connect() as resumed:
+            resumed.sendall(persistent_connect)
+            expect_packet(
+                resumed,
+                expected_connack(
+                    mqtt_packets, mqtt5_props, session_present=True
+                ),
+                "message expiry resumed CONNACK",
+            )
+            actual = read_packet(resumed)
+            surviving_variants = [
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=1,
+                    payload="message2",
+                    proto_ver=5,
+                    properties=mqtt5_props.gen_uint32_prop(
+                        mqtt5_props.MESSAGE_EXPIRY_INTERVAL, remaining
+                    ),
+                )
+                for remaining in (9, 8, 7, 6)
+            ]
+            if actual not in surviving_variants:
+                raise AssertionError(
+                    "offline message expiry mismatch: " + actual.hex()
+                )
+            resumed.sendall(mqtt_packets.gen_puback(1, proto_ver=5))
+            resumed.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                resumed,
+                mqtt_packets.gen_pingresp(),
+                "message expiry PINGRESP after surviving PUBLISH",
+            )
+            resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_subscription_handling(
     executable: Path, mqtt_packets, mqtt5_opts
 ) -> None:
@@ -2520,6 +2614,7 @@ def main() -> None:
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
+    offline_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
@@ -2552,7 +2647,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 40 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 41 scenarios")
 
 
 if __name__ == "__main__":

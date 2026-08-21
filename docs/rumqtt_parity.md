@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs forty
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs forty-one
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -956,9 +956,16 @@ subscribing, receives the exact queued QoS 1 PUBLISH with Session Present on
 resume, acknowledges it, and reconnects with Clean Start to delete the old
 Session. A final persistent reconnect reports no Session Present and answers
 PING before any stale delivery, proving both queue drain and cleanup.
+The offline Message Expiry case directly ports Mosquitto's
+`02-subpub-qos1-message-expiry.py`: two QoS 1 messages with one- and ten-second
+lifetimes are queued while a persistent subscriber is disconnected. After two
+seconds, reconnect reports Session Present, omits the expired message, delivers
+only the survivor with its interval reduced to a timing-tolerant 9-6 seconds,
+and answers PING immediately after its PUBACK to rule out a stale second
+delivery.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all forty scenarios pass. This is deliberately described as a selected
+packets; all forty-one scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
