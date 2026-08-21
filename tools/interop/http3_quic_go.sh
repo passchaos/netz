@@ -70,7 +70,7 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
   "$work/netz-client.log"
 grep -Fq \
   'request_body=12 request_trailers=1 response_body=16 response_trailers=1' \

@@ -60,6 +60,18 @@ pub fn main(init: std.process.Init) !void {
     );
     defer client.deinit();
 
+    const canceled_stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/cancel?from=netz",
+        .scheme = "https",
+        .authority = "localhost",
+    }, null);
+    try client.sendRequestBodyPaced(canceled_stream_id, "partial", false);
+    try client.cancelRequest(
+        canceled_stream_id,
+        netz.http3.ApplicationErrorCode.request_cancelled,
+    );
+
     const stream_id = try client.startRequest(.{
         .method = "POST",
         .path = "/interop?from=netz",
@@ -95,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with quic-go: request_body=12 request_trailers=1 response_body=16 response_trailers=1\n",
+        "netz HTTP/3 client interoperated with quic-go: cancel=H3_REQUEST_CANCELLED request_body=12 request_trailers=1 response_body=16 response_trailers=1\n",
         .{},
     );
 }
