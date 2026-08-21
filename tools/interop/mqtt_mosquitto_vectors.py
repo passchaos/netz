@@ -1065,6 +1065,116 @@ def persistent_no_local(executable: Path, mqtt_packets) -> None:
             resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def clean_session_qos1(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # MQTT 5 wire port of Mosquitto 05-clean-session-qos1.py. A persistent
+    # subscriber disconnects before publication, receives the queued QoS 1
+    # message with Session Present on resume, then Clean Start removes both
+    # the subscription and any future offline delivery route.
+    client_id = "05-clean-session"
+    topic = "qos1/05-clean_session/test"
+    persistent_connect = mqtt_packets.gen_connect(
+        client_id,
+        clean_session=False,
+        proto_ver=5,
+        session_expiry=60,
+    )
+    clean_connect = mqtt_packets.gen_connect(
+        client_id,
+        clean_session=True,
+        proto_ver=5,
+        session_expiry=0,
+    )
+
+    with NetzBroker(executable, connections=5) as broker:
+        with broker.connect() as first:
+            first.sendall(persistent_connect)
+            expect_packet(
+                first,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "clean-session initial CONNACK",
+            )
+            first.sendall(
+                mqtt_packets.gen_subscribe(
+                    109, topic, 1, proto_ver=5
+                )
+            )
+            expect_packet(
+                first,
+                mqtt_packets.gen_suback(109, 1, proto_ver=5),
+                "clean-session SUBACK",
+            )
+            first.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with broker.connect() as publisher:
+            connect_v5(publisher, mqtt_packets, "05-clean-qos1-helper")
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=128,
+                    payload="clean-session-message",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                publisher,
+                mqtt_packets.gen_puback(128, proto_ver=5),
+                "offline publisher PUBACK",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with broker.connect() as resumed:
+            resumed.sendall(persistent_connect)
+            expect_packet(
+                resumed,
+                expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    session_present=True,
+                ),
+                "clean-session resumed CONNACK",
+            )
+            expect_packet(
+                resumed,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=1,
+                    mid=1,
+                    payload="clean-session-message",
+                    proto_ver=5,
+                ),
+                "clean-session queued PUBLISH",
+            )
+            resumed.sendall(mqtt_packets.gen_puback(1, proto_ver=5))
+            resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with broker.connect() as cleared:
+            cleared.sendall(clean_connect)
+            expect_packet(
+                cleared,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "clean-session clearing CONNACK",
+            )
+            cleared.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        # Reopening persistently after Clean Start must create a new Session.
+        # PINGRESP must be next, proving no stale queued message was retained.
+        with broker.connect() as fresh:
+            fresh.sendall(persistent_connect)
+            expect_packet(
+                fresh,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "clean-session fresh CONNACK",
+            )
+            fresh.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                fresh,
+                mqtt_packets.gen_pingresp(),
+                "clean-session fresh PINGRESP",
+            )
+            fresh.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_subscription_handling(
     executable: Path, mqtt_packets, mqtt5_opts
 ) -> None:
@@ -2409,6 +2519,7 @@ def main() -> None:
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
+    clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
@@ -2441,7 +2552,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 39 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 40 scenarios")
 
 
 if __name__ == "__main__":
