@@ -20,6 +20,22 @@ superiority.
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | Linux io_uring experiment | Cleartext client helper | Custom epoll/kqueue/Windows server backends |
 
+RFC 8441 now has process-boundary interoperability evidence in addition to the
+in-process tests and benchmark:
+
+```sh
+zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
+```
+
+The gate builds the audited `~/Work/hyper` checkout offline, enables Hyper's
+HTTP/2 Extended CONNECT setting, and verifies the `CONNECT` method,
+`:protocol = websocket`, path and WebSocket version before accepting its
+upgraded byte stream. A netz client then sends a masked text frame, validates
+Hyper's unmasked response, exchanges Ping/Pong payloads, and completes a Close
+1000/`done` handshake. The Hyper fixture parses and writes RFC 6455 framing
+independently, so this is external RFC 8441 wire evidence rather than a second
+netz endpoint.
+
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.
 End-to-end tests cover verified localhost CA/SAN, strict subprotocol selection,
@@ -280,7 +296,9 @@ these counts explain submission shape but are not timing samples.
    non-OK case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing,
    or unknown statuses. Optional case IDs select a faster focused run. This is
    external RFC 6455/RFC 7692 conformance evidence for both cleartext HTTP/1.1
-   Upgrade and WSS, not for RFC 8441. The remaining three non-OK results are
+   Upgrade and WSS. RFC 8441 now has the separate Hyper process gate described
+   above, although it is a focused lifecycle check rather than the 517-case
+   Autobahn suite. The remaining three non-OK Autobahn results are
    inherently
    informational in Testsuite source: 7.1.6 explicitly allows implementation-
    defined close ordering, while 7.13.1 and 7.13.2 state that behavior for

@@ -172,6 +172,27 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const websocket_hyper_h2_client = b.addExecutable(.{
+        .name = "netz-websocket-hyper-h2-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_hyper_h2_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_hyper_h2 = b.addSystemCommand(
+        &.{"tools/interop/websocket_hyper_h2.sh"},
+    );
+    websocket_hyper_h2.addArtifactArg(websocket_hyper_h2_client);
+    const websocket_hyper_h2_step = b.step(
+        "interop-websocket-hyper-h2",
+        "Run netz RFC 8441 WebSocket interop with an audited Hyper server",
+    );
+    websocket_hyper_h2_step.dependOn(&websocket_hyper_h2.step);
+
     const http1_hyper_client = b.addExecutable(.{
         .name = "netz-http1-hyper-client",
         .root_module = b.createModule(.{

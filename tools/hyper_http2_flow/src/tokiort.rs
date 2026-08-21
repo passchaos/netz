@@ -93,3 +93,67 @@ where
         tokio::io::AsyncWrite::poll_write_vectored(self.project().inner, cx, bufs)
     }
 }
+
+// Hyper exposes an upgraded HTTP/2 CONNECT stream through its own runtime I/O
+// traits. Adapt that stream back to Tokio so independent interop fixtures can
+// exercise the tunnel with AsyncReadExt/AsyncWriteExt.
+impl<T> tokio::io::AsyncRead for TokioIo<T>
+where
+    T: hyper::rt::Read,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let already_filled = buffer.filled().len();
+        let newly_filled = unsafe {
+            let mut hyper_buffer = hyper::rt::ReadBuf::uninit(buffer.unfilled_mut());
+            match hyper::rt::Read::poll_read(self.project().inner, cx, hyper_buffer.unfilled()) {
+                Poll::Ready(Ok(())) => hyper_buffer.filled().len(),
+                other => return other,
+            }
+        };
+        unsafe {
+            buffer.assume_init(newly_filled);
+            buffer.set_filled(already_filled + newly_filled);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<T> tokio::io::AsyncWrite for TokioIo<T>
+where
+    T: hyper::rt::Write,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        hyper::rt::Write::poll_write(self.project().inner, cx, buffer)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        hyper::rt::Write::poll_flush(self.project().inner, cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        hyper::rt::Write::poll_shutdown(self.project().inner, cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        hyper::rt::Write::is_write_vectored(&self.inner)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffers: &[std::io::IoSlice<'_>],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        hyper::rt::Write::poll_write_vectored(self.project().inner, cx, buffers)
+    }
+}
