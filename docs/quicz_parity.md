@@ -147,7 +147,7 @@ benchmarks.
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
 | Loss recovery / PTO / retransmission | Partially covered and improved, with quic-go process evidence | Recovery tests cover timer-driven losses and bounded payload caching; recovery also validates then streams arbitrary ACK range counts without a decoded-range allocation, unlike the audited quicz allocating ACK decode. Receive preflight now uses packet-local path/stream shadows instead of cloning heap-backed path-validation state per packet, cutting 16 MiB/four-stream H3 allocation calls by 16.2-16.5% in the captured A/B. The real-handshake raw STREAM gate reorders every fifth client datagram and verifies all 4 MiB; a corruption mode flips authenticated ciphertext in exactly 25/504 datagrams and recovers all data. The quic-go process gate independently drops four netz server datagrams during Initial flight and four after application STREAM data, then verifies both two-stream echoes. | Add broader reordering/corruption distributions and long-run recovery benchmarks; aggressive non-default packet/body sizing still needs separate coverage. |
 | Flow control / stream reset / STOP_SENDING | Covered by implementation, tests, and quic-go process interop | `src/quic/flow_control.zig`, `src/quic/stream.zig`, one_rtt tests, and `zig build interop-quic-quic-go -Doptimize=ReleaseFast`; the external client sends RESET_STREAM error 41, separately observes STOP_SENDING error 42 and returns RESET_STREAM error 42, transfers/echoes 12 KiB through advertised 8 KiB connection and 2 KiB stream windows, and advances from stream 0 through 12 under an initial one-stream limit | Add cancellation-under-loss coverage and another external peer before generalizing beyond the verified quic-go lifecycle. |
-| Connection IDs / stateless reset / path validation / migration | Mostly covered in modules/tests | `src/quic/connection_id.zig`, `src/quic/stateless_reset.zig`, `src/quic/path_validation.zig`, lifecycle tests | Add runnable examples matching quicz's many UDP loopback demos if feature demos are required. |
+| Connection IDs / stateless reset / path validation / migration | Covered in modules/tests with an external active-migration gate | `src/quic/connection_id.zig`, `src/quic/stateless_reset.zig`, `src/quic/path_validation.zig`, lifecycle tests, and `zig build interop-quic-quic-go -Doptimize=ReleaseFast`; netz issues two additional CIDs, quic-go rejects `Path.Switch` before validation, probes from `127.0.0.2` with a distinct source port, validates PATH_CHALLENGE/PATH_RESPONSE, switches, and completes stream 4 there. netz independently challenges the selected new path and withholds its echo until the matching response validates it. | Add NAT rebinding under loss and multi-hop migration before generalizing beyond one active IPv4 migration. |
 | Retry/token/address validation | Covered at library level | `src/quic/retry_flow.zig`, `src/quic/address_validation_token.zig`, handshake/retry tests | Add public example after external interop is audited. |
 | Congestion control (NewReno/CUBIC/HyStart++) | Covered and defaulted to CUBIC for 1-RTT | `src/quic/congestion.zig`, `src/quic/hystart.zig`, congestion tests; ACK processing samples utilization before removing bytes in flight, suppresses NewReno/CUBIC growth while app-limited, and excludes idle time from the CUBIC epoch | Keep comparing long-lived congestion traces under equal loss/RTT schedules. |
 | UDP batching / GSO / GRO | Covered through timer-aware QUIC/HTTP/3 paths | Batch/GRO APIs plus `servicePacket` and synchronous `visitPacket` apply current-key datagrams in connection-owned receive storage with retained frame scratch; handshake-backed HTTP/3 and WebTransport non-GRO pumps no longer create discarded owned packet diagnostics or per-packet UDP buffers, while GRO keeps a lazy owning suffix for one-packet application routing. The captured 16 MiB/four-stream H3 step reduced allocation calls another 47.8-48.1%. | Keep H3 GRO opt-in on this small-rmem host and retest on tuned systems. |
@@ -224,7 +224,18 @@ benchmarks.
    treating completed STREAM echoes as connection-close evidence. A ninth
    connection reverses that assertion: netz closes with code 58/reason
    `netz interop complete`, and quic-go reads the remote `ApplicationError`
-   from its connection context and verifies both fields.
+   from its connection context and verifies both fields. A tenth reverse
+   connection verifies active migration rather than treating a same-IP port
+   change as path validation: netz sends two additional
+   `NEW_CONNECTION_ID` frames, quic-go creates a second UDP transport bound to
+   `127.0.0.2`, requires `Path.Switch()` to return `ErrPathNotValidated` before
+   probing, completes `Path.Probe()`, and switches from the original
+   `127.0.0.1` source and port. Stream 4 then carries `migrated` on the new
+   path. netz observes the new IP and source port while the path is still
+   unvalidated, sends its own PATH_CHALLENGE, waits for the authenticated
+   PATH_RESPONSE, and only then returns the exact stream echo. Repeated
+   retransmission of an already processed `RETIRE_CONNECTION_ID` is handled
+   idempotently, as required when quic-go rotates its active and probing CIDs.
 5. **Broader performance comparison against `~/Work/quicz`**: raw QUIC
    STREAM comparisons need equivalent endpoint CPU placement, and HTTP/3 still
    lacks an equal-wire quicz reference. DATAGRAM, loss simulation, four-

@@ -2375,6 +2375,13 @@ pub const Connection = struct {
         return self.peer_address_validated;
     }
 
+    /// Return the currently selected peer UDP path. Authenticated probing-only
+    /// packets are answered on their source path without changing this value;
+    /// authenticated non-probing traffic commits a NAT rebinding or migration.
+    pub fn peerAddress(self: Connection) net.IpAddress {
+        return self.config.peer;
+    }
+
     pub fn setPeerAddressValidated(self: *Connection, validated: bool) void {
         self.peer_address_validated = validated;
         if (validated) {

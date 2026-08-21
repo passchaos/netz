@@ -13,6 +13,8 @@ const stream_limit_payloads = [_][]const u8{
 };
 const client_uni_payload = "uni";
 const server_uni_payload = "uni-reply";
+const migration_initial_payload = "hello";
+const migration_final_payload = "migrated";
 const Mode = enum {
     echo,
     reset,
@@ -23,6 +25,7 @@ const Mode = enum {
     application_pto,
     initial_pto,
     peer_close,
+    migration,
 };
 
 fn receiveExpectedStream(
@@ -30,6 +33,26 @@ fn receiveExpectedStream(
     allocator: std.mem.Allocator,
     stream_id: u64,
     expected: []const u8,
+) !void {
+    return receiveExpectedStreamWithOptions(
+        connection,
+        allocator,
+        stream_id,
+        expected,
+        .{},
+    );
+}
+
+const ReceiveExpectedStreamOptions = struct {
+    service_path_responses: bool = false,
+};
+
+fn receiveExpectedStreamWithOptions(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    expected: []const u8,
+    options: ReceiveExpectedStreamOptions,
 ) !void {
     var received: usize = 0;
     while (received < expected.len or
@@ -61,6 +84,12 @@ fn receiveExpectedStream(
         }
         var packet = try connection.receivePacketServicingTimers();
         defer packet.deinit(allocator);
+        if (options.service_path_responses) {
+            // quic-go probes its candidate socket before switching application
+            // traffic. PATH_RESPONSE must return to that probing source rather
+            // than the connection's still-selected handshake path.
+            _ = try connection.sendPendingPathResponses();
+        }
     }
 }
 
@@ -116,6 +145,19 @@ fn receivePacket(
 ) !void {
     var packet = try connection.receivePacketServicingTimers();
     defer packet.deinit(allocator);
+}
+
+fn expectIpv4Address(
+    address: std.Io.net.IpAddress,
+    expected: [4]u8,
+) !u16 {
+    return switch (address) {
+        .ip4 => |ip4| if (std.mem.eql(u8, &ip4.bytes, &expected))
+            ip4.port
+        else
+            error.UnexpectedPeerAddress,
+        .ip6 => error.UnexpectedPeerAddress,
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -199,6 +241,76 @@ pub fn main(init: std.process.Init) !void {
     defer established.deinit();
     if (!std.mem.eql(u8, established.alpn, "hq-interop")) {
         return error.InvalidAlpn;
+    }
+
+    if (mode == .migration) {
+        const original_peer = established.connection.peerAddress();
+        const original_port = try expectIpv4Address(
+            original_peer,
+            .{ 127, 0, 0, 1 },
+        );
+        var migration_cids: [2][8]u8 = undefined;
+        var reset_tokens: [2][16]u8 = undefined;
+        for (&migration_cids, &reset_tokens) |*migration_cid, *reset_token| {
+            try std.Io.randomSecure(io, migration_cid);
+            try std.Io.randomSecure(io, reset_token);
+            try established.connection.sendNewConnectionId(
+                migration_cid,
+                reset_token.*,
+            );
+        }
+
+        // quic-go rotates away from sequence zero after the handshake, so the
+        // first new CID becomes its active-path CID and the second remains
+        // available for AddPath. The echo synchronizes after both frames.
+        try receiveExpectedStream(
+            &established.connection,
+            allocator,
+            0,
+            migration_initial_payload,
+        );
+        try sendEcho(
+            &established.connection,
+            0,
+            migration_initial_payload,
+        );
+        try receiveExpectedStreamWithOptions(
+            &established.connection,
+            allocator,
+            4,
+            migration_final_payload,
+            .{ .service_path_responses = true },
+        );
+
+        const migrated_peer = established.connection.peerAddress();
+        const migrated_port = try expectIpv4Address(
+            migrated_peer,
+            .{ 127, 0, 0, 2 },
+        );
+        if (migrated_port == original_port or
+            established.connection.peerAddressValidated())
+        {
+            return error.MigrationNotObserved;
+        }
+
+        // Receiving non-probing traffic selected the new path but did not
+        // validate it. Challenge it in the reverse direction and require the
+        // authenticated response before returning application data there.
+        try established.connection.sendPendingPathChallenge();
+        while (!established.connection.peerAddressValidated()) {
+            try receivePacket(&established.connection, allocator);
+        }
+        try sendEcho(
+            &established.connection,
+            4,
+            migration_final_payload,
+        );
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        std.debug.print(
+            "netz QUIC migration server interoperated with quic-go: alpn=hq-interop initial_ip=127.0.0.1 migrated_ip=127.0.0.2 source_port_changed=true path_validated=true echo_stream=4 echo_bytes=8\n",
+            .{},
+        );
+        return;
     }
 
     switch (mode) {
@@ -323,6 +435,7 @@ pub fn main(init: std.process.Init) !void {
                 server_uni_payload,
             );
         },
+        .migration => unreachable,
     }
 
     if (mode == .peer_close) {
@@ -373,5 +486,6 @@ pub fn main(init: std.process.Init) !void {
             .{},
         ),
         .peer_close => unreachable,
+        .migration => unreachable,
     }
 }

@@ -393,6 +393,11 @@ pub const LocalPool = struct {
                 return;
             }
         }
+        // RETIRE_CONNECTION_ID is retransmittable. Since local sequence
+        // numbers are issued contiguously, a missing value below the next
+        // sequence was previously issued and retired; accept it idempotently.
+        // A value at or beyond next_sequence_number was never provided.
+        if (sequence_number < self.next_sequence_number) return;
         return error.UnknownConnectionId;
     }
 
@@ -556,6 +561,17 @@ test "QUIC local CID pool rejects retiring packet DCID" {
     try std.testing.expectEqual(@as(usize, 2), pool.count());
     try pool.retireExceptPacketDestination(1, "other-cid");
     try std.testing.expectEqual(@as(usize, 1), pool.count());
+}
+
+test "QUIC local CID pool accepts repeated retirement" {
+    var pool = LocalPool{};
+    try pool.registerInitial("init-cid", [_]u8{0} ** 16);
+    _ = try pool.issue("new-cid", [_]u8{1} ** 16);
+
+    try pool.retire(0);
+    try pool.retire(0);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectError(error.UnknownConnectionId, pool.retire(2));
 }
 
 test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {

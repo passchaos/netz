@@ -865,7 +865,7 @@ test "QUIC 1-RTT receive starts validation for new peer IP" {
     var packet = try server.receivePacket();
     defer packet.deinit(allocator);
     try std.testing.expectEqualStrings("new-path", packet.frames[0].stream.data);
-    try std.testing.expectEqual(client_endpoint.address(), server.config.peer);
+    try std.testing.expectEqual(client_endpoint.address(), server.peerAddress());
     try std.testing.expect(!server.peerAddressValidated());
     try std.testing.expect(server.antiAmplificationLimitRemaining().? > 0);
     try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingChallengeCount());
@@ -908,7 +908,10 @@ test "QUIC 1-RTT receive rejects active migration before mutation when disabled"
         .frames = &.{.{ .stream = .{ .stream_id = 0, .data = "blocked" } }},
     });
     try std.testing.expectError(error.ActiveMigrationDisabled, server.receivePacket());
-    try std.testing.expectEqual(original_client_endpoint.address(), server.config.peer);
+    try std.testing.expectEqual(
+        original_client_endpoint.address(),
+        server.peerAddress(),
+    );
     try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
 }
@@ -947,7 +950,10 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
 
     const challenge = [_]u8{ 0xc0, 1, 2, 3, 4, 5, 6, 7 };
     try connection.beginPeerMigration(migrated_endpoint.address(), challenge);
-    try std.testing.expectEqual(migrated_endpoint.address(), connection.config.peer);
+    try std.testing.expectEqual(
+        migrated_endpoint.address(),
+        connection.peerAddress(),
+    );
     try std.testing.expect(!connection.peerAddressValidated());
     try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.pmtudCurrentSize());
