@@ -30,11 +30,11 @@ zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 The gate builds the audited `~/Work/hyper` checkout offline, enables Hyper's
 HTTP/2 Extended CONNECT setting, and verifies the `CONNECT` method,
 `:protocol = websocket`, path and WebSocket version before accepting its
-upgraded byte stream. A netz client then sends a masked text frame, validates
-Hyper's unmasked response, exchanges Ping/Pong payloads, and completes a Close
-1000/`done` handshake. The Hyper fixture parses and writes RFC 6455 framing
-independently, so this is external RFC 8441 wire evidence rather than a second
-netz endpoint.
+upgraded byte stream. A netz client then sends masked text split across three
+WebSocket fragments, validates Hyper's unmasked response, exchanges Ping/Pong
+payloads, and completes a Close 1000/`done` handshake. The Hyper fixture parses
+and writes RFC 6455 framing independently, so this is external RFC 8441 wire
+evidence rather than a second netz endpoint.
 
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.

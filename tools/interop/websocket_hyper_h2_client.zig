@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer websocket.close();
 
-    try websocket.sendText("netz websocket h2");
+    try websocket.sendFragmented(.text, &.{ "netz ", "websocket ", "h2" });
     var response = try websocket.receiveMessage();
     defer response.deinit(allocator);
     if (response.opcode != .text or
@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz RFC 8441 client interoperated with Hyper: text ping pong close\n",
+        "netz RFC 8441 client interoperated with Hyper: fragmented-text ping pong close\n",
         .{},
     );
 }

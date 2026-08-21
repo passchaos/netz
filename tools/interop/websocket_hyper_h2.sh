@@ -56,8 +56,8 @@ server_pid=
 cat "$work/client.log"
 cat "$work/server.log"
 grep -Fq \
-  'netz RFC 8441 client interoperated with Hyper: text ping pong close' \
+  'netz RFC 8441 client interoperated with Hyper: fragmented-text ping pong close' \
   "$work/client.log"
 grep -Fq \
-  'Hyper RFC 8441 server interoperated with netz: text ping pong close' \
+  'Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong close' \
   "$work/server.log"

@@ -68,10 +68,18 @@ async fn handle(
         let upgraded = on_upgrade.await.expect("upgrade RFC 8441 stream");
         let mut stream = TokioIo::new(upgraded);
 
-        let text = read_frame(&mut stream, true).await;
-        assert_eq!(text.opcode, 0x1);
-        assert!(text.fin);
-        assert_eq!(text.payload, b"netz websocket h2");
+        let first = read_frame(&mut stream, true).await;
+        assert_eq!(first.opcode, 0x1);
+        assert!(!first.fin);
+        assert_eq!(first.payload, b"netz ");
+        let second = read_frame(&mut stream, true).await;
+        assert_eq!(second.opcode, 0x0);
+        assert!(!second.fin);
+        assert_eq!(second.payload, b"websocket ");
+        let third = read_frame(&mut stream, true).await;
+        assert_eq!(third.opcode, 0x0);
+        assert!(third.fin);
+        assert_eq!(third.payload, b"h2");
         write_frame(&mut stream, 0x1, b"hyper websocket h2").await;
 
         let ping = read_frame(&mut stream, true).await;
@@ -86,7 +94,7 @@ async fn handle(
         assert_eq!(close.payload, [0x03, 0xE8, b'd', b'o', b'n', b'e']);
         write_frame(&mut stream, 0x8, &close.payload).await;
         stream.shutdown().await.expect("finish RFC 8441 stream");
-        println!("Hyper RFC 8441 server interoperated with netz: text ping pong close");
+        println!("Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong close");
     });
 
     let mut response = Response::new(Empty::new());
