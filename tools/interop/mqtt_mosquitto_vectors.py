@@ -1204,6 +1204,81 @@ def request_response_properties(
             requester.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def disconnect_with_will_properties(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Combine the externally observable cores of Mosquitto's
+    # 07-will-properties.py and 07-will-disconnect-with-will.py. This uses
+    # Will Delay as the first property to exercise the historical ordering
+    # edge, then requires it to be stripped while every Application Message
+    # property is forwarded in its original order.
+    topic = "will/properties"
+    will_properties = (
+        mqtt5_props.gen_uint32_prop(mqtt5_props.WILL_DELAY_INTERVAL, 0)
+        + mqtt5_props.gen_string_pair_prop(
+            mqtt5_props.USER_PROPERTY, "key1", "value1"
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.RESPONSE_TOPIC, "response/topic"
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.CORRELATION_DATA, "correlation-data"
+        )
+        + mqtt5_props.gen_byte_prop(
+            mqtt5_props.PAYLOAD_FORMAT_INDICATOR, 1
+        )
+        + mqtt5_props.gen_string_prop(
+            mqtt5_props.CONTENT_TYPE, "text/plain"
+        )
+        + mqtt5_props.gen_string_pair_prop(
+            mqtt5_props.USER_PROPERTY, "key2", "value2"
+        )
+    )
+    forwarded_properties = will_properties[5:]
+
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as source:
+            connect_v5(subscriber, mqtt_packets, "will-property-subscriber")
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "Will property SUBACK",
+            )
+            source.sendall(
+                mqtt_packets.gen_connect(
+                    "will-property-source",
+                    proto_ver=5,
+                    will_topic=topic,
+                    will_payload=b"will payload",
+                    will_properties=will_properties,
+                )
+            )
+            connack = read_packet(source)
+            if connack[0] != 0x20 or connack[2:4] != b"\x00\x00":
+                raise AssertionError(
+                    f"Will source invalid CONNACK: {connack.hex()}"
+                )
+
+            source.sendall(
+                mqtt_packets.gen_disconnect(reason_code=4, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload="will payload",
+                    proto_ver=5,
+                    properties=forwarded_properties,
+                ),
+                "DISCONNECT 0x04 Will property forwarding",
+            )
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_message_expiry(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -2200,6 +2275,9 @@ def main() -> None:
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     request_response_properties(args.broker, mqtt_packets, mqtt5_props)
+    disconnect_with_will_properties(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     retained_message_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -2220,7 +2298,7 @@ def main() -> None:
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
     assigned_client_identifier(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 35 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 36 scenarios")
 
 
 if __name__ == "__main__":
