@@ -172,6 +172,39 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const http1_hyper_client = b.addExecutable(.{
+        .name = "netz-http1-hyper-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http1_hyper_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http1_hyper_server = b.addExecutable(.{
+        .name = "netz-http1-hyper-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http1_hyper_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http1_hyper_interop = b.addSystemCommand(
+        &.{"tools/interop/http1_hyper.sh"},
+    );
+    http1_hyper_interop.addArtifactArg(http1_hyper_client);
+    http1_hyper_interop.addArtifactArg(http1_hyper_server);
+    const http1_hyper_interop_step = b.step(
+        "interop-http1-hyper",
+        "Run bidirectional netz HTTP/1 interop with audited Hyper fixtures",
+    );
+    http1_hyper_interop_step.dependOn(&http1_hyper_interop.step);
+
     const quic_quic_go_client = b.addExecutable(.{
         .name = "netz-quic-quic-go-client",
         .root_module = b.createModule(.{

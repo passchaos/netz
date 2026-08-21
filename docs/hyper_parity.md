@@ -184,6 +184,16 @@ adds roughly 225 KiB for chunked framing and allocation counts stay constant
 across body bytes after warmup. Equal Hyper allocator instrumentation is still
 required for a memory ratio.
 
+The benchmark evidence is complemented by a strict process-boundary semantic
+gate. `zig build interop-http1-hyper -Doptimize=ReleaseFast` builds against the
+audited local Hyper checkout and runs fresh TCP connections in both directions.
+Each peer sends a POST with two chunked DATA contributions, explicitly
+negotiates `TE: trailers`, and terminates with a request trailer. The receiving
+peer verifies method, query-bearing target, custom header, reconstructed body,
+and trailer. The response path repeats the two-chunk plus terminal-trailer
+shape with status 201 and exact response metadata. This is functional HTTP/1.1
+interoperability evidence rather than a benchmark proxy.
+
 ## HTTP/2 consecutive and parallel round trips
 
 Hyper's `benches/end_to_end.rs` defines consecutive empty GET, consecutive

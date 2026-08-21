@@ -546,6 +546,9 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
 # Also run the same strict suite over TLS 1.3 with mandatory h2 ALPN.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
+# Build the locked local Hyper reference offline, then verify chunked bodies
+# and negotiated trailers between netz and Hyper HTTP/1.1 in both directions.
+zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Build the locked local Hyper reference offline, then verify POST headers,
 # multi-frame bodies and trailers between netz and Hyper in both directions.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
