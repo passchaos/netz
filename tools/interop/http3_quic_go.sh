@@ -70,10 +70,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=8192 read_before_cancel>=12288 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
   "$work/netz-client.log"
 grep -Fq \
-  'request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=8192 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
   "$work/quic-go-server.log"
 cat "$work/netz-client.log"
 cat "$work/quic-go-server.log"
@@ -114,10 +114,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED connection_reused=true request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
   "$work/quic-go-client.log"
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED connection_reused=true request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
   "$work/netz-server.log"
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"

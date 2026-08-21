@@ -4,6 +4,12 @@
 const std = @import("std");
 const netz = @import("netz");
 
+const cancellation_response_size = 128 * 1024;
+const stream_receive_window = 8 * 1024;
+const connection_receive_window = 24 * 1024;
+const read_before_cancel = 12 * 1024;
+const cancellation_prefix = "n" ** read_before_cancel;
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 2) return error.InvalidArgument;
@@ -22,6 +28,10 @@ pub fn main(init: std.process.Init) !void {
     const key_pair = try netz.tls.testing.serverKeyPair();
     var server_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &server_cid);
+    var local_transport_parameters = netz.quic.practical_transport_parameters;
+    local_transport_parameters.initial_max_data = connection_receive_window;
+    local_transport_parameters.initial_max_stream_data_bidi_remote =
+        stream_receive_window;
 
     var server = try netz.http3.runtime.HandshakeServer.bind(
         allocator,
@@ -34,6 +44,14 @@ pub fn main(init: std.process.Init) !void {
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
+                .local_transport_parameters = local_transport_parameters,
+                .initial_one_rtt_config = .{
+                    .receive_window = connection_receive_window,
+                    .max_receive_window = connection_receive_window,
+                    .stream_receive_window = stream_receive_window,
+                    .max_stream_receive_window = stream_receive_window,
+                    .max_datagram_size = 4096,
+                },
                 .identity = .{
                     .certificate_chain = &.{&certificate_der},
                     .signer = .{ .ecdsa_p256_sha256 = .{
@@ -74,23 +92,12 @@ pub fn main(init: std.process.Init) !void {
         .status = 200,
         .headers = &.{.{
             .name = "x-netz-cancel",
-            .value = "response-started",
+            .value = "large-response-started",
         }},
-    }, 64);
-    try session.sendResponseBodyPaced(
-        canceled.stream_id,
-        "partial",
-        false,
-    );
-    const cancellation = try session.receivePeerResponseCancellation(
-        canceled.stream_id,
-    );
-    if (cancellation.application_error_code !=
-        netz.http3.ApplicationErrorCode.request_cancelled)
-    {
-        return error.UnexpectedCancellationCode;
-    }
+    }, cancellation_response_size);
 
+    // The response head lets quic-go start stream 4, but no cancellation body
+    // is sent until that sibling is already present on this same session.
     var request = try session.receiveRequest();
     defer request.deinit(allocator);
     if (request.stream_id != 4 or
@@ -112,6 +119,19 @@ pub fn main(init: std.process.Init) !void {
         ))
     {
         return error.InvalidRequest;
+    }
+    try session.sendResponseBodyPaced(
+        canceled.stream_id,
+        cancellation_prefix,
+        false,
+    );
+    const cancellation = try session.receivePeerResponseCancellation(
+        canceled.stream_id,
+    );
+    if (cancellation.application_error_code !=
+        netz.http3.ApplicationErrorCode.request_cancelled)
+    {
+        return error.UnexpectedCancellationCode;
     }
 
     try session.startResponse(request.stream_id, .{
@@ -137,8 +157,8 @@ pub fn main(init: std.process.Init) !void {
     }});
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz HTTP/3 server interoperated with quic-go: cancel=H3_REQUEST_CANCELLED connection_reused=true request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
-        .{},
+        "netz HTTP/3 server interoperated with quic-go: cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window={d} read_before_cancel={d} large_response={d} request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
+        .{ stream_receive_window, read_before_cancel, cancellation_response_size },
     );
 }
 
