@@ -185,6 +185,97 @@ def connect_v5(sock: socket.socket, mqtt_packets, client_id: str) -> None:
     connect_client(sock, mqtt_packets, client_id, 5)
 
 
+def assigned_client_identifier(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 12-prop-assigned-client-identifier.py.
+    # Tighten its prefix-only assertion: require the complete netz CONNACK
+    # property sequence, validate the UUID-shaped ID, then prove the first
+    # anonymous connection remains live after a second ID is assigned.
+    with NetzBroker(executable, connections=2) as broker:
+        assigned_ids = []
+        with broker.connect() as first, broker.connect() as second:
+            for index, sock in enumerate((first, second), 1):
+                sock.sendall(
+                    mqtt_packets.gen_connect(
+                        None, clean_session=True, proto_ver=5
+                    )
+                )
+                connack = read_packet(sock)
+                if (
+                    connack[0] != 0x20
+                    or connack[2:4] != b"\x00\x00"
+                    or len(connack) < 5
+                ):
+                    raise AssertionError(
+                        f"assigned client {index} invalid CONNACK: "
+                        f"{connack.hex()}"
+                    )
+                property_length = connack[4]
+                if 5 + property_length != len(connack):
+                    raise AssertionError(
+                        f"assigned client {index} malformed property length: "
+                        f"{connack.hex()}"
+                    )
+                properties = connack[5 : 5 + property_length]
+                if (
+                    len(properties) < 3
+                    or properties[0]
+                    != mqtt5_props.ASSIGNED_CLIENT_IDENTIFIER
+                ):
+                    raise AssertionError(
+                        f"assigned client {index} missing property: "
+                        f"{connack.hex()}"
+                    )
+                value_len = int.from_bytes(properties[1:3], "big")
+                value = properties[3 : 3 + value_len]
+                if len(value) != value_len:
+                    raise AssertionError(
+                        f"assigned client {index} malformed property: "
+                        f"{connack.hex()}"
+                    )
+                client_id = value.decode("ascii")
+                parts = client_id.removeprefix("netz-").split("-")
+                if (
+                    not client_id.startswith("netz-")
+                    or [len(part) for part in parts] != [8, 4, 4, 4, 12]
+                    or any(
+                        char not in "0123456789abcdef"
+                        for part in parts
+                        for char in part
+                    )
+                ):
+                    raise AssertionError(
+                        f"assigned client {index} invalid identifier: {client_id!r}"
+                    )
+                # The assigned identifier is emitted first because it is the
+                # result of CONNECT processing; fixed broker capabilities
+                # follow in runtime.writeConnAck's stable wire order. Compare
+                # the remainder exactly so duplicate or unknown properties do
+                # not slip through this interoperability gate.
+                base_properties = expected_connack(
+                    mqtt_packets, mqtt5_props
+                )[5:]
+                if properties[3 + value_len :] != base_properties:
+                    raise AssertionError(
+                        f"assigned client {index} invalid capabilities: "
+                        f"{connack.hex()}"
+                    )
+                assigned_ids.append(client_id)
+
+            if assigned_ids[0] == assigned_ids[1]:
+                raise AssertionError(
+                    "anonymous clients received duplicate identifiers"
+                )
+            first.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                first, mqtt_packets.gen_pingresp(),
+                "first anonymous client remains live",
+            )
+            first.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            second.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def connect_persistent_v5(
     sock: socket.socket, mqtt_packets, client_id: str, session_present: bool
 ) -> None:
@@ -2128,7 +2219,8 @@ def main() -> None:
     retained_replacement(args.broker, mqtt_packets, mqtt5_props)
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 34 scenarios")
+    assigned_client_identifier(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 35 scenarios")
 
 
 if __name__ == "__main__":

@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs thirty-four
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs thirty-five
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -922,9 +922,16 @@ DISCONNECT packets for Topic Alias, Receive Maximum, shared-subscription,
 Subscription Identifier, and wildcard-subscription violations. The latter
 three cover capability controls that rumqtt's codecs model but the audited
 Mosquitto broker does not expose as listener switches.
+The final case ports Mosquitto's MQTT 5 Assigned Client Identifier vector. Two
+simultaneous anonymous clients receive distinct complete
+`netz-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` identifiers, the remaining CONNACK
+capabilities match byte-for-byte, and a PING on the first connection proves
+that assigning the second identifier did not accidentally take over the first
+anonymous Session. This strengthens the upstream vector's prefix-only check
+without presenting the existing in-process broker tests as external evidence.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all thirty-four scenarios pass. This is deliberately described as a selected
+packets; all thirty-five scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -936,5 +943,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Twenty-six passing packet-vector scenarios do not cover
+   persistence semantics. Thirty-five passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
