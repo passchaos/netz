@@ -1014,5 +1014,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Fifty-one passing packet-vector scenarios do not cover
+   persistence semantics. Fifty-three passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
