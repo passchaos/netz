@@ -1175,6 +1175,131 @@ def clean_session_qos1(executable: Path, mqtt_packets, mqtt5_props) -> None:
             fresh.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def outgoing_qos1_reconnect_dup(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 03-publish-b2c-disconnect-qos1.py for both
+    # MQTT 3.1.1 and MQTT 5. The first delivery is read but deliberately left
+    # unacknowledged before an abrupt disconnect. Resumption must retain both
+    # its Packet Identifier and payload while setting DUP=1.
+    topic = "03/b2c/qos1/disconnect/test"
+    payload = "disconnect-message"
+    for proto_ver in (4, 5):
+        client_id = f"03-b2c-disco-qos1-v{proto_ver}"
+        persistent_connect = mqtt_packets.gen_connect(
+            client_id,
+            clean_session=False,
+            proto_ver=proto_ver,
+            session_expiry=60,
+        )
+
+        def connack(session_present: bool) -> bytes:
+            if proto_ver == 5:
+                return expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    session_present=session_present,
+                )
+            return mqtt_packets.gen_connack(
+                flags=int(session_present),
+                rc=0,
+                proto_ver=proto_ver,
+            )
+
+        with NetzBroker(executable, connections=3) as broker:
+            subscriber = broker.connect()
+            try:
+                subscriber.sendall(persistent_connect)
+                expect_packet(
+                    subscriber,
+                    connack(False),
+                    f"QoS1 retransmit initial CONNACK v{proto_ver}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        3265, topic, 1, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(
+                        3265, 1, proto_ver=proto_ver
+                    ),
+                    f"QoS1 retransmit SUBACK v{proto_ver}",
+                )
+
+                with broker.connect() as publisher:
+                    connect_client(
+                        publisher,
+                        mqtt_packets,
+                        f"03-b2c-disco-helper-v{proto_ver}",
+                        proto_ver,
+                    )
+                    publisher.sendall(
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=1,
+                            mid=128,
+                            payload=payload,
+                            proto_ver=proto_ver,
+                        )
+                    )
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_puback(128, proto_ver=proto_ver),
+                        f"QoS1 retransmit publisher PUBACK v{proto_ver}",
+                    )
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=1,
+                            mid=1,
+                            payload=payload,
+                            proto_ver=proto_ver,
+                        ),
+                        f"QoS1 initial downstream PUBLISH v{proto_ver}",
+                    )
+                    # No PUBACK: closing the Network Connection leaves this
+                    # exact outgoing transaction in the durable Session.
+                    subscriber.close()
+                    publisher.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                    )
+            finally:
+                subscriber.close()
+
+            with broker.connect() as resumed:
+                resumed.sendall(persistent_connect)
+                expect_packet(
+                    resumed,
+                    connack(True),
+                    f"QoS1 retransmit resumed CONNACK v{proto_ver}",
+                )
+                expect_packet(
+                    resumed,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=1,
+                        mid=1,
+                        payload=payload,
+                        dup=True,
+                        proto_ver=proto_ver,
+                    ),
+                    f"QoS1 DUP retransmission v{proto_ver}",
+                )
+                resumed.sendall(mqtt_packets.gen_puback(1, proto_ver=proto_ver))
+                resumed.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    resumed,
+                    mqtt_packets.gen_pingresp(),
+                    f"QoS1 post-retransmit PINGRESP v{proto_ver}",
+                )
+                resumed.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+
+
 def offline_message_expiry(executable: Path, mqtt_packets, mqtt5_props) -> None:
     # Direct wire port of Mosquitto 02-subpub-qos1-message-expiry.py. Keep a
     # persistent subscriber offline while two QoS 1 messages are queued, then
@@ -2863,6 +2988,7 @@ def main() -> None:
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
+    outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     offline_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
@@ -2903,7 +3029,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 47 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 49 scenarios")
 
 
 if __name__ == "__main__":
