@@ -10,6 +10,7 @@ const Config = struct {
     maximum_qos: ?netz.mqtt.QoS = null,
     retain_available: bool = true,
     topic_alias_maximum: u16 = 16,
+    server_keep_alive_seconds: ?u16 = null,
     wildcard_subscription_available: bool = true,
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
@@ -47,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
                 .maximum_qos = config.maximum_qos,
                 .retain_available = config.retain_available,
                 .topic_alias_maximum = config.topic_alias_maximum,
+                .server_keep_alive_seconds = config.server_keep_alive_seconds,
                 .wildcard_subscription_available = config.wildcard_subscription_available,
                 .subscription_identifier_available = config.subscription_identifier_available,
                 .shared_subscription_available = config.shared_subscription_available,
@@ -154,6 +156,16 @@ fn parseArgs(
             config.topic_alias_maximum = try std.fmt.parseInt(
                 u16,
                 arg["--topic-alias-maximum=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--server-keep-alive=",
+        )) {
+            config.server_keep_alive_seconds = try std.fmt.parseInt(
+                u16,
+                arg["--server-keep-alive=".len..],
                 10,
             );
         } else if (std.mem.eql(u8, arg, "--no-retain")) {

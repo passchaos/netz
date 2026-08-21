@@ -276,6 +276,40 @@ def assigned_client_identifier(
             second.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def server_keep_alive(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Direct wire port of Mosquitto 12-prop-server-keepalive.py. Unlike the
+    # upstream test's Mosquitto-specific defaults, compare netz's complete
+    # stable CONNACK capability sequence and prove the connection remains
+    # usable after the negotiated override is installed.
+    override_seconds = 60
+    with NetzBroker(
+        executable,
+        extra_args=(f"--server-keep-alive={override_seconds}",),
+    ) as broker:
+        with broker.connect() as sock:
+            sock.sendall(
+                mqtt_packets.gen_connect(
+                    "server-keep-alive",
+                    proto_ver=5,
+                    keepalive=override_seconds + 1,
+                )
+            )
+            expected = expected_connack(
+                mqtt_packets,
+                mqtt5_props,
+                extra_properties=mqtt5_props.gen_uint16_prop(
+                    mqtt5_props.SERVER_KEEP_ALIVE, override_seconds
+                ),
+            )
+            expect_packet(sock, expected, "Server Keep Alive CONNACK")
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(),
+                "PINGRESP after Server Keep Alive",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def connect_persistent_v5(
     sock: socket.socket, mqtt_packets, client_id: str, session_present: bool
 ) -> None:
@@ -2298,7 +2332,8 @@ def main() -> None:
     retained_publish_property_bundle(args.broker, mqtt_packets, mqtt5_props)
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
     assigned_client_identifier(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 36 scenarios")
+    server_keep_alive(args.broker, mqtt_packets, mqtt5_props)
+    print("Mosquitto-derived MQTT wire vectors passed: 37 scenarios")
 
 
 if __name__ == "__main__":
