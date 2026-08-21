@@ -557,7 +557,9 @@ zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
 # final response that makes the incomplete HTTP/1 exchange non-reusable.
 zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Build the locked local Hyper reference offline, then verify POST headers,
-# multi-frame bodies and trailers between netz and Hyper in both directions.
+# multi-frame bodies/trailers plus bidirectional cancellation of a 128-KiB
+# response at an 8-KiB stream window while a concurrent sibling completes on
+# the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Build the audited quic-go fixture and verify HTTP/3 POST bodies/trailers and
 # streamed responses/trailers over certificate-checked QUIC in both directions,

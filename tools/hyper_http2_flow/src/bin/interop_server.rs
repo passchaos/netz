@@ -26,6 +26,11 @@ use tokio::sync::Notify;
 mod tokiort;
 use tokiort::{TokioExecutor, TokioIo};
 
+const CONSTRAINED_STREAM_WINDOW: u32 = 8 * 1024;
+const CONSTRAINED_CONNECTION_WINDOW: u32 = 65_535;
+const CANCEL_RESPONSE_BYTES: usize = 128 * 1024;
+const SIBLING_RESPONSE_BYTES: usize = 16 * 1024;
+
 fn main() {
     let port: u16 = env::args()
         .nth(1)
@@ -48,7 +53,11 @@ fn main() {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let canceled = Arc::new(CancelSignal::default());
-        server_http2::Builder::new(TokioExecutor)
+        let mut builder = server_http2::Builder::new(TokioExecutor);
+        builder
+            .initial_stream_window_size(CONSTRAINED_STREAM_WINDOW)
+            .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW);
+        builder
             .serve_connection(
                 TokioIo::new(stream),
                 service_fn(move |request| handle(request, canceled.clone())),
@@ -64,24 +73,37 @@ async fn handle(
 ) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, io::Error> {
     if request.uri().path_and_query().map(|value| value.as_str()) == Some("/cancel?from=netz") {
         ensure_request(&request, Method::GET, "/cancel?from=netz")?;
-        return Ok(Response::new(
+        let mut response = Response::new(
             StreamBody::new(CancelResponseFrames {
-                first: Some(Bytes::from_static(b"cancel-me")),
+                // A single application frame exceeds both advertised windows.
+                // h2 must retain its unsent suffix after delivering exactly
+                // the client's 8-KiB stream credit.
+                first: Some(Bytes::from(vec![b'h'; CANCEL_RESPONSE_BYTES])),
                 signal: canceled,
             })
             .boxed(),
-        ));
+        );
+        response
+            .headers_mut()
+            .insert("content-length", HeaderValue::from_static("131072"));
+        response
+            .headers_mut()
+            .insert("x-hyper-cancel-body", HeaderValue::from_static("131072"));
+        return Ok(response);
     }
-    if request.uri().path_and_query().map(|value| value.as_str()) == Some("/after-cancel?from=netz")
-    {
-        ensure_request(&request, Method::GET, "/after-cancel?from=netz")?;
+    if request.uri().path_and_query().map(|value| value.as_str()) == Some("/sibling?from=netz") {
+        ensure_request(&request, Method::GET, "/sibling?from=netz")?;
         while !canceled.observed.load(Ordering::Acquire) {
             canceled.notified.notified().await;
         }
-        let frames = stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from_static(
-            b"after-cancel",
+        let frames = stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from(
+            vec![b's'; SIBLING_RESPONSE_BYTES],
         )))]);
-        return Ok(Response::new(StreamBody::new(frames).boxed()));
+        let mut response = Response::new(StreamBody::new(frames).boxed());
+        response
+            .headers_mut()
+            .insert("x-hyper-sibling", HeaderValue::from_static("after-cancel"));
+        return Ok(response);
     }
     if request.method() != Method::POST
         || request.uri().path_and_query().map(|value| value.as_str()) != Some("/interop?from=netz")
@@ -174,6 +196,9 @@ impl futures_util::Stream for CancelResponseFrames {
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.first.take() {
             Some(data) => Poll::Ready(Some(Ok(Frame::data(data)))),
+            // The single 128-KiB body item is only partially written when the
+            // 8-KiB HTTP/2 stream window closes. Pending keeps the response
+            // unfinished until a peer reset drops this stream.
             None => Poll::Pending,
         }
     }

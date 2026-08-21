@@ -4,6 +4,10 @@
 const std = @import("std");
 const netz = @import("netz");
 
+const constrained_stream_window = 8 * 1024;
+const cancel_response_bytes = 128 * 1024;
+const sibling_response_bytes = 16 * 1024;
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 2) return error.InvalidArgument;
@@ -21,7 +25,9 @@ pub fn main(init: std.process.Init) !void {
         .{ .ip4 = .loopback(port) },
         .{
             .max_frame_payload = 16 * 1024,
-            .max_body_bytes = 4096,
+            .max_body_bytes = 256 * 1024,
+            .initial_window_size = constrained_stream_window,
+            .initial_connection_window_size = 65_535,
         },
     );
     defer server.deinit();
@@ -78,22 +84,48 @@ pub fn main(init: std.process.Init) !void {
         .{},
     );
 
-    var cancel_request = try connection.readRequest();
-    defer cancel_request.deinit(allocator);
-    if (!std.mem.eql(
-        u8,
-        cancel_request.path,
+    // Hyper sends both requests before it consumes either response. Accept
+    // both heads first so the test has two simultaneously active streams even
+    // if the client's executor assigns their stream IDs in either order.
+    var first_concurrent = try connection.readRequest();
+    defer first_concurrent.deinit(allocator);
+    var second_concurrent = try connection.readRequest();
+    defer second_concurrent.deinit(allocator);
+    const cancel_request = requestByPath(
+        &first_concurrent,
+        &second_concurrent,
         "/cancel?from=hyper",
-    )) return error.InvalidRequest;
+    ) orelse return error.InvalidRequest;
+    const sibling_request = requestByPath(
+        &first_concurrent,
+        &second_concurrent,
+        "/sibling?from=hyper",
+    ) orelse return error.InvalidRequest;
+    if (cancel_request.stream_id == sibling_request.stream_id or
+        !std.mem.eql(u8, cancel_request.method, "GET") or
+        !std.mem.eql(u8, sibling_request.method, "GET"))
+    {
+        return error.InvalidRequest;
+    }
+
     var cancel_response = try connection.startResponse(
         cancel_request.stream_id,
         .{
             .status = 200,
+            .headers = &.{
+                .{ .name = "content-length", .value = "131072" },
+                .{ .name = "x-netz-cancel-body", .value = "131072" },
+            },
             .request_method = cancel_request.method,
         },
     );
     defer cancel_response.deinit();
-    try cancel_response.write("cancel-me");
+    const cancel_chunk = [_]u8{'n'} ** constrained_stream_window;
+    // Exactly fill Hyper's advertised per-stream receive window while leaving
+    // the declared large response unfinished. The next byte is flow-control
+    // blocked until Hyper consumes DATA; dropping that body must reset only
+    // this stream.
+    try cancel_response.write(&cancel_chunk);
     var reset = try connection.readResetStream();
     defer reset.deinit(allocator);
     if (reset.reset.stream_id != cancel_request.stream_id or
@@ -105,22 +137,30 @@ pub fn main(init: std.process.Init) !void {
     // its defer cannot emit a duplicate reset against the recycled state.
     cancel_response.finished = true;
 
-    var after_cancel = try connection.readRequest();
-    defer after_cancel.deinit(allocator);
-    if (!std.mem.eql(
-        u8,
-        after_cancel.path,
-        "/after-cancel?from=hyper",
-    )) return error.InvalidRequest;
-    try connection.writeResponse(after_cancel.stream_id, .{
+    const sibling_body = [_]u8{'s'} ** sibling_response_bytes;
+    try connection.writeResponse(sibling_request.stream_id, .{
         .status = 200,
-        .body = "after-cancel",
-        .request_method = after_cancel.method,
+        .headers = &.{.{
+            .name = "x-netz-sibling",
+            .value = "after-cancel",
+        }},
+        .body = &sibling_body,
+        .request_method = sibling_request.method,
     });
     std.debug.print(
-        "netz HTTP/2 server observed Hyper cancellation and reused connection: rst=CANCEL status=200\n",
-        .{},
+        "netz HTTP/2 server observed flow-blocked Hyper cancellation and completed concurrent sibling: rst=CANCEL window={} offered={} sibling={}\n",
+        .{ constrained_stream_window, cancel_response_bytes, sibling_response_bytes },
     );
+}
+
+fn requestByPath(
+    first: *const netz.http2.runtime.OwnedRequest,
+    second: *const netz.http2.runtime.OwnedRequest,
+    path: []const u8,
+) ?*const netz.http2.runtime.OwnedRequest {
+    if (std.mem.eql(u8, first.path, path)) return first;
+    if (std.mem.eql(u8, second.path, path)) return second;
+    return null;
 }
 
 fn headerEquals(

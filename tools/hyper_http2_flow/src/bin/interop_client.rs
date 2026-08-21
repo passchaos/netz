@@ -7,8 +7,8 @@ use std::convert::Infallible;
 use std::env;
 
 use bytes::Bytes;
-use futures_util::stream;
-use http_body_util::{BodyExt, StreamBody};
+use futures_util::{future, stream};
+use http_body_util::{combinators::BoxBody, BodyExt, Empty, StreamBody};
 use hyper::body::Frame;
 use hyper::client::conn::http2 as client_http2;
 use hyper::header::{HeaderMap, HeaderValue};
@@ -19,8 +19,12 @@ use tokio::net::TcpStream;
 mod tokiort;
 use tokiort::{TokioExecutor, TokioIo};
 
-type RequestBody =
-    StreamBody<stream::Iter<std::array::IntoIter<Result<Frame<Bytes>, Infallible>, 3>>>;
+const CONSTRAINED_STREAM_WINDOW: u32 = 8 * 1024;
+const CONSTRAINED_CONNECTION_WINDOW: u32 = 65_535;
+const CANCEL_RESPONSE_BYTES: usize = 128 * 1024;
+const SIBLING_RESPONSE_BYTES: usize = 16 * 1024;
+
+type RequestBody = BoxBody<Bytes, Infallible>;
 
 fn main() {
     let port: u16 = env::args()
@@ -39,12 +43,19 @@ fn main() {
             .await
             .expect("connect netz interoperability server");
         stream.set_nodelay(true).expect("client TCP_NODELAY");
-        let (mut sender, connection) = client_http2::Builder::new(TokioExecutor)
+        let mut builder = client_http2::Builder::new(TokioExecutor);
+        builder
+            .initial_stream_window_size(CONSTRAINED_STREAM_WINDOW)
+            .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW);
+        let (mut sender, connection) = builder
             .handshake(TokioIo::new(stream))
             .await
             .expect("Hyper HTTP/2 handshake");
         tokio::spawn(async move {
-            connection.await.expect("drive Hyper HTTP/2 connection");
+            // The one-shot netz fixture closes immediately after its final
+            // response. A concurrent close can surface as BrokenPipe after
+            // every request assertion below has already completed.
+            let _ = connection.await;
         });
 
         let mut request_trailers = HeaderMap::new();
@@ -68,7 +79,7 @@ fn main() {
                     .expect("request URI"),
             )
             .header("x-hyper-request", "request-header")
-            .body(StreamBody::new(request_frames))
+            .body(StreamBody::new(request_frames).boxed())
             .expect("request");
         let response = sender
             .send_request(request)
@@ -116,58 +127,79 @@ fn main() {
             )
             .body(empty_body())
             .expect("cancel request");
-        let cancel_response = sender
-            .send_request(cancel_request)
-            .await
-            .expect("send cancellation request");
-        assert_eq!(cancel_response.status(), StatusCode::OK);
-        let mut cancel_body = cancel_response.into_body();
-        let first = cancel_body
-            .frame()
-            .await
-            .expect("first cancellation body frame")
-            .expect("valid cancellation body frame")
-            .into_data()
-            .expect("cancellation DATA frame");
-        assert_eq!(first, Bytes::from_static(b"cancel-me"));
-        // Dropping an unfinished Incoming body emits RST_STREAM(CANCEL). The
-        // netz server waits for that exact reset before accepting this request.
-        drop(cancel_body);
-
-        let after_cancel_request = Request::builder()
+        let sibling_request = Request::builder()
             .method(Method::GET)
             .uri(
                 Uri::builder()
                     .scheme("http")
                     .authority("localhost")
-                    .path_and_query("/after-cancel?from=hyper")
+                    .path_and_query("/sibling?from=hyper")
                     .build()
-                    .expect("post-cancel request URI"),
+                    .expect("sibling request URI"),
             )
             .body(empty_body())
-            .expect("post-cancel request");
-        let response = sender
-            .send_request(after_cancel_request)
-            .await
-            .expect("send post-cancel request");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("collect post-cancel response")
-            .to_bytes();
-        assert_eq!(body, Bytes::from_static(b"after-cancel"));
+            .expect("sibling request");
+
+        let mut sibling_sender = sender.clone();
+        let cancel_flow = async move {
+            let cancel_response = sender
+                .send_request(cancel_request)
+                .await
+                .expect("send cancellation request");
+            assert_eq!(cancel_response.status(), StatusCode::OK);
+            assert_eq!(
+                cancel_response.headers().get("content-length"),
+                Some(&HeaderValue::from_static("131072")),
+            );
+            assert_eq!(
+                cancel_response.headers().get("x-netz-cancel-body"),
+                Some(&HeaderValue::from_static("131072")),
+            );
+            let mut cancel_body = cancel_response.into_body();
+            let first = cancel_body
+                .frame()
+                .await
+                .expect("first cancellation body frame")
+                .expect("valid cancellation body frame")
+                .into_data()
+                .expect("cancellation DATA frame");
+            assert_eq!(first.len(), CONSTRAINED_STREAM_WINDOW as usize);
+            assert!(first.iter().all(|byte| *byte == b'n'));
+            // The response is still 120 KiB short of Content-Length. Dropping
+            // Incoming emits RST_STREAM(CANCEL) while the sibling is active.
+            drop(cancel_body);
+            first.len()
+        };
+        let sibling_flow = async move {
+            let response = sibling_sender
+                .send_request(sibling_request)
+                .await
+                .expect("send concurrent sibling request");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get("x-netz-sibling"),
+                Some(&HeaderValue::from_static("after-cancel")),
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect sibling response")
+                .to_bytes();
+            assert_eq!(body.len(), SIBLING_RESPONSE_BYTES);
+            assert!(body.iter().all(|byte| *byte == b's'));
+            body.len()
+        };
+        let (cancel_received, sibling_received) =
+            future::join(cancel_flow, sibling_flow).await;
+        assert_eq!(CANCEL_RESPONSE_BYTES, 128 * 1024);
         println!(
-            "Hyper HTTP/2 client canceled netz stream and reused connection: rst=CANCEL status=200"
+            "Hyper HTTP/2 client canceled flow-blocked netz stream and completed concurrent sibling: rst=CANCEL window={} received={} sibling={}",
+            CONSTRAINED_STREAM_WINDOW, cancel_received, sibling_received,
         );
     });
 }
 
 fn empty_body() -> RequestBody {
-    StreamBody::new(stream::iter([
-        Ok::<_, Infallible>(Frame::data(Bytes::new())),
-        Ok(Frame::data(Bytes::new())),
-        Ok(Frame::data(Bytes::new())),
-    ]))
+    Empty::<Bytes>::new().boxed()
 }

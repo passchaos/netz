@@ -51,6 +51,7 @@ const default_max_header_list_size: usize = 16 * 1024;
 // occupies the first pair and leaves room for three DATA frames.
 const max_data_frames_per_write: usize = 4;
 const max_data_frames_with_headers: usize = 3;
+const local_reset_history_capacity: usize = 64;
 
 fn readSome(
     io: std.Io,
@@ -1097,6 +1098,13 @@ pub const Connection = struct {
     peer_origin_index: std.StringHashMapUnmanaged(usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
     alternative_service_index: AltSvcIndex = .empty,
+    /// Peers may have stream frames in flight when RST_STREAM reaches them. A
+    /// bounded recent-ID ring lets another response reader discard those late
+    /// frames without adding attacker-controlled, connection-lifetime memory.
+    locally_reset_streams: [local_reset_history_capacity]u31 =
+        @splat(0),
+    locally_reset_stream_count: usize = 0,
+    locally_reset_stream_next: usize = 0,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// constructors set this to `http`, while the ALPN-authenticated TLS
@@ -2527,9 +2535,9 @@ pub const Connection = struct {
                             // Restore exact charged credit before the outer
                             // cleanup cancels every unfinished stream. Relying
                             // on low-watermark updates here would leak usable
-                            // connection credit across callback failures.
-                            self.releaseReceivedCapacity(
-                                state.stream_id,
+                            // connection credit across callback failures. The
+                            // doomed stream does not need its credit restored.
+                            self.releaseConnectionCapacity(
                                 frame.payload.len,
                             ) catch {};
                             // A final DATA already closed the remote half; do
@@ -2582,7 +2590,10 @@ pub const Connection = struct {
             try self.transportForIo().writeAll(batch.items);
         }
         for (states) |state| {
-            if (!state.done) self.forgetStreamWindows(state.stream_id);
+            if (!state.done) {
+                self.rememberLocallyResetStream(state.stream_id);
+                self.forgetStreamWindows(state.stream_id);
+            }
         }
     }
 
@@ -3301,10 +3312,10 @@ pub const Connection = struct {
                                     // Mirror the response-side callback
                                     // contract: once DATA has been consumed
                                     // from the receive window, restore exact
-                                    // credit and cancel this stream before
-                                    // surfacing the application error.
-                                    self.releaseReceivedCapacity(
-                                        stream_id,
+                                    // shared connection credit and cancel this
+                                    // stream before surfacing the application
+                                    // error.
+                                    self.releaseConnectionCapacity(
                                         frame.payload.len,
                                     ) catch {};
                                     // Even final request DATA leaves the
@@ -3565,8 +3576,10 @@ pub const Connection = struct {
                             frame.header.stream_id,
                             data.data,
                         ) catch |err| {
-                            self.releaseReceivedCapacity(
-                                frame.header.stream_id,
+                            // The error path resets every batch member, so no
+                            // stream credit will be consumed again. Restore
+                            // only the shared connection window.
+                            self.releaseConnectionCapacity(
                                 frame.payload.len,
                             ) catch {};
                             return err;
@@ -4851,6 +4864,66 @@ pub const Connection = struct {
             error_code,
         );
         try self.transportForIo().writeAll(encoded.items);
+        self.rememberLocallyResetStream(stream_id);
+    }
+
+    fn rememberLocallyResetStream(self: *Connection, stream_id: u31) void {
+        const retained =
+            self.locally_reset_streams[0..self.locally_reset_stream_count];
+        if (std.mem.indexOfScalar(u31, retained, stream_id) != null) return;
+        if (self.locally_reset_stream_count < local_reset_history_capacity) {
+            self.locally_reset_streams[self.locally_reset_stream_count] =
+                stream_id;
+            self.locally_reset_stream_count += 1;
+            return;
+        }
+        self.locally_reset_streams[self.locally_reset_stream_next] =
+            stream_id;
+        self.locally_reset_stream_next =
+            (self.locally_reset_stream_next + 1) %
+            local_reset_history_capacity;
+    }
+
+    fn wasLocallyReset(self: *const Connection, stream_id: u31) bool {
+        return std.mem.indexOfScalar(
+            u31,
+            self.locally_reset_streams[0..self.locally_reset_stream_count],
+            stream_id,
+        ) != null;
+    }
+
+    fn discardLateFrameForLocallyResetStream(
+        self: *Connection,
+        frame: http2.Frame,
+    ) Error!bool {
+        if (frame.header.stream_id == 0 or
+            !self.wasLocallyReset(frame.header.stream_id))
+        {
+            return false;
+        }
+        switch (frame.header.frame_type) {
+            .data => {
+                // RST_STREAM makes the stream window unusable, but bytes
+                // already in flight still consumed connection credit before
+                // the reset took effect. Account and immediately restore that
+                // shared credit so discarded bytes cannot starve siblings.
+                _ = try http2.DataPayload.parse(frame);
+                try self.recv_connection_window.receive(frame.payload.len);
+                try self.releaseConnectionCapacity(frame.payload.len);
+            },
+            .headers => {
+                // HPACK state is connection-wide even when the carrying stream
+                // has been reset. Decode the complete block (including any
+                // CONTINUATION frames) before discarding its fields.
+                const headers = try self.readHeaderBlock(frame);
+                freeHeaders(self.allocator, headers);
+            },
+            .rst_stream => {
+                _ = try http2.ResetStreamPayload.parse(frame);
+            },
+            else => return false,
+        }
+        return true;
     }
 
     fn recordResetStream(
@@ -4911,6 +4984,21 @@ pub const Connection = struct {
                 increment,
                 increment,
             );
+            remaining -= increment;
+        }
+    }
+
+    fn releaseConnectionCapacity(
+        self: *Connection,
+        amount: usize,
+    ) Error!void {
+        if (amount == 0) return;
+        var remaining = amount;
+        while (remaining != 0) {
+            const increment: u31 = @intCast(
+                @min(remaining, std.math.maxInt(u31)),
+            );
+            try self.sendWindowUpdates(null, increment, null);
             remaining -= increment;
         }
     }
@@ -5514,11 +5602,10 @@ pub const Connection = struct {
                         consume(context, data.data) catch |err| {
                             // DATA already consumed connection credit before
                             // application delivery. Restore its exact charged
-                            // payload before canceling; a low-watermark-only
-                            // update would let repeated small callback failures
-                            // gradually starve unrelated streams.
-                            self.releaseReceivedCapacity(
-                                stream_id,
+                            // connection payload before canceling; a
+                            // low-watermark-only update would let repeated small
+                            // callback failures gradually starve siblings.
+                            self.releaseConnectionCapacity(
                                 frame.payload.len,
                             ) catch {};
                             if ((frame.header.flags &
@@ -5933,6 +6020,9 @@ pub const Connection = struct {
     }
 
     fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
+        if (try self.discardLateFrameForLocallyResetStream(frame)) {
+            return true;
+        }
         switch (frame.header.frame_type) {
             .settings => {
                 if ((frame.header.flags & flag_ack) != 0) {
@@ -6348,11 +6438,17 @@ pub const Connection = struct {
                     try self.handleGoAwayForStream(stream_id, goaway);
                 },
                 .rst_stream => {
-                    const reset = try http2.ResetStreamPayload.parse(frame.frame);
+                    const reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
                     if (reset.stream_id == stream_id) {
                         self.recordResetStream(reset);
                         return error.StreamReset;
                     }
+                    if (self.wasLocallyReset(reset.stream_id)) {
+                        continue;
+                    }
+                    return error.UnexpectedFrame;
                 },
                 .headers, .data, .push_promise => {
                     if (self.role != .client) {
@@ -14642,6 +14738,99 @@ test "HTTP/2 continues after RST_STREAM on a half-closed request" {
         .authority = "localhost",
     });
     try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client ignores in-flight frames after local reset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(server_ptr.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(server_ptr.allocator);
+
+            try connection.writeHeaders(first.stream_id, &.{.{
+                .name = ":status",
+                .value = "200",
+            }}, false);
+            try writeFrame(
+                server_ptr.allocator,
+                server_ptr.io,
+                connection.stream,
+                .data,
+                0,
+                first.stream_id,
+                "late",
+            );
+            try connection.writeHeaders(first.stream_id, &.{.{
+                .name = "x-late-trailer",
+                .value = "discarded",
+            }}, true);
+            try connection.writeResponse(second.stream_id, .{
+                .status = 200,
+                .body = "ok",
+                .request_method = second.method,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    const first = try client.sendCompleteRequest(.{
+        .path = "/cancel",
+        .authority = "localhost",
+    });
+    const second = try client.sendCompleteRequest(.{
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    try client.sendResetStream(first.stream_id, .cancel);
+
+    var response = try client.readResponse(
+        second.stream_id,
+        second.request_method,
+        second.extended_connect,
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+    try std.testing.expectEqual(
+        @as(i64, default_flow_window - "ok".len),
+        client.recv_connection_window.value,
+    );
 
     thread.join();
     if (shared.err) |err| return err;

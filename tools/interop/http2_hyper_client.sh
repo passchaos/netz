@@ -34,7 +34,8 @@ PY
 "$server_binary" "$port" >"$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
-  if grep -q 'Hyper HTTP/2 interop server listening' "$work/server.log"; then
+  if grep -q 'Hyper HTTP/2 interop server listening' "$work/server.log" \
+      2>/dev/null; then
     break
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -43,7 +44,8 @@ for _ in $(seq 1 200); do
   fi
   sleep 0.05
 done
-if ! grep -q 'Hyper HTTP/2 interop server listening' "$work/server.log"; then
+if ! grep -q 'Hyper HTTP/2 interop server listening' "$work/server.log" \
+    2>/dev/null; then
   echo 'timed out waiting for Hyper HTTP/2 server' >&2
   cat "$work/server.log" >&2
   exit 1
@@ -59,7 +61,7 @@ wait "$server_pid"
 server_pid=
 cat "$work/netz-client.log"
 grep -Fq \
-  'netz HTTP/2 client canceled Hyper stream and reused connection: rst=CANCEL status=200' \
+  'netz HTTP/2 client canceled flow-blocked Hyper stream and completed concurrent sibling: rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/netz-client.log"
 echo 'Hyper HTTP/2 server -> netz client interop passed'
 
@@ -75,7 +77,7 @@ PY
 server_pid=$!
 for _ in $(seq 1 200); do
   if grep -q 'netz HTTP/2 Hyper interop server listening' \
-      "$work/netz-server.log"; then
+      "$work/netz-server.log" 2>/dev/null; then
     break
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -85,7 +87,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 if ! grep -q 'netz HTTP/2 Hyper interop server listening' \
-    "$work/netz-server.log"; then
+    "$work/netz-server.log" 2>/dev/null; then
   echo 'timed out waiting for netz HTTP/2 server' >&2
   cat "$work/netz-server.log" >&2
   exit 1
@@ -104,12 +106,12 @@ grep -Fq \
   'Hyper HTTP/2 client interoperated with netz: status=201 body=13 trailers=1' \
   "$work/hyper-client.log"
 grep -Fq \
-  'Hyper HTTP/2 client canceled netz stream and reused connection: rst=CANCEL status=200' \
+  'Hyper HTTP/2 client canceled flow-blocked netz stream and completed concurrent sibling: rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/hyper-client.log"
 grep -Fq \
   'method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
   "$work/netz-server.log"
 grep -Fq \
-  'netz HTTP/2 server observed Hyper cancellation and reused connection: rst=CANCEL status=200' \
+  'netz HTTP/2 server observed flow-blocked Hyper cancellation and completed concurrent sibling: rst=CANCEL window=8192 offered=131072 sibling=16384' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/2 client -> netz server interop passed'
