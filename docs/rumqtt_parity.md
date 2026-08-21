@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs fifty-one
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs fifty-three
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -883,6 +883,14 @@ creates exactly one independent downstream QoS 2 transaction.
 The nineteenth scenario verifies Mosquitto's PUBREL idempotence boundary:
 repeating a completed PUBREL and sending an unknown Packet Identifier both
 return PUBCOMP, while the subscriber observes no duplicate Application Message.
+Two companion scenarios directly port Mosquitto's
+`03-publish-qos2-reuse-mid.py` for MQTT 3.1.1 and MQTT 5. A second non-DUP
+PUBLISH reuses an identifier that is still waiting for PUBREL but carries a
+different topic and payload. Netz acknowledges both PUBLISH packets with
+PUBREC, atomically replaces the pending transaction, and releases only the
+replacement Application Message after PUBREL; the subscriber's bounded silence
+check rejects stale delivery of the original message. DUP retransmissions
+remain stricter and must match the stored transaction byte-for-byte.
 The twentieth scenario sends the server-only Subscription Identifier property
 on a client PUBLISH. Netz rejects the connection before routing and then
 accepts a fresh MQTT 5 client/PING, proving the finite broker remains healthy.
@@ -994,7 +1002,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all fifty-one scenarios pass. This is deliberately described as a selected
+packets; all fifty-three scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.

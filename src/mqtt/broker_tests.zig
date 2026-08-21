@@ -18,6 +18,7 @@ pub const TestContext = struct {
     pub const waitForPeerCloseFn = waitForPeerClose;
     pub const joinServerFn = joinServer;
     pub const writeDuplicatePublishFn = writeDuplicatePublish;
+    pub const writePublishWithPacketIdFn = writePublishWithPacketId;
 };
 
 pub fn connectWithOptions(
@@ -140,6 +141,28 @@ fn writeDuplicatePublish(
         .{
             .qos = .exactly_once,
             .dup = true,
+            .packet_id = packet_id,
+        },
+    );
+    try connection.transport.writePacket(encoded.items);
+}
+
+fn writePublishWithPacketId(
+    connection: *runtime.Connection,
+    topic_name: []const u8,
+    payload: []const u8,
+    packet_id: u16,
+) !void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try mqtt.writePublish(
+        &encoded,
+        std.testing.allocator,
+        connection.protocol,
+        topic_name,
+        payload,
+        .{
+            .qos = .exactly_once,
             .packet_id = packet_id,
         },
     );

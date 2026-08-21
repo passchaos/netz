@@ -2802,6 +2802,110 @@ def qos2_duplicate_publish(executable: Path, mqtt_packets) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def qos2_reuse_packet_identifier(executable: Path, mqtt_packets) -> None:
+    # Direct wire port of Mosquitto 03-publish-qos2-reuse-mid.py. A second
+    # non-DUP PUBLISH is a new transaction even though it reuses an identifier
+    # that is waiting for PUBREL, so only the replacement message is released.
+    for proto_ver in (4, 5):
+        topic = f"qos2/reuse/v{proto_ver}"
+        replacement_topic = f"{topic}/replacement"
+        with NetzBroker(executable, connections=2) as broker:
+            with broker.connect() as subscriber, broker.connect() as publisher:
+                connect_client(
+                    subscriber,
+                    mqtt_packets,
+                    f"qos2-reuse-sub-{proto_ver}",
+                    proto_ver,
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        1, f"{topic}/#", 2, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(1, 2, proto_ver=proto_ver),
+                    f"QoS2 reuse SUBACK v{proto_ver}",
+                )
+                connect_client(
+                    publisher,
+                    mqtt_packets,
+                    f"qos2-reuse-pub-{proto_ver}",
+                    proto_ver,
+                )
+
+                packet_id = 312
+                for publish_topic, payload in (
+                    (topic, "original"),
+                    (replacement_topic, "replacement"),
+                ):
+                    publisher.sendall(
+                        mqtt_packets.gen_publish(
+                            publish_topic,
+                            qos=2,
+                            mid=packet_id,
+                            payload=payload,
+                            dup=False,
+                            proto_ver=proto_ver,
+                        )
+                    )
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_pubrec(
+                            packet_id, proto_ver=proto_ver
+                        ),
+                        f"QoS2 reuse PUBREC v{proto_ver}/{publish_topic}",
+                    )
+
+                publisher.sendall(
+                    mqtt_packets.gen_pubrel(packet_id, proto_ver=proto_ver)
+                )
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_pubcomp(
+                        packet_id, proto_ver=proto_ver
+                    ),
+                    f"QoS2 reuse PUBCOMP v{proto_ver}",
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        replacement_topic, qos=2, mid=1,
+                        payload="replacement", proto_ver=proto_ver,
+                    ),
+                    f"QoS2 replacement delivery v{proto_ver}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_pubrec(1, proto_ver=proto_ver)
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_pubrel(1, proto_ver=proto_ver),
+                    f"QoS2 replacement PUBREL v{proto_ver}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_pubcomp(1, proto_ver=proto_ver)
+                )
+                subscriber.settimeout(0.05)
+                try:
+                    stale = subscriber.recv(1)
+                    if stale:
+                        raise AssertionError(
+                            "replaced QoS2 message was also delivered: "
+                            + stale.hex()
+                        )
+                except socket.timeout:
+                    pass
+                finally:
+                    subscriber.settimeout(5)
+                publisher.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+
+
 def qos2_repeated_pubrel(executable: Path, mqtt_packets) -> None:
     # Mosquitto treats a repeated/unknown PUBREL as idempotent because PUBCOMP
     # may have been lost. Complete one routed transaction, repeat PUBREL, then
@@ -3174,6 +3278,7 @@ def main() -> None:
     retained_multilevel_clear(args.broker, mqtt_packets)
     shared_subscription_rotation(args.broker, mqtt_packets)
     qos2_duplicate_publish(args.broker, mqtt_packets)
+    qos2_reuse_packet_identifier(args.broker, mqtt_packets)
     qos2_repeated_pubrel(args.broker, mqtt_packets)
     reject_publish_subscription_identifier(
         args.broker, mqtt_packets, mqtt5_props
@@ -3189,7 +3294,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 51 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 53 scenarios")
 
 
 if __name__ == "__main__":

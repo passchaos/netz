@@ -9,6 +9,7 @@ const connect = context.connectFn;
 const disconnectAll = context.disconnectAllFn;
 const joinServer = context.joinServerFn;
 const writeDuplicatePublish = context.writeDuplicatePublishFn;
+const writePublishWithPacketId = context.writePublishWithPacketIdFn;
 
 test "broker routes inbound QoS 2 exactly once at PUBREL" {
     const allocator = std.testing.allocator;
@@ -106,6 +107,89 @@ test "broker routes inbound QoS 2 exactly once at PUBREL" {
         packet_id,
         repeated_pubcomp.ack.packet_id,
     );
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker replaces QoS 2 transaction when a non-DUP PUBLISH reuses its identifier" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "qos2-reuse-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "qos2-reuse-publisher",
+        &.{},
+    );
+    defer publisher.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "qos2/reuse/#", .qos = .exactly_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    const packet_id: u16 = 312;
+    try writePublishWithPacketId(
+        &publisher,
+        "qos2/reuse/original",
+        "old",
+        packet_id,
+    );
+    var first_pubrec = try publisher.readPubRec();
+    defer first_pubrec.deinit(allocator);
+    try std.testing.expectEqual(packet_id, first_pubrec.ack.packet_id);
+
+    // MQTT treats DUP=0 as a new PUBLISH even when its identifier collides
+    // with an incomplete QoS 2 transaction. Match Mosquitto by replacing the
+    // stored Application Message; the old payload must never be routed.
+    try writePublishWithPacketId(
+        &publisher,
+        "qos2/reuse/replacement",
+        "new",
+        packet_id,
+    );
+    var second_pubrec = try publisher.readPubRec();
+    defer second_pubrec.deinit(allocator);
+    try std.testing.expectEqual(packet_id, second_pubrec.ack.packet_id);
+
+    try publisher.writePubRel(packet_id, 0);
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "qos2/reuse/replacement",
+        delivered.publish.topic,
+    );
+    try std.testing.expectEqualStrings("new", delivered.publish.payload);
+    try subscriber.writePubRec(delivered.publish.packet_id.?, 0);
+    var downstream_pubrel = try subscriber.readPubRel();
+    defer downstream_pubrel.deinit(allocator);
+    try subscriber.writePubComp(downstream_pubrel.ack.packet_id, 0);
+    var pubcomp = try publisher.readPubComp();
+    defer pubcomp.deinit(allocator);
 
     try disconnectAll(&.{ &subscriber, &publisher });
     try joinServer(thread, &joined, &serve);
