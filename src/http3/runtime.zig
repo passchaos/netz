@@ -679,6 +679,17 @@ pub const StreamingResponseEvent = union(enum) {
     }
 };
 
+/// A peer request-stream receiver abandoned the response direction.
+///
+/// HTTP/3 clients express this with QUIC STOP_SENDING, most commonly using
+/// H3_REQUEST_CANCELLED when a response body is closed before EOF. Keeping the
+/// stream ID and application code avoids collapsing peer cancellation into a
+/// generic write failure in multiplexed servers.
+pub const PeerResponseCancellation = struct {
+    stream_id: u62,
+    application_error_code: u64,
+};
+
 /// One incremental event from a server-initiated push stream.
 ///
 /// Push ID and QUIC stream ID are intentionally both exposed: the former
@@ -2641,6 +2652,9 @@ pub const HandshakeServerSession = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+            return responseResetError(cancel.application_error_code);
+        }
         try sendConnectionBodyChunk(
             &self.established.connection,
             &self.outbound_bodies,
@@ -2966,6 +2980,9 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+            return responseResetError(cancel.application_error_code);
+        }
         try sendConnectionTrailers(
             &self.established.connection,
             &self.outbound_bodies,
@@ -2978,6 +2995,48 @@ pub const HandshakeServerSession = struct {
             self.options,
         );
         self.request_lifecycle.markFinished(stream_id);
+    }
+
+    /// Wait until the peer cancels the response direction of `stream_id`.
+    ///
+    /// The request itself can already be complete: closing an unread response
+    /// body sends STOP_SENDING, not RESET_STREAM, so it must be observed from
+    /// the local QUIC send state. Packets for unrelated request streams remain
+    /// routed while this blocking convenience method waits.
+    pub fn receivePeerResponseCancellation(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!PeerResponseCancellation {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        while (true) {
+            if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+                return cancel;
+            }
+            try self.receiveRequestPacket();
+        }
+    }
+
+    fn finishPeerResponseCancellation(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!?PeerResponseCancellation {
+        const stopped = self.established.connection.streamStopped(stream_id) orelse
+            return null;
+        // Do the only fallible cleanup first. If sending MAX_STREAMS is
+        // temporarily blocked, the caller can retry without losing the
+        // cancellation or partially retiring HTTP/3 bookkeeping.
+        _ = try self.established.connection.releaseCompletedPeerStream(
+            stream_id,
+        );
+        self.qpack_encode.abandonStream(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
+        self.request_lifecycle.markFinished(stream_id);
+        return .{
+            .stream_id = stream_id,
+            .application_error_code = stopped.application_error_code,
+        };
     }
 
     /// Blocking counterpart to `finishResponseTrailers` that keeps receiving
@@ -8580,6 +8639,11 @@ const ServerRequestLifecycle = struct {
         } else if (lowest == last_index) {
             self.lowest_active_stream_index = index;
         }
+    }
+
+    fn contains(self: ServerRequestLifecycle, stream_id: u62) bool {
+        return self.active_stream_index.count() != 0 and
+            self.active_stream_index.contains(stream_id);
     }
 
     fn finalGoAwayId(self: ServerRequestLifecycle) Error!u64 {
@@ -19913,5 +19977,6 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 }
 
 test {
+    _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/response_scheduler_tests.zig");
 }

@@ -114,10 +114,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED connection_reused=true request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
   "$work/quic-go-client.log"
 grep -Fq \
-  'request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
+  'cancel=H3_REQUEST_CANCELLED connection_reused=true request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
   "$work/netz-server.log"
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"

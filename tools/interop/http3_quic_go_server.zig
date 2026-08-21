@@ -56,9 +56,45 @@ pub fn main(init: std.process.Init) !void {
 
     var session = try server.accept();
     defer session.deinit();
+
+    var canceled = try session.receiveRequest();
+    defer canceled.deinit(allocator);
+    if (canceled.stream_id != 0 or
+        !std.mem.eql(u8, canceled.request.method, "GET") or
+        !std.mem.eql(
+            u8,
+            canceled.request.path,
+            "/cancel-response?from=quic-go",
+        ) or
+        canceled.request.body.len != 0)
+    {
+        return error.InvalidRequest;
+    }
+    try session.startResponse(canceled.stream_id, .{
+        .status = 200,
+        .headers = &.{.{
+            .name = "x-netz-cancel",
+            .value = "response-started",
+        }},
+    }, 64);
+    try session.sendResponseBodyPaced(
+        canceled.stream_id,
+        "partial",
+        false,
+    );
+    const cancellation = try session.receivePeerResponseCancellation(
+        canceled.stream_id,
+    );
+    if (cancellation.application_error_code !=
+        netz.http3.ApplicationErrorCode.request_cancelled)
+    {
+        return error.UnexpectedCancellationCode;
+    }
+
     var request = try session.receiveRequest();
     defer request.deinit(allocator);
-    if (!std.mem.eql(u8, request.request.method, "POST") or
+    if (request.stream_id != 4 or
+        !std.mem.eql(u8, request.request.method, "POST") or
         !std.mem.eql(u8, request.request.path, "/interop?from=quic-go") or
         !std.mem.eql(u8, request.request.scheme, "https") or
         request.request.authority == null or
@@ -101,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
     }});
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz HTTP/3 server interoperated with quic-go: request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
+        "netz HTTP/3 server interoperated with quic-go: cancel=H3_REQUEST_CANCELLED connection_reused=true request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
         .{},
     );
 }

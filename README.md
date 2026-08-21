@@ -557,7 +557,9 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Build the audited quic-go fixture and verify HTTP/3 POST bodies/trailers and
 # streamed responses/trailers over certificate-checked QUIC in both directions,
-# including H3_REQUEST_CANCELLED followed by same-connection reuse.
+# including H3_REQUEST_CANCELLED followed by same-connection reuse in both
+# directions. The reverse case closes a partially-read quic-go response body
+# and requires netz to observe the exact cancellation before serving stream 4.
 zig build interop-http3-quic-go -Doptimize=ReleaseFast
 # Use Hyper's HTTP/2 Extended CONNECT server to validate netz RFC 8441 frame
 # masking, text exchange, Ping/Pong, and the WebSocket Close handshake.
