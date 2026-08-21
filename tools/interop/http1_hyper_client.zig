@@ -6,19 +6,38 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const tls_enabled = args.len == 3;
+    if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
+        return error.InvalidArgument;
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var client = try netz.http1.runtime.Client.connect(
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    var ca_lock: std.Io.RwLock = .init;
+    if (tls_enabled) {
+        try ca_bundle.addCertsFromFilePathAbsolute(
+            allocator,
+            io,
+            std.Io.Clock.real.now(io),
+            args[2],
+        );
+    }
+    const limits: netz.http1.runtime.Limits = .{ .max_body_bytes = 4096 };
+    var client = try connect(
         allocator,
         io,
-        .{ .ip4 = .loopback(port) },
-        .{ .max_body_bytes = 4096 },
+        port,
+        limits,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
     );
     defer client.close();
 
@@ -66,18 +85,21 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/1 client interoperated with Hyper: status=201 body=14 trailers=1\n",
-        .{},
+        "netz HTTP/1 client interoperated with Hyper: transport={s} status=201 body=14 trailers=1\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
     );
 
     // Use a fresh connection so the first scenario's Hyper service lifecycle
     // cannot accidentally satisfy this request. Only send the declared body
     // after Hyper has emitted its automatic interim response.
-    var expect_client = try netz.http1.runtime.Client.connect(
+    var expect_client = try connect(
         allocator,
         io,
-        .{ .ip4 = .loopback(port) },
-        .{ .max_body_bytes = 4096 },
+        port,
+        limits,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
     );
     defer expect_client.close();
     var expect_writer = try expect_client.startRequest(.{
@@ -114,16 +136,19 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidContinueResponse;
     }
     std.debug.print(
-        "netz HTTP/1 client observed Hyper 100 Continue: interim=1 body=11 response_body=15\n",
-        .{},
+        "netz HTTP/1 client observed Hyper 100 Continue: transport={s} interim=1 body=11 response_body=15\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
     );
 
     {
-        var hints_client = try netz.http1.runtime.Client.connect(
+        var hints_client = try connect(
             allocator,
             io,
-            .{ .ip4 = .loopback(port) },
-            .{ .max_body_bytes = 4096 },
+            port,
+            limits,
+            tls_enabled,
+            &ca_bundle,
+            &ca_lock,
         );
         defer hints_client.close();
         var hints_writer = try hints_client.startRequest(.{
@@ -161,11 +186,14 @@ pub fn main(init: std.process.Init) !void {
     }
 
     {
-        var reject_client = try netz.http1.runtime.Client.connect(
+        var reject_client = try connect(
             allocator,
             io,
-            .{ .ip4 = .loopback(port) },
-            .{ .max_body_bytes = 4096 },
+            port,
+            limits,
+            tls_enabled,
+            &ca_bundle,
+            &ca_lock,
         );
         defer reject_client.close();
         var reject_writer = try reject_client.startRequest(.{
@@ -205,8 +233,38 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz HTTP/1 client handled Hyper/Tokio Expect boundaries: informational=103,100 early_final=417 body_sent=0 connection_reusable=false\n",
-        .{},
+        "netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport={s} informational=103,100 early_final=417 body_sent=0 connection_reusable=false\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
+}
+
+fn connect(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+    limits: netz.http1.runtime.Limits,
+    tls_enabled: bool,
+    ca_bundle: *std.crypto.Certificate.Bundle,
+    ca_lock: *std.Io.RwLock,
+) !netz.http1.runtime.Client {
+    if (tls_enabled) {
+        return netz.http1.runtime.Client.connectTlsHost(
+            allocator,
+            io,
+            "localhost",
+            port,
+            limits,
+            .{ .ca_bundle = .{
+                .bundle = ca_bundle,
+                .lock = ca_lock,
+            } },
+        );
+    }
+    return netz.http1.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(port) },
+        limits,
     );
 }
 

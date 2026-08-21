@@ -6,27 +6,54 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const tls_enabled = args.len == 3 and
+        std.mem.eql(u8, args[2], "--tls");
+    if (args.len == 3 and !tls_enabled) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try netz.http1.runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(port) },
-        .{ .max_body_bytes = 4096 },
+    const limits: netz.http1.runtime.Limits = .{ .max_body_bytes = 4096 };
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
     );
-    defer server.deinit();
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    var clear_server: netz.http1.runtime.Server = undefined;
+    var tls_server: netz.http1.runtime.TlsServer = undefined;
+    if (tls_enabled) {
+        tls_server = try .listen(allocator, io, .{ .ip4 = .loopback(port) }, .{
+            .limits = limits,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+        });
+    } else {
+        clear_server = try .listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+        );
+    }
+    defer if (tls_enabled) tls_server.deinit() else clear_server.deinit();
     std.debug.print(
-        "netz HTTP/1 Hyper interop server listening on {f}\n",
-        .{server.address()},
+        "netz HTTP/1 Hyper interop server listening transport={s} on {f}\n",
+        .{ if (tls_enabled) "tls" else "cleartext", if (tls_enabled) tls_server.address() else clear_server.address() },
     );
 
-    var connection = try server.accept();
+    var connection = if (tls_enabled)
+        try tls_server.accept()
+    else
+        try clear_server.accept();
     defer connection.close();
     var request = try connection.readRequest(.{});
     defer request.deinit(allocator);
@@ -56,8 +83,8 @@ pub fn main(init: std.process.Init) !void {
         .value = "response-trailer",
     }});
     std.debug.print(
-        "netz HTTP/1 server interoperated with Hyper: method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1\n",
-        .{},
+        "netz HTTP/1 server interoperated with Hyper: transport={s} method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
     );
 
     // Reuse the connection for a second exchange. readRequest() emits the
@@ -85,8 +112,8 @@ pub fn main(init: std.process.Init) !void {
         .request_method = expected.request.method,
     });
     std.debug.print(
-        "netz HTTP/1 server completed Hyper Expect exchange: interim=1 body=12 response_body=14\n",
-        .{},
+        "netz HTTP/1 server completed Hyper Expect exchange: transport={s} interim=1 body=12 response_body=14\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
     );
 }
 

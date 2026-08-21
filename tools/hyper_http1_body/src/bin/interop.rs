@@ -4,6 +4,9 @@
 
 use std::convert::Infallible;
 use std::env;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,6 +23,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 type Body = StreamBody<ThreeFrameBody>;
 
@@ -32,6 +36,8 @@ fn main() {
         .parse()
         .expect("valid port");
     assert_ne!(port, 0);
+    let tls_path = args.next();
+    let tls_key = if role == "server" { args.next() } else { None };
     assert!(args.next().is_none());
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -39,13 +45,13 @@ fn main() {
         .build()
         .expect("build Tokio runtime");
     match role.as_str() {
-        "server" => runtime.block_on(run_server(port)),
-        "client" => runtime.block_on(run_client(port)),
+        "server" => runtime.block_on(run_server(port, tls_path, tls_key)),
+        "client" => runtime.block_on(run_client(port, tls_path)),
         _ => panic!("unsupported role: {role}"),
     }
 }
 
-async fn run_server(port: u16) {
+async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<String>) {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .expect("bind Hyper HTTP/1 server");
@@ -54,21 +60,33 @@ async fn run_server(port: u16) {
     for connection_index in 0..4 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
+        let tls_acceptor = cert_path.as_ref().map(|cert| {
+            TlsAcceptor::from(tls_server_config(
+                cert,
+                key_path.as_ref().expect("TLS key path"),
+            ))
+        });
         connections.push(tokio::spawn(async move {
+            let io = match tls_acceptor {
+                Some(acceptor) => {
+                    MaybeTls::Server(acceptor.accept(stream).await.expect("accept HTTPS"))
+                }
+                None => MaybeTls::Clear(stream),
+            };
             match connection_index {
                 0 | 1 => {
                     server_http1::Builder::new()
                         .serve_connection(
-                            TokioIo::new(stream),
+                            TokioIo::new(io),
                             service_fn(move |request| handle_request(request, connection_index)),
                         )
                         .await
                         .expect("serve netz HTTP/1 client");
                 }
-                2 => serve_expect_hints(stream)
+                2 => serve_expect_hints(io)
                     .await
                     .expect("serve 103 then 100 Expect boundary"),
-                3 => serve_expect_rejection(stream)
+                3 => serve_expect_rejection(io)
                     .await
                     .expect("serve 417 Expect boundary"),
                 _ => unreachable!(),
@@ -82,7 +100,7 @@ async fn run_server(port: u16) {
 }
 
 async fn read_expect_head(
-    stream: &mut TcpStream,
+    stream: &mut MaybeTls,
     target: &str,
     content_length: usize,
 ) -> Result<(), std::io::Error> {
@@ -130,7 +148,7 @@ async fn read_expect_head(
     Ok(())
 }
 
-async fn serve_expect_hints(mut stream: TcpStream) -> Result<(), std::io::Error> {
+async fn serve_expect_hints(mut stream: MaybeTls) -> Result<(), std::io::Error> {
     read_expect_head(&mut stream, "/expect-hints?from=netz", 10).await?;
     stream
         .write_all(
@@ -153,7 +171,7 @@ async fn serve_expect_hints(mut stream: TcpStream) -> Result<(), std::io::Error>
         .await
 }
 
-async fn serve_expect_rejection(mut stream: TcpStream) -> Result<(), std::io::Error> {
+async fn serve_expect_rejection(mut stream: MaybeTls) -> Result<(), std::io::Error> {
     read_expect_head(&mut stream, "/expect-reject?from=netz", 11).await?;
     stream
         .write_all(
@@ -257,13 +275,26 @@ async fn handle_expected_request(
     Ok(response)
 }
 
-async fn run_client(port: u16) {
+async fn run_client(port: u16, ca_path: Option<String>) {
     let stream = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect netz HTTP/1 server");
     stream.set_nodelay(true).expect("client TCP_NODELAY");
+    let io = match ca_path {
+        Some(ca) => MaybeTls::Client(
+            TlsConnector::from(tls_client_config(&ca))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost")
+                        .expect("valid server name"),
+                    stream,
+                )
+                .await
+                .expect("connect HTTPS"),
+        ),
+        None => MaybeTls::Clear(stream),
+    };
     let (mut sender, connection) = client_http1::Builder::new()
-        .handshake(TokioIo::new(stream))
+        .handshake(TokioIo::new(io))
         .await
         .expect("Hyper HTTP/1 handshake");
     tokio::spawn(async move {
@@ -339,6 +370,40 @@ async fn run_client(port: u16) {
     println!("Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14");
 }
 
+fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfig> {
+    let certs = rustls_pemfile::certs(&mut BufReader::new(
+        File::open(Path::new(cert_path)).expect("open TLS certificate"),
+    ))
+    .collect::<Result<Vec<_>, _>>()
+    .expect("parse TLS certificate");
+    let key = rustls_pemfile::private_key(&mut BufReader::new(
+        File::open(Path::new(key_path)).expect("open TLS private key"),
+    ))
+    .expect("parse TLS private key")
+    .expect("TLS private key");
+    Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("certificate and private key match"),
+    )
+}
+
+fn tls_client_config(ca_path: &str) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(
+        rustls_pemfile::certs(&mut BufReader::new(
+            File::open(Path::new(ca_path)).expect("open CA certificate"),
+        ))
+        .map(|result| result.expect("parse CA certificate")),
+    );
+    Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
 fn body_with_trailers(first: &'static [u8], second: &'static [u8], trailers: HeaderMap) -> Body {
     StreamBody::new(ThreeFrameBody {
         first: Some(Bytes::from_static(first)),
@@ -391,6 +456,60 @@ async fn collect_body(mut body: Incoming) -> Result<(Vec<u8>, Option<HeaderMap>)
 #[derive(Debug)]
 struct TokioIo<T> {
     inner: T,
+}
+
+#[derive(Debug)]
+enum MaybeTls {
+    Clear(TcpStream),
+    Client(tokio_rustls::client::TlsStream<TcpStream>),
+    Server(tokio_rustls::server::TlsStream<TcpStream>),
+}
+
+impl AsyncRead for MaybeTls {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_read(cx, buffer),
+            Self::Client(stream) => Pin::new(stream).poll_read(cx, buffer),
+            Self::Server(stream) => Pin::new(stream).poll_read(cx, buffer),
+        }
+    }
+}
+
+impl AsyncWrite for MaybeTls {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_write(cx, buffer),
+            Self::Client(stream) => Pin::new(stream).poll_write(cx, buffer),
+            Self::Server(stream) => Pin::new(stream).poll_write(cx, buffer),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Client(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Server(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Client(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Server(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
 }
 
 impl<T> TokioIo<T> {

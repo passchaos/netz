@@ -6,7 +6,9 @@ const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
 const wire = @import("../internal/wire.zig");
+const vail = @import("vail");
 
 const net = std.Io.net;
 const linux = std.os.linux;
@@ -14,7 +16,7 @@ const posix = std.posix;
 const tls = std.crypto.tls;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 
-pub const Error = http1.Error || error{
+pub const Error = http1.Error || tls_stream.Error || error{
     HeadersTooLarge,
     BodyTooLarge,
     ConnectionClosed,
@@ -168,6 +170,134 @@ test "URI endpoint handles bracketed IPv6 literals" {
     try std.testing.expectEqual(@as(u16, 80), default_endpoint.port);
 }
 
+test "HTTP/1 TLS server exchanges persistent requests" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tls_testing = @import("../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{
+                .key_pair = key_pair,
+            } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            try std.testing.expect(connection.peerCertificates() == null);
+            for (0..2) |index| {
+                var request = try connection.readRequest(.{});
+                defer request.deinit(allocator);
+                try std.testing.expectEqualStrings(
+                    if (index == 0) "/first" else "/second",
+                    request.request.target,
+                );
+                try connection.writeResponse(.{
+                    .body = if (index == 0) "one" else "two",
+                    .request_method = request.request.method,
+                });
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca = try localTestCaBundle(allocator, io);
+    defer ca[0].deinit(allocator);
+    var client = try Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{},
+        .{ .ca_bundle = .{
+            .bundle = &ca[0],
+            .lock = &ca[1],
+        } },
+    );
+    defer client.close();
+    var first = try client.request(.{ .target = "/first" });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    var second = try client.request(.{ .target = "/second" });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+fn localTestCaBundle(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !struct { CertificateBundle, std.Io.RwLock } {
+    const tls_testing = @import("../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    var pem_storage: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&pem_storage);
+    try writer.writeAll("-----BEGIN CERTIFICATE-----\n");
+    const encoded_len = std.base64.standard.Encoder.calcSize(
+        certificate_der.len,
+    );
+    const encoded = try writer.writableSliceGreedy(encoded_len);
+    _ = std.base64.standard.Encoder.encode(
+        encoded[0..encoded_len],
+        &certificate_der,
+    );
+    writer.advance(encoded_len);
+    try writer.writeAll("\n-----END CERTIFICATE-----\n");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "ca.pem",
+        .data = writer.buffered(),
+    });
+    var bundle: CertificateBundle = .empty;
+    errdefer bundle.deinit(allocator);
+    try bundle.addCertsFromFilePath(
+        allocator,
+        io,
+        std.Io.Timestamp.now(io, .real),
+        tmp.dir,
+        "ca.pem",
+    );
+    return .{ bundle, .init };
+}
+
 pub const TlsClientConnection = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -313,13 +443,15 @@ pub const TlsClientConnection = struct {
 
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
-    tls: *TlsClientConnection,
+    tls_client: *TlsClientConnection,
+    tls_server: *tls_stream.ServerConnection,
     linux_io_uring: LinuxIoUringStream,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
-            .tls => |conn| conn.read(buffer),
+            .tls_client => |conn| conn.read(buffer),
+            .tls_server => |conn| conn.read(buffer),
             .linux_io_uring => |transport| transport.read(buffer),
         };
     }
@@ -327,7 +459,8 @@ const RuntimeTransport = union(enum) {
     fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
-            .tls => |conn| conn.writeAll(bytes),
+            .tls_client => |conn| conn.writeAll(bytes),
+            .tls_server => |conn| conn.writeAll(bytes),
             .linux_io_uring => |transport| transport.writeAll(bytes),
         };
     }
@@ -346,7 +479,8 @@ const RuntimeTransport = union(enum) {
                 header,
                 body,
             ),
-            .tls => |conn| conn.writeAllParts(header, body),
+            .tls_client => |conn| conn.writeAllParts(header, body),
+            .tls_server => |conn| conn.writeAllParts(header, body),
             // The raw io_uring adapter currently accepts one slice per SQE.
             // Two sends still avoid a body-sized temporary allocation.
             .linux_io_uring => |transport| {
@@ -366,7 +500,8 @@ const RuntimeTransport = union(enum) {
                 tcp.stream,
                 parts,
             ),
-            .tls => |conn| conn.writeAllSlices(parts),
+            .tls_client => |conn| conn.writeAllSlices(parts),
+            .tls_server => |conn| conn.writeAllSlices(parts),
             // io_uring's adapter owns one buffer per send SQE. Preserve the
             // borrowed-slice behavior without allocating a concatenation.
             .linux_io_uring => |transport| {
@@ -750,6 +885,86 @@ pub const Server = struct {
     }
 };
 
+pub const TlsListenOptions = struct {
+    identity: vail.tls.auth.ServerIdentity,
+    limits: Limits = .{},
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    max_client_hello_size: usize = 64 * 1024,
+    max_client_handshake_size: usize = 256 * 1024,
+    client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    tcp_nodelay: bool = true,
+};
+
+/// TLS 1.3 server transport for the same HTTP/1 parser and writer used by the
+/// cleartext listener. Accepted connections own their TLS state and expose the
+/// authenticated peer chain when client certificates are configured.
+pub const TlsServer = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    listener: net.Server,
+    limits: Limits,
+    tls: tls_stream.ServerOptions,
+    tcp_nodelay: bool,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        options: TlsListenOptions,
+    ) Error!TlsServer {
+        try options.identity.validate();
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .listener = try bind_address.listen(
+                io,
+                .{ .reuse_address = true },
+            ),
+            .limits = options.limits,
+            .tls = .{
+                .identity = options.identity,
+                .cipher_suites = options.cipher_suites,
+                .max_client_hello_size = options.max_client_hello_size,
+                .max_client_handshake_size = options.max_client_handshake_size,
+                .client_auth = options.client_auth,
+            },
+            .tcp_nodelay = options.tcp_nodelay,
+        };
+    }
+
+    pub fn deinit(self: *TlsServer) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn address(self: TlsServer) net.IpAddress {
+        return self.listener.socket.address;
+    }
+
+    pub fn accept(self: *TlsServer) Error!Connection {
+        const stream = try self.listener.accept(self.io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.io);
+        if (self.tcp_nodelay) try setTcpNoDelay(stream);
+        const tls_connection = try tls_stream.ServerConnection.init(
+            self.allocator,
+            self.io,
+            stream,
+            self.tls,
+        );
+        stream_owned = false;
+        errdefer tls_connection.deinit();
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = stream,
+            .limits = self.limits,
+            .tls_server_conn = tls_connection,
+        };
+    }
+};
+
 pub const AsyncServeError = Error || std.Io.Cancelable;
 
 pub const ConcurrentServeResult = struct {
@@ -820,7 +1035,7 @@ pub const Client = struct {
     tls_conn: ?*TlsClientConnection = null,
 
     fn transport(self: *Client) RuntimeTransport {
-        if (self.tls_conn) |conn| return .{ .tls = conn };
+        if (self.tls_conn) |conn| return .{ .tls_client = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }
 
@@ -1194,17 +1409,44 @@ pub const Connection = struct {
     inbuf: std.ArrayList(u8) = .empty,
     write_scratch: WriteScratch = .{},
     writer_state: body_writer.State = .{},
+    tls_server_conn: ?*tls_stream.ServerConnection = null,
+
+    fn transport(self: *Connection) RuntimeTransport {
+        if (self.tls_server_conn) |connection| {
+            return .{ .tls_server = connection };
+        }
+        return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
+    }
+
+    /// Return the authenticated client certificate chain for TLS server
+    /// connections. Cleartext and anonymous TLS connections return null.
+    pub fn peerCertificates(
+        self: *const Connection,
+    ) ?[]const []const u8 {
+        const tls_connection = self.tls_server_conn orelse return null;
+        return tls_connection.peerCertificates();
+    }
 
     pub fn close(self: *Connection) void {
         self.inbuf.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
-        self.stream.close(self.io);
+        if (self.tls_server_conn) |connection| {
+            connection.deinit();
+        } else {
+            self.stream.close(self.io);
+        }
         self.* = undefined;
     }
 
     pub fn readRequest(self: *Connection, options: http1.ParseOptions) Error!OwnedRequest {
         try self.writer_state.ensureReadable();
-        return readRequestFromStreamBuffered(self.allocator, self.io, self.stream, self.limits, options, &self.inbuf);
+        return readRequestFromTransportBuffered(
+            self.allocator,
+            self.transport(),
+            self.limits,
+            options,
+            &self.inbuf,
+        );
     }
 
     /// Read a request while delivering body bytes without aggregation.
@@ -1379,7 +1621,7 @@ pub const Connection = struct {
         try self.writer_state.ensureAvailable();
         try writeResponseToTransportScratch(
             self.allocator,
-            .{ .tcp = .{ .io = self.io, .stream = self.stream } },
+            self.transport(),
             response,
             &self.write_scratch,
         );
@@ -1404,10 +1646,8 @@ pub const Connection = struct {
             &self.write_scratch,
         );
         const announced_trailers = self.write_scratch.trailer_headers.items;
-        const transport = RuntimeTransport{
-            .tcp = .{ .io = self.io, .stream = self.stream },
-        };
-        transport.writeAll(prepared.head) catch |err| {
+        const active_transport = self.transport();
+        active_transport.writeAll(prepared.head) catch |err| {
             self.writer_state.phase = .unusable;
             return err;
         };
@@ -1440,7 +1680,7 @@ pub const Connection = struct {
         try self.writer_state.ensureAvailable();
         try writeResponsesToTransportScratch(
             self.allocator,
-            .{ .tcp = .{ .io = self.io, .stream = self.stream } },
+            self.transport(),
             responses,
             &self.write_scratch,
         );
@@ -1473,7 +1713,7 @@ pub const Connection = struct {
         try self.writer_state.ensureAvailable();
         if (request.method != .CONNECT or request.body.len != 0 or request.trailers.len != 0) return error.InvalidResponse;
         try http1.validateConnectTarget(request.target);
-        try writeResponseToStream(self.allocator, self.io, self.stream, .{
+        try writeResponseToTransport(self.allocator, self.transport(), .{
             .status = 200,
             .reason = "Connection Established",
             .headers = response_headers,
@@ -1483,6 +1723,7 @@ pub const Connection = struct {
             .io = self.io,
             .allocator = self.allocator,
             .stream = self.stream,
+            .tls_server_conn = self.tls_server_conn,
             .inbuf = &self.inbuf,
         };
     }
@@ -1493,10 +1734,12 @@ pub const Tunnel = struct {
     allocator: std.mem.Allocator,
     stream: net.Stream,
     tls_conn: ?*TlsClientConnection = null,
+    tls_server_conn: ?*tls_stream.ServerConnection = null,
     inbuf: *std.ArrayList(u8),
 
     fn transport(self: *Tunnel) RuntimeTransport {
-        if (self.tls_conn) |conn| return .{ .tls = conn };
+        if (self.tls_conn) |conn| return .{ .tls_client = conn };
+        if (self.tls_server_conn) |conn| return .{ .tls_server = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }
 
@@ -1781,7 +2024,7 @@ fn connectionReadSome(
     buffer: []u8,
 ) Error!usize {
     const connection: *Connection = @ptrCast(@alignCast(context.?));
-    return readSome(connection.io, connection.stream, buffer);
+    return connection.transport().read(buffer);
 }
 
 fn connectionMaybeWriteContinue(
@@ -1790,10 +2033,7 @@ fn connectionMaybeWriteContinue(
 ) Error!void {
     const connection: *Connection = @ptrCast(@alignCast(context.?));
     try maybeWriteContinue(
-        .{ .tcp = .{
-            .io = connection.io,
-            .stream = connection.stream,
-        } },
+        connection.transport(),
         head,
         connection.inbuf.items.len,
         true,
@@ -1805,12 +2045,7 @@ fn connectionWriteSlices(
     parts: []const []const u8,
 ) Error!void {
     const connection: *Connection = @ptrCast(@alignCast(context.?));
-    try (RuntimeTransport{
-        .tcp = .{
-            .io = connection.io,
-            .stream = connection.stream,
-        },
-    }).writeAllSlices(parts);
+    try connection.transport().writeAllSlices(parts);
 }
 
 fn responseIsReusable(response: http1.Response) bool {

@@ -17,6 +17,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+cat >"$work/cert.pem" <<'EOF'
+-----BEGIN CERTIFICATE-----
+MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
+-----END CERTIFICATE-----
+EOF
+cat >"$work/key.pem" <<'EOF'
+-----BEGIN EC PRIVATE KEY-----
+MDECAQEEIBI0VniavN7xI0VniavN7xI0VniavN7xI0VniavN7xI0oAoGCCqGSM49AwEH
+-----END EC PRIVATE KEY-----
+EOF
+
 cargo build --release --offline --locked \
   --manifest-path "$manifest" \
   --bin netz-hyper-http1-interop
@@ -60,10 +71,10 @@ wait "$server_pid"
 server_pid=
 cat "$work/netz-client.log"
 grep -Fq \
-  'netz HTTP/1 client observed Hyper 100 Continue: interim=1 body=11 response_body=15' \
+  'netz HTTP/1 client observed Hyper 100 Continue: transport=cleartext interim=1 body=11 response_body=15' \
   "$work/netz-client.log"
 grep -Fq \
-  'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
+  'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=cleartext informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
   "$work/netz-client.log"
 grep -Fq \
   'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries: informational=103,100 early_final=417 body_sent=0' \
@@ -106,9 +117,73 @@ grep -Fq \
   'Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14' \
   "$work/hyper-client.log"
 grep -Fq \
-  'method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
+  'transport=cleartext method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
   "$work/netz-server.log"
 grep -Fq \
-  'netz HTTP/1 server completed Hyper Expect exchange: interim=1 body=12 response_body=14' \
+  'netz HTTP/1 server completed Hyper Expect exchange: transport=cleartext interim=1 body=12 response_body=14' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/1 client -> netz server interop passed'
+
+port=$(free_tcp_port)
+"$hyper" server "$port" "$work/cert.pem" "$work/key.pem" \
+  >"$work/tls-hyper-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if grep -q 'Hyper HTTP/1 interop server listening' \
+      "$work/tls-hyper-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/tls-hyper-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if ! timeout 10s "$client" "$port" "$work/cert.pem" \
+    >"$work/tls-netz-client.log" 2>&1; then
+  cat "$work/tls-netz-client.log" >&2
+  cat "$work/tls-hyper-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz HTTP/1 client interoperated with Hyper: transport=tls status=201 body=14 trailers=1' \
+  "$work/tls-netz-client.log"
+grep -Fq \
+  'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=tls informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
+  "$work/tls-netz-client.log"
+cat "$work/tls-netz-client.log"
+echo 'Hyper HTTPS server -> netz client interop passed'
+
+port=$(free_tcp_port)
+"$server" "$port" --tls >"$work/tls-netz-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if grep -q 'netz HTTP/1 Hyper interop server listening' \
+      "$work/tls-netz-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/tls-netz-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if ! timeout 10s "$hyper" client "$port" "$work/cert.pem" \
+    >"$work/tls-hyper-client.log" 2>&1; then
+  cat "$work/tls-hyper-client.log" >&2
+  cat "$work/tls-netz-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz HTTP/1 server interoperated with Hyper: transport=tls method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'netz HTTP/1 server completed Hyper Expect exchange: transport=tls interim=1 body=12 response_body=14' \
+  "$work/tls-netz-server.log"
+cat "$work/tls-hyper-client.log"
+cat "$work/tls-netz-server.log"
+echo 'Hyper HTTP/1 client -> netz TLS server interop passed'

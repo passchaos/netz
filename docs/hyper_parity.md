@@ -186,7 +186,9 @@ required for a memory ratio.
 
 The benchmark evidence is complemented by a strict process-boundary semantic
 gate. `zig build interop-http1-hyper -Doptimize=ReleaseFast` builds against the
-audited local Hyper checkout and runs fresh TCP connections in both directions.
+audited local Hyper checkout and runs the same scenarios over fresh cleartext
+and TLS 1.3 connections in both directions. The encrypted half uses the
+checked-in localhost identity and each client validates that certificate.
 Each peer sends a POST with two chunked DATA contributions, explicitly
 negotiates `TE: trailers`, and terminates with a request trailer. The receiving
 peer verifies method, query-bearing target, custom header, reconstructed body,
@@ -205,8 +207,10 @@ Early Hints followed by 100 Continue releases the exact ten-byte body, while a
 reject further writes through the stale writer, and mark the connection
 unusable. The peer waits for EOF and fails if any declared-body byte arrives,
 so this is observable process-boundary evidence rather than an in-process state
-assertion. This is functional HTTP/1.1 interoperability evidence rather than a
-benchmark proxy.
+assertion. The netz HTTP/1 server uses the same parser, streaming-body state,
+vectored writer, persistent connection, and CONNECT tunnel surface over either
+raw TCP or its native TLS transport. This is functional HTTP/1.1 and HTTPS
+interoperability evidence rather than a benchmark proxy.
 
 ## HTTP/2 consecutive and parallel round trips
 
@@ -472,7 +476,7 @@ connection credit while a more urgent stream has no stream credit.
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, and callback-streaming fixed/chunked/close-delimited readers | Async runtime integration, mature ecosystem and generic Body polling |
+| HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, push, priorities, flow control, tunnels/RFC 8441; certificate-verified TLS interop with Hyper is exercised in both endpoint roles | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
