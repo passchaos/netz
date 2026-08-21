@@ -185,6 +185,49 @@ pub const Stream = struct {
         }
     }
 
+    /// Write an arbitrary sequence of borrowed slices as one TLS plaintext
+    /// stream without requiring the protocol layer to concatenate them.
+    pub fn writeAllSlices(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        parts: []const []const u8,
+    ) Error!void {
+        if (self.closed) return error.ConnectionClosed;
+        var part_index: usize = 0;
+        var part_offset: usize = 0;
+        var plaintext: [record_io.max_plaintext_len]u8 = undefined;
+        while (true) {
+            var len: usize = 0;
+            while (part_index < parts.len and len < plaintext.len) {
+                const part = parts[part_index];
+                if (part_offset == part.len) {
+                    part_index += 1;
+                    part_offset = 0;
+                    continue;
+                }
+                const count = @min(
+                    plaintext.len - len,
+                    part.len - part_offset,
+                );
+                @memcpy(plaintext[len..][0..count], part[part_offset..][0..count]);
+                len += count;
+                part_offset += count;
+                if (part_offset == part.len) {
+                    part_index += 1;
+                    part_offset = 0;
+                }
+            }
+            if (len == 0) return;
+            try self.writeRecord(
+                io,
+                stream,
+                tls_record.content_type_application_data,
+                plaintext[0..len],
+            );
+        }
+    }
+
     pub fn sendCloseNotify(
         self: *Stream,
         io: std.Io,

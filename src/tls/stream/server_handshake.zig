@@ -45,6 +45,9 @@ pub const Options = struct {
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    /// Server-preference ALPN list. A configured list is mandatory: the
+    /// handshake fails when the client offers none of its protocols.
+    alpn_protocols: []const []const u8 = &.{},
 };
 
 pub const PeerCertificateChain = struct {
@@ -64,6 +67,7 @@ pub const TrafficKeys = struct {
     read: tls_record.Keys,
     write: tls_record.Keys,
     peer_certificate_chain: ?PeerCertificateChain = null,
+    selected_alpn: ?[]const u8 = null,
 
     pub fn deinit(self: *TrafficKeys) void {
         self.read.deinit();
@@ -133,6 +137,7 @@ pub fn perform(
                     // Advertising only implemented groups avoids negotiating
                     // a share for which no secret can be derived.
                     .groups = &.{x25519_group},
+                    .alpn_protocols = options.alpn_protocols,
                 },
                 .server_random = server_random,
                 .server_key_share = &server_public,
@@ -150,6 +155,11 @@ pub fn perform(
     defer handshake.handshake_secret.deinit();
     defer handshake.client_handshake_traffic_secret.deinit();
     defer handshake.server_handshake_traffic_secret.deinit();
+    if (options.alpn_protocols.len != 0 and
+        handshake.selection.alpn_protocol == null)
+    {
+        return error.InvalidAlpn;
+    }
 
     try writeServerFlight(io, stream, flight.items);
 
@@ -218,6 +228,7 @@ pub fn perform(
             application.server_traffic_secret,
         ),
         .peer_certificate_chain = peer_certificate_chain,
+        .selected_alpn = handshake.selection.alpn_protocol,
     };
 }
 

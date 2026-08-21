@@ -40,7 +40,10 @@ pub const Error = std.mem.Allocator.Error ||
 pub const Options = struct {
     server_name: []const u8,
     server_verifier: vail.tls.auth.ClientVerifier,
-    client_identity: vail.tls.client_auth.ClientIdentity,
+    client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    /// Ordered ALPN offers carried in ClientHello. When non-empty, the server
+    /// must select exactly one of them or the handshake is rejected.
+    alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
@@ -62,7 +65,8 @@ pub const VerifiedOptions = struct {
     verify_host: bool = true,
     ca_bundle: ?CaBundle = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
-    client_identity: vail.tls.client_auth.ClientIdentity,
+    client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
@@ -73,6 +77,7 @@ pub const Connection = struct {
     io: std.Io,
     stream: net.Stream,
     records: record_stream.Stream,
+    selected_alpn: ?[]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -80,7 +85,7 @@ pub const Connection = struct {
         stream: net.Stream,
         options: Options,
     ) Error!*Connection {
-        try options.client_identity.validate();
+        if (options.client_identity) |identity| try identity.validate();
 
         var client_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_random);
@@ -113,6 +118,7 @@ pub const Connection = struct {
                 .server_name = options.server_name,
                 .x25519_public_key = x25519_public,
                 .cipher_suites = options.cipher_suites,
+                .alpn_protocols = options.alpn_protocols,
             },
         );
         try writeCleartextHandshake(
@@ -203,6 +209,11 @@ pub const Connection = struct {
                 },
             );
         defer verified.deinit();
+        if (options.alpn_protocols.len != 0 and
+            !containsProtocol(options.alpn_protocols, verified.selected_alpn))
+        {
+            return error.InvalidServerFlight;
+        }
         try writeEncryptedClientFlight(
             io,
             stream,
@@ -221,6 +232,11 @@ pub const Connection = struct {
             verified.application.client_traffic_secret,
         );
         errdefer write_keys.deinit();
+        const selected_alpn = if (verified.selected_alpn) |protocol|
+            try allocator.dupe(u8, protocol)
+        else
+            null;
+        errdefer if (selected_alpn) |protocol| allocator.free(protocol);
 
         const connection = try allocator.create(Connection);
         connection.* = .{
@@ -228,6 +244,7 @@ pub const Connection = struct {
             .io = io,
             .stream = stream,
             .records = .init(read_keys, write_keys),
+            .selected_alpn = selected_alpn,
         };
         return connection;
     }
@@ -276,6 +293,7 @@ pub const Connection = struct {
             .server_name = options.server_name,
             .server_verifier = verifier,
             .client_identity = options.client_identity,
+            .alpn_protocols = options.alpn_protocols,
             .cipher_suites = options.cipher_suites,
             .max_server_handshake_size = options.max_server_handshake_size,
         });
@@ -288,6 +306,7 @@ pub const Connection = struct {
         self.records.deinit();
         self.stream.close(self.io);
         const allocator = self.allocator;
+        if (self.selected_alpn) |protocol| allocator.free(protocol);
         self.* = undefined;
         allocator.destroy(self);
     }
@@ -313,6 +332,17 @@ pub const Connection = struct {
             self.stream,
             first,
             second,
+        );
+    }
+
+    pub fn writeAllSlices(
+        self: *Connection,
+        parts: []const []const u8,
+    ) Error!void {
+        return self.records.writeAllSlices(
+            self.io,
+            self.stream,
+            parts,
         );
     }
 };
@@ -483,6 +513,17 @@ fn containsCipherSuite(
 ) bool {
     for (suites) |suite| {
         if (suite == selected) return true;
+    }
+    return false;
+}
+
+fn containsProtocol(
+    protocols: []const []const u8,
+    selected: ?[]const u8,
+) bool {
+    const value = selected orelse return false;
+    for (protocols) |protocol| {
+        if (std.mem.eql(u8, protocol, value)) return true;
     }
     return false;
 }

@@ -27,6 +27,7 @@ pub const Connection = struct {
     stream: net.Stream,
     records: record_stream.Stream,
     peer_certificate_chain: ?server_handshake.PeerCertificateChain = null,
+    selected_alpn: ?[]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -41,6 +42,11 @@ pub const Connection = struct {
             options,
         );
         errdefer keys.deinit();
+        const selected_alpn = if (keys.selected_alpn) |protocol|
+            try allocator.dupe(u8, protocol)
+        else
+            null;
+        errdefer if (selected_alpn) |protocol| allocator.free(protocol);
 
         const connection = try allocator.create(Connection);
         connection.* = .{
@@ -49,6 +55,7 @@ pub const Connection = struct {
             .stream = stream,
             .records = .init(keys.read, keys.write),
             .peer_certificate_chain = keys.peer_certificate_chain,
+            .selected_alpn = selected_alpn,
         };
         return connection;
     }
@@ -61,6 +68,7 @@ pub const Connection = struct {
         if (self.peer_certificate_chain) |*chain| chain.deinit();
         self.stream.close(self.io);
         const allocator = self.allocator;
+        if (self.selected_alpn) |protocol| allocator.free(protocol);
         self.* = undefined;
         allocator.destroy(self);
     }
@@ -103,6 +111,17 @@ pub const Connection = struct {
             self.stream,
             header,
             payload,
+        );
+    }
+
+    pub fn writeAllSlices(
+        self: *Connection,
+        parts: []const []const u8,
+    ) Error!void {
+        try self.records.writeAllSlices(
+            self.io,
+            self.stream,
+            parts,
         );
     }
 };
