@@ -49,9 +49,18 @@ if ! grep -q 'Hyper HTTP/2 interop server listening' "$work/server.log"; then
   exit 1
 fi
 
-timeout 10s "$client" "$port"
+if ! timeout 10s "$client" "$port" \
+    >"$work/netz-client.log" 2>&1; then
+  cat "$work/netz-client.log" >&2
+  cat "$work/server.log" >&2
+  exit 1
+fi
 wait "$server_pid"
 server_pid=
+cat "$work/netz-client.log"
+grep -Fq \
+  'netz HTTP/2 client canceled Hyper stream and reused connection: rst=CANCEL status=200' \
+  "$work/netz-client.log"
 echo 'Hyper HTTP/2 server -> netz client interop passed'
 
 port=$(python3 - <<'PY'

@@ -545,10 +545,19 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    two DATA frames joined into `hyper-request` plus a terminal trailer to a netz
    server, which verifies the complete request and uses its stateful response
    writer to send two DATA contributions plus a terminal trailer. Hyper verifies
-   the 201 status and complete netz response. The gate builds the locked Rust
+   that response. The netz-client/Hyper-server half now also rejects the first
+   response DATA callback, forcing netz to send `RST_STREAM(CANCEL)`. Hyper's
+   pending response body records that cancellation before releasing a second
+   same-connection request, which netz completes on the next stream. This is
+   process-boundary evidence that callback cancellation retires only the target
+   stream and leaves HPACK plus connection state reusable. In the reverse
+   direction, Hyper verifies the 201 status and complete netz response. The
+   gate builds the locked Rust
    harness offline after its crates are cached and fails on either process or
    any exact value mismatch. This is cleartext prior-knowledge HTTP/2 evidence
    in both directions; TLS interoperability remains covered by native netz tests
    rather than this Hyper process gate.
-4. Compare cancellation, backpressure and fairness under concurrent streams;
-   one synchronous loopback pipeline is not whole-library superiority.
+4. Extend the new process-boundary cancellation case to the reverse direction
+   and combine it with constrained flow-control windows; one sequential
+   cancellation and the synchronous benchmark pipeline are not whole-library
+   superiority.

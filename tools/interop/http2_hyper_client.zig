@@ -63,6 +63,44 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/2 client interoperated with Hyper: status=201 body=14 trailers=1\n",
         .{},
     );
+
+    // Reject the first response DATA callback. The streaming reader emits
+    // RST_STREAM(CANCEL); Hyper does not answer the subsequent request until
+    // its response body has observed that cancellation.
+    const cancel_result = connection.requestStreaming(.{
+        .method = "GET",
+        .path = "/cancel?from=netz",
+        .scheme = "http",
+        .authority = "localhost",
+    }, {}, cancelResponseBody);
+    if (cancel_result) |response_value| {
+        var unexpected = response_value;
+        unexpected.deinit(allocator);
+        return error.ExpectedCancellation;
+    } else |err| if (err != error.CancelResponse) {
+        return err;
+    }
+
+    var after_cancel = try connection.request(.{
+        .method = "GET",
+        .path = "/after-cancel?from=netz",
+        .scheme = "http",
+        .authority = "localhost",
+    });
+    defer after_cancel.deinit(allocator);
+    if (after_cancel.status != 200 or
+        !std.mem.eql(u8, after_cancel.body, "after-cancel"))
+    {
+        return error.InvalidResponse;
+    }
+    std.debug.print(
+        "netz HTTP/2 client canceled Hyper stream and reused connection: rst=CANCEL status=200\n",
+        .{},
+    );
+}
+
+fn cancelResponseBody(_: void, _: []const u8) error{CancelResponse}!void {
+    return error.CancelResponse;
 }
 
 fn headerEquals(
