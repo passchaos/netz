@@ -66,7 +66,7 @@ timeout 20s "$client" "$port" "$work/ca.pem"
 echo 'quic-go server -> netz client interop passed'
 wait "$server_pid"
 server_pid=
-grep -q 'handshake_done=true retry=false echo_streams=2 echo_bytes=10' \
+grep -q 'handshake_done=true retry=false key_updates=0 echo_streams=2 echo_bytes=10' \
   "$work/server.log"
 
 port=$(free_udp_port)
@@ -106,9 +106,50 @@ grep -Fq \
   'netz QUIC client interoperated with quic-go: verified=true retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
   "$work/retry-client.log"
 grep -Fq \
-  'handshake_done=true retry=true echo_streams=2 echo_bytes=10' \
+  'handshake_done=true retry=true key_updates=0 echo_streams=2 echo_bytes=10' \
   "$work/retry-server.log"
 echo 'quic-go forced Retry server -> netz client interop passed'
+
+port=$(free_udp_port)
+"$work/quic-go-server" \
+  -addr "127.0.0.1:$port" \
+  -ca-out "$work/key-update-ca.pem" \
+  -key-updates 2 \
+  >"$work/key-update-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/key-update-ca.pem" ]] && \
+      grep -q 'listening=' "$work/key-update-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/key-update-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "$work/key-update-ca.pem" ]] || ! \
+    grep -q 'listening=' "$work/key-update-server.log"; then
+  echo 'timed out waiting for key-update quic-go server' >&2
+  cat "$work/key-update-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$client" "$port" "$work/key-update-ca.pem" \
+    --expect-key-update >"$work/key-update-client.log" 2>&1; then
+  cat "$work/key-update-client.log" >&2
+  cat "$work/key-update-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+cat "$work/key-update-client.log"
+grep -Fq \
+  'netz QUIC client interoperated with quic-go: verified=true key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57' \
+  "$work/key-update-client.log"
+grep -Fq \
+  'handshake_done=true retry=false key_updates=2 echo_streams=3 echo_bytes=31' \
+  "$work/key-update-server.log"
+echo 'netz client -> quic-go server key-update interop passed'
 
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----

@@ -5,6 +5,11 @@ const std = @import("std");
 const netz = @import("netz");
 
 const payloads = [_][]const u8{ "hello", "world" };
+const key_update_payloads = [_][]const u8{
+    "before-update",
+    "phase-one",
+    "phase-two",
+};
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -13,11 +18,13 @@ pub fn main(init: std.process.Init) !void {
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
-    const expect_retry = if (args.len == 4)
-        std.mem.eql(u8, args[3], "--expect-retry")
-    else
-        false;
-    if (args.len == 4 and !expect_retry) return error.InvalidArgument;
+    const mode = if (args.len == 4) args[3] else "";
+    const expect_retry = std.mem.eql(u8, mode, "--expect-retry");
+    const expect_key_update =
+        std.mem.eql(u8, mode, "--expect-key-update");
+    if (args.len == 4 and !expect_retry and !expect_key_update) {
+        return error.InvalidArgument;
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -79,47 +86,80 @@ pub fn main(init: std.process.Init) !void {
         return error.UnexpectedRetryState;
     }
 
-    var stream_ids: [payloads.len]u64 = undefined;
-    for (payloads, 0..) |payload, index| {
-        stream_ids[index] = try established.connection.openStream();
-        try established.connection.send(&.{.{ .stream = .{
-            .stream_id = stream_ids[index],
-            .offset = 0,
-            .data = payload,
-            .fin = true,
-        } }});
-    }
-
-    var offsets = [_]usize{0} ** payloads.len;
-    var complete = [_]bool{false} ** payloads.len;
-    while (!std.mem.allEqual(bool, &complete, true)) {
-        var packet = try established.connection
-            .receivePacketServicingTimers();
-        defer packet.deinit(allocator);
-        inline for (stream_ids, payloads, 0..) |stream_id, payload, index| {
-            if (established.connection.availableReceivedStream(
-                stream_id,
-            )) |available| {
-                if (available.len != 0) {
-                    const end = std.math.add(
-                        usize,
-                        offsets[index],
-                        available.len,
-                    ) catch return error.UnexpectedEcho;
-                    if (end > payload.len or !std.mem.eql(
-                        u8,
-                        available,
-                        payload[offsets[index]..end],
-                    )) return error.UnexpectedEcho;
-                    try established.connection.releaseReceivedCapacity(
-                        stream_id,
-                        available.len,
-                    );
-                    offsets[index] = end;
+    if (expect_key_update) {
+        for (key_update_payloads, 0..) |payload, index| {
+            if (index != 0) {
+                try established.connection.initiateKeyUpdate();
+                if (established.connection.localOneRttKeyUpdateCount() !=
+                    index)
+                {
+                    return error.UnexpectedKeyUpdate;
                 }
             }
-            complete[index] = offsets[index] == payload.len and
-                established.connection.receivedStreamComplete(stream_id);
+            try echoStream(
+                &established.connection,
+                allocator,
+                payload,
+            );
+            while (index != 0 and
+                established.connection.pendingOneRttKeyUpdateAckThreshold() !=
+                    null)
+            {
+                var packet = try established.connection
+                    .receivePacketServicingTimers();
+                packet.deinit(allocator);
+            }
+        }
+        if (established.connection.localOneRttKeyUpdateCount() != 2 or
+            established.connection.peerOneRttKeyUpdateCount() != 2 or
+            established.connection.localOneRttKeyPhase() or
+            established.connection.peerOneRttKeyPhase())
+        {
+            return error.UnexpectedKeyUpdate;
+        }
+    } else {
+        var stream_ids: [payloads.len]u64 = undefined;
+        for (payloads, 0..) |payload, index| {
+            stream_ids[index] = try established.connection.openStream();
+            try established.connection.send(&.{.{ .stream = .{
+                .stream_id = stream_ids[index],
+                .offset = 0,
+                .data = payload,
+                .fin = true,
+            } }});
+        }
+
+        var offsets = [_]usize{0} ** payloads.len;
+        var complete = [_]bool{false} ** payloads.len;
+        while (!std.mem.allEqual(bool, &complete, true)) {
+            var packet = try established.connection
+                .receivePacketServicingTimers();
+            defer packet.deinit(allocator);
+            inline for (stream_ids, payloads, 0..) |stream_id, payload, index| {
+                if (established.connection.availableReceivedStream(
+                    stream_id,
+                )) |available| {
+                    if (available.len != 0) {
+                        const end = std.math.add(
+                            usize,
+                            offsets[index],
+                            available.len,
+                        ) catch return error.UnexpectedEcho;
+                        if (end > payload.len or !std.mem.eql(
+                            u8,
+                            available,
+                            payload[offsets[index]..end],
+                        )) return error.UnexpectedEcho;
+                        try established.connection.releaseReceivedCapacity(
+                            stream_id,
+                            available.len,
+                        );
+                        offsets[index] = end;
+                    }
+                }
+                complete[index] = offsets[index] == payload.len and
+                    established.connection.receivedStreamComplete(stream_id);
+            }
         }
     }
 
@@ -150,8 +190,56 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedPeerClose,
     }
 
-    std.debug.print(
-        "netz QUIC client interoperated with quic-go: verified=true retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
-        .{expect_retry},
-    );
+    if (expect_key_update) {
+        std.debug.print(
+            "netz QUIC client interoperated with quic-go: verified=true key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57\n",
+            .{},
+        );
+    } else {
+        std.debug.print(
+            "netz QUIC client interoperated with quic-go: verified=true retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
+            .{expect_retry},
+        );
+    }
+}
+
+fn echoStream(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+) !void {
+    const stream_id = try connection.openStream();
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = 0,
+        .data = payload,
+        .fin = true,
+    } }});
+    var received: usize = 0;
+    while (received < payload.len or
+        !connection.receivedStreamComplete(stream_id))
+    {
+        if (connection.availableReceivedStream(stream_id)) |available| {
+            if (available.len != 0) {
+                const end = received + available.len;
+                if (end > payload.len or
+                    !std.mem.eql(u8, available, payload[received..end]))
+                {
+                    return error.UnexpectedEcho;
+                }
+                try connection.releaseReceivedCapacity(
+                    stream_id,
+                    available.len,
+                );
+                received = end;
+            }
+        }
+        if (received == payload.len and
+            connection.receivedStreamComplete(stream_id))
+        {
+            return;
+        }
+        var packet = try connection.receivePacketServicingTimers();
+        packet.deinit(allocator);
+    }
 }
