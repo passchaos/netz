@@ -543,6 +543,8 @@ zig build run-http2-h2c
 zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
+# Bidirectional wtransport interop for CONNECT, DATAGRAM, bidi/uni streams,
+# mapped RESET_STREAM/STOP_SENDING codes, post-cancellation reuse, and close.
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
 # always enables strict mode and rejects empty, skipped, or failed test runs.

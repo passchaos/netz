@@ -21,10 +21,13 @@ checkout at `d96cbb8` and exercises both directions over real TLS
 1.3/QUIC/HTTP/3 connections. The wtransport-client/netz-server half verifies a
 successful Extended CONNECT at `/interop`, bidirectional DATAGRAM exchange, a
 client-created bidirectional stream and its reverse direction, client- and
-server-created unidirectional streams, and a `CLOSE_WEBTRANSPORT_SESSION` with
-code 77/reason `netz done`. The netz-client/wtransport-server half repeats
-CONNECT, DATAGRAM and both stream-direction checks, then waits for and validates
-the server's QUIC application close code 0/reason `interop complete`. Session
+server-created unidirectional streams, mapped application-code 71
+RESET_STREAM, code 72 STOP_SENDING, a fresh bidirectional stream after both
+cancellations, and a `CLOSE_WEBTRANSPORT_SESSION` with code 77/reason
+`netz done`. The netz-client/wtransport-server half repeats CONNECT, DATAGRAM,
+both stream directions, mapped reset code 73, mapped stop code 74, and
+post-cancellation stream reuse, then waits for and validates the server's QUIC
+application close code 0/reason `interop complete`. Session
 close capsules and connection-level shutdown remain separate typed APIs, so the
 gate cannot mistake a clean CONNECT-stream FIN for a peer connection close. The
 gate exposed three
@@ -57,8 +60,8 @@ WebTransport DATAGRAM round trip and transport statistics.
 | --- | --- | --- | --- |
 | CONNECT / SETTINGS | Handshake, protected and dev runtimes; handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session |
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
-| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop |
-| Unidirectional streams | Real-handshake both directions, incremental reads, reset/stop and lifecycle/limits | Session registry and header codec | Production async uni streams with read/reset/stop |
+| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits; post-cancellation reuse is externally verified | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop; interoperates with netz before and after cancellations |
+| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop and lifecycle/limits, externally verified in both endpoint roles | Session registry and header codec | Production async uni streams with read/reset/stop; exact raw mapped codes are verified against netz |
 | Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver handles close while drain support is absent |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
@@ -187,9 +190,12 @@ lightweight protected transport does not own a stateful recovery connection.
    owner.
 2. Add browser WebTransport evidence. The checked-in wtransport gate now
    covers both client/server directions across CONNECT, DATAGRAM, and
-   bidirectional/unidirectional streams; its wtransport-client half also checks
-   the detailed session-close capsule, while its wtransport-server half checks
-   netz's peer QUIC application-close code and reason handling.
+   bidirectional/unidirectional streams. Each direction now sends and observes
+   exact mapped RESET_STREAM and STOP_SENDING codes, then completes another
+   bidirectional stream on the same session. Its wtransport-client half also
+   checks the detailed session-close capsule, while its wtransport-server half
+   checks netz's peer QUIC application-close code and reason handling. Browser
+   coverage remains distinct and is not inferred from this native peer.
 3. Add larger long-run stream-churn distributions; concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The

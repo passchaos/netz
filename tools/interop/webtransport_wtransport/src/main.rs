@@ -1,6 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::time::Duration;
 use tokio::time::timeout;
+use wtransport::error::{StreamReadError, StreamWriteError};
 use wtransport::{ClientConfig, Endpoint, Identity, ServerConfig, VarInt};
 
 const CLIENT_DATAGRAM: &[u8] = b"wtransport datagram";
@@ -9,8 +10,20 @@ const CLIENT_BIDI: &[u8] = b"wtransport bidi";
 const SERVER_BIDI: &[u8] = b"netz bidi";
 const CLIENT_UNI: &[u8] = b"wtransport uni";
 const SERVER_UNI: &[u8] = b"netz uni";
+const CLIENT_RESET: &[u8] = b"wtransport reset";
+const SERVER_STOP: &[u8] = b"netz stop";
+const REUSE_REQUEST: &[u8] = b"after cancel";
+const REUSE_RESPONSE: &[u8] = b"session reused";
+const RESET_READY: &[u8] = b"reset ready";
+const CANCEL_DONE: &[u8] = b"cancel done";
 const CLOSE_READY: &[u8] = b"close ready";
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+fn mapped_stream_error(application_code: u32) -> VarInt {
+    let code = u64::from(application_code);
+    VarInt::try_from_u64(0x52e4_a40f_a8db + code + code / 0x1e)
+        .expect("mapped WebTransport error fits a QUIC varint")
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -78,6 +91,56 @@ async fn main() -> Result<()> {
         .await
         .context("server unidirectional payload timed out")??;
     ensure!(uni_reply == SERVER_UNI, "unexpected unidirectional payload");
+
+    let reset_opening = timeout(TIMEOUT, connection.open_uni())
+        .await
+        .context("reset stream credit timed out")??;
+    let mut reset_send = timeout(TIMEOUT, reset_opening)
+        .await
+        .context("reset stream association timed out")??;
+    reset_send.write_all(CLIENT_RESET).await?;
+    let reset_ready = timeout(TIMEOUT, connection.receive_datagram())
+        .await
+        .context("reset-ready DATAGRAM timed out")??;
+    ensure!(
+        &*reset_ready == RESET_READY,
+        "unexpected reset-ready payload"
+    );
+    reset_send.reset(mapped_stream_error(71))?;
+
+    let mut stopped_recv = timeout(TIMEOUT, connection.accept_uni())
+        .await
+        .context("stop stream timed out")??;
+    let mut stop_payload = [0; SERVER_STOP.len()];
+    timeout(TIMEOUT, stopped_recv.read_exact(&mut stop_payload))
+        .await
+        .context("stop stream payload timed out")??;
+    ensure!(
+        stop_payload == SERVER_STOP,
+        "unexpected stop stream payload"
+    );
+    stopped_recv.stop(mapped_stream_error(72));
+    let cancel_done = timeout(TIMEOUT, connection.receive_datagram())
+        .await
+        .context("cancel-done DATAGRAM timed out")??;
+    ensure!(
+        &*cancel_done == CANCEL_DONE,
+        "unexpected cancel-done payload"
+    );
+
+    let reuse_opening = timeout(TIMEOUT, connection.open_bi())
+        .await
+        .context("reuse stream credit timed out")??;
+    let (mut reuse_send, mut reuse_recv) = timeout(TIMEOUT, reuse_opening)
+        .await
+        .context("reuse stream association timed out")??;
+    reuse_send.write_all(REUSE_REQUEST).await?;
+    reuse_send.finish().await?;
+    let mut reuse_reply = [0; REUSE_RESPONSE.len()];
+    timeout(TIMEOUT, reuse_recv.read_exact(&mut reuse_reply))
+        .await
+        .context("reuse stream response timed out")??;
+    ensure!(reuse_reply == REUSE_RESPONSE, "unexpected reuse response");
     connection.send_datagram(CLOSE_READY)?;
 
     match timeout(TIMEOUT, connection.receive_datagram()).await {
@@ -94,7 +157,7 @@ async fn main() -> Result<()> {
     // wtransport consumes that capsule and then closes QUIC with H3_NO_ERROR.
     endpoint.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport client interop passed: CONNECT DATAGRAM bidi uni close");
+    println!("wtransport client interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 reuse=true close");
     Ok(())
 }
 
@@ -150,12 +213,63 @@ async fn run_server() -> Result<()> {
     uni_send.write_all(SERVER_UNI).await?;
     uni_send.finish().await?;
 
+    let mut reset_recv = timeout(TIMEOUT, connection.accept_uni())
+        .await
+        .context("netz reset stream timed out")??;
+    let mut reset_payload = [0; CLIENT_RESET.len()];
+    timeout(TIMEOUT, reset_recv.read_exact(&mut reset_payload))
+        .await
+        .context("netz reset payload timed out")??;
+    ensure!(reset_payload == CLIENT_RESET, "unexpected reset payload");
+    connection.send_datagram(RESET_READY)?;
+    let stop_opening = timeout(TIMEOUT, connection.open_uni())
+        .await
+        .context("stop stream credit timed out")??;
+    let mut stop_send = timeout(TIMEOUT, stop_opening)
+        .await
+        .context("stop stream association timed out")??;
+    stop_send.write_all(SERVER_STOP).await?;
+    match timeout(TIMEOUT, stop_send.stopped())
+        .await
+        .context("netz STOP_SENDING timed out")?
+    {
+        StreamWriteError::Stopped(code) => ensure!(
+            code == mapped_stream_error(74),
+            "unexpected stop code: {code}"
+        ),
+        other => bail!("unexpected stopped result: {other:?}"),
+    }
+
+    let mut after_reset = [0; 1];
+    match timeout(TIMEOUT, reset_recv.read(&mut after_reset))
+        .await
+        .context("netz RESET_STREAM timed out")?
+    {
+        Err(StreamReadError::Reset(code)) => ensure!(
+            code == mapped_stream_error(73),
+            "unexpected reset code: {code}"
+        ),
+        other => bail!("unexpected reset result: {other:?}"),
+    }
+    connection.send_datagram(CANCEL_DONE)?;
+
+    let (mut reuse_send, mut reuse_recv) = timeout(TIMEOUT, connection.accept_bi())
+        .await
+        .context("reuse bidirectional stream timed out")??;
+    let mut reuse_request = [0; REUSE_REQUEST.len()];
+    reuse_recv.read_exact(&mut reuse_request).await?;
+    ensure!(reuse_request == REUSE_REQUEST, "unexpected reuse request");
+    reuse_send.write_all(REUSE_RESPONSE).await?;
+    reuse_send.finish().await?;
+
     let ready = timeout(TIMEOUT, connection.receive_datagram())
         .await
         .context("close-ready DATAGRAM timed out")??;
     ensure!(&*ready == CLOSE_READY, "unexpected close-ready payload");
     connection.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport server interop passed: CONNECT DATAGRAM bidi uni");
+    println!(
+        "wtransport server interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 reuse=true"
+    );
     Ok(())
 }

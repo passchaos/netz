@@ -7,7 +7,60 @@ const client_bidi = "wtransport bidi";
 const server_bidi = "netz bidi";
 const client_uni = "wtransport uni";
 const server_uni = "netz uni";
+const client_reset = "wtransport reset";
+const server_stop = "netz stop";
+const reuse_request = "after cancel";
+const reuse_response = "session reused";
+const reset_ready = "reset ready";
+const cancel_done = "cancel done";
 const close_ready = "close ready";
+
+fn receiveExpectedStream(
+    session: anytype,
+    buffer: []u8,
+    expected_stream_id: ?u62,
+    direction: netz.webtransport.StreamDirection,
+    locally_initiated: bool,
+    expected: []const u8,
+    expect_fin: bool,
+) !u62 {
+    var stream_id = expected_stream_id;
+    var received: usize = 0;
+    while (true) {
+        const event = try session.readStream(buffer);
+        switch (event) {
+            .data => |data| {
+                if (stream_id) |id| {
+                    if (data.stream_id != id) return error.UnexpectedStream;
+                } else {
+                    stream_id = data.stream_id;
+                }
+                if (data.direction != direction or
+                    data.locally_initiated != locally_initiated or
+                    data.bytes > expected.len - received or
+                    !std.mem.eql(
+                        u8,
+                        buffer[0..data.bytes],
+                        expected[received..][0..data.bytes],
+                    ))
+                {
+                    return error.UnexpectedStream;
+                }
+                received += data.bytes;
+                if (data.fin) {
+                    if (!expect_fin or received != expected.len) {
+                        return error.UnexpectedStream;
+                    }
+                    return stream_id.?;
+                }
+                if (!expect_fin and received == expected.len) {
+                    return stream_id.?;
+                }
+            },
+            .reset, .stopped => return error.UnexpectedStream,
+        }
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -80,30 +133,90 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("netz WebTransport interop received DATAGRAM\n", .{});
     try session.sendDatagram(server_datagram);
 
-    var bidi = try session.receiveStream();
-    defer bidi.deinit();
-    if (bidi.direction != .bidirectional or
-        bidi.locally_initiated or
-        !bidi.fin or
-        !std.mem.eql(u8, bidi.payload, client_bidi))
-    {
-        return error.UnexpectedBidirectionalStream;
-    }
+    var read_buffer: [64]u8 = undefined;
+    const bidi_stream_id = try receiveExpectedStream(
+        &session,
+        &read_buffer,
+        null,
+        .bidirectional,
+        false,
+        client_bidi,
+        true,
+    );
     std.debug.print("netz WebTransport interop received bidi\n", .{});
-    try session.sendStream(bidi.stream_id, server_bidi, true);
+    try session.sendStream(bidi_stream_id, server_bidi, true);
 
-    var uni = try session.receiveStream();
-    defer uni.deinit();
-    if (uni.direction != .unidirectional or
-        uni.locally_initiated or
-        !uni.fin or
-        !std.mem.eql(u8, uni.payload, client_uni))
-    {
-        return error.UnexpectedUnidirectionalStream;
-    }
+    _ = try receiveExpectedStream(
+        &session,
+        &read_buffer,
+        null,
+        .unidirectional,
+        false,
+        client_uni,
+        true,
+    );
     std.debug.print("netz WebTransport interop received uni\n", .{});
     const response_uni = try session.openUnidirectionalStream();
     try session.sendStream(response_uni, server_uni, true);
+
+    const reset_stream_id = try receiveExpectedStream(
+        &session,
+        &read_buffer,
+        null,
+        .unidirectional,
+        false,
+        client_reset,
+        false,
+    );
+    try session.sendDatagram(reset_ready);
+    while (true) {
+        const event = try session.readStream(&read_buffer);
+        switch (event) {
+            .reset => |reset| {
+                if (reset.stream_id != reset_stream_id or
+                    reset.direction != .unidirectional or
+                    reset.locally_initiated or
+                    reset.error_info.application_code != 71)
+                {
+                    return error.UnexpectedResetStream;
+                }
+                break;
+            },
+            .data, .stopped => return error.UnexpectedResetStream,
+        }
+    }
+
+    const stop_stream = try session.openUnidirectionalStream();
+    try session.sendStream(stop_stream, server_stop, false);
+    while (true) {
+        const event = try session.readStream(&read_buffer);
+        switch (event) {
+            .stopped => |stopped| {
+                if (stopped.stream_id != stop_stream or
+                    stopped.direction != .unidirectional or
+                    !stopped.locally_initiated or
+                    stopped.error_info.application_code != 72)
+                {
+                    return error.UnexpectedStoppedStream;
+                }
+                break;
+            },
+            .data, .reset => return error.UnexpectedStoppedStream,
+        }
+    }
+    try session.sendDatagram(cancel_done);
+
+    const reused_stream_id = try receiveExpectedStream(
+        &session,
+        &read_buffer,
+        null,
+        .bidirectional,
+        false,
+        reuse_request,
+        true,
+    );
+    try session.sendStream(reused_stream_id, reuse_response, true);
+
     var ready = try session.receiveDatagram();
     defer ready.deinit(allocator);
     if (!std.mem.eql(u8, ready.datagram.payload, close_ready)) {
@@ -112,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
     try session.close(77, "netz done");
     try std.Io.sleep(io, .fromMilliseconds(100), .awake);
     std.debug.print(
-        "netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni close\n",
+        "netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 reuse=true close\n",
         .{},
     );
 }

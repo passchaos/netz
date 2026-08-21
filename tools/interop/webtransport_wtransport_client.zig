@@ -7,7 +7,60 @@ const client_bidi = "wtransport bidi";
 const server_bidi = "netz bidi";
 const client_uni = "wtransport uni";
 const server_uni = "netz uni";
+const client_reset = "wtransport reset";
+const server_stop = "netz stop";
+const reuse_request = "after cancel";
+const reuse_response = "session reused";
+const reset_ready = "reset ready";
+const cancel_done = "cancel done";
 const close_ready = "close ready";
+
+fn receiveExpectedStream(
+    session: anytype,
+    buffer: []u8,
+    expected_stream_id: ?u62,
+    direction: netz.webtransport.StreamDirection,
+    locally_initiated: bool,
+    expected: []const u8,
+    expect_fin: bool,
+) !u62 {
+    var stream_id = expected_stream_id;
+    var received: usize = 0;
+    while (true) {
+        const event = try session.readStream(buffer);
+        switch (event) {
+            .data => |data| {
+                if (stream_id) |id| {
+                    if (data.stream_id != id) return error.UnexpectedStream;
+                } else {
+                    stream_id = data.stream_id;
+                }
+                if (data.direction != direction or
+                    data.locally_initiated != locally_initiated or
+                    data.bytes > expected.len - received or
+                    !std.mem.eql(
+                        u8,
+                        buffer[0..data.bytes],
+                        expected[received..][0..data.bytes],
+                    ))
+                {
+                    return error.UnexpectedStream;
+                }
+                received += data.bytes;
+                if (data.fin) {
+                    if (!expect_fin or received != expected.len) {
+                        return error.UnexpectedStream;
+                    }
+                    return stream_id.?;
+                }
+                if (!expect_fin and received == expected.len) {
+                    return stream_id.?;
+                }
+            },
+            .reset, .stopped => return error.UnexpectedStream,
+        }
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -61,25 +114,65 @@ pub fn main(init: std.process.Init) !void {
 
     const bidi = try client.openBidirectionalStream();
     try client.sendStream(bidi, client_bidi, true);
-    var bidi_response = try client.receiveStream();
-    defer bidi_response.deinit();
-    if (bidi_response.stream_id != bidi or
-        !bidi_response.locally_initiated or
-        !std.mem.eql(u8, bidi_response.payload, server_bidi))
-    {
-        return error.UnexpectedBidirectionalStream;
-    }
+    var read_buffer: [64]u8 = undefined;
+    _ = try receiveExpectedStream(
+        &client,
+        &read_buffer,
+        bidi,
+        .bidirectional,
+        true,
+        server_bidi,
+        true,
+    );
 
     const uni = try client.openUnidirectionalStream();
     try client.sendStream(uni, client_uni, true);
-    var uni_response = try client.receiveStream();
-    defer uni_response.deinit();
-    if (uni_response.direction != .unidirectional or
-        uni_response.locally_initiated or
-        !std.mem.eql(u8, uni_response.payload, server_uni))
-    {
-        return error.UnexpectedUnidirectionalStream;
+    _ = try receiveExpectedStream(
+        &client,
+        &read_buffer,
+        null,
+        .unidirectional,
+        false,
+        server_uni,
+        true,
+    );
+
+    const reset_stream = try client.openUnidirectionalStream();
+    try client.sendStream(reset_stream, client_reset, false);
+    var reset_signal = try client.receiveDatagram();
+    defer reset_signal.deinit(allocator);
+    if (!std.mem.eql(u8, reset_signal.datagram.payload, reset_ready)) {
+        return error.UnexpectedResetReady;
     }
+    try client.resetStream(reset_stream, 73);
+
+    const stop_stream = try receiveExpectedStream(
+        &client,
+        &read_buffer,
+        null,
+        .unidirectional,
+        false,
+        server_stop,
+        false,
+    );
+    try client.stopStream(stop_stream, 74);
+    var cancel_signal = try client.receiveDatagram();
+    defer cancel_signal.deinit(allocator);
+    if (!std.mem.eql(u8, cancel_signal.datagram.payload, cancel_done)) {
+        return error.UnexpectedCancelDone;
+    }
+
+    const reused_stream = try client.openBidirectionalStream();
+    try client.sendStream(reused_stream, reuse_request, true);
+    _ = try receiveExpectedStream(
+        &client,
+        &read_buffer,
+        reused_stream,
+        .bidirectional,
+        true,
+        reuse_response,
+        true,
+    );
 
     try client.sendDatagram(close_ready);
     const close = try client.receivePeerConnectionClose();
@@ -98,7 +191,7 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedConnectionClose,
     }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni peer-close\n",
+        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 reuse=true peer-close\n",
         .{},
     );
 }

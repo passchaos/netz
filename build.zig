@@ -325,7 +325,7 @@ pub fn build(b: *std.Build) void {
     );
     const webtransport_wtransport_step = b.step(
         "interop-webtransport-wtransport",
-        "Exercise WebTransport CONNECT, datagrams, streams, and close with wtransport",
+        "Exercise WebTransport CONNECT, datagrams, stream cancellation, reuse, and close with wtransport",
     );
     webtransport_wtransport_step.dependOn(
         &webtransport_wtransport.step,
