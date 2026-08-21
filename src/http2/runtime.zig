@@ -1146,6 +1146,19 @@ pub const Connection = struct {
         return self.transport orelse tcpTransport(self.io, self.stream);
     }
 
+    /// Return the verified client certificate chain for TLS server
+    /// connections. Anonymous TLS and every client/cleartext connection return
+    /// null; the slices remain valid until `close`.
+    pub fn peerCertificates(
+        self: *const Connection,
+    ) ?[]const []const u8 {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_server => |connection| connection.peerCertificates(),
+            .tcp, .tls_client => null,
+        };
+    }
+
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
         const pending = try self.sendCompleteRequest(options);
         return self.readResponse(

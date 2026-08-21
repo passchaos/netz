@@ -190,3 +190,112 @@ test "HTTP/2 TLS listener rejects a client without h2 ALPN" {
     if (shared.err) |err| return err;
     try std.testing.expect(shared.rejected);
 }
+
+test "HTTP/2 TLS runtime exposes a required authenticated client chain" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const limits: runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .client_auth = .{ .verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            } },
+            .limits = limits,
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        certificate: *const [tls_testing.certificate_der_len]u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            const chain = connection.peerCertificates() orelse {
+                shared.err = error.MissingPeerCertificate;
+                return;
+            };
+            if (chain.len != 1 or
+                !std.mem.eql(u8, chain[0], shared.certificate))
+            {
+                shared.err = error.InvalidPeerCertificate;
+                return;
+            }
+            var request = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(shared.server.allocator);
+            connection.writeResponse(request.stream_id, .{
+                .body = "authenticated h2",
+            }) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .certificate = &certificate_der,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        limits,
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .client_identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer client.close();
+    try std.testing.expect(client.peerCertificates() == null);
+    var response = try client.request(.{ .path = "/mtls" });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("authenticated h2", response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
