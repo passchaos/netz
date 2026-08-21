@@ -13,7 +13,16 @@ const stream_limit_payloads = [_][]const u8{
 };
 const client_uni_payload = "uni";
 const server_uni_payload = "uni-reply";
-const Mode = enum { echo, reset, stop, flow, stream_limit, uni };
+const Mode = enum {
+    echo,
+    reset,
+    stop,
+    flow,
+    stream_limit,
+    uni,
+    application_pto,
+    initial_pto,
+};
 
 fn receiveExpectedStream(
     connection: *netz.quic.one_rtt.Connection,
@@ -192,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     switch (mode) {
-        .echo => {
+        .echo, .application_pto, .initial_pto => {
             for (payloads, 0..) |expected, index| {
                 const stream_id: u64 = @intCast(index * 4);
                 try receiveExpectedStream(
@@ -339,6 +348,14 @@ pub fn main(init: std.process.Init) !void {
         ),
         .uni => std.debug.print(
             "netz QUIC unidirectional server interoperated with quic-go: alpn=hq-interop client_stream=2 server_stream=3 request_bytes=3 reply_bytes=9\n",
+            .{},
+        ),
+        .application_pto => std.debug.print(
+            "netz QUIC application PTO server interoperated with quic-go: alpn=hq-interop dropped_datagrams=4 streams=2 bytes=10\n",
+            .{},
+        ),
+        .initial_pto => std.debug.print(
+            "netz QUIC Initial PTO server interoperated with quic-go: alpn=hq-interop dropped_datagrams=4 streams=2 bytes=10\n",
             .{},
         ),
     }

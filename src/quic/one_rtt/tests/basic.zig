@@ -189,6 +189,83 @@ test "QUIC 1-RTT connection greases and accepts the fixed bit" {
     try std.testing.expect(accepted.frames[0] == .ping);
 }
 
+test "QUIC 1-RTT receive pumps discard late long-header packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xba} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    // Established connections have discarded Initial and Handshake keys. A
+    // delayed retransmission in either long-header space must not be handed to
+    // the 1-RTT short-header decoder or fail an otherwise healthy receive.
+    try sender.sendBytes(receiver.address(), &.{0xc0});
+    try client.send(&.{.{ .ping = {} }});
+    var packet = try server.receivePacketServicingTimers();
+    defer packet.deinit(allocator);
+    try std.testing.expect(packet.frames[0] == .ping);
+
+    try sender.sendBytes(receiver.address(), &.{0xe0});
+    try client.send(&.{.{ .ping = {} }});
+    try server.servicePacketServicingTimers();
+    try std.testing.expectEqual(@as(u64, 2), server.stats().packets_received);
+
+    try sender.sendBytes(receiver.address(), &.{0xc0});
+    try client.send(&.{.{ .ping = {} }});
+    var timed = try server.receivePacketTimeout(.{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(100),
+    } });
+    defer timed.deinit(allocator);
+    try std.testing.expect(timed.frames[0] == .ping);
+    try std.testing.expectEqual(@as(u64, 3), server.stats().packets_received);
+
+    try sender.sendBytes(receiver.address(), &.{0xe0});
+    try client.send(&.{.{ .ping = {} }});
+    var batch = try server.receivePacketBatchServicingTimers();
+    defer batch.deinit();
+    try std.testing.expectEqual(@as(usize, 1), batch.packets.len);
+    try std.testing.expect(batch.packets[0].frames[0] == .ping);
+    try std.testing.expectEqual(@as(u64, 4), server.stats().packets_received);
+}
+
 test "QUIC 1-RTT batch send preflights storage and all packets" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

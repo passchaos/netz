@@ -552,7 +552,8 @@ zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Build the quic-go fixtures from the audited local quicz checkout and run
 # certificate-verified, ALPN-checked two-stream echoes in both directions,
 # followed by quic-go RESET_STREAM, STOP_SENDING, and rolling flow-control
-# and stream-limit renewal probes, plus client/server unidirectional streams.
+# and stream-limit renewal probes, client/server unidirectional streams, and
+# four-datagram Initial/application loss recovery.
 zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass

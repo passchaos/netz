@@ -180,3 +180,13 @@ run_quic_go_client_scenario \
   -expect-uni \
   'go_quic_uni_client: handshake_done=true client_stream=2 server_stream=3 reply_bytes=9' \
   'alpn=hq-interop client_stream=2 server_stream=3 request_bytes=3 reply_bytes=9'
+run_quic_go_client_scenario \
+  application_pto \
+  -expect-server-pto \
+  'go_quic_server_pto_client: handshake_done=true dropped_datagrams=4 echo_streams=2 echo_bytes=10' \
+  'alpn=hq-interop dropped_datagrams=4 streams=2 bytes=10'
+run_quic_go_client_scenario \
+  initial_pto \
+  -expect-server-initial-pto \
+  'go_quic_server_initial_pto_client: handshake_done=true dropped_datagrams=4 echo_streams=2 echo_bytes=10' \
+  'alpn=hq-interop dropped_datagrams=4 streams=2 bytes=10'

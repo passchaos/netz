@@ -560,6 +560,13 @@ pub const anti_amplification_multiplier: usize = 3;
 const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_len;
 const timer_blocked_receive_backoff_ns: u64 = std.time.ns_per_ms;
 
+/// Established 1-RTT receive APIs no longer own Initial or Handshake keys.
+/// A long header therefore belongs to an obsolete/rejected packet-number
+/// space and is silently discarded before the short-header decoder.
+fn isDiscardedLongHeaderPacket(bytes: []const u8) bool {
+    return bytes.len != 0 and (bytes[0] & 0x80) != 0;
+}
+
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
     config: ConnectionConfig,
@@ -4005,17 +4012,25 @@ pub const Connection = struct {
     /// the next transport deadline, services the timer on timeout, and then
     /// resumes waiting.
     pub fn receivePacketServicingTimers(self: *Connection) Error!ReceivedPacket {
-        var datagram = try self.receiveBytesServicingTimers();
-        defer datagram.deinit(self.endpoint.allocator);
-        var packet = try self.processReceivedBytesAt(
-            datagram.from,
-            datagram.bytes,
-            datagram.ecn,
-            self.monotonicNowNs(),
-        );
-        errdefer packet.deinit(self.endpoint.allocator);
-        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
-        return packet;
+        while (true) {
+            var datagram = try self.receiveBytesServicingTimers();
+            defer datagram.deinit(self.endpoint.allocator);
+            // Once 1-RTT keys are installed, retransmitted Initial/Handshake
+            // datagrams belong to discarded packet-number spaces. RFC 9001
+            // requires silently discarding them; feeding their long header to
+            // the short-header decoder incorrectly turns ordinary handshake
+            // loss recovery into an application receive failure.
+            if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
+            var packet = try self.processReceivedBytesAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                self.monotonicNowNs(),
+            );
+            errdefer packet.deinit(self.endpoint.allocator);
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            return packet;
+        }
     }
 
     /// Wait for raw packet storage while keeping all connection timers live.
@@ -4124,9 +4139,17 @@ pub const Connection = struct {
 
     pub fn receivePacketAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var datagram = try self.endpoint.receiveBytes();
-        defer datagram.deinit(self.endpoint.allocator);
-        return try self.processReceivedBytesAt(datagram.from, datagram.bytes, datagram.ecn, now_ns);
+        while (true) {
+            var datagram = try self.endpoint.receiveBytes();
+            defer datagram.deinit(self.endpoint.allocator);
+            if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
+            return try self.processReceivedBytesAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                now_ns,
+            );
+        }
     }
 
     /// Receive one 1-RTT packet with a caller-supplied socket timeout.
@@ -4144,14 +4167,18 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
-        var datagram = try self.endpoint.receiveBytesTimeout(timeout);
-        defer datagram.deinit(self.endpoint.allocator);
-        return try self.processReceivedBytesAt(
-            datagram.from,
-            datagram.bytes,
-            datagram.ecn,
-            self.monotonicNowNs(),
-        );
+        const deadline = timeout.toDeadline(self.endpoint.io);
+        while (true) {
+            var datagram = try self.endpoint.receiveBytesTimeout(deadline);
+            defer datagram.deinit(self.endpoint.allocator);
+            if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
+            return try self.processReceivedBytesAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                self.monotonicNowNs(),
+            );
+        }
     }
 
     /// Import authenticated 0-RTT frames into the shared application-data
@@ -4270,32 +4297,48 @@ pub const Connection = struct {
 
     pub fn receivePacketBatchAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacketBatch {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var datagrams = try self.endpoint.receiveBytesBatch();
-        defer datagrams.deinit(self.endpoint.allocator);
-        return try self.processReceivedDatagramBatchAt(&datagrams, now_ns);
+        while (true) {
+            var datagrams = try self.endpoint.receiveBytesBatch();
+            defer datagrams.deinit(self.endpoint.allocator);
+            if (try self.processReceivedDatagramBatchAt(
+                &datagrams,
+                now_ns,
+            )) |batch| return batch;
+        }
     }
 
     fn processReceivedDatagramBatchAt(
         self: *Connection,
         datagrams: *quic.runtime.OwnedBytesBatch,
         now_ns: ?u64,
-    ) Error!ReceivedPacketBatch {
+    ) Error!?ReceivedPacketBatch {
         const packets = try self.endpoint.allocator.alloc(ReceivedPacket, datagrams.segment_count);
         var completed: usize = 0;
         errdefer {
             for (packets[0..completed]) |*packet| packet.deinit(self.endpoint.allocator);
             self.endpoint.allocator.free(packets);
         }
-        for (packets, 0..) |*packet, index| {
-            packet.* = try self.processReceivedBytesAt(
+        for (0..datagrams.segment_count) |index| {
+            const bytes = datagrams.datagramAt(index) orelse
+                return error.InvalidPacket;
+            if (isDiscardedLongHeaderPacket(bytes)) continue;
+            packets[completed] = try self.processReceivedBytesAt(
                 datagrams.from,
-                datagrams.datagramAt(index) orelse return error.InvalidPacket,
+                bytes,
                 datagrams.ecn,
                 now_ns,
             );
             completed += 1;
         }
-        return .{ .allocator = self.endpoint.allocator, .packets = packets };
+        if (completed == 0) {
+            self.endpoint.allocator.free(packets);
+            return null;
+        }
+        const retained = if (completed == packets.len)
+            packets
+        else
+            try self.endpoint.allocator.realloc(packets, completed);
+        return .{ .allocator = self.endpoint.allocator, .packets = retained };
     }
 
     /// Receive one owning GRO batch while continuing to service QUIC timers.
@@ -4351,10 +4394,10 @@ pub const Connection = struct {
                 else => |other| return @errorCast(other),
             };
             defer datagrams.deinit(self.endpoint.allocator);
-            var batch = try self.processReceivedDatagramBatchAt(
+            var batch = (try self.processReceivedDatagramBatchAt(
                 &datagrams,
                 self.monotonicNowNs(),
-            );
+            )) orelse continue;
             errdefer batch.deinit();
             _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
             return batch;
@@ -4396,10 +4439,10 @@ pub const Connection = struct {
             else => |other| return @errorCast(other),
         };
         defer datagrams.deinit(self.endpoint.allocator);
-        var batch = try self.processReceivedDatagramBatchAt(
+        var batch = (try self.processReceivedDatagramBatchAt(
             &datagrams,
             self.monotonicNowNs(),
-        );
+        )) orelse return null;
         errdefer batch.deinit();
         _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
         return batch;
@@ -4456,17 +4499,20 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
-        const datagram = try self.endpoint.receiveBytesInto(
-            self.receive_packet_buffer.allocatedSlice(),
-        );
-        return self.processReceivedBytesVisitingAt(
-            datagram.from,
-            datagram.bytes,
-            datagram.ecn,
-            now_ns,
-            context,
-            visitor,
-        );
+        while (true) {
+            const datagram = try self.endpoint.receiveBytesInto(
+                self.receive_packet_buffer.allocatedSlice(),
+            );
+            if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
+            return self.processReceivedBytesVisitingAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                now_ns,
+                context,
+                visitor,
+            );
+        }
     }
 
     /// Timer-aware borrowed receive used by blocking HTTP/3 and WebTransport
@@ -4525,8 +4571,11 @@ pub const Connection = struct {
             if (self.close_info != null or self.idle_timed_out) {
                 return error.ConnectionClosed;
             }
-            const timer = self.nextTimerDeadline() orelse
-                return self.endpoint.receiveBytesInto(storage);
+            const timer = self.nextTimerDeadline() orelse {
+                const datagram = try self.endpoint.receiveBytesInto(storage);
+                if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
+                return datagram;
+            };
             const now_ns = self.monotonicNowNs();
             if (now_ns >= timer.deadline_ns) {
                 if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
@@ -4536,6 +4585,9 @@ pub const Connection = struct {
                     storage,
                     now_ns,
                 )) |datagram| {
+                    if (isDiscardedLongHeaderPacket(datagram.bytes)) {
+                        continue;
+                    }
                     return datagram;
                 }
                 continue;
@@ -4544,7 +4596,7 @@ pub const Connection = struct {
                 i96,
                 timer.deadline_ns,
             ) orelse std.math.maxInt(i96);
-            return self.endpoint.receiveBytesIntoTimeout(storage, .{
+            const datagram = self.endpoint.receiveBytesIntoTimeout(storage, .{
                 .deadline = .{
                     .clock = .awake,
                     .raw = .fromNanoseconds(deadline_ns_i96),
@@ -4559,14 +4611,19 @@ pub const Connection = struct {
                             storage,
                             timeout_ns,
                         )) |datagram| {
+                            if (isDiscardedLongHeaderPacket(datagram.bytes)) {
+                                continue;
+                            }
                             return datagram;
                         }
                     }
                     continue;
                 },
-                error.ConcurrencyUnavailable => self.endpoint.receiveBytesInto(storage),
+                error.ConcurrencyUnavailable => try self.endpoint.receiveBytesInto(storage),
                 else => |other| return @errorCast(other),
             };
+            if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
+            return datagram;
         }
     }
 
@@ -4649,8 +4706,10 @@ pub const Connection = struct {
         defer datagrams.deinit(self.endpoint.allocator);
 
         var completed: usize = 0;
-        while (completed < datagrams.segment_count) : (completed += 1) {
-            const bytes = datagrams.datagramAtMutable(completed) orelse return error.InvalidPacket;
+        for (0..datagrams.segment_count) |index| {
+            const bytes = datagrams.datagramAtMutable(index) orelse
+                return error.InvalidPacket;
+            if (isDiscardedLongHeaderPacket(bytes)) continue;
             const keys = self.receive_key_phase.keyUpdateKeys();
             const key_phase = quic.protection.peekShortPacketKeyPhaseForPolicy(
                 keys.current.hp,
@@ -4669,6 +4728,7 @@ pub const Connection = struct {
                     now_ns,
                     keys.current,
                 );
+                completed += 1;
                 continue;
             }
 
@@ -4683,6 +4743,7 @@ pub const Connection = struct {
                 now_ns,
             );
             packet.deinit(self.endpoint.allocator);
+            completed += 1;
         }
         return completed;
     }
