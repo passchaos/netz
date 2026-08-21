@@ -198,8 +198,15 @@ receiver verifies the body plus final response. Hyper observes netz's interim
 response through its `on_informational` extension; netz uses the new
 `RequestWriter.waitForContinue`, which also consumes preceding non-100 1xx
 responses and returns a typed owned final response if the server rejects the
-expectation before the body. This is functional HTTP/1.1 interoperability
-evidence rather than a benchmark proxy.
+expectation before the body. The external client gate now exercises both
+branches against raw wire responses in the same Hyper/Tokio fixture: a 103
+Early Hints followed by 100 Continue releases the exact ten-byte body, while a
+417 response causes netz to send zero body bytes, return the owned rejection,
+reject further writes through the stale writer, and mark the connection
+unusable. The peer waits for EOF and fails if any declared-body byte arrives,
+so this is observable process-boundary evidence rather than an in-process state
+assertion. This is functional HTTP/1.1 interoperability evidence rather than a
+benchmark proxy.
 
 ## HTTP/2 consecutive and parallel round trips
 

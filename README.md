@@ -551,6 +551,8 @@ zig build interop-http2-h2spec -Doptimize=ReleaseFast
 zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
 # Build the locked local Hyper reference offline, then verify chunked bodies,
 # negotiated trailers, and Expect/100-continue handshakes in both directions.
+# The netz client also proves 103-before-100 handling and a bodyless 417 early
+# final response that makes the incomplete HTTP/1 exchange non-reusable.
 zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Build the locked local Hyper reference offline, then verify POST headers,
 # multi-frame bodies and trailers between netz and Hyper in both directions.

@@ -117,6 +117,97 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 client observed Hyper 100 Continue: interim=1 body=11 response_body=15\n",
         .{},
     );
+
+    {
+        var hints_client = try netz.http1.runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            .{ .max_body_bytes = 4096 },
+        );
+        defer hints_client.close();
+        var hints_writer = try hints_client.startRequest(.{
+            .method = .POST,
+            .target = "/expect-hints?from=netz",
+            .host = "localhost",
+            .headers = &.{.{
+                .name = "Expect",
+                .value = "100-continue",
+            }},
+            .body_length = "netz-hints".len,
+        });
+        defer hints_writer.deinit();
+        switch (try hints_writer.waitForContinue()) {
+            .proceed => {},
+            .final_response => |response_value| {
+                var early_response = response_value;
+                early_response.deinit(allocator);
+                return error.ExpectedContinue;
+            },
+        }
+        try hints_writer.write("netz-hints");
+        try hints_writer.finish();
+        var hints_response = try hints_writer.readResponse();
+        defer hints_response.deinit(allocator);
+        if (hints_response.response.status != 200 or
+            !std.mem.eql(
+                u8,
+                hints_response.response.body,
+                "hyper-hints-ok",
+            ))
+        {
+            return error.InvalidContinueResponse;
+        }
+    }
+
+    {
+        var reject_client = try netz.http1.runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            .{ .max_body_bytes = 4096 },
+        );
+        defer reject_client.close();
+        var reject_writer = try reject_client.startRequest(.{
+            .method = .POST,
+            .target = "/expect-reject?from=netz",
+            .host = "localhost",
+            .headers = &.{.{
+                .name = "Expect",
+                .value = "100-continue",
+            }},
+            .body_length = "netz-reject".len,
+        });
+        defer reject_writer.deinit();
+        switch (try reject_writer.waitForContinue()) {
+            .proceed => return error.UnexpectedContinue,
+            .final_response => |response_value| {
+                var rejected = response_value;
+                defer rejected.deinit(allocator);
+                if (rejected.response.status != 417 or
+                    !std.mem.eql(u8, rejected.response.body, "rejected"))
+                {
+                    return error.InvalidEarlyResponse;
+                }
+            },
+        }
+        try std.testing.expectError(
+            error.InvalidWriterState,
+            reject_writer.write("netz-reject"),
+        );
+        try std.testing.expectError(
+            error.ConnectionUnusable,
+            reject_client.request(.{
+                .target = "/must-not-reuse",
+                .host = "localhost",
+            }),
+        );
+    }
+
+    std.debug.print(
+        "netz HTTP/1 client handled Hyper/Tokio Expect boundaries: informational=103,100 early_final=417 body_sent=0 connection_reusable=false\n",
+        .{},
+    );
 }
 
 fn headerEquals(

@@ -62,6 +62,12 @@ cat "$work/netz-client.log"
 grep -Fq \
   'netz HTTP/1 client observed Hyper 100 Continue: interim=1 body=11 response_body=15' \
   "$work/netz-client.log"
+grep -Fq \
+  'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
+  "$work/netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries: informational=103,100 early_final=417 body_sent=0' \
+  "$work/hyper-server.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
 port=$(free_tcp_port)
