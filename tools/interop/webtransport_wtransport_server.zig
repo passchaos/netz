@@ -188,6 +188,9 @@ pub fn main(init: std.process.Init) !void {
 
     const stop_stream = try session.openUnidirectionalStream();
     try session.sendStream(stop_stream, server_stop, false);
+    var sibling_stream_id: ?u62 = null;
+    var sibling_received: usize = 0;
+    var sibling_finished = false;
     while (true) {
         const event = try session.readStream(&read_buffer);
         switch (event) {
@@ -201,21 +204,68 @@ pub fn main(init: std.process.Init) !void {
                 }
                 break;
             },
-            .data, .reset => return error.UnexpectedStoppedStream,
+            .data => |data| {
+                if (data.direction != .bidirectional or
+                    data.locally_initiated)
+                {
+                    return error.UnexpectedStoppedStream;
+                }
+                if (sibling_stream_id) |id| {
+                    if (data.stream_id != id) {
+                        return error.UnexpectedStoppedStream;
+                    }
+                } else {
+                    sibling_stream_id = data.stream_id;
+                }
+                if (data.bytes > reuse_request.len - sibling_received or
+                    !std.mem.eql(
+                        u8,
+                        read_buffer[0..data.bytes],
+                        reuse_request[sibling_received..][0..data.bytes],
+                    ))
+                {
+                    return error.UnexpectedStoppedStream;
+                }
+                sibling_received += data.bytes;
+                if (data.fin) {
+                    if (sibling_received != reuse_request.len) {
+                        return error.UnexpectedStoppedStream;
+                    }
+                    sibling_finished = true;
+                }
+            },
+            .reset => return error.UnexpectedStoppedStream,
+        }
+    }
+    while (!sibling_finished) {
+        const event = try session.readStream(&read_buffer);
+        if (event != .data) return error.UnexpectedStream;
+        const data = event.data;
+        if (sibling_stream_id) |id| {
+            if (data.stream_id != id) return error.UnexpectedStream;
+        } else {
+            sibling_stream_id = data.stream_id;
+        }
+        if (data.bytes > reuse_request.len - sibling_received or
+            !std.mem.eql(
+                u8,
+                read_buffer[0..data.bytes],
+                reuse_request[sibling_received..][0..data.bytes],
+            ))
+        {
+            return error.UnexpectedStream;
+        }
+        sibling_received += data.bytes;
+        if (data.fin) {
+            if (sibling_received != reuse_request.len) {
+                return error.UnexpectedStream;
+            }
+            sibling_finished = true;
         }
     }
     try session.sendDatagram(cancel_done);
 
-    const reused_stream_id = try receiveExpectedStream(
-        &session,
-        &read_buffer,
-        null,
-        .bidirectional,
-        false,
-        reuse_request,
-        true,
-    );
-    try session.sendStream(reused_stream_id, reuse_response, true);
+    try session.sendStream(sibling_stream_id.?, reuse_response, true);
 
     var ready = try session.receiveDatagram();
     defer ready.deinit(allocator);
@@ -225,7 +275,7 @@ pub fn main(init: std.process.Init) !void {
     try session.close(77, "netz done");
     try std.Io.sleep(io, .fromMilliseconds(100), .awake);
     std.debug.print(
-        "netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 reuse=true close\n",
+        "netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close\n",
         .{},
     );
 }

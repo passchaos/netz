@@ -15,6 +15,18 @@ const reset_ready = "reset ready";
 const cancel_done = "cancel done";
 const close_ready = "close ready";
 
+const StopLoss = struct {
+    armed: bool = false,
+    dropped: usize = 0,
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *StopLoss = @ptrCast(@alignCast(context));
+        if (!self.armed or self.dropped != 0) return false;
+        self.dropped = 1;
+        return true;
+    }
+};
+
 fn receiveExpectedStream(
     session: anytype,
     buffer: []u8,
@@ -76,6 +88,7 @@ pub fn main(init: std.process.Init) !void {
     const io = threaded.io();
     const original_dcid = [_]u8{ 0x77, 0x74, 0x63, 0x6c, 0x69, 0x00, 0x00, 0x01 };
     const client_cid = [_]u8{ 0x77, 0x74, 0x63, 0x6c, 0x69, 0x00, 0x00, 0x02 };
+    var stop_loss = StopLoss{};
 
     var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
         allocator,
@@ -88,6 +101,10 @@ pub fn main(init: std.process.Init) !void {
             .limits = .{ .http3 = .{ .quic = .{
                 .max_datagram_size = 4096,
                 .max_frames_per_datagram = 16,
+                .send_interceptor = .{
+                    .context = &stop_loss,
+                    .should_drop = StopLoss.shouldDrop,
+                },
             } } },
             .h3 = .{
                 .handshake = .{
@@ -155,15 +172,21 @@ pub fn main(init: std.process.Init) !void {
         server_stop,
         false,
     );
+    // The sibling exists before cancellation and its response is withheld by
+    // the peer until STOP_SENDING arrives. Drop the first control datagram so
+    // receiveDatagram must service QUIC recovery instead of sleeping forever.
+    const reused_stream = try client.openBidirectionalStream();
+    try client.sendStream(reused_stream, reuse_request, true);
+    stop_loss.armed = true;
     try client.stopStream(stop_stream, 74);
     var cancel_signal = try client.receiveDatagram();
     defer cancel_signal.deinit(allocator);
-    if (!std.mem.eql(u8, cancel_signal.datagram.payload, cancel_done)) {
+    if (!std.mem.eql(u8, cancel_signal.datagram.payload, cancel_done) or
+        stop_loss.dropped != 1)
+    {
         return error.UnexpectedCancelDone;
     }
 
-    const reused_stream = try client.openBidirectionalStream();
-    try client.sendStream(reused_stream, reuse_request, true);
     _ = try receiveExpectedStream(
         &client,
         &read_buffer,
@@ -191,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedConnectionClose,
     }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 reuse=true peer-close\n",
+        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
         .{},
     );
 }

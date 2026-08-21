@@ -1610,9 +1610,137 @@ fn sendHandshakeDatagramFromConnection(
 fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) Error!OwnedHandshakeDatagram {
     while (true) {
         if (try popHandshakeDatagramFromConnection(connection)) |datagram| return datagram;
-        var packet = try connection.receivePacket();
-        packet.deinit(connection.endpoint.allocator);
+        // DATAGRAM waiters also own the transport progress loop. In
+        // particular, a previously sent RESET_STREAM or STOP_SENDING may need
+        // PTO retransmission before the peer can emit the DATAGRAM that this
+        // call is awaiting. A plain blocking receive would sleep past that
+        // recovery deadline and deadlock both endpoints.
+        try connection.servicePacketServicingTimers();
     }
+}
+
+test "WebTransport DATAGRAM waiter recovers a lost control packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x44, 0x47, 0x50, 0x00, 0x00, 0x01 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x47, 0x50, 0x00, 0x00, 0x02 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x44, 0x47, 0x50, 0x00, 0x00, 0x03 };
+
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xc3} ** 32,
+            .x25519_secret_key = [_]u8{0xc4} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var accepted = try shared.server.accept();
+            defer accepted.deinit();
+            var buffer: [32]u8 = undefined;
+            const stream_id = try accepted.openUnidirectionalStream();
+            try accepted.sendStream(stream_id, "stop", false);
+            while (true) {
+                const event = try accepted.readStream(&buffer);
+                if (event != .stopped) continue;
+                try std.testing.expectEqual(stream_id, event.stopped.stream_id);
+                try std.testing.expectEqual(
+                    @as(?u32, 88),
+                    event.stopped.error_info.application_code,
+                );
+                break;
+            }
+            try accepted.sendDatagram("cancel observed");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var drop_enabled = false;
+    var dropped: usize = 0;
+    const DropFirst = struct {
+        fn send(context: *anyopaque, _: []const u8) bool {
+            const state: *struct { enabled: *bool, count: *usize } =
+                @ptrCast(@alignCast(context));
+            if (!state.enabled.* or state.count.* != 0) return false;
+            state.count.* = 1;
+            return true;
+        }
+    };
+    var drop_state = .{ .enabled = &drop_enabled, .count = &dropped };
+    var client = try HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-datagram-pto",
+            .limits = .{ .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+                .send_interceptor = .{
+                    .context = &drop_state,
+                    .should_drop = DropFirst.send,
+                },
+            } } },
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xc1} ** 32,
+                .x25519_secret_key = [_]u8{0xc2} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+    // A server-created unidirectional stream gives the client a receive side
+    // on which STOP_SENDING is valid.
+    var stopped: ?u62 = null;
+    var buffer: [32]u8 = undefined;
+    while (stopped == null) {
+        const event = try client.readStream(&buffer);
+        if (event != .data) return error.UnexpectedStreamEvent;
+        try std.testing.expectEqualStrings(
+            "stop",
+            buffer[0..event.data.bytes],
+        );
+        stopped = event.data.stream_id;
+    }
+    drop_enabled = true;
+    try client.stopStream(stopped.?, 88);
+
+    var observed = try client.receiveDatagram();
+    defer observed.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "cancel observed",
+        observed.datagram.payload,
+    );
+    try std.testing.expectEqual(@as(usize, 1), dropped);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 fn receiveHandshakePeerConnectionClose(

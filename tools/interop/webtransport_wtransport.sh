@@ -68,10 +68,10 @@ server_pid=
 cat "$work/wtransport-client.log"
 cat "$work/server.log"
 grep -Fq \
-  'wtransport client interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 reuse=true close' \
+  'wtransport client interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
   "$work/wtransport-client.log"
 grep -Fq \
-  'netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 reuse=true close' \
+  'netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
   "$work/server.log"
 
 rust_log="$work/wtransport-server.log"
@@ -108,7 +108,7 @@ server_pid=
 cat "$work/netz-client.log"
 cat "$rust_log"
 grep -Fq \
-  'netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 reuse=true peer-close' \
+  'netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close' \
   "$work/netz-client.log"
 grep -Fq \
   'wtransport server interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 reuse=true' \

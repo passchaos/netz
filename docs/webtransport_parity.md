@@ -22,15 +22,21 @@ checkout at `d96cbb8` and exercises both directions over real TLS
 successful Extended CONNECT at `/interop`, bidirectional DATAGRAM exchange, a
 client-created bidirectional stream and its reverse direction, client- and
 server-created unidirectional streams, mapped application-code 71
-RESET_STREAM, code 72 STOP_SENDING, a fresh bidirectional stream after both
-cancellations, and a `CLOSE_WEBTRANSPORT_SESSION` with code 77/reason
+RESET_STREAM, code 72 STOP_SENDING, a bidirectional sibling already active
+when cancellation occurs, and a `CLOSE_WEBTRANSPORT_SESSION` with code 77/reason
 `netz done`. The netz-client/wtransport-server half repeats CONNECT, DATAGRAM,
 both stream directions, mapped reset code 73, mapped stop code 74, and
-post-cancellation stream reuse, then waits for and validates the server's QUIC
+same-session sibling completion, then waits for and validates the server's QUIC
 application close code 0/reason `interop complete`. Session
 close capsules and connection-level shutdown remain separate typed APIs, so the
 gate cannot mistake a clean CONNECT-stream FIN for a peer connection close. The
-gate exposed three
+response stream is now opened before each peer sends STOP_SENDING, and the
+receiver withholds its reply until it observes that cancellation. In the
+netz-client half, the first mapped STOP_SENDING datagram is deliberately
+dropped; the peer can release the sibling only after QUIC retransmits it. This
+also exposed and fixed a transport-progress bug: a blocking WebTransport
+DATAGRAM receive now services loss/PTO timers instead of sleeping indefinitely
+while its own recoverable control packet is outstanding. The gate exposed four
 cross-stack assumptions now covered in production code: Client Finished can
 follow an Initial ACK in the same UDP datagram, modern peers may omit the older
 Capsule-Protocol and per-session stream-limit settings, and HTTP/3 critical
@@ -60,8 +66,8 @@ WebTransport DATAGRAM round trip and transport statistics.
 | --- | --- | --- | --- |
 | CONNECT / SETTINGS | Handshake, protected and dev runtimes; handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session |
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
-| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits; post-cancellation reuse is externally verified | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop; interoperates with netz before and after cancellations |
-| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop and lifecycle/limits, externally verified in both endpoint roles | Session registry and header codec | Production async uni streams with read/reset/stop; exact raw mapped codes are verified against netz |
+| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop; interoperates with netz while another stream is being cancelled |
+| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop and lifecycle/limits; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop; exact mapped codes are verified against netz |
 | Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver handles close while drain support is absent |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
@@ -191,8 +197,12 @@ lightweight protected transport does not own a stateful recovery connection.
 2. Add browser WebTransport evidence. The checked-in wtransport gate now
    covers both client/server directions across CONNECT, DATAGRAM, and
    bidirectional/unidirectional streams. Each direction now sends and observes
-   exact mapped RESET_STREAM and STOP_SENDING codes, then completes another
-   bidirectional stream on the same session. Its wtransport-client half also
+   exact mapped RESET_STREAM and STOP_SENDING codes. The next bidirectional
+   stream is opened before cancellation and the response is gated on peer
+   observation, so completion proves a concurrent sibling survives. The
+   netz-client half additionally discards the first STOP_SENDING datagram and
+   completes only after transport recovery delivers the exact code. Its
+   wtransport-client half also
    checks the detailed session-close capsule, while its wtransport-server half
    checks netz's peer QUIC application-close code and reason handling. Browser
    coverage remains distinct and is not inferred from this native peer.

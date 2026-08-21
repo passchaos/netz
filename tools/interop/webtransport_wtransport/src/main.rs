@@ -119,6 +119,16 @@ async fn main() -> Result<()> {
         stop_payload == SERVER_STOP,
         "unexpected stop stream payload"
     );
+    // Open and finish the reuse request before cancellation. The netz peer
+    // withholds the reply until it observes STOP_SENDING after loss recovery.
+    let reuse_opening = timeout(TIMEOUT, connection.open_bi())
+        .await
+        .context("reuse stream credit timed out")??;
+    let (mut reuse_send, mut reuse_recv) = timeout(TIMEOUT, reuse_opening)
+        .await
+        .context("reuse stream association timed out")??;
+    reuse_send.write_all(REUSE_REQUEST).await?;
+    reuse_send.finish().await?;
     stopped_recv.stop(mapped_stream_error(72));
     let cancel_done = timeout(TIMEOUT, connection.receive_datagram())
         .await
@@ -128,14 +138,6 @@ async fn main() -> Result<()> {
         "unexpected cancel-done payload"
     );
 
-    let reuse_opening = timeout(TIMEOUT, connection.open_bi())
-        .await
-        .context("reuse stream credit timed out")??;
-    let (mut reuse_send, mut reuse_recv) = timeout(TIMEOUT, reuse_opening)
-        .await
-        .context("reuse stream association timed out")??;
-    reuse_send.write_all(REUSE_REQUEST).await?;
-    reuse_send.finish().await?;
     let mut reuse_reply = [0; REUSE_RESPONSE.len()];
     timeout(TIMEOUT, reuse_recv.read_exact(&mut reuse_reply))
         .await
@@ -157,7 +159,7 @@ async fn main() -> Result<()> {
     // wtransport consumes that capsule and then closes QUIC with H3_NO_ERROR.
     endpoint.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport client interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 reuse=true close");
+    println!("wtransport client interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close");
     Ok(())
 }
 
