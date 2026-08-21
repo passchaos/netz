@@ -549,6 +549,9 @@ zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
 # Build the locked local Hyper reference offline, then verify a netz HTTP/2
 # client POST body/trailer and Hyper response DATA/trailer exchange.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
+# Build the quic-go fixture from the audited local quicz checkout and run a
+# certificate-verified, ALPN-checked two-stream echo from the netz QUIC client.
+zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.

@@ -160,6 +160,27 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const quic_quic_go_client = b.addExecutable(.{
+        .name = "netz-quic-quic-go-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_quic_go_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_quic_go = b.addSystemCommand(
+        &.{"tools/interop/quic_quic_go.sh"},
+    );
+    quic_quic_go.addArtifactArg(quic_quic_go_client);
+    const quic_quic_go_step = b.step(
+        "interop-quic-quic-go",
+        "Run a verified netz QUIC client against the local quic-go fixture",
+    );
+    quic_quic_go_step.dependOn(&quic_quic_go.step);
+
     const webtransport_wtransport_server = b.addExecutable(.{
         .name = "netz-webtransport-wtransport-server",
         .root_module = b.createModule(.{
