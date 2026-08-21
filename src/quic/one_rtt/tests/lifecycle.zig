@@ -32,6 +32,10 @@ test "QUIC 1-RTT stateless reset enters draining" {
 
     try std.testing.expectEqual(@as(?u64, 1), connection.processStatelessResetDatagram(reset_datagram.items, 10, 25));
     try std.testing.expect(connection.draining());
+    try std.testing.expectEqual(
+        @as(?one_rtt.PeerCloseInfo, null),
+        connection.peerCloseInfo(),
+    );
     try std.testing.expectEqual(@as(?u64, 85), connection.closeExpiryDeadlineMillis());
     try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
     try std.testing.expectEqual(@as(?u64, null), connection.processStatelessResetDatagram(&.{ 0x40, 1, 2 }, 11, 25));
@@ -455,6 +459,16 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     try std.testing.expect(client2.close_info.?.application);
     try std.testing.expectEqual(@as(u64, 42), client2.close_info.?.error_code);
     try std.testing.expectEqualStrings("app done", client2.close_info.?.reason_phrase);
+    switch (client2.peerCloseInfo().?) {
+        .application => |close| {
+            try std.testing.expectEqual(@as(u64, 42), close.error_code);
+            try std.testing.expectEqualStrings(
+                "app done",
+                close.reason_phrase,
+            );
+        },
+        .transport => return error.TestUnexpectedResult,
+    }
 }
 
 test "QUIC 1-RTT close lifecycle expires after three PTOs" {

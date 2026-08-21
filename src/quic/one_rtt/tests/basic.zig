@@ -1737,6 +1737,10 @@ test "QUIC 1-RTT closing state can retransmit close" {
 
     try connection.closeTransport(42, @intFromEnum(quic.FrameType.stream), "closing");
     try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(
+        @as(?one_rtt.PeerCloseInfo, null),
+        connection.peerCloseInfo(),
+    );
     const before = connection.next_packet_number;
     try connection.resendClose();
     try std.testing.expectEqual(before + 1, connection.next_packet_number);
@@ -1747,6 +1751,17 @@ test "QUIC 1-RTT closing state can retransmit close" {
         .reason_phrase = "peer-close",
     } }}, null, .not_ect);
     try std.testing.expect(connection.draining());
+    switch (connection.peerCloseInfo().?) {
+        .transport => |close| {
+            try std.testing.expectEqual(@as(u64, 0), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0), close.frame_type);
+            try std.testing.expectEqualStrings(
+                "peer-close",
+                close.reason_phrase,
+            );
+        },
+        .application => return error.TestUnexpectedResult,
+    }
     try std.testing.expectError(error.ConnectionClosed, connection.resendClose());
 }
 

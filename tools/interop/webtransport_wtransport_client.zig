@@ -82,8 +82,23 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try client.sendDatagram(close_ready);
+    const close = try client.receivePeerConnectionClose();
+    switch (close) {
+        .application => |application| {
+            if (application.error_code != 0 or
+                !std.mem.eql(
+                    u8,
+                    application.reason_phrase,
+                    "interop complete",
+                ))
+            {
+                return error.UnexpectedConnectionClose;
+            }
+        },
+        .transport => return error.UnexpectedConnectionClose,
+    }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni\n",
+        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni peer-close\n",
         .{},
     );
 }

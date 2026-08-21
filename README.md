@@ -520,7 +520,10 @@ scheduling, with independent FIN and blocking write-all compatibility. Their
 Extended CONNECT streams remain open for bounded incremental Capsule Protocol
 control, including advisory drain, detailed/clean close, split DATA/capsule
 parsing, UTF-8 reason validation and WT_SESSION_GONE cleanup of associated
-streams. The lightweight preconfigured-key protected runtime shares the same
+streams. Handshake-backed sessions separately expose authenticated peer QUIC
+application/transport close details, including code, reason, and transport
+frame type, without conflating connection shutdown with a Session close
+capsule. The lightweight preconfigured-key protected runtime shares the same
 incremental Capsule parser and drain/close semantics, including same-chunk
 event retention through the largest valid 1024-byte close reason; associated
 stream cleanup remains specific to the stateful real-handshake runtime.

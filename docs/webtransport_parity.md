@@ -23,7 +23,11 @@ successful Extended CONNECT at `/interop`, bidirectional DATAGRAM exchange, a
 client-created bidirectional stream and its reverse direction, client- and
 server-created unidirectional streams, and a `CLOSE_WEBTRANSPORT_SESSION` with
 code 77/reason `netz done`. The netz-client/wtransport-server half repeats
-CONNECT, DATAGRAM and both stream-direction checks. The gate exposed three
+CONNECT, DATAGRAM and both stream-direction checks, then waits for and validates
+the server's QUIC application close code 0/reason `interop complete`. Session
+close capsules and connection-level shutdown remain separate typed APIs, so the
+gate cannot mistake a clean CONNECT-stream FIN for a peer connection close. The
+gate exposed three
 cross-stack assumptions now covered in production code: Client Finished can
 follow an Initial ACK in the same UDP datagram, modern peers may omit the older
 Capsule-Protocol and per-session stream-limit settings, and HTTP/3 critical
@@ -184,7 +188,8 @@ lightweight protected transport does not own a stateful recovery connection.
 2. Add browser WebTransport evidence. The checked-in wtransport gate now
    covers both client/server directions across CONNECT, DATAGRAM, and
    bidirectional/unidirectional streams; its wtransport-client half also checks
-   the detailed session-close capsule.
+   the detailed session-close capsule, while its wtransport-server half checks
+   netz's peer QUIC application-close code and reason handling.
 3. Add larger long-run stream-churn distributions; concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The

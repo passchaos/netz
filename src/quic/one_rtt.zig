@@ -330,6 +330,28 @@ pub const CloseState = enum {
     closed,
 };
 
+/// Borrowed details from a peer's authenticated QUIC CONNECTION_CLOSE frame.
+///
+/// The reason phrase remains owned by `Connection` and is valid until that
+/// connection is deinitialized. A stateless reset and a locally generated
+/// close deliberately do not produce this value because neither carries peer
+/// CONNECTION_CLOSE diagnostics.
+pub const PeerCloseInfo = union(enum) {
+    transport: Transport,
+    application: Application,
+
+    pub const Transport = struct {
+        error_code: u64,
+        frame_type: u64,
+        reason_phrase: []const u8,
+    };
+
+    pub const Application = struct {
+        error_code: u64,
+        reason_phrase: []const u8,
+    };
+};
+
 /// Allocation-free snapshot of the 1-RTT transport state.
 ///
 /// The counters intentionally live on `Connection` instead of being derived
@@ -591,6 +613,7 @@ pub const Connection = struct {
     stream_recv_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     last_recv_stream_index: ?usize = null,
     close_info: ?CloseInfo = null,
+    peer_close_frame_received: bool = false,
     send_key_phase: quic.protection.Aes128KeyPhaseState,
     receive_key_phase: quic.protection.Aes128KeyPhaseState,
     pending_key_update_ack_threshold: ?u64 = null,
@@ -3610,6 +3633,28 @@ pub const Connection = struct {
         return if (self.close_info) |close_info| close_info.expires_ms else null;
     }
 
+    /// Return the first peer CONNECTION_CLOSE observed by this connection.
+    ///
+    /// Local close state is replaced with the peer's diagnostics when the peer
+    /// replies while we are closing. This keeps the snapshot unambiguous and
+    /// is safe because a draining endpoint can no longer retransmit its local
+    /// close frame.
+    pub fn peerCloseInfo(self: *const Connection) ?PeerCloseInfo {
+        const close_info = self.close_info orelse return null;
+        if (!self.peer_close_frame_received) return null;
+        if (close_info.application) {
+            return .{ .application = .{
+                .error_code = close_info.error_code,
+                .reason_phrase = close_info.reason_phrase,
+            } };
+        }
+        return .{ .transport = .{
+            .error_code = close_info.error_code,
+            .frame_type = close_info.frame_type,
+            .reason_phrase = close_info.reason_phrase,
+        } };
+    }
+
     pub fn checkCloseExpired(self: *Connection, now_ms: u64) bool {
         if (self.close_info) |*close_info| {
             const deadline = close_info.expires_ms orelse return false;
@@ -5308,12 +5353,14 @@ pub const Connection = struct {
                     .error_code = close.error_code,
                     .frame_type = close.frame_type,
                     .reason_phrase = close.reason_phrase,
+                    .peer_close_frame_received = true,
                     .state = .draining,
                 }),
                 .application_close => |close| try self.setCloseInfo(.{
                     .application = true,
                     .error_code = close.error_code,
                     .reason_phrase = close.reason_phrase,
+                    .peer_close_frame_received = true,
                     .state = .draining,
                 }),
                 .stream => |stream| {
@@ -5881,6 +5928,7 @@ pub const Connection = struct {
         error_code: u64,
         frame_type: u64 = 0,
         reason_phrase: []const u8,
+        peer_close_frame_received: bool = false,
         state: CloseState,
         now_ms: ?u64 = null,
         pto_ms: ?u64 = null,
@@ -5891,6 +5939,20 @@ pub const Connection = struct {
             // close starts in `closing`; if the peer answers with its own close,
             // do not ignore that transition merely because close_info exists.
             if (close.state == .draining and existing.state == .closing) {
+                // Allocate before mutating so OOM leaves the locally initiated
+                // closing state intact and retransmittable.
+                const peer_reason = if (close.peer_close_frame_received)
+                    try self.endpoint.allocator.dupe(u8, close.reason_phrase)
+                else
+                    null;
+                if (peer_reason) |reason_phrase| {
+                    self.endpoint.allocator.free(existing.reason_phrase);
+                    existing.application = close.application;
+                    existing.error_code = close.error_code;
+                    existing.frame_type = close.frame_type;
+                    existing.reason_phrase = reason_phrase;
+                    self.peer_close_frame_received = true;
+                }
                 existing.state = .draining;
                 existing.started_ms = close.now_ms;
                 existing.expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
@@ -5914,6 +5976,7 @@ pub const Connection = struct {
             .started_ms = close.now_ms,
             .expires_ms = expires_ms,
         };
+        self.peer_close_frame_received = close.peer_close_frame_received;
         self.observeConnectionClosed(
             close.now_ms,
             close.application,

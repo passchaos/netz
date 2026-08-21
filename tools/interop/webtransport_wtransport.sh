@@ -77,7 +77,7 @@ if [[ -z "${rust_port:-}" ]]; then
   cat "$work/wtransport-server.log" >&2
   exit 1
 fi
-"$netz_client" "$rust_port"
+timeout 30s "$netz_client" "$rust_port"
 wait "$server_pid"
 server_pid=
 cat "$work/wtransport-server.log"

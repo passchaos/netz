@@ -412,6 +412,19 @@ pub const AcceptedHandshakeSession = struct {
         return self.stats();
     }
 
+    /// Wait for an authenticated QUIC CONNECTION_CLOSE from the peer.
+    ///
+    /// This is intentionally distinct from `receiveSessionEvent`, which reads
+    /// WebTransport CLOSE capsules and clean FIN from the Extended CONNECT
+    /// stream. Some peers terminate the entire HTTP/3 connection directly.
+    pub fn receivePeerConnectionClose(
+        self: *AcceptedHandshakeSession,
+    ) Error!quic.one_rtt.PeerCloseInfo {
+        return receiveHandshakePeerConnectionClose(
+            &self.h3.established.connection,
+        );
+    }
+
     pub fn openBidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
@@ -777,6 +790,19 @@ pub const HandshakeClientSession = struct {
 
     pub fn getStats(self: HandshakeClientSession) quic.one_rtt.ConnectionStats {
         return self.stats();
+    }
+
+    /// Wait for an authenticated QUIC CONNECTION_CLOSE from the peer.
+    ///
+    /// This is intentionally distinct from `receiveSessionEvent`, which reads
+    /// WebTransport CLOSE capsules and clean FIN from the Extended CONNECT
+    /// stream. Some peers terminate the entire HTTP/3 connection directly.
+    pub fn receivePeerConnectionClose(
+        self: *HandshakeClientSession,
+    ) Error!quic.one_rtt.PeerCloseInfo {
+        return receiveHandshakePeerConnectionClose(
+            &self.h3.established.connection,
+        );
     }
 
     pub fn openBidirectionalStream(
@@ -1586,6 +1612,23 @@ fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) 
         if (try popHandshakeDatagramFromConnection(connection)) |datagram| return datagram;
         var packet = try connection.receivePacket();
         packet.deinit(connection.endpoint.allocator);
+    }
+}
+
+fn receiveHandshakePeerConnectionClose(
+    connection: *quic.one_rtt.Connection,
+) Error!quic.one_rtt.PeerCloseInfo {
+    while (true) {
+        if (connection.peerCloseInfo()) |close| return close;
+        connection.servicePacketServicingTimers() catch |err| switch (err) {
+            // A previously observed close makes every later receive fail.
+            // Re-read its immutable details before propagating a generic
+            // terminal error such as idle timeout or a local close.
+            error.ConnectionClosed => {
+                return connection.peerCloseInfo() orelse return err;
+            },
+            else => return err,
+        };
     }
 }
 

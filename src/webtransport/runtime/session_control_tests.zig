@@ -211,6 +211,91 @@ test "WebTransport handshake clean CONNECT FIN is normal close" {
     if (shared.err) |err| return err;
 }
 
+test "WebTransport handshake session receives peer QUIC close details" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x51, 0x01, 0x57, 0x54, 0x51, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x51, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x51, 0x04 };
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xf3} ** 32,
+                .x25519_secret_key = [_]u8{0xf4} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *runtime.HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            try session.h3.established.connection.closeApplication(
+                0,
+                "interop complete",
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-quic-close",
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .server_name = "localhost",
+                    .random = [_]u8{0xf1} ** 32,
+                    .x25519_secret_key = [_]u8{0xf2} ** 32,
+                },
+            },
+        },
+    );
+    defer client.deinit();
+
+    switch (try client.receivePeerConnectionClose()) {
+        .application => |close| {
+            try std.testing.expectEqual(@as(u64, 0), close.error_code);
+            try std.testing.expectEqualStrings(
+                "interop complete",
+                close.reason_phrase,
+            );
+        },
+        .transport => return error.TestUnexpectedResult,
+    }
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebTransport session control encodes bounds and rejects malformed close" {
     const control = @import("session_control.zig");
     var buffer: [4 + control.max_close_reason + 16]u8 = undefined;
