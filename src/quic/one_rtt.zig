@@ -269,6 +269,7 @@ const StreamRecvFlowEntry = struct {
     final_size: ?u64 = null,
     reset: ?StreamResetInfo = null,
     stop_sending_sent: ?StopSendingInfo = null,
+    stream_count_credit_released: bool = false,
 
     fn deinit(self: *StreamRecvFlowEntry) void {
         self.recv_state.deinit();
@@ -3229,6 +3230,63 @@ pub const Connection = struct {
     ) bool {
         const entry = self.findRecvStreamEntry(stream_id) orelse return false;
         return entry.recv_state.complete();
+    }
+
+    /// Return one peer-initiated stream slot after both halves are terminal.
+    ///
+    /// The receive half is terminal after its FIN has been fully consumed, or
+    /// after the application observes a RESET_STREAM and explicitly calls this
+    /// method. A bidirectional stream also requires a locally sent FIN or
+    /// RESET_STREAM. State remains retained for duplicate/reordered frame
+    /// validation; only the cumulative MAX_STREAMS limit advances.
+    ///
+    /// Returns true only when a new MAX_STREAMS frame was sent. Repeated calls
+    /// are idempotent.
+    pub fn releaseCompletedPeerStream(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!bool {
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return error.StreamStateError;
+        }
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        if (recv_stream.stream_count_credit_released) return false;
+        if (!recv_stream.recv_state.complete() and recv_stream.reset == null) {
+            return false;
+        }
+        const direction = streamDirection(stream_id);
+        if (direction == .bidirectional) {
+            const send_stream = self.findSendStreamEntry(stream_id) orelse
+                return false;
+            if (send_stream.final_size == null and
+                send_stream.reset_sent == null)
+            {
+                return false;
+            }
+        }
+
+        const limit = switch (direction) {
+            .bidirectional => &self.recv_max_streams_bidi,
+            .unidirectional => &self.recv_max_streams_uni,
+        };
+        if (limit.* == quic.max_stream_count) {
+            recv_stream.stream_count_credit_released = true;
+            return false;
+        }
+        const next_limit = limit.* + 1;
+        const frame: quic.Frame = switch (direction) {
+            .bidirectional => .{ .max_streams_bidi = .{
+                .maximum_streams = next_limit,
+            } },
+            .unidirectional => .{ .max_streams_uni = .{
+                .maximum_streams = next_limit,
+            } },
+        };
+        try self.sendTrackedFrames(&.{frame});
+        limit.* = next_limit;
+        recv_stream.stream_count_credit_released = true;
+        return true;
     }
 
     /// Copy known receive-stream IDs into caller storage without allocation.

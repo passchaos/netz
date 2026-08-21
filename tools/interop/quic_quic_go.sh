@@ -170,3 +170,8 @@ run_quic_go_client_scenario \
   -expect-flow-control \
   'go_quic_flow_control_client: handshake_done=true stream_bytes=12288 echo_bytes=12288' \
   'alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288'
+run_quic_go_client_scenario \
+  stream_limit \
+  -expect-stream-limit \
+  'go_quic_stream_limit_client: handshake_done=true initial_limit=1 released_stream=12 echo_bytes=19' \
+  'alpn=hq-interop initial_limit=1 released_stream=12 streams=4 echo_bytes=19'

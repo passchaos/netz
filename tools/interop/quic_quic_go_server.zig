@@ -5,7 +5,13 @@ const netz = @import("netz");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
-const Mode = enum { echo, reset, stop, flow };
+const stream_limit_payloads = [_][]const u8{
+    "hello",
+    "world",
+    "again",
+    "more",
+};
+const Mode = enum { echo, reset, stop, flow, stream_limit };
 
 fn receiveExpectedStream(
     connection: *netz.quic.one_rtt.Connection,
@@ -137,10 +143,16 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.randomSecure(io, &server_cid);
     var local_transport_parameters =
         netz.quic.practical_transport_parameters;
-    if (mode == .flow) {
-        local_transport_parameters.initial_max_data = 8 * 1024;
-        local_transport_parameters.initial_max_stream_data_bidi_remote =
-            2 * 1024;
+    switch (mode) {
+        .flow => {
+            local_transport_parameters.initial_max_data = 8 * 1024;
+            local_transport_parameters.initial_max_stream_data_bidi_remote =
+                2 * 1024;
+        },
+        .stream_limit => {
+            local_transport_parameters.initial_max_streams_bidi = 1;
+        },
+        else => {},
     }
     var established = try netz.quic.handshake.accept(&endpoint, .{
         .local_connection_id = &server_cid,
@@ -260,6 +272,27 @@ pub fn main(init: std.process.Init) !void {
                 &flow_control_payload,
             );
         },
+        .stream_limit => {
+            for (stream_limit_payloads, 0..) |expected, index| {
+                const stream_id: u64 = @intCast(index * 4);
+                try receiveExpectedStream(
+                    &established.connection,
+                    allocator,
+                    stream_id,
+                    expected,
+                );
+                try sendEcho(
+                    &established.connection,
+                    stream_id,
+                    expected,
+                );
+                if (!try established.connection
+                    .releaseCompletedPeerStream(stream_id))
+                {
+                    return error.StreamCreditNotReleased;
+                }
+            }
+        },
     }
 
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
@@ -278,6 +311,10 @@ pub fn main(init: std.process.Init) !void {
         ),
         .flow => std.debug.print(
             "netz QUIC flow-control server interoperated with quic-go: alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288\n",
+            .{},
+        ),
+        .stream_limit => std.debug.print(
+            "netz QUIC stream-limit server interoperated with quic-go: alpn=hq-interop initial_limit=1 released_stream=12 streams=4 echo_bytes=19\n",
             .{},
         ),
     }
