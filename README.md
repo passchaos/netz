@@ -561,8 +561,9 @@ zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 # Build the quic-go fixtures from the audited local quicz checkout and run
 # certificate-verified, ALPN-checked two-stream echoes in both directions,
 # followed by quic-go RESET_STREAM, STOP_SENDING, and rolling flow-control
-# and stream-limit renewal probes, client/server unidirectional streams, and
-# four-datagram Initial/application loss recovery.
+# and stream-limit renewal probes, client/server unidirectional streams,
+# four-datagram Initial/application loss recovery, and exact application-close
+# codes/reasons in both directions.
 zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass

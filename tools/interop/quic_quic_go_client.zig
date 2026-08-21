@@ -115,12 +115,35 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try established.connection.closeApplication(
-        0,
-        "netz interop complete",
-    );
+    // The quic-go fixture closes only after both stream FINs are complete.
+    // Keep pumping QUIC rather than treating echo completion as proof of a
+    // clean connection shutdown, and validate its peer application metadata.
+    while (established.connection.peerCloseInfo() == null) {
+        established.connection.servicePacketServicingTimers() catch |err|
+            switch (err) {
+                error.ConnectionClosed => break,
+                else => return err,
+            };
+    }
+    const close = established.connection.peerCloseInfo() orelse
+        return error.MissingPeerClose;
+    switch (close) {
+        .application => |application| {
+            if (application.error_code != 57 or
+                !std.mem.eql(
+                    u8,
+                    application.reason_phrase,
+                    "quic-go interop complete",
+                ))
+            {
+                return error.UnexpectedPeerClose;
+            }
+        },
+        .transport => return error.UnexpectedPeerClose,
+    }
+
     std.debug.print(
-        "netz QUIC client interoperated with quic-go: verified=true alpn=hq-interop streams=2 bytes=10\n",
+        "netz QUIC client interoperated with quic-go: verified=true alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
         .{},
     );
 }

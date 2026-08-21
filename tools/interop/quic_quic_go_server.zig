@@ -22,6 +22,7 @@ const Mode = enum {
     uni,
     application_pto,
     initial_pto,
+    peer_close,
 };
 
 fn receiveExpectedStream(
@@ -201,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     switch (mode) {
-        .echo, .application_pto, .initial_pto => {
+        .echo, .application_pto, .initial_pto, .peer_close => {
             for (payloads, 0..) |expected, index| {
                 const stream_id: u64 = @intCast(index * 4);
                 try receiveExpectedStream(
@@ -324,6 +325,19 @@ pub fn main(init: std.process.Init) !void {
         },
     }
 
+    if (mode == .peer_close) {
+        // Give the peer time to consume both FIN-terminated echoes. The close
+        // is intentionally delayed just like the ordinary fixture close so
+        // the application-close assertion cannot truncate stream validation.
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        try established.connection.closeApplication(58, "netz interop complete");
+        std.debug.print(
+            "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
+            .{},
+        );
+        return;
+    }
+
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     switch (mode) {
         .echo => std.debug.print(
@@ -358,5 +372,6 @@ pub fn main(init: std.process.Init) !void {
             "netz QUIC Initial PTO server interoperated with quic-go: alpn=hq-interop dropped_datagrams=4 streams=2 bytes=10\n",
             .{},
         ),
+        .peer_close => unreachable,
     }
 }

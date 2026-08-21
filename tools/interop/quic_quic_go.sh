@@ -190,3 +190,8 @@ run_quic_go_client_scenario \
   -expect-server-initial-pto \
   'go_quic_server_initial_pto_client: handshake_done=true dropped_datagrams=4 echo_streams=2 echo_bytes=10' \
   'alpn=hq-interop dropped_datagrams=4 streams=2 bytes=10'
+run_quic_go_client_scenario \
+  peer_close \
+  -expect-peer-close \
+  'go_quic_peer_close_client: handshake_done=true peer_close=58 reason="netz interop complete" echo_streams=2 echo_bytes=10' \
+  'alpn=hq-interop peer_close=58'
