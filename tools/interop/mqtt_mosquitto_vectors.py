@@ -1300,6 +1300,165 @@ def outgoing_qos1_reconnect_dup(
                 )
 
 
+def outgoing_qos2_reconnect_stages(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 03-publish-b2c-disconnect-qos2.py for both
+    # MQTT 3.1.1 and MQTT 5. Exercise both durable outbound states: an
+    # unacknowledged PUBLISH resumes with DUP and its original Packet
+    # Identifier, while a transaction already acknowledged with PUBREC resumes
+    # directly at PUBREL without delivering the Application Message again.
+    topic = "03/b2c/qos2/disconnect/test"
+    payload = "disconnect-message"
+    for proto_ver in (4, 5):
+        client_id = f"03-b2c-disco-qos2-v{proto_ver}"
+        persistent_connect = mqtt_packets.gen_connect(
+            client_id,
+            clean_session=False,
+            proto_ver=proto_ver,
+            session_expiry=60,
+        )
+
+        def connack(session_present: bool) -> bytes:
+            if proto_ver == 5:
+                return expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    session_present=session_present,
+                )
+            return mqtt_packets.gen_connack(
+                flags=int(session_present),
+                rc=0,
+                proto_ver=proto_ver,
+            )
+
+        with NetzBroker(executable, connections=4) as broker:
+            subscriber = broker.connect()
+            try:
+                subscriber.sendall(persistent_connect)
+                expect_packet(
+                    subscriber,
+                    connack(False),
+                    f"QoS2 reconnect initial CONNACK v{proto_ver}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        3265, topic, 2, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(
+                        3265, 2, proto_ver=proto_ver
+                    ),
+                    f"QoS2 reconnect SUBACK v{proto_ver}",
+                )
+
+                with broker.connect() as publisher:
+                    connect_client(
+                        publisher,
+                        mqtt_packets,
+                        f"03-b2c-disco-qos2-helper-v{proto_ver}",
+                        proto_ver,
+                    )
+                    publisher.sendall(
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=2,
+                            mid=312,
+                            payload=payload,
+                            proto_ver=proto_ver,
+                        )
+                    )
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_pubrec(312, proto_ver=proto_ver),
+                        f"QoS2 reconnect publisher PUBREC v{proto_ver}",
+                    )
+                    publisher.sendall(
+                        mqtt_packets.gen_pubrel(312, proto_ver=proto_ver)
+                    )
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_pubcomp(312, proto_ver=proto_ver),
+                        f"QoS2 reconnect publisher PUBCOMP v{proto_ver}",
+                    )
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=2,
+                            mid=1,
+                            payload=payload,
+                            proto_ver=proto_ver,
+                        ),
+                        f"QoS2 initial downstream PUBLISH v{proto_ver}",
+                    )
+                    # Leave the transaction awaiting PUBREC and force a
+                    # Network Connection failure rather than a clean MQTT
+                    # DISCONNECT.
+                    subscriber.close()
+                    publisher.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                    )
+            finally:
+                subscriber.close()
+
+            second = broker.connect()
+            try:
+                second.sendall(persistent_connect)
+                expect_packet(
+                    second,
+                    connack(True),
+                    f"QoS2 reconnect second CONNACK v{proto_ver}",
+                )
+                expect_packet(
+                    second,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=2,
+                        mid=1,
+                        payload=payload,
+                        dup=True,
+                        proto_ver=proto_ver,
+                    ),
+                    f"QoS2 DUP retransmission v{proto_ver}",
+                )
+                second.sendall(mqtt_packets.gen_pubrec(1, proto_ver=proto_ver))
+                expect_packet(
+                    second,
+                    mqtt_packets.gen_pubrel(1, proto_ver=proto_ver),
+                    f"QoS2 first PUBREL v{proto_ver}",
+                )
+                # Leave the transaction awaiting PUBCOMP.
+                second.close()
+            finally:
+                second.close()
+
+            with broker.connect() as third:
+                third.sendall(persistent_connect)
+                expect_packet(
+                    third,
+                    connack(True),
+                    f"QoS2 reconnect third CONNACK v{proto_ver}",
+                )
+                expect_packet(
+                    third,
+                    mqtt_packets.gen_pubrel(1, proto_ver=proto_ver),
+                    f"QoS2 resumed PUBREL v{proto_ver}",
+                )
+                third.sendall(mqtt_packets.gen_pubcomp(1, proto_ver=proto_ver))
+                third.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    third,
+                    mqtt_packets.gen_pingresp(),
+                    f"QoS2 post-completion PINGRESP v{proto_ver}",
+                )
+                third.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+
+
 def offline_message_expiry(executable: Path, mqtt_packets, mqtt5_props) -> None:
     # Direct wire port of Mosquitto 02-subpub-qos1-message-expiry.py. Keep a
     # persistent subscriber offline while two QoS 1 messages are queued, then
@@ -2989,6 +3148,7 @@ def main() -> None:
     persistent_no_local(args.broker, mqtt_packets)
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
+    outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
     offline_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
@@ -3029,7 +3189,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 49 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 51 scenarios")
 
 
 if __name__ == "__main__":
