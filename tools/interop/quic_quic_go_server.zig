@@ -4,7 +4,8 @@ const std = @import("std");
 const netz = @import("netz");
 
 const payloads = [_][]const u8{ "hello", "world" };
-const Mode = enum { echo, reset, stop };
+const flow_control_payload = [_]u8{'f'} ** 12_288;
+const Mode = enum { echo, reset, stop, flow };
 
 fn receiveExpectedStream(
     connection: *netz.quic.one_rtt.Connection,
@@ -58,6 +59,39 @@ fn sendEcho(
     } }});
 }
 
+fn sendStreamFully(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    payload: []const u8,
+) !void {
+    // A STREAM frame must fit the peer's negotiated UDP payload limit. Keep
+    // this raw-QUIC fixture deliberately below the IPv6-safe 1200-byte packet
+    // size, and make flow-control/congestion progress before retrying a chunk.
+    const max_chunk_len: usize = 1024;
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const end = @min(offset + max_chunk_len, payload.len);
+        connection.send(&.{.{ .stream = .{
+            .stream_id = stream_id,
+            .offset = offset,
+            .data = payload[offset..end],
+            .fin = end == payload.len,
+        } }}) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receivePacket(connection, allocator);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
+                continue;
+            },
+            else => return err,
+        };
+        offset = end;
+    }
+}
+
 fn receivePacket(
     connection: *netz.quic.one_rtt.Connection,
     allocator: std.mem.Allocator,
@@ -101,9 +135,17 @@ pub fn main(init: std.process.Init) !void {
 
     var server_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &server_cid);
+    var local_transport_parameters =
+        netz.quic.practical_transport_parameters;
+    if (mode == .flow) {
+        local_transport_parameters.initial_max_data = 8 * 1024;
+        local_transport_parameters.initial_max_stream_data_bidi_remote =
+            2 * 1024;
+    }
     var established = try netz.quic.handshake.accept(&endpoint, .{
         .local_connection_id = &server_cid,
         .alpn_protocol = "hq-interop",
+        .local_transport_parameters = local_transport_parameters,
         .identity = .{
             .certificate_chain = &.{&certificate_der},
             .signer = .{ .ecdsa_p256_sha256 = .{
@@ -117,7 +159,16 @@ pub fn main(init: std.process.Init) !void {
             .max_retries = 4,
             .max_duration_ms = 10_000,
         },
-        .initial_one_rtt_config = .{
+        .initial_one_rtt_config = if (mode == .flow) .{
+            // Match the advertised limits so consuming data advances credit
+            // in bounded 8 KiB connection / 2 KiB stream windows rather than
+            // immediately switching to the normal 64 KiB runtime windows.
+            .max_datagram_size = 8192,
+            .receive_window = 8 * 1024,
+            .max_receive_window = 8 * 1024,
+            .stream_receive_window = 2 * 1024,
+            .max_stream_receive_window = 2 * 1024,
+        } else .{
             .max_datagram_size = 8192,
         },
     });
@@ -195,6 +246,20 @@ pub fn main(init: std.process.Init) !void {
             );
             try sendEcho(&established.connection, 4, payloads[1]);
         },
+        .flow => {
+            try receiveExpectedStream(
+                &established.connection,
+                allocator,
+                0,
+                &flow_control_payload,
+            );
+            try sendStreamFully(
+                &established.connection,
+                allocator,
+                0,
+                &flow_control_payload,
+            );
+        },
     }
 
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
@@ -209,6 +274,10 @@ pub fn main(init: std.process.Init) !void {
         ),
         .stop => std.debug.print(
             "netz QUIC stop-sending server interoperated with quic-go: alpn=hq-interop stop_error=42 reset_error=42 echo_stream=4 echo_bytes=5\n",
+            .{},
+        ),
+        .flow => std.debug.print(
+            "netz QUIC flow-control server interoperated with quic-go: alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288\n",
             .{},
         ),
     }

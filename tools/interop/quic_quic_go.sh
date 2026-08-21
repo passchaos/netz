@@ -165,3 +165,8 @@ run_quic_go_client_scenario \
   -expect-stop-sending \
   'go_quic_stop_sending_client: handshake_done=true stop_error=42 reset_error=42 echo_stream=4 echo_bytes=5' \
   'alpn=hq-interop stop_error=42 reset_error=42 echo_stream=4 echo_bytes=5'
+run_quic_go_client_scenario \
+  flow \
+  -expect-flow-control \
+  'go_quic_flow_control_client: handshake_done=true stream_bytes=12288 echo_bytes=12288' \
+  'alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288'
