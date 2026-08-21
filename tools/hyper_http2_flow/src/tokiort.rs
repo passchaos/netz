@@ -1,5 +1,6 @@
 //! Minimal Tokio executor and I/O adapters used by the Hyper reference harness.
 use std::{
+    io,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -17,6 +18,58 @@ where
 {
     fn execute(&self, fut: F) {
         tokio::task::spawn(fut);
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum MaybeTls {
+    Clear(tokio::net::TcpStream),
+    Client(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+    Server(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
+}
+
+impl tokio::io::AsyncRead for MaybeTls {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_read(cx, buffer),
+            Self::Client(stream) => Pin::new(stream).poll_read(cx, buffer),
+            Self::Server(stream) => Pin::new(stream).poll_read(cx, buffer),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for MaybeTls {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_write(cx, buffer),
+            Self::Client(stream) => Pin::new(stream).poll_write(cx, buffer),
+            Self::Server(stream) => Pin::new(stream).poll_write(cx, buffer),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Client(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Server(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Clear(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Client(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Server(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
     }
 }
 

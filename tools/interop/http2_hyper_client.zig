@@ -10,26 +10,55 @@ const sibling_response_bytes = 16 * 1024;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const tls_enabled = args.len == 3;
+    if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
+        return error.InvalidArgument;
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var connection = try netz.http2.runtime.Client.connect(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(port) },
-        .{
-            .max_frame_payload = 16 * 1024,
-            .max_body_bytes = 256 * 1024,
-            .initial_window_size = constrained_stream_window,
-            .initial_connection_window_size = 65_535,
-        },
-    );
+    const limits: netz.http2.runtime.Limits = .{
+        .max_frame_payload = 16 * 1024,
+        .max_body_bytes = 256 * 1024,
+        .initial_window_size = constrained_stream_window,
+        .initial_connection_window_size = 65_535,
+    };
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    var ca_lock: std.Io.RwLock = .init;
+    if (tls_enabled) {
+        try ca_bundle.addCertsFromFilePathAbsolute(
+            allocator,
+            io,
+            std.Io.Clock.real.now(io),
+            args[2],
+        );
+    }
+    var connection = if (tls_enabled)
+        try netz.http2.runtime.Client.connectTlsHost(
+            allocator,
+            io,
+            "localhost",
+            port,
+            limits,
+            .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+        )
+    else
+        try netz.http2.runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+        );
     defer connection.close();
 
     var response = try connection.request(.{
@@ -66,8 +95,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz HTTP/2 client interoperated with Hyper: status=201 body=14 trailers=1\n",
-        .{},
+        "netz HTTP/2 client interoperated with Hyper: transport={s} alpn={s} status=201 body=14 trailers=1\n",
+        .{ if (tls_enabled) "tls" else "h2c", if (tls_enabled) "h2" else "n/a" },
     );
 
     // Open both requests before reading either response. Hyper deliberately
@@ -123,8 +152,8 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/2 client canceled flow-blocked Hyper stream and completed concurrent sibling: rst=CANCEL window={} received={} sibling={}\n",
-        .{ constrained_stream_window, cancellation.body_bytes, sibling.body.len },
+        "netz HTTP/2 client canceled flow-blocked Hyper stream and completed concurrent sibling: transport={s} rst=CANCEL window={} received={} sibling={}\n",
+        .{ if (tls_enabled) "tls" else "h2c", constrained_stream_window, cancellation.body_bytes, sibling.body.len },
     );
 }
 

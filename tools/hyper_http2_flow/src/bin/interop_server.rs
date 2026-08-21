@@ -5,7 +5,9 @@
 
 use std::convert::Infallible;
 use std::env;
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufReader, Write};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,10 +23,11 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
+use tokio_rustls::TlsAcceptor;
 
 #[path = "../tokiort.rs"]
 mod tokiort;
-use tokiort::{TokioExecutor, TokioIo};
+use tokiort::{MaybeTls, TokioExecutor, TokioIo};
 
 const CONSTRAINED_STREAM_WINDOW: u32 = 8 * 1024;
 const CONSTRAINED_CONNECTION_WINDOW: u32 = 65_535;
@@ -32,12 +35,17 @@ const CANCEL_RESPONSE_BYTES: usize = 128 * 1024;
 const SIBLING_RESPONSE_BYTES: usize = 16 * 1024;
 
 fn main() {
-    let port: u16 = env::args()
-        .nth(1)
+    let mut args = env::args().skip(1);
+    let port: u16 = args
+        .next()
         .expect("port argument")
         .parse()
         .expect("valid port");
     assert_ne!(port, 0);
+    let tls_paths = args
+        .next()
+        .map(|cert| (cert, args.next().expect("TLS private key argument")));
+    assert!(args.next().is_none(), "unexpected extra argument");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -52,6 +60,15 @@ fn main() {
 
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
+        let io = match tls_paths {
+            Some((cert, key)) => MaybeTls::Server(
+                TlsAcceptor::from(tls_server_config(&cert, &key))
+                    .accept(stream)
+                    .await
+                    .expect("accept TLS with h2 ALPN"),
+            ),
+            None => MaybeTls::Clear(stream),
+        };
         let canceled = Arc::new(CancelSignal::default());
         let mut builder = server_http2::Builder::new(TokioExecutor);
         builder
@@ -59,12 +76,31 @@ fn main() {
             .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW);
         builder
             .serve_connection(
-                TokioIo::new(stream),
+                TokioIo::new(io),
                 service_fn(move |request| handle(request, canceled.clone())),
             )
             .await
             .expect("serve netz HTTP/2 client");
     });
+}
+
+fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfig> {
+    let certs = rustls_pemfile::certs(&mut BufReader::new(
+        File::open(Path::new(cert_path)).expect("open TLS certificate"),
+    ))
+    .collect::<Result<Vec<_>, _>>()
+    .expect("parse TLS certificate");
+    let key = rustls_pemfile::private_key(&mut BufReader::new(
+        File::open(Path::new(key_path)).expect("open TLS private key"),
+    ))
+    .expect("parse TLS private key")
+    .expect("TLS private key");
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("certificate and private key match");
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Arc::new(config)
 }
 
 async fn handle(

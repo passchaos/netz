@@ -5,6 +5,10 @@
 
 use std::convert::Infallible;
 use std::env;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::{future, stream};
@@ -17,7 +21,7 @@ use tokio::net::TcpStream;
 
 #[path = "../tokiort.rs"]
 mod tokiort;
-use tokiort::{TokioExecutor, TokioIo};
+use tokiort::{MaybeTls, TokioExecutor, TokioIo};
 
 const CONSTRAINED_STREAM_WINDOW: u32 = 8 * 1024;
 const CONSTRAINED_CONNECTION_WINDOW: u32 = 65_535;
@@ -27,12 +31,15 @@ const SIBLING_RESPONSE_BYTES: usize = 16 * 1024;
 type RequestBody = BoxBody<Bytes, Infallible>;
 
 fn main() {
-    let port: u16 = env::args()
-        .nth(1)
+    let mut args = env::args().skip(1);
+    let port: u16 = args
+        .next()
         .expect("port argument")
         .parse()
         .expect("valid port");
     assert_ne!(port, 0);
+    let ca_path = args.next();
+    assert!(args.next().is_none(), "unexpected extra argument");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -43,12 +50,36 @@ fn main() {
             .await
             .expect("connect netz interoperability server");
         stream.set_nodelay(true).expect("client TCP_NODELAY");
+        let io = match ca_path {
+            Some(ca) => {
+                let mut roots = rustls::RootCertStore::empty();
+                roots.add_parsable_certificates(
+                    rustls_pemfile::certs(&mut BufReader::new(
+                        File::open(Path::new(&ca)).expect("open CA certificate"),
+                    ))
+                    .map(|result| result.expect("parse CA certificate")),
+                );
+                let mut config = rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                config.alpn_protocols = vec![b"h2".to_vec()];
+                let server_name = rustls::pki_types::ServerName::try_from("localhost")
+                    .expect("valid server name");
+                MaybeTls::Client(
+                    tokio_rustls::TlsConnector::from(Arc::new(config))
+                        .connect(server_name, stream)
+                        .await
+                        .expect("connect TLS with h2 ALPN"),
+                )
+            }
+            None => MaybeTls::Clear(stream),
+        };
         let mut builder = client_http2::Builder::new(TokioExecutor);
         builder
             .initial_stream_window_size(CONSTRAINED_STREAM_WINDOW)
             .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW);
         let (mut sender, connection) = builder
-            .handshake(TokioIo::new(stream))
+            .handshake(TokioIo::new(io))
             .await
             .expect("Hyper HTTP/2 handshake");
         tokio::spawn(async move {
