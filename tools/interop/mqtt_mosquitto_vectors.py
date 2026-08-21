@@ -1787,6 +1787,89 @@ def will_delay_session_expiry_minimum(
                 )
 
 
+def delayed_will_delivery(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of both branches in Mosquitto 07-will-delay.py. The
+    # broker must neither publish before three seconds nor lose the Will for
+    # clean and persistent Sessions.
+    will_delay = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.WILL_DELAY_INTERVAL, 3
+    )
+    session_expiry = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.SESSION_EXPIRY_INTERVAL, 60
+    )
+    for clean_start in (True, False):
+        label = "clean" if clean_start else "persistent"
+        topic = f"will/delay/{label}"
+        with NetzBroker(executable, connections=2) as broker:
+            with broker.connect() as subscriber, broker.connect() as source:
+                connect_v5(
+                    subscriber, mqtt_packets, f"will-delay-sub-{label}"
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        1, topic, 0, proto_ver=5
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                    f"delayed Will {label} SUBACK",
+                )
+                source.sendall(
+                    mqtt_packets.gen_connect(
+                        f"will-delay-source-{label}",
+                        proto_ver=5,
+                        clean_session=clean_start,
+                        properties=session_expiry,
+                        will_topic=topic,
+                        will_payload=b"will delay",
+                        will_qos=2,
+                        will_properties=will_delay,
+                    )
+                )
+                expect_packet(
+                    source,
+                    expected_connack(mqtt_packets, mqtt5_props),
+                    f"delayed Will {label} source CONNACK",
+                )
+                source.close()
+
+                subscriber.settimeout(2.0)
+                try:
+                    early = subscriber.recv(1)
+                    if early:
+                        raise AssertionError(
+                            f"delayed Will {label} published early: "
+                            + early.hex()
+                        )
+                except socket.timeout:
+                    pass
+                finally:
+                    subscriber.settimeout(5)
+
+                started = time.monotonic()
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=0,
+                        payload="will delay",
+                        proto_ver=5,
+                    ),
+                    f"delayed Will {label} PUBLISH",
+                )
+                elapsed = time.monotonic() - started
+                if elapsed > 2.0:
+                    raise AssertionError(
+                        f"delayed Will {label} published late: {elapsed:.3f}s"
+                    )
+                subscriber.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=5)
+                )
+
+
 def retained_message_expiry(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -2794,6 +2877,7 @@ def main() -> None:
     will_delay_session_expiry_minimum(
         args.broker, mqtt_packets, mqtt5_props
     )
+    delayed_will_delivery(args.broker, mqtt_packets, mqtt5_props)
     retained_message_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -2819,7 +2903,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 45 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 47 scenarios")
 
 
 if __name__ == "__main__":

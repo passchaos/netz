@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs forty-five
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs forty-seven
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -974,9 +974,14 @@ Three companion cases port Mosquitto's
 Session Expiry is shorter than Will Delay, when Will Delay is shorter, and when
 Session Expiry is zero, proving the broker uses the required minimum deadline
 and publishes immediately in the zero-expiry case.
+Two more cases port both clean and persistent branches of Mosquitto's
+`07-will-delay.py`. Each holds the subscriber read open for two seconds to
+prove the three-second Will is not published early, then requires the exact
+PUBLISH during the following bounded interval, proving the scheduled Will is
+not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all forty-five scenarios pass. This is deliberately described as a selected
+packets; all forty-seven scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
