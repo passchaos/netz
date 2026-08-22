@@ -12,7 +12,6 @@ pub const Error = mqtt.Error || websocket_runtime.Error ||
     ConnectionClosed,
     InvalidWebSocketMessage,
     PacketTooLarge,
-    TimedReadUnsupported,
 } || net.Stream.Reader.Error || net.Stream.Writer.Error ||
     keep_alive_reader.Error;
 
@@ -184,7 +183,12 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
             ),
-            .tls => error.TimedReadUnsupported,
+            .tls => |connection| readStreamPacketWithInactivityTimeout(
+                allocator,
+                connection,
+                max_packet_size,
+                timeout,
+            ),
             .tls_vail => |connection| readStreamPacketWithInactivityTimeout(
                 allocator,
                 connection,

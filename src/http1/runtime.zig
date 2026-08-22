@@ -309,6 +309,11 @@ pub const TlsClientConnection = struct {
     net_reader: net.Stream.Reader,
     net_writer: net.Stream.Writer,
     client: tls.Client,
+    // Only the thread currently driving this connection mutates the deadline.
+    // `std.crypto.tls.Client` calls back into `net_reader` synchronously, so
+    // this field scopes one application read without introducing shared timer
+    // state or changing ordinary untimed reads.
+    timed_read_deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -341,6 +346,7 @@ pub const TlsClientConnection = struct {
             .client = undefined,
         };
         conn.net_reader = net.Stream.reader(stream, io, conn.net_read_buf);
+        conn.net_reader.interface.vtable = &tls_client_reader_vtable;
         conn.net_writer = net.Stream.writer(stream, io, conn.net_write_buf);
 
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
@@ -392,12 +398,43 @@ pub const TlsClientConnection = struct {
         const available = self.client.reader.peekGreedy(1) catch |err|
             switch (err) {
                 error.EndOfStream => return 0,
-                error.ReadFailed => return error.ReadFailed,
+                error.ReadFailed => return self.takeReadError(),
             };
         const count = @min(buffer.len, available.len);
         @memcpy(buffer[0..count], available[0..count]);
         self.client.reader.toss(count);
         return count;
+    }
+
+    /// Read decrypted application bytes under one absolute socket deadline.
+    ///
+    /// Zig's TLS client owns the record parser and its plaintext/ciphertext
+    /// buffers. Rather than duplicating that private state machine, the
+    /// network Reader consults this transient deadline only when TLS needs
+    /// more ciphertext. Already-buffered plaintext and complete encrypted
+    /// records therefore remain immediately available.
+    pub fn readWithDeadline(
+        self: *TlsClientConnection,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        std.debug.assert(self.timed_read_deadline == null);
+        self.timed_read_deadline = deadline;
+        defer self.timed_read_deadline = null;
+        return self.read(buffer);
+    }
+
+    fn takeReadError(self: *TlsClientConnection) Error {
+        if (self.net_reader.err) |err| {
+            self.net_reader.err = null;
+            return err;
+        }
+        if (self.client.read_err) |err| return switch (err) {
+            error.TlsBadLength => error.TlsDecodeError,
+            error.TlsSequenceOverflow => error.SequenceOverflow,
+            else => |value| value,
+        };
+        return error.ReadFailed;
     }
 
     pub fn writeAll(self: *TlsClientConnection, bytes: []const u8) Error!void {
@@ -440,6 +477,109 @@ pub const TlsClientConnection = struct {
         try self.net_writer.interface.flush();
     }
 };
+
+const tls_client_reader_vtable: std.Io.Reader.VTable = .{
+    .stream = tlsClientReaderStream,
+    .readVec = tlsClientReaderReadVec,
+};
+
+fn tlsClientReaderStream(
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    limit: std.Io.Limit,
+) std.Io.Reader.StreamError!usize {
+    const destination = limit.slice(try writer.writableSliceGreedy(1));
+    var data: [1][]u8 = .{destination};
+    const count = try tlsClientReaderReadVec(reader, &data);
+    writer.advance(count);
+    return count;
+}
+
+fn tlsClientReaderReadVec(
+    reader: *std.Io.Reader,
+    data: [][]u8,
+) std.Io.Reader.Error!usize {
+    const net_reader: *net.Stream.Reader = @alignCast(
+        @fieldParentPtr("interface", reader),
+    );
+    const connection: *TlsClientConnection = @alignCast(
+        @fieldParentPtr("net_reader", net_reader),
+    );
+    var vectors: [8][]u8 = undefined;
+    const vector_count, const direct_bytes = try reader.writableVector(
+        &vectors,
+        data,
+    );
+    const destinations = vectors[0..vector_count];
+    std.debug.assert(destinations.len != 0 and destinations[0].len != 0);
+
+    const count = if (connection.timed_read_deadline) |deadline|
+        readTlsClientTransportWithDeadline(
+            connection,
+            destinations,
+            deadline,
+        ) catch |err| {
+            net_reader.err = mapTimedReadError(err);
+            return error.ReadFailed;
+        }
+    else
+        connection.io.vtable.netRead(
+            connection.io.userdata,
+            connection.stream.socket.handle,
+            destinations,
+        ) catch |err| {
+            net_reader.err = err;
+            return error.ReadFailed;
+        };
+    if (count == 0) return error.EndOfStream;
+    if (count > direct_bytes) {
+        reader.end += count - direct_bytes;
+        return direct_bytes;
+    }
+    return count;
+}
+
+fn mapTimedReadError(err: stream_io.TimedReadError) net.Stream.Reader.Error {
+    // std.Io.Reader deliberately erases transport errors into ReadFailed. Keep
+    // the precise errors representable by net.Stream.Reader; collapse only
+    // file-operation details which cannot be expressed by that public type.
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.Canceled => error.Canceled,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.NetworkDown => error.NetworkDown,
+        error.SocketUnconnected => error.SocketUnconnected,
+        error.SystemResources,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+        => error.SystemResources,
+        error.Timeout => error.Timeout,
+        else => error.Unexpected,
+    };
+}
+
+fn readTlsClientTransportWithDeadline(
+    connection: *TlsClientConnection,
+    destinations: [][]u8,
+    deadline: std.Io.Clock.Timestamp,
+) stream_io.TimedReadError!usize {
+    var total: usize = 0;
+    for (destinations) |destination| {
+        if (destination.len == 0) continue;
+        const count = try stream_io.readSomeWithDeadline(
+            connection.io,
+            connection.stream,
+            destination,
+            deadline,
+        );
+        total += count;
+        // One read is enough to preserve ordinary stream short-read behavior.
+        // Continue only when it completely filled this vector so a following
+        // TLS-owned buffer can receive bytes already available in the socket.
+        if (count != destination.len) break;
+    }
+    return total;
+}
 
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
@@ -5757,4 +5897,5 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
 test {
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
+    _ = @import("runtime/tls_client_deadline_tests.zig");
 }

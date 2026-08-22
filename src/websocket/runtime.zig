@@ -100,10 +100,11 @@ const RuntimeTransport = union(enum) {
             ),
             .tls_vail => |conn| conn.readWithDeadline(buffer, deadline),
             .tls_server => |conn| conn.readWithDeadline(buffer, deadline),
-            // Zig's std TLS client and the raw io_uring adapter do not expose
-            // deadline-aware reads. Failing explicitly is safer than silently
-            // weakening an upper-layer inactivity contract.
-            .tls, .linux_io_uring => error.TimedReadUnsupported,
+            .tls => |conn| conn.readWithDeadline(buffer, deadline),
+            // The raw io_uring adapter does not expose deadline-aware reads.
+            // Failing explicitly is safer than silently weakening an
+            // upper-layer inactivity contract.
+            .linux_io_uring => error.TimedReadUnsupported,
         };
     }
 

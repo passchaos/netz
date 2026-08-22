@@ -306,6 +306,126 @@ test "MQTT WSS server enforces Keep Alive inactivity" {
     try std.testing.expect(elapsed.nanoseconds < 4 * std.time.ns_per_s);
 }
 
+test "MQTT WSS std TLS client enforces local packet deadline" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try websocket_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_head_bytes = max_packet_size,
+                .max_frame_bytes = max_packet_size,
+                .max_message_bytes = max_packet_size,
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *websocket_runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var ws = try shared.server.accept(.{
+                .protocols = &.{"mqtt"},
+                .require_subprotocol = true,
+            });
+            defer ws.close();
+            var connect = try ws.receiveMessage();
+            defer connect.deinit(shared.server.allocator);
+            var parsed = try mqtt.Connect.parse(
+                shared.server.allocator,
+                connect.payload,
+            );
+            defer parsed.deinit(shared.server.allocator);
+            var connack: std.ArrayList(u8) = .empty;
+            defer connack.deinit(shared.server.allocator);
+            try mqtt.ConnAck.write(
+                &connack,
+                shared.server.allocator,
+                .v5,
+                false,
+                0,
+                &.{},
+            );
+            try ws.sendBinary(connack.items);
+            try std.Io.sleep(
+                shared.server.io,
+                .fromMilliseconds(400),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://localhost:{d}/mqtt",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var client = try mqtt_ws.Client.connectUri(allocator, io, uri, .{
+        .mqtt = .{
+            .protocol = .v5,
+            .client_id = "mqtt-wss-std-tls-deadline",
+            .keep_alive_seconds = 1,
+        },
+        .tls = .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    });
+    defer client.close();
+
+    // connectUri without a client identity intentionally selects Zig's std
+    // TLS client. The packet deadline must emerge as Timeout rather than the
+    // std.Reader's erased ReadFailed error.
+    try std.testing.expectError(
+        error.Timeout,
+        client.transport.readPacketWithInactivityTimeout(
+            allocator,
+            max_packet_size,
+            .{ .raw = .fromMilliseconds(100), .clock = .awake },
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 fn localCaBundle(
     allocator: std.mem.Allocator,
     io: std.Io,

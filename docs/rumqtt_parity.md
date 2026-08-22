@@ -372,13 +372,17 @@ large partial packets. Netz preserves those semantics without a timer task per
 client by applying Zig 0.16 timed socket reads directly in each already-owned
 broker reader. The TLS record layer now applies the same absolute deadline
 across each encrypted header/body read while preserving already-decrypted
-buffered plaintext. WebSocket carries that absolute deadline across frame and
-message boundaries; Ping/Pong traffic cannot renew MQTT activity, while MQTT
-payload progress above the same 1,000-byte threshold can. Tests cover exact
-timeout arithmetic including the maximum u16 value, byte-progress renewal
-beyond one whole timeout, native TLS/WS/WSS timeout, cross-message large-packet
-progress, post-timeout Will routing, and a live Keep Alive zero connection
-remaining usable past the one-second expiry boundary.
+buffered plaintext. The standard Zig TLS client now applies the deadline only
+when its internal record parser requests more ciphertext, preserving buffered
+plaintext while recovering the underlying Timeout from `std.Io.Reader`'s
+generic `ReadFailed`. WebSocket carries that absolute deadline across frame
+and message boundaries; Ping/Pong traffic cannot renew MQTT activity, while
+MQTT payload progress above the same 1,000-byte threshold can. Tests cover
+exact timeout arithmetic including the maximum u16 value, byte-progress
+renewal beyond one whole timeout, native TLS/WS/WSS timeout, standard-TLS MQTT
+and WSS client timeout, cross-message large-packet progress, post-timeout Will
+routing, and a live Keep Alive zero connection remaining usable past the
+one-second expiry boundary.
 
 ## Live retained-message integration
 
