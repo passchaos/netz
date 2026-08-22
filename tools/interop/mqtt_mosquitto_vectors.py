@@ -2245,6 +2245,95 @@ def delayed_will_reconnect_cancels(
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def clean_disconnect_will_reconnect(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto issue 1273. A normal DISCONNECT permanently
+    # cancels the old Will even when a durable Session is resumed immediately
+    # with another CONNECT carrying a fresh Will. PINGRESP ordering proves no
+    # stale Will was queued before the replacement's live publication.
+    topic = "will/reconnect/test"
+    for proto_ver in (4, 5):
+        client_id = f"will-1273-{proto_ver}"
+        session_expiry = 60 if proto_ver == 5 else -1
+        with NetzBroker(executable, connections=3) as broker:
+            with broker.connect() as subscriber:
+                connect_client(
+                    subscriber, mqtt_packets,
+                    f"will-1273-subscriber-{proto_ver}", proto_ver,
+                )
+                subscriber.sendall(mqtt_packets.gen_subscribe(
+                    1, topic, 0, proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    subscriber, mqtt_packets.gen_suback(
+                        1, 0, proto_ver=proto_ver,
+                    ), f"Will reconnect SUBACK v{proto_ver}",
+                )
+                with broker.connect() as original:
+                    original.sendall(mqtt_packets.gen_connect(
+                        client_id, clean_session=False, proto_ver=proto_ver,
+                        session_expiry=session_expiry, will_topic=topic,
+                        will_payload=b"stale will",
+                    ))
+                    expect_packet(
+                        original, expected_connack(
+                            mqtt_packets, mqtt5_props,
+                        ) if proto_ver == 5 else mqtt_packets.gen_connack(
+                            proto_ver=4,
+                        ), f"Will reconnect initial CONNACK v{proto_ver}",
+                    )
+                    original.sendall(mqtt_packets.gen_publish(
+                        topic, qos=0, payload="alive-before",
+                        proto_ver=proto_ver,
+                    ))
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_publish(
+                            topic, qos=0, payload="alive-before",
+                            proto_ver=proto_ver,
+                        ), f"Will reconnect initial PUBLISH v{proto_ver}",
+                    )
+                    original.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                    )
+
+                with broker.connect() as resumed:
+                    resumed.sendall(mqtt_packets.gen_connect(
+                        client_id, clean_session=False, proto_ver=proto_ver,
+                        session_expiry=session_expiry, will_topic=topic,
+                        will_payload=b"replacement will",
+                    ))
+                    expect_packet(
+                        resumed, expected_connack(
+                            mqtt_packets, mqtt5_props, session_present=True,
+                        ) if proto_ver == 5 else mqtt_packets.gen_connack(
+                            flags=1, proto_ver=4,
+                        ), f"Will reconnect resumed CONNACK v{proto_ver}",
+                    )
+                    resumed.sendall(mqtt_packets.gen_publish(
+                        topic, qos=0, payload="alive-after",
+                        proto_ver=proto_ver,
+                    ))
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_publish(
+                            topic, qos=0, payload="alive-after",
+                            proto_ver=proto_ver,
+                        ), f"Will reconnect resumed PUBLISH v{proto_ver}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_pingresp(),
+                        f"no stale Will after reconnect v{proto_ver}",
+                    )
+                    resumed.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                    )
+                if proto_ver == 5:
+                    subscriber.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=5)
+                    )
+
+
 def will_delay_session_expiry_minimum(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -3527,6 +3616,9 @@ def main() -> None:
     delayed_will_reconnect_cancels(
         args.broker, mqtt_packets, mqtt5_props
     )
+    clean_disconnect_will_reconnect(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     will_delay_session_expiry_minimum(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -3560,7 +3652,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 67 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 69 scenarios")
 
 
 if __name__ == "__main__":

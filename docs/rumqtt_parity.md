@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs sixty-seven
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs sixty-nine
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -1008,6 +1008,12 @@ The delayed-Will reconnect case directly ports Mosquitto's
 Will for a durable Session, reconnecting the same Client ID after one second
 reports Session Present, and a subscriber receives PINGRESP after the original
 deadline instead of the canceled Will.
+Two companion cases directly port Mosquitto issue 1273's
+`07-will-reconnect-1273.py` for MQTT 3.1.1 and MQTT 5. A durable client sends a
+normal DISCONNECT after installing a Will, reconnects with the same Client ID
+and a replacement Will, and receives Session Present. Exact live PUBLISH bytes
+on both sides of the reconnect plus an ordered PINGRESP prove the canceled old
+Will is never resurrected.
 Three companion cases port Mosquitto's
 `07-will-delay-session-expiry.py`, `07-will-delay-session-expiry2.py`, and
 `07-will-delay-session-expiry-0.py`. They time the external delivery when
@@ -1021,7 +1027,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all sixty-seven scenarios pass. This is deliberately described as a selected
+packets; all sixty-nine scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1033,5 +1039,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Sixty-seven passing packet-vector scenarios do not cover
+   persistence semantics. Sixty-nine passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
