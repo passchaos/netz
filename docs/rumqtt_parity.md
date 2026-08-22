@@ -104,12 +104,18 @@ The netz broker is a finite process for deterministic teardown:
 zig build run-mqtt-broker -Doptimize=ReleaseFast -- \
   --bind=127.0.0.1:18883 --connections=8 \
   --max-queued-deliveries=1024 --max-outgoing-inflight=64 \
-  --persistence=netz-mqtt.db
+  --persistence=netz-mqtt.db --autosave-interval-seconds=30
 ```
 
 The finite example restores that snapshot before accepting clients and saves
-again after all configured connections exit. `--no-restore` starts from an
-empty in-memory state but still writes the final snapshot.
+again after all configured connections exit. With the autosave interval above,
+it also writes live checkpoints while clients remain connected;
+`--no-restore` starts from an empty in-memory state but still writes periodic
+and final snapshots. `zig build interop-mqtt-live-autosave
+-Doptimize=ReleaseFast` creates a durable subscription, waits for an autosave,
+kills the broker without its final save, restores the database in a fresh
+process, and verifies Session Present plus live routing through the restored
+subscription.
 
 Run the same sequential (window-one) driver against any broker address:
 
@@ -1057,8 +1063,10 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    transactions remain intentionally excluded; inbound QoS 2 owned by a
    durable Session is restored.
    Tests cover both direct state and a real active broker connection remaining
-   usable after checkpoint, followed by restore. A replicated/incremental
-   commitlog is still needed to close mutations between periodic checkpoints.
+   usable after checkpoint, followed by restore. The production example now
+   accepts `--autosave-interval-seconds=N`, and the process gate above proves a
+   periodic checkpoint survives forced termination. A replicated/incremental
+   commitlog is still needed to close mutations between intervals.
 2. Extend the production-scale publisher-window, latency, allocation and RSS
    comparison above to Mosquitto and additional concurrency/fanout shapes;
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.

@@ -95,6 +95,17 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_vectors_step.dependOn(&mqtt_vectors.step);
 
+    const mqtt_live_autosave = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_live_autosave.py",
+    });
+    mqtt_live_autosave.addArtifactArg(mqtt_vectors_broker);
+    const mqtt_live_autosave_step = b.step(
+        "interop-mqtt-live-autosave",
+        "Verify periodic MQTT checkpoints survive a broker crash",
+    );
+    mqtt_live_autosave_step.dependOn(&mqtt_live_autosave.step);
+
     const websocket_autobahn_server = b.addExecutable(.{
         .name = "netz-websocket-autobahn-server",
         .root_module = b.createModule(.{

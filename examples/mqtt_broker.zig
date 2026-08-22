@@ -15,6 +15,7 @@ const Config = struct {
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
     persistence_path: ?[]const u8 = null,
+    autosave_interval_seconds: ?u32 = null,
     restore: bool = true,
     ignore_connection_errors: bool = false,
 };
@@ -68,15 +69,64 @@ pub fn main(init: std.process.Init) !void {
         "netz MQTT 3.1.1/5 broker listening on {f} for {d} clients\n",
         .{ broker.address(), config.connections },
     );
-    if (config.ignore_connection_errors) {
-        // Conformance/fuzz harnesses deliberately open malformed connections.
-        // Serve one finite slot at a time so an expected protocol rejection
-        // does not terminate the process before later valid-vector probes.
-        for (0..config.connections) |_| {
-            broker.serve(1) catch {};
+    if (config.autosave_interval_seconds) |seconds| {
+        const path = config.persistence_path orelse
+            return error.InvalidArgument;
+        const interval = std.Io.Clock.Duration{
+            .raw = .fromSeconds(seconds),
+            .clock = .awake,
+        };
+        const Result = union(enum) {
+            serve: ?anyerror,
+            timer: std.Io.Cancelable!void,
+        };
+        var result_buffer: [2]Result = undefined;
+        var select: std.Io.Select(Result) = .init(io, &result_buffer);
+        defer select.cancelDiscard();
+        try select.concurrent(
+            .serve,
+            serveBrokerResult,
+            .{
+                &broker,
+                config.connections,
+                config.ignore_connection_errors,
+            },
+        );
+        try select.concurrent(.timer, waitAutosaveInterval, .{ io, interval });
+        while (true) {
+            switch (try select.await()) {
+                .serve => |maybe_err| {
+                    // Stop the outstanding timer before returning. Otherwise
+                    // defer-based cancellation would run only after the final
+                    // snapshot below and could race that quiescent write.
+                    select.cancelDiscard();
+                    if (maybe_err) |err| return err;
+                    break;
+                },
+                .timer => |timer_result| {
+                    try timer_result;
+                    broker.saveLiveSnapshot(std.Io.Dir.cwd(), path) catch |save_err|
+                        switch (save_err) {
+                            // A CONNECT between Session registration and
+                            // CONNACK attachment is intentionally not
+                            // checkpointable. Retry at the next interval.
+                            error.SnapshotBusy => {},
+                            else => return save_err,
+                        };
+                    try select.concurrent(
+                        .timer,
+                        waitAutosaveInterval,
+                        .{ io, interval },
+                    );
+                },
+            }
         }
     } else {
-        try broker.serve(config.connections);
+        try serveBroker(
+            &broker,
+            config.connections,
+            config.ignore_connection_errors,
+        );
     }
     if (config.persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
@@ -198,13 +248,63 @@ fn parseArgs(
             config.persistence_path = path;
         } else if (std.mem.eql(u8, arg, "--no-restore")) {
             config.restore = false;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--autosave-interval-seconds=",
+        )) {
+            config.autosave_interval_seconds = try std.fmt.parseInt(
+                u32,
+                arg["--autosave-interval-seconds=".len..],
+                10,
+            );
+            if (config.autosave_interval_seconds.? == 0) {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.eql(u8, arg, "--ignore-connection-errors")) {
             config.ignore_connection_errors = true;
         } else {
             return error.InvalidArgument;
         }
     }
+    if (config.autosave_interval_seconds != null and
+        config.persistence_path == null)
+    {
+        return error.InvalidArgument;
+    }
     return config;
+}
+
+fn serveBroker(
+    broker: *netz.mqtt.broker.Broker,
+    connections: usize,
+    ignore_connection_errors: bool,
+) !void {
+    if (ignore_connection_errors) {
+        // Conformance/fuzz harnesses deliberately open malformed connections.
+        // Serve one finite slot at a time so an expected protocol rejection
+        // does not terminate the process before later valid-vector probes.
+        for (0..connections) |_| broker.serve(1) catch {};
+    } else {
+        try broker.serve(connections);
+    }
+}
+
+fn serveBrokerResult(
+    broker: *netz.mqtt.broker.Broker,
+    connections: usize,
+    ignore_connection_errors: bool,
+) ?anyerror {
+    serveBroker(broker, connections, ignore_connection_errors) catch |err|
+        return err;
+    return null;
+}
+
+fn waitAutosaveInterval(
+    io: std.Io,
+    interval: std.Io.Clock.Duration,
+) std.Io.Cancelable!void {
+    try interval.sleep(io);
 }
 
 fn parsePositiveUsize(raw: []const u8) !usize {
