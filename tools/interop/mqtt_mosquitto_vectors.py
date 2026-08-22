@@ -1720,6 +1720,202 @@ def outgoing_qos2_reconnect_stages(
                 )
 
 
+def incoming_qos2_disconnect_recovery(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 03-publish-c2b-disconnect-qos2.py for the
+    # MQTT versions supported by netz. A durable publisher drops the first
+    # connection after PUBREC, repeats PUBLISH with DUP after reconnect, then
+    # drops again after PUBCOMP. A final repeated PUBREL must be acknowledged
+    # without releasing the Application Message twice.
+    topic = "03/c2b/qos2/disconnect/test"
+    payload = "disconnect-message"
+    packet_id = 3265
+    for proto_ver in (4, 5):
+        client_id = f"03-c2b-qos2-disco-v{proto_ver}"
+        persistent_connect = mqtt_packets.gen_connect(
+            client_id,
+            clean_session=False,
+            proto_ver=proto_ver,
+            session_expiry=60,
+        )
+
+        def connack(session_present: bool) -> bytes:
+            if proto_ver == 5:
+                return expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    session_present=session_present,
+                )
+            return mqtt_packets.gen_connack(
+                flags=int(session_present),
+                rc=0,
+                proto_ver=proto_ver,
+            )
+
+        # Subscriber, three publisher generations, and one Clean Start clear.
+        with NetzBroker(executable, connections=5) as broker:
+            subscriber = broker.connect()
+            try:
+                connect_client(
+                    subscriber,
+                    mqtt_packets,
+                    f"03-c2b-qos2-helper-v{proto_ver}",
+                    proto_ver,
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        1, topic, 2, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(1, 2, proto_ver=proto_ver),
+                    f"incoming QoS2 recovery SUBACK v{proto_ver}",
+                )
+
+                first = broker.connect()
+                try:
+                    first.sendall(persistent_connect)
+                    expect_packet(
+                        first,
+                        connack(False),
+                        f"incoming QoS2 first CONNACK v{proto_ver}",
+                    )
+                    first.sendall(
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=2,
+                            mid=packet_id,
+                            payload=payload,
+                            proto_ver=proto_ver,
+                        )
+                    )
+                    expect_packet(
+                        first,
+                        mqtt_packets.gen_pubrec(
+                            packet_id, proto_ver=proto_ver
+                        ),
+                        f"incoming QoS2 first PUBREC v{proto_ver}",
+                    )
+                finally:
+                    first.close()
+
+                second = broker.connect()
+                try:
+                    second.sendall(persistent_connect)
+                    expect_packet(
+                        second,
+                        connack(True),
+                        f"incoming QoS2 second CONNACK v{proto_ver}",
+                    )
+                    second.sendall(
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=2,
+                            mid=packet_id,
+                            payload=payload,
+                            dup=True,
+                            proto_ver=proto_ver,
+                        )
+                    )
+                    expect_packet(
+                        second,
+                        mqtt_packets.gen_pubrec(
+                            packet_id, proto_ver=proto_ver
+                        ),
+                        f"incoming QoS2 DUP PUBREC v{proto_ver}",
+                    )
+                    second.sendall(
+                        mqtt_packets.gen_pubrel(
+                            packet_id, proto_ver=proto_ver
+                        )
+                    )
+                    expect_packet(
+                        second,
+                        mqtt_packets.gen_pubcomp(
+                            packet_id, proto_ver=proto_ver
+                        ),
+                        f"incoming QoS2 PUBCOMP v{proto_ver}",
+                    )
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=2,
+                            mid=1,
+                            payload=payload,
+                            proto_ver=proto_ver,
+                        ),
+                        f"incoming QoS2 delivery v{proto_ver}",
+                    )
+                    subscriber.sendall(
+                        mqtt_packets.gen_pubrec(1, proto_ver=proto_ver)
+                    )
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_pubrel(1, proto_ver=proto_ver),
+                        f"incoming QoS2 downstream PUBREL v{proto_ver}",
+                    )
+                    subscriber.sendall(
+                        mqtt_packets.gen_pubcomp(1, proto_ver=proto_ver)
+                    )
+                finally:
+                    # Pretend the successful PUBCOMP was lost.
+                    second.close()
+
+                third = broker.connect()
+                try:
+                    third.sendall(persistent_connect)
+                    expect_packet(
+                        third,
+                        connack(True),
+                        f"incoming QoS2 third CONNACK v{proto_ver}",
+                    )
+                    third.sendall(
+                        mqtt_packets.gen_pubrel(
+                            packet_id,
+                            dup=proto_ver == 4,
+                            proto_ver=proto_ver,
+                        )
+                    )
+                    expect_packet(
+                        third,
+                        mqtt_packets.gen_pubcomp(
+                            packet_id, proto_ver=proto_ver
+                        ),
+                        f"incoming QoS2 repeated PUBCOMP v{proto_ver}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_pingresp(),
+                        f"incoming QoS2 no duplicate delivery v{proto_ver}",
+                    )
+                finally:
+                    third.close()
+
+                subscriber.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+                with broker.connect() as clear:
+                    clear.sendall(
+                        mqtt_packets.gen_connect(
+                            client_id, proto_ver=proto_ver
+                        )
+                    )
+                    expect_packet(
+                        clear,
+                        connack(False),
+                        f"incoming QoS2 clear CONNACK v{proto_ver}",
+                    )
+                    clear.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                    )
+            finally:
+                subscriber.close()
+
+
 def incoming_qos2_reconnect_reuse(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -3841,6 +4037,9 @@ def main() -> None:
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
+    incoming_qos2_disconnect_recovery(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     incoming_qos2_reconnect_reuse(args.broker, mqtt_packets, mqtt5_props)
     offline_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     offline_will_message_expiry(args.broker, mqtt_packets, mqtt5_props)
@@ -3890,7 +4089,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 72 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 74 scenarios")
 
 
 if __name__ == "__main__":

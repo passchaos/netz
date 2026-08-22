@@ -1068,6 +1068,9 @@ pub const Publish = struct {
 pub const AckPacket = struct {
     packet_type: PacketType,
     packet_id: u16,
+    /// MQTT 3.1.1 permits bit 3 on a retransmitted PUBREL. MQTT 5 removed
+    /// that signaling and requires the ordinary 0x2 reserved flag pattern.
+    dup: bool = false,
     reason_code: u8 = 0,
     properties: []Property = &.{},
 
@@ -1082,14 +1085,25 @@ pub const AckPacket = struct {
             .puback, .pubrec, .pubrel, .pubcomp => {},
             else => return error.InvalidPacketType,
         }
-        try validateControlFlags(fixed);
+        if (!(protocol == .v3_1_1 and
+            fixed.packet_type == .pubrel and
+            (fixed.flags == 0x02 or fixed.flags == 0x0a)))
+        {
+            try validateControlFlags(fixed);
+        }
         try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         if (protocol == .v3_1_1) {
             if (!cursor.eof()) return error.InvalidPacketType;
-            return .{ .packet_type = fixed.packet_type, .packet_id = packet_id, .properties = try allocator.alloc(Property, 0) };
+            return .{
+                .packet_type = fixed.packet_type,
+                .packet_id = packet_id,
+                .dup = fixed.packet_type == .pubrel and
+                    (fixed.flags & 0x08) != 0,
+                .properties = try allocator.alloc(Property, 0),
+            };
         }
 
         var reason_code: u8 = 0;
@@ -1099,7 +1113,12 @@ pub const AckPacket = struct {
         errdefer allocator.free(props);
         try validateAckProperties(fixed.packet_type, props);
         if (!cursor.eof()) return error.InvalidPacketType;
-        return .{ .packet_type = fixed.packet_type, .packet_id = packet_id, .reason_code = reason_code, .properties = props };
+        return .{
+            .packet_type = fixed.packet_type,
+            .packet_id = packet_id,
+            .reason_code = reason_code,
+            .properties = props,
+        };
     }
 
     pub fn write(
@@ -2434,6 +2453,19 @@ test "MQTT connack ack and ping controls" {
     puback_bytes.clearRetainingCapacity();
     try UnsubAck.write(&puback_bytes, allocator, .v5, 44, &.{}, &.{0x00});
     try std.testing.expectError(error.InvalidPacketType, AckPacket.parse(allocator, .v5, puback_bytes.items));
+
+    var duplicate_pubrel = try AckPacket.parse(
+        allocator,
+        .v3_1_1,
+        &.{ 0x6a, 0x02, 0x00, 0x2a },
+    );
+    defer duplicate_pubrel.deinit(allocator);
+    try std.testing.expect(duplicate_pubrel.dup);
+    try std.testing.expectEqual(@as(u16, 42), duplicate_pubrel.packet_id);
+    try std.testing.expectError(
+        error.InvalidFlags,
+        AckPacket.parse(allocator, .v5, &.{ 0x6a, 0x02, 0x00, 0x2a }),
+    );
 
     var ping: std.ArrayList(u8) = .empty;
     defer ping.deinit(allocator);

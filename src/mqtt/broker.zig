@@ -1569,6 +1569,17 @@ pub const Broker = struct {
             const publisher_slot = try self.slotForSubscriber(publisher_id);
             publisher_slot.writer_mutex.lockUncancelable(self.io);
             defer publisher_slot.writer_mutex.unlock(self.io);
+            if (durable_publisher_id != publisher_id) {
+                // The completed inbound transaction belongs to a durable
+                // Session from an earlier Network Connection. Reconcile the
+                // fresh connection's fixed receive table so writePubComp can
+                // release it normally. MQTT 3.1.1 identifies this retry with
+                // PUBREL DUP; MQTT 5 defines repeated PUBREL as idempotent
+                // without carrying a DUP bit.
+                if (publisher.protocol == .v5 or ack.dup) {
+                    try publisher.resumeIncomingQoS2(ack.packet_id);
+                }
+            }
             try publisher.writePubComp(ack.packet_id, 0);
             return;
         };

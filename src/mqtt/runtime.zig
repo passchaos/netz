@@ -1273,6 +1273,27 @@ pub const Connection = struct {
         return self.readAck(.pubrel);
     }
 
+    /// Restore connection-local receive accounting before acknowledging a
+    /// PUBREL that belongs to a durable transaction completed on an earlier
+    /// Network Connection. MQTT 5 has no PUBREL DUP flag, so the broker uses
+    /// this only after its Session store identifies the retry.
+    pub fn resumeIncomingQoS2(
+        self: *Connection,
+        packet_id: u16,
+    ) Error!void {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        const index = @as(usize, packet_id);
+        if (self.incoming_qos1.isSet(index)) {
+            return error.InvalidPacketIdentifier;
+        }
+        if (self.incoming_qos2.isSet(index)) return;
+        if (self.incoming_inflight >= self.max_incoming_inflight) {
+            return error.ReceiveMaximumExceeded;
+        }
+        self.incoming_qos2.set(index);
+        self.incoming_inflight += 1;
+    }
+
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacket(.pubcomp, packet_id, reason_code, &.{});
         self.completeIncomingPublish(.pubcomp, packet_id);
