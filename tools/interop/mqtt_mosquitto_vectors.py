@@ -2335,6 +2335,92 @@ def offline_queued_payload_bytes(executable: Path, mqtt_packets) -> None:
                 subscriber.close()
 
 
+def outgoing_inflight_payload_bytes(executable: Path, mqtt_packets) -> None:
+    # Bounded process-level port of Mosquitto
+    # 02-subpub-qos2-max-inflight-bytes.py. The subscriber advertises ample
+    # Receive Maximum, so the broker's independent byte window must hold the
+    # third QoS 1 delivery until one earlier PUBACK releases payload budget.
+    topic = "subpub/qos1/inflight-bytes"
+    for proto_ver in (4, 5):
+        with NetzBroker(
+            executable,
+            connections=2,
+            extra_args=("--max-session-inflight-payload-bytes=10",),
+        ) as broker:
+            with broker.connect() as subscriber, broker.connect() as publisher:
+                subscriber.sendall(mqtt_packets.gen_connect(
+                    f"inflight-bytes-sub-{proto_ver}",
+                    clean_session=False,
+                    proto_ver=proto_ver,
+                    session_expiry=60 if proto_ver == 5 else None,
+                ))
+                connack = read_packet(subscriber)
+                if connack[2] != 0 or connack[3] != 0:
+                    raise AssertionError(
+                        f"inflight bytes invalid CONNACK v{proto_ver}: "
+                        f"{connack.hex()}"
+                    )
+                subscriber.sendall(mqtt_packets.gen_subscribe(
+                    1, topic, 1, proto_ver=proto_ver
+                ))
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(1, 1, proto_ver=proto_ver),
+                    f"inflight bytes SUBACK v{proto_ver}",
+                )
+                connect_client(
+                    publisher, mqtt_packets,
+                    f"inflight-bytes-pub-{proto_ver}", proto_ver,
+                )
+                for mid, payload in enumerate(("123456", "789012", "third"), 1):
+                    publisher.sendall(mqtt_packets.gen_publish(
+                        topic, qos=1, mid=mid, payload=payload,
+                        proto_ver=proto_ver,
+                    ))
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_puback(mid, proto_ver=proto_ver),
+                        f"inflight bytes publisher PUBACK v{proto_ver}/{mid}",
+                    )
+
+                first = []
+                for packet_id, payload in enumerate(("123456", "789012"), 1):
+                    packet = mqtt_packets.gen_publish(
+                        topic, qos=1, mid=packet_id, payload=payload,
+                        proto_ver=proto_ver,
+                    )
+                    first.append(packet)
+                expect_packets_unordered(
+                    subscriber, first, f"inflight bytes first window v{proto_ver}"
+                )
+                subscriber.settimeout(0.1)
+                try:
+                    unexpected = subscriber.recv(1)
+                    if unexpected:
+                        raise AssertionError(
+                            f"inflight byte window leaked third PUBLISH "
+                            f"v{proto_ver}: {unexpected.hex()}"
+                        )
+                except socket.timeout:
+                    pass
+                finally:
+                    subscriber.settimeout(5)
+
+                subscriber.sendall(mqtt_packets.gen_puback(1, proto_ver=proto_ver))
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic, qos=1, mid=3, payload="third",
+                        proto_ver=proto_ver,
+                    ),
+                    f"inflight bytes released delivery v{proto_ver}",
+                )
+                subscriber.sendall(mqtt_packets.gen_puback(2, proto_ver=proto_ver))
+                subscriber.sendall(mqtt_packets.gen_puback(3, proto_ver=proto_ver))
+                publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=proto_ver))
+                subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=proto_ver))
+
+
 def retained_subscription_handling(
     executable: Path, mqtt_packets, mqtt5_opts
 ) -> None:
@@ -4239,6 +4325,7 @@ def main() -> None:
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     offline_queued_payload_bytes(args.broker, mqtt_packets)
+    outgoing_inflight_payload_bytes(args.broker, mqtt_packets)
     outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
     incoming_qos2_disconnect_recovery(
         args.broker, mqtt_packets, mqtt5_props
@@ -4293,7 +4380,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 80 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 82 scenarios")
 
 
 if __name__ == "__main__":

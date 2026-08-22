@@ -6,6 +6,7 @@ const Config = struct {
     connections: usize = 16,
     max_queued_deliveries: usize = 1024,
     max_session_queued_payload_bytes: usize = 0,
+    max_session_inflight_payload_bytes: usize = 0,
     max_outgoing_inflight: u16 = 64,
     max_packet_size: usize = 16 * 1024 * 1024,
     maximum_qos: ?netz.mqtt.QoS = null,
@@ -59,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
+                .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
             },
         },
     );
@@ -189,6 +191,16 @@ fn parseArgs(
             config.max_session_queued_payload_bytes = try std.fmt.parseInt(
                 usize,
                 arg["--max-session-queued-payload-bytes=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--max-session-inflight-payload-bytes=",
+        )) {
+            config.max_session_inflight_payload_bytes = try std.fmt.parseInt(
+                usize,
+                arg["--max-session-inflight-payload-bytes=".len..],
                 10,
             );
         } else if (std.mem.startsWith(

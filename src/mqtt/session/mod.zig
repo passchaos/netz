@@ -32,6 +32,11 @@ pub const Options = struct {
     /// by `max_session_bytes` and `max_total_bytes`.
     max_queued_payload_bytes_per_session: usize = 0,
     max_inflight_per_session: usize = std.math.maxInt(u16),
+    /// Maximum payload bytes occupying outgoing QoS 1/2 inflight state. Zero
+    /// disables the byte bound. Like Mosquitto, admission inspects the current
+    /// window, so a single message may cross the threshold but no later
+    /// PUBLISH enters until acknowledgements or expiry release bytes.
+    max_inflight_payload_bytes_per_session: usize = 0,
     max_incoming_qos2_per_session: usize = 16_384,
     max_session_bytes: usize = 64 * 1024 * 1024,
     max_total_bytes: usize = 1024 * 1024 * 1024,
@@ -58,6 +63,7 @@ pub const Stats = struct {
     queued_count: usize,
     queued_payload_bytes: usize,
     inflight_count: usize,
+    inflight_payload_bytes: usize,
     incoming_qos2_count: usize,
     owned_wire_bytes: usize,
 };
@@ -250,6 +256,7 @@ const Session = struct {
     queued_payload_bytes: usize = 0,
     inflight: std.ArrayList(?Inflight) = .empty,
     inflight_count: usize = 0,
+    inflight_payload_bytes: usize = 0,
     packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
     incoming_qos2: std.AutoHashMapUnmanaged(u16, void) = .empty,
     next_packet_id: u16 = 1,
@@ -709,6 +716,17 @@ pub const Store = struct {
             {
                 return error.CorruptSnapshot;
             }
+            if (inflightPayloadLimitReached(
+                self.options,
+                session.inflight_payload_bytes,
+            )) {
+                return error.InflightFull;
+            }
+            const inflight_payload_bytes = std.math.add(
+                usize,
+                session.inflight_payload_bytes,
+                publish.payload.len,
+            ) catch return error.SessionByteLimitExceeded;
             try self.ensureBytes(session, publish.allocation_bytes);
             const inflight_index = appendOrReuseAssumeCapacity(
                 Inflight,
@@ -726,6 +744,7 @@ pub const Store = struct {
                 inflight_index,
             );
             session.inflight_count += 1;
+            session.inflight_payload_bytes = inflight_payload_bytes;
             session.allocation_bytes += publish.allocation_bytes;
             self.total_bytes += publish.allocation_bytes;
             publish = undefined;
@@ -1202,6 +1221,7 @@ pub const Store = struct {
             .queued_count = session.queued_count,
             .queued_payload_bytes = session.queued_payload_bytes,
             .inflight_count = session.inflight_count,
+            .inflight_payload_bytes = session.inflight_payload_bytes,
             .incoming_qos2_count = session.incoming_qos2.count(),
             .owned_wire_bytes = session.allocation_bytes,
         };
@@ -1383,6 +1403,12 @@ pub const Store = struct {
             @min(@as(usize, receive_maximum), publish_window_used);
         available = @min(available, out.len - written);
         available = @min(available, session.queued_count);
+        if (inflightPayloadLimitReached(
+            self.options,
+            session.inflight_payload_bytes,
+        )) {
+            available = 0;
+        }
         if (available == 0) return out[0..written];
         const max_inflight = @min(
             self.options.max_inflight_per_session,
@@ -1409,6 +1435,10 @@ pub const Store = struct {
             queue_index < session.queued.items.len)
         {
             if (session.queued.items[queue_index]) |publish_value| {
+                if (inflightPayloadLimitReached(
+                    self.options,
+                    session.inflight_payload_bytes,
+                )) break;
                 var publish = publish_value;
                 session.queued.items[queue_index] = null;
                 session.queued_count -= 1;
@@ -1435,6 +1465,11 @@ pub const Store = struct {
                     inflight_index,
                 );
                 session.inflight_count += 1;
+                session.inflight_payload_bytes = std.math.add(
+                    usize,
+                    session.inflight_payload_bytes,
+                    publish.payload.len,
+                ) catch unreachable;
                 out[written] = .{ .publish = publishTransmission(
                     session.inflight.items[inflight_index].?,
                     now.nanoseconds,
@@ -1678,6 +1713,7 @@ pub const Store = struct {
         session.inflight.items[index] = null;
         _ = session.packet_index.fetchRemove(inflight.packet_id).?;
         session.inflight_count -= 1;
+        session.inflight_payload_bytes -= inflight.publish.payload.len;
         session.allocation_bytes -= inflight.publish.allocation_bytes;
         self.total_bytes -= inflight.publish.allocation_bytes;
         inflight.publish.deinit(self.allocator);
@@ -1941,6 +1977,11 @@ fn compactQueue(session: *Session) void {
 
 fn queuedPayloadLimitReached(options: Options, current_bytes: usize) bool {
     const limit = options.max_queued_payload_bytes_per_session;
+    return limit != 0 and current_bytes >= limit;
+}
+
+fn inflightPayloadLimitReached(options: Options, current_bytes: usize) bool {
+    const limit = options.max_inflight_payload_bytes_per_session;
     return limit != 0 and current_bytes >= limit;
 }
 
