@@ -2421,6 +2421,100 @@ def outgoing_inflight_payload_bytes(executable: Path, mqtt_packets) -> None:
                 subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=proto_ver))
 
 
+def acknowledgement_length_forms(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct process-boundary coverage from Mosquitto
+    # 03-publish-b2c-qos{1,2}-len.py. Exercise the four legal MQTT 5 ACK forms:
+    # Packet Identifier only, explicit reason, reason plus empty Property
+    # Length, and reason plus a User Property. A following PING proves each
+    # form advanced and released the broker's outgoing state.
+    user_property = mqtt5_props.gen_string_pair_prop(
+        mqtt5_props.USER_PROPERTY, "key", "value"
+    )
+    ack_forms = (
+        (-1, None),
+        (0, None),
+        (0, ""),
+        (0, user_property),
+    )
+    scenario = 0
+    for qos in (1, 2):
+        for reason_code, properties in ack_forms:
+            scenario += 1
+            topic = f"03/b2c/qos{qos}/len/test/{scenario}"
+            with NetzBroker(executable, connections=2) as broker:
+                with broker.connect() as subscriber, broker.connect() as publisher:
+                    connect_v5(
+                        subscriber, mqtt_packets,
+                        f"ack-len-sub-{qos}-{scenario}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_subscribe(
+                        3265, topic, qos, proto_ver=5
+                    ))
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_suback(3265, qos, proto_ver=5),
+                        f"ACK length SUBACK qos{qos}/{scenario}",
+                    )
+                    connect_v5(
+                        publisher, mqtt_packets,
+                        f"ack-len-pub-{qos}-{scenario}",
+                    )
+                    publisher.sendall(mqtt_packets.gen_publish(
+                        topic, qos=qos, mid=77, payload="len-message",
+                        proto_ver=5,
+                    ))
+                    if qos == 1:
+                        expect_packet(
+                            publisher, mqtt_packets.gen_puback(77, proto_ver=5),
+                            f"ACK length publisher PUBACK {scenario}",
+                        )
+                    else:
+                        expect_packet(
+                            publisher, mqtt_packets.gen_pubrec(77, proto_ver=5),
+                            f"ACK length publisher PUBREC {scenario}",
+                        )
+                        publisher.sendall(mqtt_packets.gen_pubrel(77, proto_ver=5))
+                        expect_packet(
+                            publisher, mqtt_packets.gen_pubcomp(77, proto_ver=5),
+                            f"ACK length publisher PUBCOMP {scenario}",
+                        )
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_publish(
+                            topic, qos=qos, mid=1, payload="len-message",
+                            proto_ver=5,
+                        ),
+                        f"ACK length downstream PUBLISH qos{qos}/{scenario}",
+                    )
+                    if qos == 1:
+                        subscriber.sendall(mqtt_packets.gen_puback(
+                            1, proto_ver=5, reason_code=reason_code,
+                            properties=properties,
+                        ))
+                    else:
+                        subscriber.sendall(mqtt_packets.gen_pubrec(
+                            1, proto_ver=5, reason_code=reason_code,
+                            properties=properties,
+                        ))
+                        expect_packet(
+                            subscriber, mqtt_packets.gen_pubrel(1, proto_ver=5),
+                            f"ACK length downstream PUBREL {scenario}",
+                        )
+                        subscriber.sendall(mqtt_packets.gen_pubcomp(
+                            1, proto_ver=5, reason_code=reason_code,
+                            properties=properties,
+                        ))
+                    subscriber.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_pingresp(),
+                        f"ACK length PINGRESP qos{qos}/{scenario}",
+                    )
+                    publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+                    subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def retained_subscription_handling(
     executable: Path, mqtt_packets, mqtt5_opts
 ) -> None:
@@ -4326,6 +4420,7 @@ def main() -> None:
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     offline_queued_payload_bytes(args.broker, mqtt_packets)
     outgoing_inflight_payload_bytes(args.broker, mqtt_packets)
+    acknowledgement_length_forms(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
     incoming_qos2_disconnect_recovery(
         args.broker, mqtt_packets, mqtt5_props
@@ -4380,7 +4475,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 82 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 90 scenarios")
 
 
 if __name__ == "__main__":
