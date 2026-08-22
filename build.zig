@@ -106,6 +106,30 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_live_autosave_step.dependOn(&mqtt_live_autosave.step);
 
+    const mqtt_websocket_server = b.addExecutable(.{
+        .name = "netz-mqtt-websocket-interop-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/mqtt_websocket_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_websocket_mosquitto = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_websocket_mosquitto.py",
+    });
+    mqtt_websocket_mosquitto.addArtifactArg(mqtt_websocket_server);
+    const mqtt_websocket_mosquitto_step = b.step(
+        "interop-mqtt-websocket-mosquitto",
+        "Run Mosquitto-derived MQTT WS/WSS peers against netz",
+    );
+    mqtt_websocket_mosquitto_step.dependOn(
+        &mqtt_websocket_mosquitto.step,
+    );
+
     const websocket_autobahn_server = b.addExecutable(.{
         .name = "netz-websocket-autobahn-server",
         .root_module = b.createModule(.{

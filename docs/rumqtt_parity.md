@@ -596,6 +596,16 @@ extra payload copy. Broker Keep Alive enforcement also remains packet-scoped:
 one absolute deadline spans WebSocket fragments, messages, and control frames,
 so Ping/Pong traffic cannot keep an otherwise idle MQTT session alive.
 
+`zig build interop-mqtt-websocket-mosquitto -Doptimize=ReleaseFast` now imports
+the audited Mosquitto `mqtt_packets.py` generators and `WebsocketWrapper` as an
+external peer. It runs MQTT 3.1.1 and MQTT 5 over both WS and certificate-
+verified TLS 1.3 WSS. Every case sends a 65,556-byte QoS 1 PUBLISH split across
+two WebSocket messages, coalesces a following MQTT PINGREQ into the second
+message, checks the exact PUBACK and PINGRESP, then verifies a netz-originated
+QoS 1 PUBLISH byte-for-byte before acknowledging it and disconnecting. The
+finite netz process validates the client ID, topic, complete payload pattern,
+and disconnect, so success cannot be inferred from the HTTP upgrade alone.
+
 The audited rumqtt client supports MQTT 3.1.1 and MQTT 5 over WebSocket, while
 the rumqttd server path still contains `TODO: Add support for V5 protocol with
 websockets`. Netz tests both versions end to end on its client and server and
