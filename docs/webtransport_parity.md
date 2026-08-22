@@ -57,6 +57,9 @@ also correctly omits the server-facing ENABLE_CONNECT_PROTOCOL setting from
 its client SETTINGS, so WebTransport negotiation treats that setting as a
 directional server capability while still requiring the client's WebTransport
 and H3 DATAGRAM advertisements.
+The browser also checks the resolved `transport.closed` value exactly: close
+code 77 and reason `netz done`. A cleanly resolved promise alone is not counted
+as evidence for CLOSE_WEBTRANSPORT_SESSION metadata propagation.
 
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:

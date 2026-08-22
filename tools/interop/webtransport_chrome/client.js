@@ -114,8 +114,14 @@ async function runBrowserProbe({port, certificateHash}) {
   await readExact(reuse.readable.getReader(), 'session reused', 'reuse response');
 
   await datagramWriter.write(textEncoder.encode('close ready'));
-  await withTimeout(transport.closed, 'session close');
-  return 'Chrome WebTransport interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close';
+  const closeInfo = await withTimeout(transport.closed, 'session close');
+  if (closeInfo.closeCode !== 77 || closeInfo.reason !== 'netz done') {
+    throw new Error(
+      `unexpected session close: code=${closeInfo.closeCode} ` +
+      `reason=${JSON.stringify(closeInfo.reason)}`,
+    );
+  }
+  return 'Chrome WebTransport interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done';
 }
 
 (async () => {

@@ -98,7 +98,7 @@ server_pid=
 cat "$work/client.log"
 cat "$work/server.log"
 grep -Fq \
-  'Chrome WebTransport interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
+  'Chrome WebTransport interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done' \
   "$work/client.log"
 grep -Fq \
   'netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
