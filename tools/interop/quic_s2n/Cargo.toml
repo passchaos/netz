@@ -1,0 +1,11 @@
+[package]
+name = "netz-quic-s2n-interop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+s2n-quic = { path = "../../../../../Work/s2n-quic/quic/s2n-quic", version = "=1.85.0" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

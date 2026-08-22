@@ -338,22 +338,22 @@ pub fn build(b: *std.Build) void {
     );
     http1_hyper_interop_step.dependOn(&http1_hyper_interop.step);
 
-    const quic_quic_go_client = b.addExecutable(.{
-        .name = "netz-quic-quic-go-client",
+    const quic_peer_client = b.addExecutable(.{
+        .name = "netz-quic-peer-client",
         .root_module = b.createModule(.{
             .root_source_file = b.path(
-                "tools/interop/quic_quic_go_client.zig",
+                "tools/interop/quic_peer_client.zig",
             ),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
-    const quic_quic_go_server = b.addExecutable(.{
-        .name = "netz-quic-quic-go-server",
+    const quic_peer_server = b.addExecutable(.{
+        .name = "netz-quic-peer-server",
         .root_module = b.createModule(.{
             .root_source_file = b.path(
-                "tools/interop/quic_quic_go_server.zig",
+                "tools/interop/quic_peer_server.zig",
             ),
             .target = target,
             .optimize = optimize,
@@ -363,13 +363,24 @@ pub fn build(b: *std.Build) void {
     const quic_quic_go = b.addSystemCommand(
         &.{"tools/interop/quic_quic_go.sh"},
     );
-    quic_quic_go.addArtifactArg(quic_quic_go_client);
-    quic_quic_go.addArtifactArg(quic_quic_go_server);
+    quic_quic_go.addArtifactArg(quic_peer_client);
+    quic_quic_go.addArtifactArg(quic_peer_server);
     const quic_quic_go_step = b.step(
         "interop-quic-quic-go",
         "Run verified QUIC lifecycle, migration, flow-control, and loss interop with local quic-go fixtures",
     );
     quic_quic_go_step.dependOn(&quic_quic_go.step);
+
+    const quic_s2n = b.addSystemCommand(
+        &.{"tools/interop/quic_s2n.sh"},
+    );
+    quic_s2n.addArtifactArg(quic_peer_client);
+    quic_s2n.addArtifactArg(quic_peer_server);
+    const quic_s2n_step = b.step(
+        "interop-quic-s2n",
+        "Run verified bidirectional QUIC stream interop with local s2n-quic",
+    );
+    quic_s2n_step.dependOn(&quic_s2n.step);
 
     const webtransport_wtransport_server = b.addExecutable(.{
         .name = "netz-webtransport-wtransport-server",

@@ -1,4 +1,4 @@
-//! One-shot QUIC v1/v2 server for process-boundary interop with quic-go.
+//! One-shot QUIC v1/v2 server for process-boundary interop with external peers.
 
 const std = @import("std");
 const netz = @import("netz");
@@ -34,6 +34,7 @@ const Mode = enum {
     migration_loss,
     nat_rebinding,
     v2,
+    s2n,
 };
 
 fn receiveExpectedStream(
@@ -413,7 +414,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     switch (mode) {
-        .echo, .application_pto, .initial_pto, .peer_close, .v2 => {
+        .echo, .application_pto, .initial_pto, .peer_close, .v2, .s2n => {
             for (payloads, 0..) |expected, index| {
                 const stream_id: u64 = @intCast(index * 4);
                 try receiveExpectedStream(
@@ -539,16 +540,23 @@ pub fn main(init: std.process.Init) !void {
         .nat_rebinding => unreachable,
     }
 
-    if (mode == .peer_close) {
+    if (mode == .peer_close or mode == .s2n) {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
         // the application-close assertion cannot truncate stream validation.
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         try established.connection.closeApplication(58, "netz interop complete");
-        std.debug.print(
-            "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
-            .{},
-        );
+        if (mode == .s2n) {
+            std.debug.print(
+                "netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58\n",
+                .{},
+            );
+        } else {
+            std.debug.print(
+                "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
+                .{},
+            );
+        }
         return;
     }
 
@@ -587,6 +595,7 @@ pub fn main(init: std.process.Init) !void {
             .{},
         ),
         .peer_close => unreachable,
+        .s2n => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

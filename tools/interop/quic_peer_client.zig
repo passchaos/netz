@@ -1,5 +1,7 @@
-//! Certificate-verified QUIC v1/v2 stream interop client for the quic-go fixture
-//! maintained in the audited local quicz checkout.
+//! Certificate-verified QUIC stream interop client for external peer fixtures.
+//!
+//! The primary matrix lives in the audited local quicz checkout and uses
+//! quic-go; the basic stream/close path is also shared with s2n-quic.
 
 const std = @import("std");
 const netz = @import("netz");
@@ -13,13 +15,14 @@ const key_update_payloads = [_][]const u8{
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 3 or args.len > 5) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 6) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
     var expect_retry = false;
     var expect_key_update = false;
+    var peer: enum { quic_go, s2n_quic } = .quic_go;
     var version: netz.quic.Version = .version_1;
     for (args[3..]) |arg| {
         if (std.mem.eql(u8, arg, "--expect-retry")) {
@@ -31,11 +34,24 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--version=2")) {
             if (version == .version_2) return error.InvalidArgument;
             version = .version_2;
+        } else if (std.mem.eql(u8, arg, "--peer=s2n-quic")) {
+            if (peer != .quic_go) return error.InvalidArgument;
+            peer = .s2n_quic;
         } else {
             return error.InvalidArgument;
         }
     }
     if (expect_retry and expect_key_update) return error.InvalidArgument;
+    if (peer == .s2n_quic and
+        (expect_retry or expect_key_update or version != .version_1))
+    {
+        return error.InvalidArgument;
+    }
+    const key_exchange_groups: []const netz.quic.tls_client_hello.NamedGroup =
+        if (peer == .s2n_quic)
+            &.{.x25519}
+        else
+            &.{ .x25519_mlkem768, .x25519, .secp256r1 };
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -81,6 +97,11 @@ pub fn main(init: std.process.Init) !void {
                 &.{ .version_1, .version_2 },
             .server_name = "localhost",
             .alpn_protocols = &.{"hq-interop"},
+            // s2n-quic 1.85 rejects netz's fragmented post-quantum
+            // ClientHello before all CRYPTO ranges arrive. This peer-specific
+            // X25519 profile keeps the ClientHello in one Initial datagram and
+            // still exercises the standard RFC 9001 handshake path.
+            .key_exchange_groups = key_exchange_groups,
             .server_auth = verifier.clientVerifier(),
             .max_crypto_buffer = 64 * 1024,
             .handshake_recovery = .{
@@ -193,12 +214,14 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingPeerClose;
     switch (close) {
         .application => |application| {
+            const expected_reason = switch (peer) {
+                .quic_go => "quic-go interop complete",
+                // s2n-quic's public close API carries the RFC 9000
+                // application code but does not expose a reason phrase.
+                .s2n_quic => "",
+            };
             if (application.error_code != 57 or
-                !std.mem.eql(
-                    u8,
-                    application.reason_phrase,
-                    "quic-go interop complete",
-                ))
+                !std.mem.eql(u8, application.reason_phrase, expected_reason))
             {
                 return error.UnexpectedPeerClose;
             }
@@ -213,8 +236,15 @@ pub fn main(init: std.process.Init) !void {
         );
     } else {
         std.debug.print(
-            "netz QUIC client interoperated with quic-go: verified=true version={d} retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
-            .{ if (version == .version_2) @as(u8, 2) else 1, expect_retry },
+            "netz QUIC client interoperated with {s}: verified=true version={d} retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
+            .{
+                switch (peer) {
+                    .quic_go => "quic-go",
+                    .s2n_quic => "s2n-quic",
+                },
+                if (version == .version_2) @as(u8, 2) else 1,
+                expect_retry,
+            },
         );
     }
 }
