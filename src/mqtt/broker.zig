@@ -57,6 +57,11 @@ pub const Options = struct {
     retained: retained_mod.Options = .{},
     session: session_mod.Options = .{},
     will: will_mod.Options = .{},
+    /// Mosquitto-compatible opt-in that sends messages at the subscription
+    /// QoS even when that raises the publisher's original QoS. MQTT otherwise
+    /// requires min(source QoS, granted subscription QoS), which remains the
+    /// default.
+    upgrade_outgoing_qos: bool = false,
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -1309,6 +1314,7 @@ pub const Broker = struct {
                     .subscription_existed = existed,
                     .subscriber_id = sessionSubscriberId(session_route_id),
                     .subscription_identifier = subscription_identifier,
+                    .upgrade_outgoing_qos = self.options.upgrade_outgoing_qos,
                 },
                 now,
             ) catch |err| {
@@ -1696,6 +1702,7 @@ pub const Broker = struct {
             matches,
             publish.qos,
             publish.retain,
+            self.options.upgrade_outgoing_qos,
         );
         defer session_plan.deinit();
         for (session_plan.routes) |*route| {
@@ -1868,7 +1875,10 @@ pub const Broker = struct {
                 }
             }
             const delivery_qos = minQos(
-                minQos(publish.qos, match.subscription.qos),
+                if (self.options.upgrade_outgoing_qos)
+                    match.subscription.qos
+                else
+                    minQos(publish.qos, match.subscription.qos),
                 self.maximumQoS(),
             );
             if (duplicate) |delivery| {

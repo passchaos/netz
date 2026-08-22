@@ -14,6 +14,7 @@ const Config = struct {
     wildcard_subscription_available: bool = true,
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
+    upgrade_outgoing_qos: bool = false,
     persistence_path: ?[]const u8 = null,
     autosave_interval_seconds: ?u32 = null,
     restore: bool = true,
@@ -54,6 +55,7 @@ pub fn main(init: std.process.Init) !void {
                 .subscription_identifier_available = config.subscription_identifier_available,
                 .shared_subscription_available = config.shared_subscription_available,
             },
+            .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
         },
     );
     defer broker.deinit();
@@ -238,6 +240,12 @@ fn parseArgs(
             "--no-shared-subscriptions",
         )) {
             config.shared_subscription_available = false;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--upgrade-outgoing-qos",
+        )) {
+            config.upgrade_outgoing_qos = true;
         } else if (std.mem.startsWith(
             u8,
             arg,

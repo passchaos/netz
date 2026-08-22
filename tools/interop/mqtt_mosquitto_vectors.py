@@ -3074,6 +3074,119 @@ def retained_message_expiry(
             expired.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def outgoing_qos_upgrade(executable: Path, mqtt_packets) -> None:
+    # Direct wire port of Mosquitto 04-retain-upgrade-outgoing-qos.py. This is
+    # deliberately opt-in because upgrading a QoS 0 Application Message to
+    # the subscription grant is a Mosquitto extension forbidden by MQTT.
+    topic = "retain/qos0/test"
+    for proto_ver in (4, 5):
+        with NetzBroker(
+            executable,
+            extra_args=("--upgrade-outgoing-qos",),
+        ) as broker:
+            with broker.connect() as sock:
+                connect_client(
+                    sock,
+                    mqtt_packets,
+                    f"retain-qos-upgrade-v{proto_ver}",
+                    proto_ver,
+                )
+                sock.sendall(
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=0,
+                        payload="retained message",
+                        retain=True,
+                        proto_ver=proto_ver,
+                    )
+                )
+                sock.sendall(
+                    mqtt_packets.gen_subscribe(
+                        16, topic, 1, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_suback(16, 1, proto_ver=proto_ver),
+                    f"retained QoS upgrade SUBACK v{proto_ver}",
+                )
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        mid=1,
+                        qos=1,
+                        payload="retained message",
+                        retain=True,
+                        proto_ver=proto_ver,
+                    ),
+                    f"retained QoS upgrade PUBLISH v{proto_ver}",
+                )
+                sock.sendall(mqtt_packets.gen_puback(1, proto_ver=proto_ver))
+                sock.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+
+        # The same policy applies to ordinary live fanout, not only retained
+        # replay. Keep this as one additional scenario per protocol version.
+        with NetzBroker(
+            executable,
+            connections=2,
+            extra_args=("--upgrade-outgoing-qos",),
+        ) as broker:
+            with broker.connect() as subscriber, broker.connect() as publisher:
+                connect_client(
+                    subscriber,
+                    mqtt_packets,
+                    f"live-qos-upgrade-sub-v{proto_ver}",
+                    proto_ver,
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        17, topic, 1, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(17, 1, proto_ver=proto_ver),
+                    f"live QoS upgrade SUBACK v{proto_ver}",
+                )
+                connect_client(
+                    publisher,
+                    mqtt_packets,
+                    f"live-qos-upgrade-pub-v{proto_ver}",
+                    proto_ver,
+                )
+                publisher.sendall(
+                    mqtt_packets.gen_publish(
+                        topic,
+                        qos=0,
+                        payload="live message",
+                        proto_ver=proto_ver,
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic,
+                        mid=1,
+                        qos=1,
+                        payload="live message",
+                        proto_ver=proto_ver,
+                    ),
+                    f"live QoS upgrade PUBLISH v{proto_ver}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_puback(1, proto_ver=proto_ver)
+                )
+                publisher.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+
+
 def qos2_receive_maximum_one(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -4044,6 +4157,7 @@ def main() -> None:
     offline_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     offline_will_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
+    outgoing_qos_upgrade(args.broker, mqtt_packets)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     request_response_properties(args.broker, mqtt_packets, mqtt5_props)
@@ -4089,7 +4203,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 74 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 78 scenarios")
 
 
 if __name__ == "__main__":

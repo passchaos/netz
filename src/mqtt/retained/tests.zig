@@ -156,6 +156,15 @@ test "retained deliveries implement MQTT 5 retain handling and shared rule" {
         mqtt.QoS.at_most_once,
         always[1].qos,
     );
+    const upgraded = try store.deliveriesInto(.{
+        .topic_filter = "sensors/two",
+        .qos = .at_least_once,
+    }, .{ .upgrade_outgoing_qos = true }, now, &deliveries);
+    try std.testing.expectEqual(@as(usize, 1), upgraded.len);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        upgraded[0].qos,
+    );
 
     const new_only = mqtt.Subscription{
         .topic_filter = "sensors/+",

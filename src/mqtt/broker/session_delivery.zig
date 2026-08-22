@@ -37,6 +37,7 @@ pub const Plan = struct {
         matches: []const router.Match,
         source_qos: mqtt.QoS,
         source_retain: bool,
+        upgrade_outgoing_qos: bool,
     ) std.mem.Allocator.Error!Plan {
         var stable_match_count: usize = 0;
         for (matches) |match| {
@@ -70,7 +71,10 @@ pub const Plan = struct {
             const route_id = session_route.sessionRouteId(
                 match.subscriber_id,
             ) orelse continue;
-            const effective_qos = minQos(source_qos, match.subscription.qos);
+            const effective_qos = if (upgrade_outgoing_qos)
+                match.subscription.qos
+            else
+                minQos(source_qos, match.subscription.qos);
             const result = route_index.getOrPutAssumeCapacity(route_id);
             if (!result.found_existing) {
                 result.value_ptr.* = route_count;
@@ -215,6 +219,7 @@ test "Session delivery plan aggregates route options and identifiers" {
         &matches,
         .at_least_once,
         true,
+        false,
     );
     defer plan.deinit();
     try std.testing.expectEqual(@as(usize, 1), plan.routes.len);
@@ -243,6 +248,30 @@ test "Session delivery plan allocation failures leak nothing" {
     );
 }
 
+test "Session delivery plan can upgrade source QoS" {
+    const stable = session_route.sessionSubscriberId(13);
+    const matches = [_]router.Match{.{
+        .subscriber_id = stable,
+        .subscription = .{
+            .topic_filter = "upgrade/#",
+            .qos = .exactly_once,
+        },
+        .subscription_identifier = null,
+    }};
+    var plan = try Plan.init(
+        std.testing.allocator,
+        &matches,
+        .at_most_once,
+        false,
+        true,
+    );
+    defer plan.deinit();
+    try std.testing.expectEqual(
+        mqtt.QoS.exactly_once,
+        plan.routes[0].qos,
+    );
+}
+
 fn testAllocationFailures(allocator: std.mem.Allocator) !void {
     const stable = session_route.sessionSubscriberId(11);
     const matches = [_]router.Match{
@@ -264,6 +293,7 @@ fn testAllocationFailures(allocator: std.mem.Allocator) !void {
         allocator,
         &matches,
         .at_least_once,
+        false,
         false,
     );
     defer plan.deinit();

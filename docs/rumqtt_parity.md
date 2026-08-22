@@ -14,6 +14,7 @@ and equal-wire broker results are kept separate.
 | MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
+| Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
@@ -815,7 +816,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs seventy-four
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs seventy-eight
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -1017,6 +1018,12 @@ PUBREL and receives PUBCOMP without a second subscriber delivery. This exposed
 the MQTT 3.1.1 PUBREL DUP flag being rejected and the fresh connection's
 receive accounting not recognizing an idempotent completed transaction; both
 are now reconciled without weakening MQTT 5 reserved-flag validation.
+Four MQTT 3.1.1/5 scenarios cover Mosquitto's non-standard
+`upgrade_outgoing_qos` switch. A retained and an ordinary live QoS 0
+Application Message are each delivered at the subscriber's granted QoS 1 when
+the opt-in is enabled, with the full PUBLISH/PUBACK exchange checked. The
+default remains the MQTT-required minimum QoS, and the same policy is applied
+before durable Session enqueueing.
 The offline Message Expiry case directly ports Mosquitto's
 `02-subpub-qos1-message-expiry.py`: two QoS 1 messages with one- and ten-second
 lifetimes are queued while a persistent subscriber is disconnected. After two
@@ -1054,7 +1061,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all seventy-four scenarios pass. This is deliberately described as a selected
+packets; all seventy-eight scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1080,5 +1087,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Seventy-four passing packet-vector scenarios do not cover
+   persistence semantics. Seventy-eight passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

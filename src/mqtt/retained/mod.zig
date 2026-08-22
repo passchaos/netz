@@ -36,6 +36,9 @@ pub const DeliveryContext = struct {
     subscription_existed: bool = false,
     subscriber_id: ?ClientId = null,
     subscription_identifier: ?usize = null,
+    /// Mosquitto-compatible, non-standard policy: raise a retained message to
+    /// the subscription QoS instead of applying the MQTT min(source, grant).
+    upgrade_outgoing_qos: bool = false,
 };
 
 pub const Match = struct {
@@ -577,6 +580,7 @@ pub const Store = struct {
                 subscription.qos,
                 context.subscription_identifier,
                 remaining,
+                context.upgrade_outgoing_qos,
             );
             return out[0..1];
         }
@@ -596,6 +600,7 @@ pub const Store = struct {
                     subscription.qos,
                     context.subscription_identifier,
                     remaining,
+                    context.upgrade_outgoing_qos,
                 );
                 written += 1;
             }
@@ -626,6 +631,7 @@ pub const Store = struct {
                 subscription.qos,
                 context.subscription_identifier,
                 remaining,
+                context.upgrade_outgoing_qos,
             );
             written += 1;
         }
@@ -763,11 +769,15 @@ fn deliveryForEntry(
     subscription_qos: mqtt.QoS,
     subscription_identifier: ?usize,
     remaining: ?u32,
+    upgrade_outgoing_qos: bool,
 ) Delivery {
     return .{
         .topic = entry.topic,
         .payload = entry.payload,
-        .qos = minQos(entry.qos, subscription_qos),
+        .qos = if (upgrade_outgoing_qos)
+            subscription_qos
+        else
+            minQos(entry.qos, subscription_qos),
         // Retained messages sent because of a subscription always carry
         // RETAIN=1, independent of Retain As Published.
         .retain = true,
