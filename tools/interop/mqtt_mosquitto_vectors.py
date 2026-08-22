@@ -1720,6 +1720,159 @@ def outgoing_qos2_reconnect_stages(
                 )
 
 
+def incoming_qos2_reconnect_reuse(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto issue 1322. A durable publisher repeatedly
+    # reconnects and reuses Packet Identifier 1 for completed QoS2
+    # transactions while subscriptions change. No stale Application Message
+    # may be released under a later transaction's topology.
+    topic_one = "02/subpub/qos2/1322/topic1"
+    topic_two = "02/subpub/qos2/1322/topic2"
+    for proto_ver in (4, 5):
+        publisher_id = f"qos2-1322-publisher-{proto_ver}"
+        persistent_connect = mqtt_packets.gen_connect(
+            publisher_id, clean_session=False, proto_ver=proto_ver,
+            session_expiry=60,
+        )
+
+        def connack(session_present: bool) -> bytes:
+            if proto_ver == 5:
+                return expected_connack(
+                    mqtt_packets, mqtt5_props,
+                    session_present=session_present,
+                )
+            return mqtt_packets.gen_connack(
+                flags=int(session_present), proto_ver=proto_ver,
+            )
+
+        # Two subscribers plus five separate publisher Network Connections.
+        with NetzBroker(executable, connections=7) as broker:
+            subscriber_one = broker.connect()
+            subscriber_two = None
+            try:
+                connect_client(
+                    subscriber_one, mqtt_packets,
+                    f"qos2-1322-sub1-{proto_ver}", proto_ver,
+                )
+                subscriber_one.sendall(mqtt_packets.gen_subscribe(
+                    1, topic_one, 0, proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    subscriber_one, mqtt_packets.gen_suback(
+                        1, 0, proto_ver=proto_ver,
+                    ), f"QoS2 1322 topic1 SUBACK v{proto_ver}",
+                )
+
+                for attempt, (topic, payload, target) in enumerate((
+                    (topic_one, "message1", subscriber_one),
+                    (topic_two, "message2", None),
+                    (topic_one, "message3", subscriber_one),
+                )):
+                    with broker.connect() as publisher:
+                        publisher.sendall(persistent_connect)
+                        expect_packet(
+                            publisher, connack(attempt != 0),
+                            f"QoS2 1322 publisher CONNACK {attempt} "
+                            f"v{proto_ver}",
+                        )
+                        publish = mqtt_packets.gen_publish(
+                            topic, qos=2, mid=1, payload=payload,
+                            proto_ver=proto_ver,
+                        )
+                        publisher.sendall(publish)
+                        expect_packet(
+                            publisher, mqtt_packets.gen_pubrec(
+                                1, proto_ver=proto_ver,
+                            ), f"QoS2 1322 PUBREC {attempt} v{proto_ver}",
+                        )
+                        publisher.sendall(mqtt_packets.gen_pubrel(
+                            1, proto_ver=proto_ver,
+                        ))
+                        expect_packet(
+                            publisher, mqtt_packets.gen_pubcomp(
+                                1, proto_ver=proto_ver,
+                            ), f"QoS2 1322 PUBCOMP {attempt} v{proto_ver}",
+                        )
+                        if target is not None:
+                            expect_packet(
+                                target, mqtt_packets.gen_publish(
+                                    topic, qos=0, payload=payload,
+                                    proto_ver=proto_ver,
+                                ), f"QoS2 1322 delivery {attempt} "
+                                f"v{proto_ver}",
+                            )
+                    # The publisher drops its TCP connection after completing
+                    # each transaction, matching mosquitto_pub -c invocations.
+
+                subscriber_two = broker.connect()
+                connect_client(
+                    subscriber_two, mqtt_packets,
+                    f"qos2-1322-sub2-{proto_ver}", proto_ver,
+                )
+                subscriber_two.sendall(mqtt_packets.gen_subscribe(
+                    1, topic_two, 0, proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    subscriber_two, mqtt_packets.gen_suback(
+                        1, 0, proto_ver=proto_ver,
+                    ), f"QoS2 1322 topic2 SUBACK v{proto_ver}",
+                )
+
+                for attempt, payload in enumerate(
+                    ("message4", "message5"), start=3
+                ):
+                    with broker.connect() as publisher:
+                        publisher.sendall(persistent_connect)
+                        expect_packet(
+                            publisher, connack(True),
+                            f"QoS2 1322 publisher CONNACK {attempt} "
+                            f"v{proto_ver}",
+                        )
+                        publisher.sendall(mqtt_packets.gen_publish(
+                            topic_one, qos=2, mid=1, payload=payload,
+                            proto_ver=proto_ver,
+                        ))
+                        expect_packet(
+                            publisher, mqtt_packets.gen_pubrec(
+                                1, proto_ver=proto_ver,
+                            ), f"QoS2 1322 PUBREC {attempt} v{proto_ver}",
+                        )
+                        publisher.sendall(mqtt_packets.gen_pubrel(
+                            1, proto_ver=proto_ver,
+                        ))
+                        expect_packet(
+                            publisher, mqtt_packets.gen_pubcomp(
+                                1, proto_ver=proto_ver,
+                            ), f"QoS2 1322 PUBCOMP {attempt} v{proto_ver}",
+                        )
+                        expect_packet(
+                            subscriber_one, mqtt_packets.gen_publish(
+                                topic_one, qos=0, payload=payload,
+                                proto_ver=proto_ver,
+                            ), f"QoS2 1322 topic1 delivery {attempt} "
+                            f"v{proto_ver}",
+                        )
+                    subscriber_two.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        subscriber_two, mqtt_packets.gen_pingresp(),
+                        f"QoS2 1322 no stale topic2 delivery {attempt} "
+                        f"v{proto_ver}",
+                    )
+
+                if proto_ver == 5:
+                    subscriber_one.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=5)
+                    )
+                    subscriber_two.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=5)
+                    )
+            finally:
+                subscriber_one.close()
+                if subscriber_two is not None:
+                    subscriber_two.close()
+
+
 def offline_message_expiry(executable: Path, mqtt_packets, mqtt5_props) -> None:
     # Direct wire port of Mosquitto 02-subpub-qos1-message-expiry.py. Keep a
     # persistent subscriber offline while two QoS 1 messages are queued, then
@@ -3688,6 +3841,7 @@ def main() -> None:
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
+    incoming_qos2_reconnect_reuse(args.broker, mqtt_packets, mqtt5_props)
     offline_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     offline_will_message_expiry(args.broker, mqtt_packets, mqtt5_props)
     retained_subscription_handling(args.broker, mqtt_packets, mqtt5_opts)
@@ -3736,7 +3890,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 70 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 72 scenarios")
 
 
 if __name__ == "__main__":
