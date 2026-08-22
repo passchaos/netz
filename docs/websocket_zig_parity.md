@@ -323,6 +323,13 @@ reference recorded about 1,772 `sendmsg` plus 892 `writev` calls: its client
 still sends mask/header separately from payload. Tracing perturbs latency, so
 these counts explain submission shape but are not timing samples.
 
+Server handshake policy also includes an optional exact Origin allowlist for
+both HTTP/1.1 Upgrade and RFC 8441. When configured, a missing, duplicate, or
+non-matching Origin is rejected before the successful handshake; leaving the
+list empty preserves native-client behavior. The MQTT adapter exposes the same
+policy for WS and WSS, and its Mosquitto-derived process gate ports the raw
+allowed/denied request shape from `13-websocket-bad-origin.py`.
+
 ## Remaining evidence before a broad completion claim
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark

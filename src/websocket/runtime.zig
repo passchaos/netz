@@ -11,6 +11,7 @@ const tls_client_identity = @import(
 );
 const compression_scratch =
     @import("runtime/compression_scratch.zig");
+const origin_policy = @import("runtime/origin_policy.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
@@ -33,6 +34,7 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     HeadersTooLarge,
     ConnectionClosed,
     InvalidResponse,
+    InvalidOrigin,
     InvalidSubprotocol,
     InvalidUri,
     UnsupportedScheme,
@@ -383,6 +385,7 @@ fn acceptTransport(
     var request = try http1.parseRequest(allocator, head.head, .{});
     defer request.deinit(allocator);
     try websocket.validateClientHandshake(request);
+    try origin_policy.validateHttp1(request.headers, options.allowed_origins);
     // Bytes sent before the 101 response are ambiguous HTTP smuggling/junk,
     // regardless of whether the carrier is TCP or TLS.
     if (head.extra.len != 0) return error.InvalidHandshake;
@@ -526,6 +529,10 @@ pub const AcceptOptions = struct {
     /// select their registered token. Keeping this opt-in avoids weakening the
     /// generic behavior while allowing adapters to fail before sending 101.
     require_subprotocol: bool = false,
+    /// When non-empty, require exactly one Origin header whose complete value
+    /// byte-for-byte matches an entry. An empty list preserves non-browser and
+    /// same-origin-agnostic server use cases by disabling Origin enforcement.
+    allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http1.Header = &.{},
     enable_permessage_deflate: bool = false,
 };
@@ -803,6 +810,12 @@ pub const Client = struct {
             }
             try headers.append(allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol_value.items });
         }
+        if (options.origin) |origin| {
+            try headers.append(allocator, .{
+                .name = "Origin",
+                .value = origin,
+            });
+        }
         if (options.enable_permessage_deflate) {
             try headers.append(allocator, .{
                 .name = "Sec-WebSocket-Extensions",
@@ -867,6 +880,8 @@ pub const ConnectOptions = struct {
     host: []const u8 = "",
     target: []const u8 = "/",
     protocols: []const []const u8 = &.{},
+    /// Optional browser Origin value for the opening request.
+    origin: ?[]const u8 = null,
     enable_permessage_deflate: bool = false,
     tcp_nodelay: bool = true,
     limits: Limits = .{},
@@ -2118,6 +2133,12 @@ pub const H2Client = struct {
             }
             try request_headers.append(allocator, .{ .name = "sec-websocket-protocol", .value = protocol_value.items });
         }
+        if (options.origin) |origin| {
+            try request_headers.append(allocator, .{
+                .name = "origin",
+                .value = origin,
+            });
+        }
         if (options.enable_permessage_deflate) {
             try request_headers.append(allocator, .{
                 .name = "sec-websocket-extensions",
@@ -2167,6 +2188,7 @@ pub const H2Server = struct {
         const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
         if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
         try rejectH2ExtendedConnectLegacyHeaders(request.headers);
+        try origin_policy.validateH2(request.headers, options.allowed_origins);
 
         const selected_protocol = try selectH2Subprotocol(allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
@@ -2206,6 +2228,8 @@ pub const H2ConnectOptions = struct {
     /// selected transport rather than hard-coding secure origins.
     scheme: ?[]const u8 = null,
     protocols: []const []const u8 = &.{},
+    /// Optional browser Origin value sent as a regular RFC 8441 header.
+    origin: ?[]const u8 = null,
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
     limits: Limits = .{},
@@ -2213,6 +2237,8 @@ pub const H2ConnectOptions = struct {
 
 pub const H2AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
+    /// RFC 8441 counterpart to `AcceptOptions.allowed_origins`.
+    allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
     limits: Limits = .{},

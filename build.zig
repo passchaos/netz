@@ -130,6 +130,17 @@ pub fn build(b: *std.Build) void {
         &mqtt_websocket_mosquitto.step,
     );
 
+    const mqtt_websocket_origin = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_websocket_origin.py",
+    });
+    mqtt_websocket_origin.addArtifactArg(mqtt_websocket_server);
+    const mqtt_websocket_origin_step = b.step(
+        "interop-mqtt-websocket-origin",
+        "Run Mosquitto-derived MQTT WebSocket Origin policy checks",
+    );
+    mqtt_websocket_origin_step.dependOn(&mqtt_websocket_origin.step);
+
     const websocket_autobahn_server = b.addExecutable(.{
         .name = "netz-websocket-autobahn-server",
         .root_module = b.createModule(.{

@@ -7,7 +7,7 @@ const tls_test = netz.tls.testing;
 const max_packet_size: usize = 128 * 1024;
 const expected_payload_len: usize = 36 * 1821;
 
-const Transport = enum { ws, wss };
+const Transport = enum { ws, wss, origin };
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", port);
 
     switch (transport) {
-        .ws => {
+        .ws, .origin => {
             var server = try netz.mqtt.websocket_runtime.Server.listen(
                 allocator,
                 io,
@@ -43,11 +43,21 @@ pub fn main(init: std.process.Init) !void {
                 .{
                     .limits = .{ .max_packet_size = max_packet_size },
                     .max_head_bytes = 16 * 1024,
+                    .allowed_origins = if (transport == .origin)
+                        &.{"https://example.org"}
+                    else
+                        &.{},
                 },
             );
             defer server.deinit();
             std.debug.print("netz MQTT WS interop server listening\n", .{});
-            try serveOne(&server, protocol);
+            if (transport == .origin) {
+                try std.testing.expectError(
+                    error.InvalidOrigin,
+                    server.accept(.{ .protocol = protocol }),
+                );
+            }
+            try serveOne(&server, protocol, transport == .origin);
         },
         .wss => {
             var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
@@ -74,12 +84,16 @@ pub fn main(init: std.process.Init) !void {
             );
             defer server.deinit();
             std.debug.print("netz MQTT WSS interop server listening\n", .{});
-            try serveOne(&server, protocol);
+            try serveOne(&server, protocol, false);
         },
     }
 }
 
-fn serveOne(server: anytype, protocol: netz.mqtt.ProtocolVersion) !void {
+fn serveOne(
+    server: anytype,
+    protocol: netz.mqtt.ProtocolVersion,
+    origin_mode: bool,
+) !void {
     var accepted = try server.accept(.{
         .protocol = protocol,
         .max_outgoing_inflight = 20,
@@ -87,7 +101,9 @@ fn serveOne(server: anytype, protocol: netz.mqtt.ProtocolVersion) !void {
     });
     defer accepted.deinit(server.allocator);
 
-    const expected_client_id = switch (protocol) {
+    const expected_client_id = if (origin_mode)
+        "origin-allowed"
+    else switch (protocol) {
         .v3_1_1 => "mosquitto-ws-v311",
         .v5 => "mosquitto-ws-v5",
     };
@@ -95,6 +111,11 @@ fn serveOne(server: anytype, protocol: netz.mqtt.ProtocolVersion) !void {
         expected_client_id,
         accepted.connect.connect.client_id,
     );
+    if (origin_mode) {
+        var disconnect = try accepted.connection.readDisconnect();
+        defer disconnect.deinit(server.allocator);
+        return;
+    }
 
     var publish = try accepted.connection.readPublish();
     defer publish.deinit(server.allocator);

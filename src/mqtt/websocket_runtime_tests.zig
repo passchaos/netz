@@ -681,6 +681,83 @@ test "MQTT WebSocket adapter rejects text messages" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WebSocket server enforces Origin allowlist" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{ .max_packet_size = max_packet_size },
+            .allowed_origins = &.{"https://example.org"},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *mqtt_ws.Server) !void {
+            try std.testing.expectError(
+                error.InvalidOrigin,
+                server_ptr.accept(.{ .protocol = .v5 }),
+            );
+            var accepted = try server_ptr.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings(
+                "mqtt-origin-allowed",
+                accepted.connect.connect.client_id,
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        mqtt_ws.Client.connect(allocator, io, server.address(), .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-origin-denied",
+            },
+            .host = "127.0.0.1",
+            .origin = "https://denied.example",
+        }),
+    );
+    var client = try mqtt_ws.Client.connect(allocator, io, server.address(), .{
+        .mqtt = .{
+            .protocol = .v5,
+            .client_id = "mqtt-origin-allowed",
+        },
+        .host = "127.0.0.1",
+        .origin = "https://example.org",
+    });
+    defer client.close();
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 fn localCaBundle(
     allocator: std.mem.Allocator,
     io: std.Io,

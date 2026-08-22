@@ -22,6 +22,7 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     websocket_server: websocket_runtime.Server,
     limits: runtime.Limits,
+    allowed_origins: []const []const u8,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -38,6 +39,7 @@ pub const Server = struct {
                 websocketLimits(options.limits, options.max_head_bytes),
             ),
             .limits = options.limits,
+            .allowed_origins = options.allowed_origins,
         };
     }
 
@@ -57,6 +59,7 @@ pub const Server = struct {
         var ws = try self.websocket_server.accept(.{
             .protocols = &.{mqtt_subprotocol},
             .require_subprotocol = true,
+            .allowed_origins = self.allowed_origins,
         });
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
@@ -78,6 +81,8 @@ pub const Server = struct {
 pub const ListenOptions = struct {
     limits: runtime.Limits = .{},
     max_head_bytes: usize = 64 * 1024,
+    /// Optional exact Origin allowlist for browser MQTT clients.
+    allowed_origins: []const []const u8 = &.{},
 };
 
 /// MQTT-over-WSS listener.
@@ -89,6 +94,7 @@ pub const TlsServer = struct {
     allocator: std.mem.Allocator,
     websocket_server: websocket_runtime.TlsServer,
     limits: runtime.Limits,
+    allowed_origins: []const []const u8,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -116,6 +122,7 @@ pub const TlsServer = struct {
                 },
             ),
             .limits = options.limits,
+            .allowed_origins = options.allowed_origins,
         };
     }
 
@@ -135,6 +142,7 @@ pub const TlsServer = struct {
         var ws = try self.websocket_server.accept(.{
             .protocols = &.{mqtt_subprotocol},
             .require_subprotocol = true,
+            .allowed_origins = self.allowed_origins,
         });
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
@@ -203,6 +211,8 @@ pub const TlsListenOptions = struct {
     max_client_handshake_size: usize = 256 * 1024,
     client_auth: ?@import("vail").tls.client_auth.ServerPolicy = null,
     tcp_nodelay: bool = true,
+    /// Optional exact Origin allowlist for browser MQTT clients.
+    allowed_origins: []const []const u8 = &.{},
 };
 
 fn TlsServeTask(comptime HandlerContext: type) type {
@@ -322,6 +332,8 @@ pub const ConnectOptions = struct {
     mqtt: runtime.ConnectOptions,
     host: []const u8 = "",
     target: []const u8 = "/mqtt",
+    /// Optional browser Origin header.
+    origin: ?[]const u8 = null,
     max_head_bytes: usize = 64 * 1024,
     tcp_nodelay: bool = true,
     tls: http1_runtime.TlsClientOptions = .{},
@@ -352,6 +364,7 @@ fn websocketConnectOptions(
     return .{
         .host = options.host,
         .target = options.target,
+        .origin = options.origin,
         .protocols = &.{mqtt_subprotocol},
         .tcp_nodelay = options.tcp_nodelay,
         .limits = websocketLimits(

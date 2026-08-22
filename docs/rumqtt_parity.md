@@ -588,6 +588,9 @@ operations/s:      75,579
 The adapter requires `Sec-WebSocket-Protocol: mqtt` on both client and server.
 It reuses the TCP runtime's MQTT negotiation, QoS 0/1/2, inflight, topic-alias,
 and capability state rather than maintaining a second protocol state machine.
+WS and WSS listeners may additionally require an exact Origin allowlist; a
+configured policy rejects missing, duplicate, or non-matching Origin headers
+before the 101 response, while the default remains disabled for native clients.
 Like rumqtt's audited `ws_stream_tungstenite` adapter, each write is one binary
 WebSocket message while reads expose a continuous byte stream: an MQTT packet
 may span messages and one message may contain bytes from multiple packets.
@@ -605,6 +608,10 @@ message, checks the exact PUBACK and PINGRESP, then verifies a netz-originated
 QoS 1 PUBLISH byte-for-byte before acknowledging it and disconnecting. The
 finite netz process validates the client ID, topic, complete payload pattern,
 and disconnect, so success cannot be inferred from the HTTP upgrade alone.
+`zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast` separately
+ports Mosquitto's `13-websocket-bad-origin.py` request shape: a disallowed
+origin is closed before upgrade, then an allowed origin completes WebSocket and
+MQTT 5 negotiation on the same finite server process.
 
 The audited rumqtt client supports MQTT 3.1.1 and MQTT 5 over WebSocket, while
 the rumqttd server path still contains `TODO: Add support for V5 protocol with
