@@ -80,7 +80,10 @@ grep -Fq \
   'netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=cleartext buffered_server_bytes=18 client_bytes=17 reply_bytes=18' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries and CONNECT tunnel: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18' \
+  'netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=cleartext buffered_server_bytes=19 client_bytes=18 reply_bytes=19' \
+  "$work/netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz Expect, CONNECT, and Upgrade boundaries: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
   "$work/hyper-server.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
@@ -131,6 +134,12 @@ grep -Fq \
 grep -Fq \
   'netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=cleartext server_preface=17 client_bytes=18 reply_bytes=17' \
   "$work/netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  "$work/hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=cleartext protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  "$work/netz-server.log"
 echo 'Hyper HTTP/1 client -> netz server interop passed'
 
 port=$(free_tcp_port)
@@ -166,7 +175,10 @@ grep -Fq \
   'netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=tls buffered_server_bytes=18 client_bytes=17 reply_bytes=18' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries and CONNECT tunnel: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18' \
+  'netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=tls buffered_server_bytes=19 client_bytes=18 reply_bytes=19' \
+  "$work/tls-netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz Expect, CONNECT, and Upgrade boundaries: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
   "$work/tls-hyper-server.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper HTTPS server -> netz client interop passed'
@@ -204,6 +216,12 @@ grep -Fq \
   "$work/tls-hyper-client.log"
 grep -Fq \
   'netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=tls server_preface=17 client_bytes=18 reply_bytes=17' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  "$work/tls-hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=tls protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
   "$work/tls-netz-server.log"
 cat "$work/tls-hyper-client.log"
 cat "$work/tls-netz-server.log"

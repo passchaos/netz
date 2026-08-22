@@ -58,7 +58,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
     let mut connections = Vec::new();
-    for connection_index in 0..5 {
+    for connection_index in 0..6 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let tls_acceptor = cert_path.as_ref().map(|cert| {
@@ -108,6 +108,24 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         .expect("CONNECT tunnel task completion")
                         .expect("CONNECT tunnel exchange");
                 }
+                5 => {
+                    let (completion, mut completed) = tokio::sync::mpsc::channel(1);
+                    server_http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(io),
+                            service_fn(move |request| {
+                                handle_upgrade_request(request, completion.clone())
+                            }),
+                        )
+                        .with_upgrades()
+                        .await
+                        .expect("serve netz generic Upgrade");
+                    completed
+                        .recv()
+                        .await
+                        .expect("Upgrade task completion")
+                        .expect("Upgrade exchange");
+                }
                 _ => unreachable!(),
             }
         }));
@@ -115,7 +133,65 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries and CONNECT tunnel: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz Expect, CONNECT, and Upgrade boundaries: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19");
+}
+
+async fn handle_upgrade_request(
+    mut request: Request<Incoming>,
+    completion: tokio::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<Response<Body>, std::io::Error> {
+    if request.method() != Method::GET
+        || request.uri().path_and_query().map(|value| value.as_str()) != Some("/upgrade?from=netz")
+        || request.headers().get("connection") != Some(&HeaderValue::from_static("Upgrade"))
+        || request.headers().get("upgrade") != Some(&HeaderValue::from_static("netz-test"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected generic Upgrade request",
+        ));
+    }
+    tokio::spawn(async move {
+        let result = match hyper::upgrade::on(&mut request).await {
+            Ok(upgraded) => serve_upgrade_tunnel(upgraded)
+                .await
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(format!("upgrade generic request: {error}")),
+        };
+        let _ = completion.send(result).await;
+    });
+    Ok(Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header("connection", "Upgrade")
+        .header("upgrade", "netz-test")
+        .body(empty_body())
+        .expect("Upgrade response"))
+}
+
+async fn serve_upgrade_tunnel(upgraded: Upgraded) -> Result<(), std::io::Error> {
+    let parts = upgraded
+        .downcast::<TokioIo<MaybeTls>>()
+        .map_err(|_| std::io::Error::other("unexpected upgraded IO type"))?;
+    let mut tunnel = parts.io.inner;
+    tunnel.write_all(b"hyper upgrade ready").await?;
+    let mut payload = parts.read_buf.to_vec();
+    while payload.len() < b"netz upgrade bytes".len() {
+        let mut chunk = [0; 64];
+        let count = tunnel.read(&mut chunk).await?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Upgrade closed before client payload",
+            ));
+        }
+        payload.extend_from_slice(&chunk[..count]);
+    }
+    if payload != b"netz upgrade bytes" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected Upgrade payload: {payload:?}"),
+        ));
+    }
+    tunnel.write_all(b"hyper upgrade reply").await
 }
 
 async fn handle_connect_request(
@@ -357,9 +433,9 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         .await
         .expect("connect netz HTTP/1 server");
     stream.set_nodelay(true).expect("client TCP_NODELAY");
-    let io = match ca_path {
+    let io = match ca_path.as_ref() {
         Some(ca) => MaybeTls::Client(
-            TlsConnector::from(tls_client_config(&ca))
+            TlsConnector::from(tls_client_config(ca))
                 .connect(
                     rustls::pki_types::ServerName::try_from("localhost")
                         .expect("valid server name"),
@@ -489,6 +565,77 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         .expect("read netz tunnel reply");
     assert_eq!(&reply, b"netz tunnel reply");
     println!("Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17");
+
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect netz Upgrade server");
+    stream.set_nodelay(true).expect("Upgrade TCP_NODELAY");
+    let io = match ca_path.as_ref() {
+        Some(ca) => MaybeTls::Client(
+            TlsConnector::from(tls_client_config(ca))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost")
+                        .expect("valid server name"),
+                    stream,
+                )
+                .await
+                .expect("connect Upgrade HTTPS"),
+        ),
+        None => MaybeTls::Clear(stream),
+    };
+    let (mut upgrade_sender, upgrade_connection) = client_http1::Builder::new()
+        .handshake(TokioIo::new(io))
+        .await
+        .expect("Hyper generic Upgrade handshake");
+    tokio::spawn(async move {
+        upgrade_connection
+            .with_upgrades()
+            .await
+            .expect("drive Hyper generic Upgrade connection");
+    });
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/upgrade?from=hyper")
+        .header("host", "localhost")
+        .header("connection", "Upgrade")
+        .header("upgrade", "netz-test")
+        .body(empty_body())
+        .expect("Upgrade request");
+    let mut response = upgrade_sender
+        .send_request(request)
+        .await
+        .expect("send Hyper Upgrade request");
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(
+        response.headers().get("upgrade"),
+        Some(&HeaderValue::from_static("netz-test")),
+    );
+    let upgraded = hyper::upgrade::on(&mut response)
+        .await
+        .expect("upgrade netz generic response");
+    let parts = upgraded
+        .downcast::<TokioIo<MaybeTls>>()
+        .expect("downcast generic upgraded netz transport");
+    let mut tunnel = parts.io.inner;
+    let mut preface = parts.read_buf.to_vec();
+    while preface.len() < b"netz upgrade ready".len() {
+        let mut chunk = [0; 64];
+        let count = tunnel.read(&mut chunk).await.expect("read Upgrade preface");
+        assert_ne!(count, 0, "Upgrade closed before server preface");
+        preface.extend_from_slice(&chunk[..count]);
+    }
+    assert_eq!(preface, b"netz upgrade ready");
+    tunnel
+        .write_all(b"hyper upgrade bytes")
+        .await
+        .expect("write Upgrade payload");
+    let mut reply = [0; 18];
+    tunnel
+        .read_exact(&mut reply)
+        .await
+        .expect("read Upgrade reply");
+    assert_eq!(&reply, b"netz upgrade reply");
+    println!("Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18");
 }
 
 fn empty_body() -> Body {

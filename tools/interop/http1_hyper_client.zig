@@ -276,6 +276,50 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport={s} buffered_server_bytes=18 client_bytes=17 reply_bytes=18\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+
+    var upgrade_client = try connect(
+        allocator,
+        io,
+        port,
+        limits,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
+    );
+    defer upgrade_client.close();
+    var upgrade = try upgrade_client.openUpgrade(
+        "/upgrade?from=netz",
+        "localhost",
+        "netz-test",
+        &.{},
+    );
+    var upgrade_preface: [19]u8 = undefined;
+    var upgrade_preface_len: usize = 0;
+    while (upgrade_preface_len < upgrade_preface.len) {
+        const count = try upgrade.read(
+            upgrade_preface[upgrade_preface_len..],
+        );
+        if (count == 0) return error.ConnectionClosed;
+        upgrade_preface_len += count;
+    }
+    if (!std.mem.eql(u8, &upgrade_preface, "hyper upgrade ready")) {
+        return error.InvalidUpgradeResponse;
+    }
+    try upgrade.write("netz upgrade bytes");
+    var upgrade_reply: [19]u8 = undefined;
+    var upgrade_reply_len: usize = 0;
+    while (upgrade_reply_len < upgrade_reply.len) {
+        const count = try upgrade.read(upgrade_reply[upgrade_reply_len..]);
+        if (count == 0) return error.ConnectionClosed;
+        upgrade_reply_len += count;
+    }
+    if (!std.mem.eql(u8, &upgrade_reply, "hyper upgrade reply")) {
+        return error.InvalidUpgradeResponse;
+    }
+    std.debug.print(
+        "netz HTTP/1 client interoperated with Hyper generic Upgrade: transport={s} buffered_server_bytes=19 client_bytes=18 reply_bytes=19\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
 }
 
 fn connect(

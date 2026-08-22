@@ -245,6 +245,16 @@ direction. Hyper uses `upgrade::on` with `with_upgrades`, while netz uses
 `openConnectTunnel` and `acceptConnectTunnel`; the gate awaits tunnel-task
 completion instead of inferring success from the HTTP status.
 
+Generic HTTP/1.1 `101 Switching Protocols` now has the same explicit transport
+handoff rather than being available only through the WebSocket adapter. The
+client validates `Connection: Upgrade`, the selected Upgrade token, empty HTTP
+body/trailers, and then exposes any bytes read past the response head. The
+server validates the corresponding request before sending 101 and transferring
+its buffered request suffix. The Hyper process gate exercises both endpoint
+roles over cleartext and TLS with protocol `netz-test`, bidirectional opaque
+payloads, and an immediate server preface; the netz-server direction uses
+Hyper's generic `upgrade::on`/`with_upgrades` path rather than WebSocket code.
+
 ## HTTP/2 consecutive and parallel round trips
 
 Hyper's `benches/end_to_end.rs` defines consecutive empty GET, consecutive

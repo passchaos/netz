@@ -247,6 +247,18 @@ pub const Response = struct {
         }
         return self.version == .http_1_1;
     }
+
+    /// Return the selected protocol from a valid 101 Switching Protocols
+    /// response. Both Connection and Upgrade are required so callers cannot
+    /// mistake an arbitrary informational response for a protocol handoff.
+    pub fn upgradeProtocol(self: Response) ?[]const u8 {
+        if (self.status != 101) return null;
+        const connection = self.header("connection") orelse return null;
+        if (!wire.containsToken(connection, "upgrade")) return null;
+        const upgrade = self.header("upgrade") orelse return null;
+        const protocol = wire.trimOws(upgrade);
+        return if (protocol.len == 0) null else protocol;
+    }
 };
 
 /// Parse a strict request head into caller-provided header storage.

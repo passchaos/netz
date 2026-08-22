@@ -1370,6 +1370,82 @@ pub const Client = struct {
         };
     }
 
+    /// Perform a generic HTTP/1.1 Upgrade and transfer the underlying byte
+    /// stream to the caller after validating the peer's 101 response. Bytes
+    /// already read beyond the response head remain available through
+    /// `Tunnel.read`, which is essential when the upgraded peer sends its
+    /// protocol preface immediately with the 101.
+    pub fn openUpgrade(
+        self: *Client,
+        target: []const u8,
+        host: ?[]const u8,
+        protocol: []const u8,
+        headers: []const http1.Header,
+    ) Error!Tunnel {
+        try self.writer_state.ensureAvailable();
+        try validateUpgradeProtocol(protocol);
+        try rejectUpgradeManagedHeaders(headers);
+        var upgrade_headers: std.ArrayList(http1.Header) = .empty;
+        defer upgrade_headers.deinit(self.allocator);
+        try upgrade_headers.ensureTotalCapacity(
+            self.allocator,
+            headers.len + 2,
+        );
+        upgrade_headers.appendAssumeCapacity(.{
+            .name = "Connection",
+            .value = "Upgrade",
+        });
+        upgrade_headers.appendAssumeCapacity(.{
+            .name = "Upgrade",
+            .value = protocol,
+        });
+        upgrade_headers.appendSliceAssumeCapacity(headers);
+        try writeRequestToTransport(self.allocator, self.transport(), .{
+            .method = .GET,
+            .target = target,
+            .host = host orelse self.default_host,
+            .headers = upgrade_headers.items,
+        });
+        return self.finishUpgrade(protocol);
+    }
+
+    /// Complete a generic Upgrade from an already-written request. This split
+    /// form supports callers that must coalesce their first protocol bytes
+    /// with the HTTP request while preserving any response suffix read ahead.
+    pub fn finishUpgrade(
+        self: *Client,
+        protocol: []const u8,
+    ) Error!Tunnel {
+        try self.writer_state.ensureAvailable();
+        try validateUpgradeProtocol(protocol);
+        var response = try readResponseFromTransportBufferedForRequest(
+            self.allocator,
+            self.transport(),
+            self.limits,
+            .{},
+            &self.inbuf,
+            .GET,
+        );
+        errdefer response.deinit(self.allocator);
+        const selected = response.response.upgradeProtocol() orelse
+            return error.InvalidResponse;
+        if (!std.ascii.eqlIgnoreCase(selected, protocol) or
+            response.response.body.len != 0 or
+            response.response.trailers.len != 0)
+        {
+            return error.InvalidResponse;
+        }
+        response.deinit(self.allocator);
+        self.writer_state.phase = .unusable;
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = self.stream,
+            .tls_conn = self.tls_conn,
+            .inbuf = &self.inbuf,
+        };
+    }
+
     fn readStreamingResponse(
         self: *Client,
         request_method: http1.Method,
@@ -1727,7 +1803,63 @@ pub const Connection = struct {
             .inbuf = &self.inbuf,
         };
     }
+
+    /// Accept a validated generic Upgrade request and hand off the same
+    /// transport after sending 101. The request parser may already have read
+    /// upgraded-protocol bytes; `Tunnel` preserves that buffered suffix.
+    pub fn acceptUpgrade(
+        self: *Connection,
+        request: http1.Request,
+        protocol: []const u8,
+        response_headers: []const http1.Header,
+    ) Error!Tunnel {
+        try self.writer_state.ensureAvailable();
+        try validateUpgradeProtocol(protocol);
+        try rejectUpgradeManagedHeaders(response_headers);
+        const requested = request.upgradeProtocol() orelse
+            return error.InvalidResponse;
+        if (request.version != .http_1_1 or
+            !std.ascii.eqlIgnoreCase(requested, protocol) or
+            request.body.len != 0 or request.trailers.len != 0)
+        {
+            return error.InvalidResponse;
+        }
+        var headers: [2]http1.Header = .{
+            .{ .name = "Connection", .value = "Upgrade" },
+            .{ .name = "Upgrade", .value = protocol },
+        };
+        var merged: std.ArrayList(http1.Header) = .empty;
+        defer merged.deinit(self.allocator);
+        try merged.appendSlice(self.allocator, &headers);
+        try merged.appendSlice(self.allocator, response_headers);
+        try writeResponseToTransport(self.allocator, self.transport(), .{
+            .status = 101,
+            .reason = "Switching Protocols",
+            .headers = merged.items,
+            .request_method = request.method,
+        });
+        self.writer_state.phase = .unusable;
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = self.stream,
+            .tls_server_conn = self.tls_server_conn,
+            .inbuf = &self.inbuf,
+        };
+    }
 };
+
+fn validateUpgradeProtocol(protocol: []const u8) Error!void {
+    http1.validateHeaderName(protocol) catch return error.InvalidResponse;
+}
+
+fn rejectUpgradeManagedHeaders(headers: []const http1.Header) Error!void {
+    for (headers) |header| {
+        if (header.eqlName("connection") or header.eqlName("upgrade")) {
+            return error.InvalidResponse;
+        }
+    }
+}
 
 pub const Tunnel = struct {
     io: std.Io,
@@ -3451,6 +3583,82 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
     if (shared.err) |err| return err;
 
     try std.testing.expectError(error.MalformedStartLine, client.openConnectTunnel("/not-authority", &.{}));
+}
+
+test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            var tunnel = try connection.acceptUpgrade(
+                request.request,
+                "netz-test",
+                &.{},
+            );
+            try tunnel.write("server-preface");
+            var payload: [14]u8 = undefined;
+            var read: usize = 0;
+            while (read < payload.len) {
+                const count = try tunnel.read(payload[read..]);
+                if (count == 0) return error.ConnectionClosed;
+                read += count;
+            }
+            try std.testing.expectEqualStrings(
+                "client-preface",
+                &payload,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    try writeAllToStream(
+        io,
+        client.stream,
+        "GET /upgrade HTTP/1.1\r\nHost: localhost\r\n" ++
+            "Connection: keep-alive, Upgrade\r\n" ++
+            "Upgrade: netz-test\r\n\r\nclient-preface",
+    );
+    var tunnel = try client.finishUpgrade("netz-test");
+    var preface: [14]u8 = undefined;
+    var read: usize = 0;
+    while (read < preface.len) {
+        const count = try tunnel.read(preface[read..]);
+        if (count == 0) return error.ConnectionClosed;
+        read += count;
+    }
+    try std.testing.expectEqualStrings("server-preface", &preface);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 client connects by host name" {
