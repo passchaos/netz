@@ -184,10 +184,12 @@ reported rather than hidden by the latency result.
 ```sh
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
 
-zig build-exe -OReleaseFast -lc --dep websocket \
+zig build-exe -OReleaseFast -lc \
+  --dep websocket --dep counting_allocator \
   -Mroot=benchmarks/reference/websocket_zig_echo.zig \
   --dep build \
   -Mwebsocket=/home/passchaos/Work/websocket.zig/src/websocket.zig \
+  -Mcounting_allocator=examples/support/counting_allocator.zig \
   -Mbuild=benchmarks/reference/websocket_zig_build_options.zig \
   -femit-bin=/tmp/bench-websocket-zig-echo
 taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay
@@ -249,6 +251,40 @@ netz aggregate-latency advantage:
   1.256x by median, 1.251x by trimmed mean
 ```
 
+### Mixed payload and higher-concurrency coverage
+
+Both checked-in echo harnesses now accept `--mixed` and use the identical
+deterministic `1, 7, 125, 126, 1024, 4096`-byte schedule. This crosses the
+RFC 6455 7-bit/16-bit payload-length boundary while retaining tiny control-like,
+medium and 4-KiB application messages. Reports use the exact 200-iteration
+schedule rather than multiplying by an average, and both sides verify the same
+payload checksum. The websocket.zig fixture's fixed 16-entry benchmark arrays
+were replaced with bounded dynamic storage and its connection cap was raised to
+256, matching netz.
+
+Three CPU-0..31 runs at 64 concurrent persistent connections produced:
+
+```text
+netz:
+  0.940-0.988 us aggregate/roundtrip
+  1,011,630-1,063,066 roundtrips/s
+
+websocket.zig:
+  1.274-1.406 us aggregate/roundtrip
+  710,848-784,670 roundtrips/s
+
+netz advantage:
+  1.289-1.496x across the observed throughput ranges
+```
+
+All runs verified 22,753,024 logical payload bytes and checksum 4,846,784. The
+netz harness now gives its blocking handlers an unlimited async resource limit;
+the former default could strand connections above the host's CPU count behind
+handlers waiting for their next echo. The websocket.zig reference uses its
+blocking worker implementation, and its fixed 16-entry benchmark bookkeeping
+was replaced with bounded dynamic arrays. Both harnesses now permit 256
+connections rather than imposing an artificial 16-connection ceiling.
+
 One `strace -f -c` run recorded about 1,768 netz `sendmsg` calls. The
 reference recorded about 1,772 `sendmsg` plus 892 `writev` calls: its client
 still sends mask/header separately from payload. Tracing perturbs latency, so
@@ -256,8 +292,8 @@ these counts explain submission shape but are not timing samples.
 
 ## Remaining evidence before a broad completion claim
 
-1. Extend the now-equal-shape 1/4-connection benchmark to mixed payload
-   distributions and higher connection counts.
+1. Extend the now-equal-shape mixed-payload benchmark beyond the validated
+   64-connection comparison and add latency percentiles per payload class.
 2. Compare buffer-pool behavior and peak memory under many mostly-idle
    connections; the reference exposes explicit small/large buffer pools. The
    netz echo benchmark now accepts `--stats` and reports thread-safe allocation
@@ -268,12 +304,12 @@ these counts explain submission shape but are not timing samples.
    dominated by sixteen retained 64-KiB codec windows. Add equal telemetry to
    the websocket.zig harness and extend beyond 16 mostly-idle connections before
    making a memory ratio. The fixed 16-connection benchmark bookkeeping has
-   since been replaced by bounded dynamic arrays and the cap raised to 256. A
-   32-connection cleartext smoke completed 6,400 measured round trips with 423
-   allocations and 425,312 peak live bytes (about 13.0 KiB/connection including
-   both client and server runtime state plus benchmark coordination). A 64-
-   connection run exceeded the practical duration of this same-process smoke
-   on the current host, so it is not counted as passing evidence.
+   since been replaced by bounded dynamic arrays and the cap raised to 256 in
+   both harnesses. Equal 64-connection mixed-payload telemetry recorded 1,095
+   allocations and 851,974 peak live bytes for netz versus 402 allocations and
+   683,242 peak live bytes for websocket.zig. Netz is faster in this shape but
+   not yet smaller; future work should reduce its per-connection runtime state
+   before making a memory-superiority claim.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated

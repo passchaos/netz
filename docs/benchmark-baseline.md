@@ -1172,10 +1172,12 @@ Commands:
 ```sh
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
 
-zig build-exe -OReleaseFast -lc --dep websocket \
+zig build-exe -OReleaseFast -lc \
+  --dep websocket --dep counting_allocator \
   -Mroot=benchmarks/reference/websocket_zig_echo.zig \
   --dep build \
   -Mwebsocket=/home/passchaos/Work/websocket.zig/src/websocket.zig \
+  -Mcounting_allocator=examples/support/counting_allocator.zig \
   -Mbuild=benchmarks/reference/websocket_zig_build_options.zig \
   -femit-bin=/tmp/bench-websocket-zig-echo
 taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay

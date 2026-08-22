@@ -3,14 +3,19 @@ const netz = @import("netz");
 const CountingAllocator = @import("support/counting_allocator.zig")
     .CountingAllocator;
 
-const payload_bytes: usize = 4096;
+const max_payload_bytes: usize = 4096;
+const fixed_payload_bytes: usize = max_payload_bytes;
+// Exercise both RFC 6455 length encodings and realistic tiny/medium/large
+// application messages. Twenty warmups plus 200 measured iterations do not
+// divide evenly by six, so accounting uses the exact deterministic schedule.
+const mixed_payload_sizes = [_]usize{ 1, 7, 125, 126, 1024, 4096 };
 // websocket.zig's client submits mask/header and payload separately, which can
 // make long runs expensive on kernels that apply delayed ACK. Keep the shared
 // comparison shape short enough for repeated pinned samples while retaining a
 // meaningful untimed warmup.
 const warmup_iterations: usize = 20;
 const iterations: usize = 200;
-const max_message_bytes: usize = payload_bytes;
+const max_message_bytes: usize = max_payload_bytes;
 const default_connections: usize = 1;
 const max_connections: usize = 256;
 const fragmented_slices: usize = 16;
@@ -23,7 +28,14 @@ pub fn main(init: std.process.Init) !void {
     else
         std.heap.smp_allocator;
     const connections = options.connections;
-    var threaded = std.Io.Threaded.init(allocator, .{});
+    // Every server-side connection handler blocks on its own socket while the
+    // matching client runs on an OS thread. An executor capped near the CPU
+    // count can therefore strand handlers above that count behind peers that
+    // are waiting for their echoes. Unlimited async resources keep this
+    // transport-concurrency benchmark from measuring scheduler starvation.
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
     defer threaded.deinit();
     const io = threaded.io();
 
@@ -46,6 +58,7 @@ pub fn main(init: std.process.Init) !void {
         expected_exchanges: usize,
         connection_count: usize,
         compression: bool,
+        mixed: bool,
 
         fn run(shared: *@This()) void {
             shared.result = shared.server.serveConcurrent(
@@ -65,10 +78,13 @@ pub fn main(init: std.process.Init) !void {
             connection: *netz.websocket.runtime.Connection,
         ) netz.websocket.runtime.Error!void {
             var storage: [max_message_bytes]u8 align(64) = undefined;
-            for (0..shared.expected_exchanges) |_| {
+            for (0..shared.expected_exchanges) |iteration| {
                 const message = try connection.receiveMessageInto(&storage);
                 if (message.opcode != .binary or
-                    message.payload.len != payload_bytes)
+                    message.payload.len != payloadLength(
+                        shared.mixed,
+                        iteration,
+                    ))
                 {
                     return error.InvalidFrame;
                 }
@@ -81,6 +97,7 @@ pub fn main(init: std.process.Init) !void {
         .expected_exchanges = warmup_iterations + iterations,
         .connection_count = connections,
         .compression = options.compression,
+        .mixed = options.mixed,
     };
     const server_thread = try std.Thread.spawn(
         .{},
@@ -139,6 +156,7 @@ pub fn main(init: std.process.Init) !void {
         checksum: *u64,
         seed: u8,
         fragmented: bool,
+        mixed: bool,
 
         fn run(worker: *@This()) void {
             runFallible(worker) catch |err| {
@@ -148,28 +166,33 @@ pub fn main(init: std.process.Init) !void {
         }
 
         fn runFallible(worker: *@This()) !void {
-            var payload: [payload_bytes]u8 align(64) = undefined;
-            var response: [payload_bytes]u8 align(64) = undefined;
+            var payload: [max_payload_bytes]u8 align(64) = undefined;
+            var response: [max_payload_bytes]u8 align(64) = undefined;
             for (&payload, 0..) |*byte, index| {
                 byte.* = worker.seed +% @as(u8, @truncate(index));
             }
-            for (0..warmup_iterations) |_| {
+            for (0..warmup_iterations) |iteration| {
                 _ = try exchange(
                     worker.client,
                     &payload,
                     &response,
                     worker.fragmented,
+                    payloadLength(worker.mixed, iteration),
                 );
             }
             _ = worker.ready.fetchAdd(1, .release);
             worker.start.waitUncancelable(worker.io);
             var checksum: u64 = 0;
-            for (0..iterations) |_| {
+            for (0..iterations) |iteration| {
                 checksum +%= try exchange(
                     worker.client,
                     &payload,
                     &response,
                     worker.fragmented,
+                    payloadLength(
+                        worker.mixed,
+                        warmup_iterations + iteration,
+                    ),
                 );
             }
             worker.checksum.* = checksum;
@@ -190,6 +213,7 @@ pub fn main(init: std.process.Init) !void {
             .checksum = &checksums[index],
             .seed = @truncate(index * 17),
             .fragmented = options.fragmented,
+            .mixed = options.mixed,
         };
         workers[index] = try std.Thread.spawn(
             .{},
@@ -221,15 +245,16 @@ pub fn main(init: std.process.Init) !void {
     server_thread.join();
     if (shared.accept_error) |err| return err;
     var serve_result = shared.result orelse return error.ServerFailed;
-    defer serve_result.deinit();
-    if (serve_result.firstError()) |err| return err;
-    const uncompressed_roundtrip_wire_bytes =
-        // Client frame: 2-byte base + 2-byte extended length + 4-byte mask.
-        (2 + 2 + 4 + payload_bytes) +
-        // Server frame: 2-byte base + 2-byte extended length.
-        (2 + 2 + payload_bytes);
-    const logical_roundtrip_bytes = payload_bytes * 2;
+    if (serve_result.firstError()) |err| {
+        serve_result.deinit();
+        return err;
+    }
+    serve_result.deinit();
     const measured_roundtrips = iterations * connections;
+    const logical_payload_bytes =
+        measuredPayloadBytes(options.mixed) * connections;
+    const uncompressed_wire_bytes =
+        measuredWireBytes(options.mixed) * connections;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
@@ -240,10 +265,11 @@ pub fn main(init: std.process.Init) !void {
         \\  connections: {d}
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
-        \\  payload bytes: {d}
+        \\  payload schedule: {s}
+        \\  logical payload bytes: {d}
         \\  permessage-deflate: {}
         \\  fragmented send slices: {d}
-        \\  uncompressed-equivalent wire bytes/roundtrip: {d}
+        \\  uncompressed-equivalent wire bytes: {d}
         \\  aggregate ns/roundtrip: {d}
         \\  roundtrips/s: {d}
         \\  uncompressed-equivalent wire MiB/s: {d:.2}
@@ -254,22 +280,28 @@ pub fn main(init: std.process.Init) !void {
         connections,
         warmup_iterations,
         iterations,
-        payload_bytes,
+        if (options.mixed) "1,7,125,126,1024,4096" else "4096",
+        logical_payload_bytes,
         options.compression,
         if (options.fragmented) fragmented_slices else 1,
-        uncompressed_roundtrip_wire_bytes,
+        uncompressed_wire_bytes,
         elapsed / measured_roundtrips,
         roundtrips_per_second,
         @as(f64, @floatFromInt(
-            roundtrips_per_second * uncompressed_roundtrip_wire_bytes,
+            @as(u128, uncompressed_wire_bytes) * std.time.ns_per_s /
+                @max(elapsed, 1),
         )) /
             (1024.0 * 1024.0),
         @as(f64, @floatFromInt(
-            roundtrips_per_second * logical_roundtrip_bytes,
+            @as(u128, logical_payload_bytes) * std.time.ns_per_s /
+                @max(elapsed, 1),
         )) / (1024.0 * 1024.0),
         checksum,
     });
-    if (options.stats) counting.snapshot().print();
+    if (options.stats) {
+        const snapshot = counting.snapshot();
+        snapshot.print();
+    }
 }
 
 const Options = struct {
@@ -277,6 +309,7 @@ const Options = struct {
     compression: bool = false,
     stats: bool = false,
     fragmented: bool = false,
+    mixed: bool = false,
 };
 
 fn parseOptions(init: std.process.Init) !Options {
@@ -300,6 +333,8 @@ fn parseOptions(init: std.process.Init) !Options {
             options.stats = true;
         } else if (std.mem.eql(u8, arg, "--fragmented")) {
             options.fragmented = true;
+        } else if (std.mem.eql(u8, arg, "--mixed")) {
+            options.mixed = true;
         } else {
             return error.InvalidArgument;
         }
@@ -315,36 +350,75 @@ fn parseOptions(init: std.process.Init) !Options {
 
 fn exchange(
     client: *netz.websocket.runtime.Connection,
-    payload: *[payload_bytes]u8,
-    response_storage: *[payload_bytes]u8,
+    payload: *[max_payload_bytes]u8,
+    response_storage: *[max_payload_bytes]u8,
     fragmented: bool,
+    payload_len: usize,
 ) !u64 {
+    const data = payload[0..payload_len];
     if (fragmented) {
         var fragments: [fragmented_slices][]const u8 = undefined;
-        for (&fragments, 0..) |*fragment, index| {
-            const start = index * payload.len / fragments.len;
-            const end = (index + 1) * payload.len / fragments.len;
-            fragment.* = payload[start..end];
+        const fragment_count = @min(fragments.len, data.len);
+        for (fragments[0..fragment_count], 0..) |*fragment, index| {
+            const start = index * data.len / fragment_count;
+            const end = (index + 1) * data.len / fragment_count;
+            fragment.* = data[start..end];
         }
-        try client.sendFragmented(.binary, &fragments);
+        try client.sendFragmented(.binary, fragments[0..fragment_count]);
     } else if (client.permessage_deflate) {
-        try client.sendBinary(payload);
+        try client.sendBinary(data);
     } else {
-        try client.sendBinaryInPlace(payload);
+        try client.sendBinaryInPlace(data);
     }
     const response = try client.receiveMessageInto(response_storage);
     if (response.opcode != .binary or
-        response.payload.len != payload_bytes)
+        response.payload.len != payload_len)
     {
         return error.InvalidFrame;
     }
     // sendBinaryInPlace deliberately leaves `payload` masked. Restoring it
     // from the echoed application bytes gives both compared clients the same
     // per-roundtrip copy and the same logical payload on their next send.
-    @memcpy(payload, response.payload);
+    @memcpy(data, response.payload);
     return @as(u64, response.payload[0]) +%
-        @as(u64, response.payload[payload_bytes / 2]) +%
-        @as(u64, response.payload[payload_bytes - 1]);
+        @as(u64, response.payload[payload_len / 2]) +%
+        @as(u64, response.payload[payload_len - 1]);
+}
+
+fn payloadLength(mixed: bool, iteration: usize) usize {
+    return if (mixed)
+        mixed_payload_sizes[iteration % mixed_payload_sizes.len]
+    else
+        fixed_payload_bytes;
+}
+
+fn measuredPayloadBytes(mixed: bool) usize {
+    var total: usize = 0;
+    for (0..iterations) |iteration| {
+        total += payloadLength(mixed, warmup_iterations + iteration) * 2;
+    }
+    return total;
+}
+
+fn measuredWireBytes(mixed: bool) usize {
+    var total: usize = 0;
+    for (0..iterations) |iteration| {
+        const len = payloadLength(mixed, warmup_iterations + iteration);
+        total += clientFrameLen(len) + serverFrameLen(len);
+    }
+    return total;
+}
+
+fn clientFrameLen(payload_len: usize) usize {
+    return 2 + payloadLengthFieldBytes(payload_len) + 4 + payload_len;
+}
+
+fn serverFrameLen(payload_len: usize) usize {
+    return 2 + payloadLengthFieldBytes(payload_len) + payload_len;
+}
+
+fn payloadLengthFieldBytes(payload_len: usize) usize {
+    return if (payload_len <= 125) 0 else if (payload_len <= 65_535) 2 else 8;
 }
 
 fn nowNs(io: std.Io) u64 {

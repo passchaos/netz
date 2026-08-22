@@ -1,23 +1,30 @@
 const std = @import("std");
 const websocket = @import("websocket");
+const CountingAllocator = @import("counting_allocator").CountingAllocator;
 
-const payload_bytes: usize = 4096;
+const max_payload_bytes: usize = 4096;
+const fixed_payload_bytes: usize = max_payload_bytes;
+const mixed_payload_sizes = [_]usize{ 1, 7, 125, 126, 1024, 4096 };
 const warmup_iterations: usize = 20;
 const iterations: usize = 200;
 const default_connections: usize = 1;
-const max_connections: usize = 16;
+const max_connections: usize = 256;
 
-const Context = struct {};
+const Context = struct {
+    mixed: bool,
+};
 
 const Handler = struct {
     conn: *websocket.Conn,
+    mixed: bool,
+    iteration: usize = 0,
 
     pub fn init(
         _: *const websocket.Handshake,
         conn: *websocket.Conn,
-        _: *Context,
+        context: *Context,
     ) !Handler {
-        return .{ .conn = conn };
+        return .{ .conn = conn, .mixed = context.mixed };
     }
 
     pub fn clientMessage(
@@ -25,56 +32,42 @@ const Handler = struct {
         data: []const u8,
         message_type: websocket.MessageTextType,
     ) !void {
-        if (message_type != .binary or data.len != payload_bytes) {
+        if (message_type != .binary or
+            data.len != payloadLength(self.mixed, self.iteration))
+        {
             return error.InvalidMessage;
         }
+        self.iteration += 1;
         try self.conn.writeBin(data);
     }
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init, std.heap.smp_allocator);
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
     const io = init.io;
-    var args = try std.process.Args.Iterator.initAllocator(
-        init.minimal.args,
-        allocator,
-    );
-    defer args.deinit();
-    _ = args.next();
-    var enable_tcp_nodelay = false;
-    var connections = default_connections;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--tcp-nodelay")) {
-            enable_tcp_nodelay = true;
-        } else if (std.mem.startsWith(u8, arg, "--connections=")) {
-            connections = try std.fmt.parseInt(
-                usize,
-                arg["--connections=".len..],
-                10,
-            );
-        } else {
-            return error.InvalidArgument;
-        }
-    }
-    if (connections == 0 or connections > max_connections) {
-        return error.InvalidArgument;
-    }
+    const connections = options.connections;
     var server = try websocket.Server(Handler).init(io, allocator, .{
         .port = 9924,
         .address = "127.0.0.1",
-        .worker_count = @intCast(connections),
         .max_conn = connections,
-        .max_message_size = payload_bytes,
-        .thread_pool = .{ .buffer_size = payload_bytes + 32 },
+        .max_message_size = max_payload_bytes,
+        .thread_pool = .{ .buffer_size = max_payload_bytes + 32 },
         .buffers = .{
-            .small_size = payload_bytes + 32,
-            .small_pool = 2,
-            .large_size = payload_bytes + 32,
+            .small_size = max_payload_bytes + 32,
+            // Blocking mode allocates one small buffer per connection; the
+            // configured pool is unused and only produces a warning.
+            .small_pool = 1,
+            .large_size = max_payload_bytes + 32,
             .large_pool = 2,
         },
     });
     defer server.deinit();
-    var context = Context{};
+    var context = Context{ .mixed = options.mixed };
     const server_thread = try server.listenInNewThread(&context);
 
     const clients = try allocator.alloc(websocket.Client, connections);
@@ -85,11 +78,11 @@ pub fn main(init: std.process.Init) !void {
         client.* = try websocket.Client.init(io, allocator, .{
             .port = 9924,
             .host = "127.0.0.1",
-            .max_size = payload_bytes,
-            .buffer_size = payload_bytes + 32,
+            .max_size = max_payload_bytes,
+            .buffer_size = max_payload_bytes + 32,
         });
         connected += 1;
-        if (enable_tcp_nodelay) {
+        if (options.enable_tcp_nodelay) {
             try setTcpNoDelay(client.stream.stream.socket.handle);
         }
         try client.handshake("/echo-bench", .{
@@ -100,13 +93,17 @@ pub fn main(init: std.process.Init) !void {
     var ready = std.atomic.Value(usize).init(0);
     var failed = std.atomic.Value(bool).init(false);
     var start: std.Io.Event = .unset;
-    var worker_errors: [max_connections]?anyerror =
-        .{null} ** max_connections;
-    var finished_ns: [max_connections]u64 =
-        .{0} ** max_connections;
-    var checksums: [max_connections]u64 =
-        .{0} ** max_connections;
-    var workers: [max_connections]std.Thread = undefined;
+    const worker_errors = try allocator.alloc(?anyerror, connections);
+    defer allocator.free(worker_errors);
+    @memset(worker_errors, null);
+    const finished_ns = try allocator.alloc(u64, connections);
+    defer allocator.free(finished_ns);
+    @memset(finished_ns, 0);
+    const checksums = try allocator.alloc(u64, connections);
+    defer allocator.free(checksums);
+    @memset(checksums, 0);
+    const workers = try allocator.alloc(std.Thread, connections);
+    defer allocator.free(workers);
     const Worker = struct {
         client: *websocket.Client,
         io: std.Io,
@@ -117,6 +114,7 @@ pub fn main(init: std.process.Init) !void {
         finished_ns: *u64,
         checksum: *u64,
         seed: u8,
+        mixed: bool,
 
         fn run(worker: *@This()) void {
             runFallible(worker) catch |err| {
@@ -126,24 +124,36 @@ pub fn main(init: std.process.Init) !void {
         }
 
         fn runFallible(worker: *@This()) !void {
-            var payload: [payload_bytes]u8 align(64) = undefined;
+            var payload: [max_payload_bytes]u8 align(64) = undefined;
             for (&payload, 0..) |*byte, index| {
                 byte.* = worker.seed +% @as(u8, @truncate(index));
             }
-            for (0..warmup_iterations) |_| {
-                _ = try exchange(worker.client, &payload);
+            for (0..warmup_iterations) |iteration| {
+                _ = try exchange(
+                    worker.client,
+                    &payload,
+                    payloadLength(worker.mixed, iteration),
+                );
             }
             _ = worker.ready.fetchAdd(1, .release);
             worker.start.waitUncancelable(worker.io);
             var checksum: u64 = 0;
-            for (0..iterations) |_| {
-                checksum +%= try exchange(worker.client, &payload);
+            for (0..iterations) |iteration| {
+                checksum +%= try exchange(
+                    worker.client,
+                    &payload,
+                    payloadLength(
+                        worker.mixed,
+                        warmup_iterations + iteration,
+                    ),
+                );
             }
             worker.checksum.* = checksum;
             worker.finished_ns.* = nowNs(worker.io);
         }
     };
-    var worker_contexts: [max_connections]Worker = undefined;
+    const worker_contexts = try allocator.alloc(Worker, connections);
+    defer allocator.free(worker_contexts);
     for (0..connections) |index| {
         worker_contexts[index] = .{
             .client = &clients[index],
@@ -155,6 +165,7 @@ pub fn main(init: std.process.Init) !void {
             .finished_ns = &finished_ns[index],
             .checksum = &checksums[index],
             .seed = @truncate(index * 17),
+            .mixed = options.mixed,
         };
         workers[index] = try std.Thread.spawn(
             .{},
@@ -169,12 +180,12 @@ pub fn main(init: std.process.Init) !void {
     const started = nowNs(io);
     start.set(io);
     for (workers[0..connections]) |worker| worker.join();
-    for (worker_errors[0..connections]) |maybe_err| {
+    for (worker_errors) |maybe_err| {
         if (maybe_err) |err| return err;
     }
     var finished = started;
     var checksum: u64 = 0;
-    for (finished_ns[0..connections], checksums[0..connections]) |
+    for (finished_ns, checksums) |
         worker_finished,
         worker_checksum,
     | {
@@ -187,10 +198,10 @@ pub fn main(init: std.process.Init) !void {
     server.stop();
     server_thread.join();
 
-    const roundtrip_wire_bytes =
-        (2 + 2 + 4 + payload_bytes) +
-        (2 + 2 + payload_bytes);
     const measured_roundtrips = iterations * connections;
+    const logical_payload_bytes =
+        measuredPayloadBytes(options.mixed) * connections;
+    const wire_bytes = measuredWireBytes(options.mixed) * connections;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
@@ -201,9 +212,10 @@ pub fn main(init: std.process.Init) !void {
         \\  connections: {d}
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
-        \\  payload bytes: {d}
+        \\  payload schedule: {s}
+        \\  logical payload bytes: {d}
         \\  TCP_NODELAY: {}
-        \\  wire bytes/roundtrip: {d}
+        \\  wire bytes: {d}
         \\  aggregate ns/roundtrip: {d}
         \\  roundtrips/s: {d}
         \\  wire MiB/s: {d:.2}
@@ -213,16 +225,59 @@ pub fn main(init: std.process.Init) !void {
         connections,
         warmup_iterations,
         iterations,
-        payload_bytes,
-        enable_tcp_nodelay,
-        roundtrip_wire_bytes,
+        if (options.mixed) "1,7,125,126,1024,4096" else "4096",
+        logical_payload_bytes,
+        options.enable_tcp_nodelay,
+        wire_bytes,
         elapsed / measured_roundtrips,
         roundtrips_per_second,
         @as(f64, @floatFromInt(
-            roundtrips_per_second * roundtrip_wire_bytes,
+            @as(u128, wire_bytes) * std.time.ns_per_s / @max(elapsed, 1),
         )) / (1024.0 * 1024.0),
         checksum,
     });
+    if (options.stats) counting.snapshot().print();
+}
+
+const Options = struct {
+    connections: usize = default_connections,
+    enable_tcp_nodelay: bool = false,
+    mixed: bool = false,
+    stats: bool = false,
+};
+
+fn parseOptions(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !Options {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var options: Options = .{};
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--tcp-nodelay")) {
+            options.enable_tcp_nodelay = true;
+        } else if (std.mem.eql(u8, arg, "--mixed")) {
+            options.mixed = true;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--connections=")) {
+            options.connections = try std.fmt.parseInt(
+                usize,
+                arg["--connections=".len..],
+                10,
+            );
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    if (options.connections == 0 or options.connections > max_connections) {
+        return error.InvalidArgument;
+    }
+    return options;
 }
 
 fn setTcpNoDelay(handle: std.Io.net.Socket.Handle) !void {
@@ -237,18 +292,56 @@ fn setTcpNoDelay(handle: std.Io.net.Socket.Handle) !void {
 
 fn exchange(
     client: *websocket.Client,
-    payload: *[payload_bytes]u8,
+    payload: *[max_payload_bytes]u8,
+    payload_len: usize,
 ) !u64 {
-    try client.writeBin(payload);
+    const data = payload[0..payload_len];
+    try client.writeBin(data);
     const message = (try client.read()) orelse return error.MissingMessage;
     defer client.done(message);
-    if (message.type != .binary or message.data.len != payload_bytes) {
+    if (message.type != .binary or message.data.len != payload_len) {
         return error.InvalidMessage;
     }
-    @memcpy(payload, message.data);
+    @memcpy(data, message.data);
     return @as(u64, message.data[0]) +%
-        @as(u64, message.data[payload_bytes / 2]) +%
-        @as(u64, message.data[payload_bytes - 1]);
+        @as(u64, message.data[payload_len / 2]) +%
+        @as(u64, message.data[payload_len - 1]);
+}
+
+fn payloadLength(mixed: bool, iteration: usize) usize {
+    return if (mixed)
+        mixed_payload_sizes[iteration % mixed_payload_sizes.len]
+    else
+        fixed_payload_bytes;
+}
+
+fn measuredPayloadBytes(mixed: bool) usize {
+    var total: usize = 0;
+    for (0..iterations) |iteration| {
+        total += payloadLength(mixed, warmup_iterations + iteration) * 2;
+    }
+    return total;
+}
+
+fn measuredWireBytes(mixed: bool) usize {
+    var total: usize = 0;
+    for (0..iterations) |iteration| {
+        const len = payloadLength(mixed, warmup_iterations + iteration);
+        total += clientFrameLen(len) + serverFrameLen(len);
+    }
+    return total;
+}
+
+fn clientFrameLen(payload_len: usize) usize {
+    return 2 + payloadLengthFieldBytes(payload_len) + 4 + payload_len;
+}
+
+fn serverFrameLen(payload_len: usize) usize {
+    return 2 + payloadLengthFieldBytes(payload_len) + payload_len;
+}
+
+fn payloadLengthFieldBytes(payload_len: usize) usize {
+    return if (payload_len <= 125) 0 else if (payload_len <= 65_535) 2 else 8;
 }
 
 fn nowNs(io: std.Io) u64 {
