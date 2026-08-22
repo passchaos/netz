@@ -761,6 +761,92 @@ test "session limits preserve existing state" {
     );
 }
 
+test "session queued payload bytes bound admission and recover budget" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{
+        .max_queued_per_session = 16,
+        .max_queued_payload_bytes_per_session = 10,
+    });
+    defer store.deinit();
+    const opened = try store.open("byte-bounded", false, 60, .zero);
+
+    _ = try store.enqueuePublish(opened.handle, "queue/one", "123456", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+    _ = try store.enqueuePublish(opened.handle, "queue/two", "789012", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+    try std.testing.expectEqual(
+        @as(usize, 12),
+        (try store.stats(opened.handle)).queued_payload_bytes,
+    );
+    try std.testing.expectError(
+        error.QueueFull,
+        store.enqueuePublish(opened.handle, "queue/three", "x", .{
+            .qos = .at_least_once,
+            .now = .zero,
+        }),
+    );
+
+    var transmissions: [1]Transmission = undefined;
+    const drained = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &transmissions,
+    );
+    try std.testing.expectEqual(@as(usize, 1), drained.len);
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        (try store.stats(opened.handle)).queued_payload_bytes,
+    );
+    _ = try store.enqueuePublish(opened.handle, "queue/three", "abcd", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+    try std.testing.expectEqual(
+        @as(usize, 10),
+        (try store.stats(opened.handle)).queued_payload_bytes,
+    );
+}
+
+test "session expiry pruning releases queued payload byte budget" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{
+        .max_queued_per_session = 16,
+        .max_queued_payload_bytes_per_session = 5,
+    });
+    defer store.deinit();
+    const opened = try store.open("byte-expiry", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "queue/expiring",
+        "12345",
+        .{
+            .qos = .at_least_once,
+            .properties = &.{.{ .four_byte = .{
+                .id = .message_expiry_interval,
+                .value = 1,
+            } }},
+            .now = .zero,
+        },
+    );
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "queue/replacement",
+        "fresh",
+        .{
+            .qos = .at_least_once,
+            .now = std.Io.Timestamp.fromNanoseconds(second_ns),
+        },
+    );
+    const stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 1), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 5), stats.queued_payload_bytes);
+}
+
 test "session allocation failures leak nothing" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,

@@ -5,6 +5,7 @@ const Config = struct {
     bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(1883) },
     connections: usize = 16,
     max_queued_deliveries: usize = 1024,
+    max_session_queued_payload_bytes: usize = 0,
     max_outgoing_inflight: u16 = 64,
     max_packet_size: usize = 16 * 1024 * 1024,
     maximum_qos: ?netz.mqtt.QoS = null,
@@ -56,6 +57,9 @@ pub fn main(init: std.process.Init) !void {
                 .shared_subscription_available = config.shared_subscription_available,
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
+            .session = .{
+                .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
+            },
         },
     );
     defer broker.deinit();
@@ -177,6 +181,16 @@ fn parseArgs(
             if (config.max_outgoing_inflight == 0) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--max-session-queued-payload-bytes=",
+        )) {
+            config.max_session_queued_payload_bytes = try std.fmt.parseInt(
+                usize,
+                arg["--max-session-queued-payload-bytes=".len..],
+                10,
+            );
         } else if (std.mem.startsWith(
             u8,
             arg,

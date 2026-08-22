@@ -26,6 +26,11 @@ pub const Options = struct {
     max_sessions: usize = 16_384,
     max_subscriptions_per_session: usize = 1_024,
     max_queued_per_session: usize = 16_384,
+    /// Maximum payload bytes retained in one Session's outgoing queue. Zero
+    /// disables this independent byte bound, matching Mosquitto's
+    /// `max_queued_bytes` convention. Topic/property ownership remains covered
+    /// by `max_session_bytes` and `max_total_bytes`.
+    max_queued_payload_bytes_per_session: usize = 0,
     max_inflight_per_session: usize = std.math.maxInt(u16),
     max_incoming_qos2_per_session: usize = 16_384,
     max_session_bytes: usize = 64 * 1024 * 1024,
@@ -51,6 +56,7 @@ pub const Stats = struct {
     expiry_interval: u32,
     subscription_count: usize,
     queued_count: usize,
+    queued_payload_bytes: usize,
     inflight_count: usize,
     incoming_qos2_count: usize,
     owned_wire_bytes: usize,
@@ -241,6 +247,7 @@ const Session = struct {
     /// prefix. The storage is reset as soon as the logical queue is empty.
     queued_head: usize = 0,
     queued_count: usize = 0,
+    queued_payload_bytes: usize = 0,
     inflight: std.ArrayList(?Inflight) = .empty,
     inflight_count: usize = 0,
     packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
@@ -646,9 +653,21 @@ pub const Store = struct {
             );
             if (restored) |*publish| {
                 errdefer publish.deinit(self.allocator);
+                if (queuedPayloadLimitReached(
+                    self.options,
+                    session.queued_payload_bytes,
+                )) {
+                    return error.QueueFull;
+                }
                 try self.ensureBytes(session, publish.allocation_bytes);
+                const queued_payload_bytes = std.math.add(
+                    usize,
+                    session.queued_payload_bytes,
+                    publish.payload.len,
+                ) catch return error.SessionByteLimitExceeded;
                 try session.queued.append(self.allocator, publish.*);
                 session.queued_count += 1;
+                session.queued_payload_bytes = queued_payload_bytes;
                 session.allocation_bytes += publish.allocation_bytes;
                 self.total_bytes += publish.allocation_bytes;
                 restored = null;
@@ -1181,6 +1200,7 @@ pub const Store = struct {
             .expiry_interval = session.expiry_interval,
             .subscription_count = session.subscription_count,
             .queued_count = session.queued_count,
+            .queued_payload_bytes = session.queued_payload_bytes,
             .inflight_count = session.inflight_count,
             .incoming_qos2_count = session.incoming_qos2.count(),
             .owned_wire_bytes = session.allocation_bytes,
@@ -1269,7 +1289,18 @@ pub const Store = struct {
             return error.InvalidProperty;
         }
         const session = try self.getSession(handle);
+        // Admission uses the current queue size, as Mosquitto does: the message
+        // that reaches/crosses the threshold is retained, while later messages
+        // wait for draining or expiry to release byte budget. Prune first so an
+        // expired head never blocks a fresh Application Message.
+        self.pruneExpiredPublishes(session, options.now.nanoseconds);
         if (session.queued_count >= self.options.max_queued_per_session) {
+            return error.QueueFull;
+        }
+        if (queuedPayloadLimitReached(
+            self.options,
+            session.queued_payload_bytes,
+        )) {
             return error.QueueFull;
         }
         if (mqtt.messageExpiryInterval(options.properties) == 0) {
@@ -1286,6 +1317,11 @@ pub const Store = struct {
         );
         errdefer publish.deinit(self.allocator);
         try self.ensureBytes(session, publish.allocation_bytes);
+        const queued_payload_bytes = std.math.add(
+            usize,
+            session.queued_payload_bytes,
+            publish.payload.len,
+        ) catch return error.SessionByteLimitExceeded;
         if (session.queued_count == 0) {
             session.queued.items.len = 0;
             session.queued_head = 0;
@@ -1296,6 +1332,7 @@ pub const Store = struct {
         }
         try session.queued.append(self.allocator, publish);
         session.queued_count += 1;
+        session.queued_payload_bytes = queued_payload_bytes;
         session.allocation_bytes += publish.allocation_bytes;
         self.total_bytes += publish.allocation_bytes;
         publish = undefined;
@@ -1375,6 +1412,7 @@ pub const Store = struct {
                 var publish = publish_value;
                 session.queued.items[queue_index] = null;
                 session.queued_count -= 1;
+                session.queued_payload_bytes -= publish.payload.len;
                 const packet_id = try reservePacketId(session);
                 const state: InflightState = switch (publish.qos) {
                     .at_least_once => .await_puback,
@@ -1612,6 +1650,7 @@ pub const Store = struct {
                 var removed = publish;
                 maybe_publish.* = null;
                 session.queued_count -= 1;
+                session.queued_payload_bytes -= removed.payload.len;
                 session.allocation_bytes -= removed.allocation_bytes;
                 self.total_bytes -= removed.allocation_bytes;
                 removed.deinit(self.allocator);
@@ -1900,6 +1939,11 @@ fn compactQueue(session: *Session) void {
     std.debug.assert(write_index == session.queued_count);
 }
 
+fn queuedPayloadLimitReached(options: Options, current_bytes: usize) bool {
+    const limit = options.max_queued_payload_bytes_per_session;
+    return limit != 0 and current_bytes >= limit;
+}
+
 fn advanceQueueHead(session: *Session) void {
     while (session.queued_head < session.queued.items.len and
         session.queued.items[session.queued_head] == null)
@@ -1912,6 +1956,7 @@ fn advanceQueueHead(session: *Session) void {
         // number of messages observed since CONNECT.
         session.queued.items.len = 0;
         session.queued_head = 0;
+        std.debug.assert(session.queued_payload_bytes == 0);
     }
 }
 

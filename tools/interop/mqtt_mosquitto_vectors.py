@@ -2246,6 +2246,95 @@ def offline_will_message_expiry(
             resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def offline_queued_payload_bytes(executable: Path, mqtt_packets) -> None:
+    # Wire-level behavior derived from Mosquitto
+    # 03-publish-qos1-queued-bytes.py. Bound each durable outgoing queue by
+    # payload bytes, prove the packet that reaches the threshold is retained,
+    # and require subsequent publications to be dropped without changing the
+    # publisher's successful QoS 1 acknowledgement.
+    topic = "test/publish/queueing/value"
+    for proto_ver in (4, 5):
+        with NetzBroker(
+            executable,
+            connections=3,
+            extra_args=("--max-session-queued-payload-bytes=10",),
+        ) as broker:
+            subscriber = broker.connect()
+            publisher = broker.connect()
+            try:
+                subscriber.sendall(mqtt_packets.gen_connect(
+                    f"queued-bytes-sub-{proto_ver}",
+                    clean_session=False,
+                    proto_ver=proto_ver,
+                    session_expiry=60 if proto_ver == 5 else None,
+                ))
+                read_packet(subscriber)
+                subscriber.sendall(mqtt_packets.gen_subscribe(
+                    1, topic, 1, proto_ver=proto_ver
+                ))
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(1, 1, proto_ver=proto_ver),
+                    f"queued bytes SUBACK v{proto_ver}",
+                )
+                subscriber.close()
+
+                connect_client(
+                    publisher, mqtt_packets,
+                    f"queued-bytes-pub-{proto_ver}", proto_ver,
+                )
+                for mid, payload in enumerate(("123456", "789012", "drop"), 1):
+                    publisher.sendall(mqtt_packets.gen_publish(
+                        topic, qos=1, mid=mid, payload=payload,
+                        proto_ver=proto_ver,
+                    ))
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_puback(mid, proto_ver=proto_ver),
+                        f"queued bytes publisher PUBACK v{proto_ver}/{mid}",
+                    )
+
+                subscriber = broker.connect()
+                subscriber.sendall(mqtt_packets.gen_connect(
+                    f"queued-bytes-sub-{proto_ver}",
+                    clean_session=False,
+                    proto_ver=proto_ver,
+                    session_expiry=60 if proto_ver == 5 else None,
+                ))
+                connack = read_packet(subscriber)
+                if connack[2] != 1 or connack[3] != 0:
+                    raise AssertionError(
+                        f"queued bytes missing Session Present v{proto_ver}: "
+                        f"{connack.hex()}"
+                    )
+                for packet_id, payload in enumerate(("123456", "789012"), 1):
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_publish(
+                            topic, qos=1, mid=packet_id, payload=payload,
+                            proto_ver=proto_ver,
+                        ),
+                        f"queued bytes delivery v{proto_ver}/{packet_id}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_puback(
+                        packet_id, proto_ver=proto_ver
+                    ))
+                subscriber.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    subscriber, mqtt_packets.gen_pingresp(),
+                    f"queued bytes no dropped delivery v{proto_ver}",
+                )
+                publisher.sendall(mqtt_packets.gen_disconnect(
+                    proto_ver=proto_ver
+                ))
+                subscriber.sendall(mqtt_packets.gen_disconnect(
+                    proto_ver=proto_ver
+                ))
+            finally:
+                publisher.close()
+                subscriber.close()
+
+
 def retained_subscription_handling(
     executable: Path, mqtt_packets, mqtt5_opts
 ) -> None:
@@ -4149,6 +4238,7 @@ def main() -> None:
     persistent_no_local(args.broker, mqtt_packets)
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
+    offline_queued_payload_bytes(args.broker, mqtt_packets)
     outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
     incoming_qos2_disconnect_recovery(
         args.broker, mqtt_packets, mqtt5_props
@@ -4203,7 +4293,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 78 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 80 scenarios")
 
 
 if __name__ == "__main__":
