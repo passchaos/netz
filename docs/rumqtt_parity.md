@@ -1009,7 +1009,10 @@ Requests above 100 seconds and zero (which would disable Keep Alive) receive
 legacy CONNACK return code 2 in MQTT 3.1.1, while MQTT 5 accepts them with an
 exact Server Keep Alive value of 100. Requests exactly at the limit are
 accepted without an unnecessary override, and MQTT 5 PING verifies each
-accepted connection remains usable.
+accepted connection remains usable. The policy lives in shared
+`runtime.AcceptOptions`, so TCP, TLS, WS and WSS accept paths cannot diverge;
+the broker resolves it before Session registration to keep refusals
+side-effect-free.
 Three zero-length Client ID policy cases extend the existing assigned-ID
 coverage with Mosquitto's `01-connect-zero-length-id.py` deny branch. The
 production broker switch rejects clean-start anonymous MQTT 3.1.1 with return

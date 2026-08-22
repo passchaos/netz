@@ -170,8 +170,10 @@ test "broker maximum Keep Alive replaces MQTT 5 and refuses MQTT 3.1.1" {
                 .max_queued_deliveries_per_connection = 8,
                 .runtime = .{ .max_packet_size = 4096 },
             },
-            .maximum_keep_alive_seconds = 10,
-            .accept = .{ .max_outgoing_inflight = 64 },
+            .accept = .{
+                .max_outgoing_inflight = 64,
+                .maximum_keep_alive_seconds = 10,
+            },
         },
     );
     defer broker.deinit();
@@ -772,7 +774,7 @@ test "broker can reject zero-length Client Identifiers before registration" {
                 .max_queued_deliveries_per_connection = 8,
                 .runtime = .{ .max_packet_size = 4096 },
             },
-            .allow_zero_length_client_id = false,
+            .accept = .{ .allow_zero_length_client_id = false },
         },
     );
     defer broker.deinit();

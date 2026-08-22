@@ -61,10 +61,6 @@ pub const Options = struct {
     /// Mosquitto limits `auto_id_prefix` to 50 bytes; matching that cap keeps
     /// the generated identifier below MQTT's u16 UTF-8 string bound.
     auto_client_id_prefix: []const u8 = "netz-",
-    /// Permit a clean-start CONNECT with an empty Client Identifier and assign
-    /// a unique identifier. Disabling this rejects before any Session, Will,
-    /// or subscription state is created.
-    allow_zero_length_client_id: bool = true,
     router: router_mod.Options = .{},
     retained: retained_mod.Options = .{},
     session: session_mod.Options = .{},
@@ -78,12 +74,6 @@ pub const Options = struct {
     /// while a persistent Session is offline. The MQTT-oriented default drops
     /// those messages because delivery has no reliability guarantee.
     queue_qos0_messages: bool = false,
-    /// Maximum client-requested Keep Alive in seconds. Null leaves the client
-    /// value unrestricted. MQTT 5 clients above the limit (including zero,
-    /// which otherwise disables Keep Alive) are accepted with Server Keep
-    /// Alive set to the limit; MQTT 3.1.1 clients are refused because that
-    /// protocol has no way to negotiate a replacement value.
-    maximum_keep_alive_seconds: ?u16 = null,
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -700,34 +690,13 @@ pub const Broker = struct {
                 self.options.accept,
             );
             errdefer pending.deinit(self.allocator);
-            if (pending.connect.connect.client_id.len == 0 and
-                !self.options.allow_zero_length_client_id)
-            {
-                // MQTT 3.1.1 calls this Identifier Rejected. Mosquitto uses
-                // Unspecified Error for MQTT 5 when its equivalent policy is
-                // disabled, and both versions require Session Present=false.
-                var refused = try pending.finish(.{
-                    .reason_code = switch (pending.connect.connect.protocol) {
-                        .v3_1_1 => 0x02,
-                        .v5 => 0x80,
-                    },
-                });
-                refused.deinit(self.allocator);
-                clients_started += 1;
-                continue;
-            }
-            const keep_alive_limit_exceeded = if (self.options.maximum_keep_alive_seconds) |maximum|
-                pending.connect.connect.keep_alive_seconds == 0 or
-                    pending.connect.connect.keep_alive_seconds > maximum
-            else
-                false;
-            if (keep_alive_limit_exceeded and
-                pending.connect.connect.protocol == .v3_1_1)
-            {
-                // MQTT 3.1.1 cannot advertise a replacement Keep Alive. As
-                // Mosquitto does for max_keepalive, reject with legacy return
-                // code 2 before creating Session, Will, or router state.
-                var refused = try pending.finish(.{ .reason_code = 0x02 });
+            var accept_options = try pending.resolvedOptions(
+                self.options.accept,
+            );
+            if (accept_options.reason_code != 0) {
+                // Resolve policies before registration so rejected CONNECTs
+                // cannot create Session, Will, or router state.
+                var refused = try pending.finish(accept_options);
                 refused.deinit(self.allocator);
                 clients_started += 1;
                 continue;
@@ -766,14 +735,6 @@ pub const Broker = struct {
                 pending.connect.connect,
             );
             const subscriber_id = registration.subscriber_id;
-            var accept_options = self.options.accept;
-            if (keep_alive_limit_exceeded) {
-                std.debug.assert(
-                    pending.connect.connect.protocol == .v5,
-                );
-                accept_options.server_keep_alive_seconds =
-                    self.options.maximum_keep_alive_seconds.?;
-            }
             accept_options.session_present =
                 self.slots[index].session_present;
             if (self.slots[index].assigned_client_id_len != 0) {

@@ -187,6 +187,13 @@ pub const AcceptOptions = struct {
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
+    /// Optional upper bound for the Keep Alive requested by CONNECT. MQTT 5
+    /// negotiates violations down with Server Keep Alive; MQTT 3.1.1 must be
+    /// refused because it has no equivalent response property.
+    maximum_keep_alive_seconds: ?u16 = null,
+    /// Whether clean-start clients may request an assigned identifier by
+    /// sending an empty Client ID.
+    allow_zero_length_client_id: bool = true,
     maximum_qos: ?mqtt.QoS = null,
     retain_available: bool = true,
     wildcard_subscription_available: bool = true,
@@ -220,19 +227,20 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         options: AcceptOptions,
     ) Error!AcceptedClient {
+        const resolved = try self.resolvedOptions(options);
         var properties: [3]mqtt.Property = undefined;
         var property_count: usize = 0;
         if (self.connection.protocol == .v5 and
-            options.assigned_client_identifier != null)
+            resolved.assigned_client_identifier != null)
         {
             properties[property_count] = .{ .utf8 = .{
                 .id = .assigned_client_identifier,
-                .value = options.assigned_client_identifier.?,
+                .value = resolved.assigned_client_identifier.?,
             } };
             property_count += 1;
         }
         if (self.connection.authentication.method) |method| {
-            if (options.reason_code == 0 and
+            if (resolved.reason_code == 0 and
                 !self.authentication_authorized)
             {
                 return error.AuthenticationInProgress;
@@ -251,19 +259,19 @@ pub const PendingAcceptedClient = struct {
             }
         }
         try self.connection.writeConnAck(.{
-            .session_present = options.session_present,
-            .reason_code = options.reason_code,
+            .session_present = resolved.session_present,
+            .reason_code = resolved.reason_code,
             .properties = properties[0..property_count],
-            .max_outgoing_inflight = options.max_outgoing_inflight,
-            .topic_alias_maximum = options.topic_alias_maximum,
-            .server_keep_alive_seconds = options.server_keep_alive_seconds,
-            .maximum_qos = options.maximum_qos,
-            .retain_available = options.retain_available,
-            .wildcard_subscription_available = options.wildcard_subscription_available,
-            .subscription_identifier_available = options.subscription_identifier_available,
-            .shared_subscription_available = options.shared_subscription_available,
+            .max_outgoing_inflight = resolved.max_outgoing_inflight,
+            .topic_alias_maximum = resolved.topic_alias_maximum,
+            .server_keep_alive_seconds = resolved.server_keep_alive_seconds,
+            .maximum_qos = resolved.maximum_qos,
+            .retain_available = resolved.retain_available,
+            .wildcard_subscription_available = resolved.wildcard_subscription_available,
+            .subscription_identifier_available = resolved.subscription_identifier_available,
+            .shared_subscription_available = resolved.shared_subscription_available,
         });
-        if (options.reason_code == 0 and
+        if (resolved.reason_code == 0 and
             self.connection.authentication.phase == .authenticating)
         {
             try self.connection.authentication.finishServerInitial();
@@ -278,6 +286,51 @@ pub const PendingAcceptedClient = struct {
         };
         self.* = undefined;
         return accepted;
+    }
+
+    /// Resolve CONNECT-dependent acceptance policy without mutating state.
+    /// Stateful brokers call this before registration so a refused client can
+    /// never create Session, Will, or router records; direct TCP/TLS/WS/WSS
+    /// servers get the same behavior automatically through `finish`.
+    pub fn resolvedOptions(
+        self: PendingAcceptedClient,
+        options: AcceptOptions,
+    ) Error!AcceptOptions {
+        var resolved = options;
+        if (resolved.maximum_keep_alive_seconds == 0) {
+            return error.InvalidProperty;
+        }
+        if (resolved.reason_code != 0) return resolved;
+        const connect = self.connect.connect;
+        if (connect.client_id.len == 0 and
+            !resolved.allow_zero_length_client_id)
+        {
+            resolved.reason_code = switch (connect.protocol) {
+                .v3_1_1 => 0x02,
+                .v5 => 0x80,
+            };
+            return resolved;
+        }
+        if (resolved.maximum_keep_alive_seconds) |maximum| {
+            if (resolved.server_keep_alive_seconds) |explicit| {
+                resolved.server_keep_alive_seconds = @min(
+                    explicit,
+                    maximum,
+                );
+            }
+            if (connect.keep_alive_seconds == 0 or
+                connect.keep_alive_seconds > maximum)
+            {
+                switch (connect.protocol) {
+                    .v3_1_1 => resolved.reason_code = 0x02,
+                    .v5 => resolved.server_keep_alive_seconds = if (resolved.server_keep_alive_seconds) |explicit|
+                        @min(explicit, maximum)
+                    else
+                        maximum,
+                }
+            }
+        }
+        return resolved;
     }
 
     /// Send one pre-CONNACK Enhanced Authentication challenge.
@@ -2283,7 +2336,7 @@ test "MQTT runtime client and server exchange over TCP" {
                 .protocol = .v5,
                 .max_outgoing_inflight = 2,
                 .topic_alias_maximum = 4,
-                .server_keep_alive_seconds = 7,
+                .maximum_keep_alive_seconds = 7,
                 .maximum_qos = .exactly_once,
                 .retain_available = false,
             });
@@ -2430,6 +2483,57 @@ test "MQTT runtime client and server exchange over TCP" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "MQTT runtime resolves connection acceptance policies" {
+    var pending = PendingAcceptedClient{
+        .connection = undefined,
+        .connect = .{
+            .packet = undefined,
+            .connect = .{
+                .protocol = .v5,
+                .clean_start = true,
+                .keep_alive_seconds = 0,
+                .client_id = "client",
+            },
+        },
+    };
+    const v5_options = try pending.resolvedOptions(.{
+        .server_keep_alive_seconds = 20,
+        .maximum_keep_alive_seconds = 10,
+    });
+    try std.testing.expectEqual(@as(u8, 0), v5_options.reason_code);
+    try std.testing.expectEqual(
+        @as(?u16, 10),
+        v5_options.server_keep_alive_seconds,
+    );
+
+    pending.connect.connect.protocol = .v3_1_1;
+    pending.connect.connect.keep_alive_seconds = 11;
+    const v311_options = try pending.resolvedOptions(.{
+        .maximum_keep_alive_seconds = 10,
+    });
+    try std.testing.expectEqual(@as(u8, 0x02), v311_options.reason_code);
+
+    pending.connect.connect.protocol = .v5;
+    pending.connect.connect.keep_alive_seconds = 10;
+    const boundary = try pending.resolvedOptions(.{
+        .maximum_keep_alive_seconds = 10,
+    });
+    try std.testing.expectEqual(
+        @as(?u16, null),
+        boundary.server_keep_alive_seconds,
+    );
+
+    pending.connect.connect.client_id = "";
+    const anonymous = try pending.resolvedOptions(.{
+        .allow_zero_length_client_id = false,
+    });
+    try std.testing.expectEqual(@as(u8, 0x80), anonymous.reason_code);
+    try std.testing.expectError(
+        error.InvalidProperty,
+        pending.resolvedOptions(.{ .maximum_keep_alive_seconds = 0 }),
+    );
 }
 
 test "MQTT runtime exposes CONNACK session present" {
