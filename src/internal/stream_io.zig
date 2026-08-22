@@ -3,6 +3,56 @@ const builtin = @import("builtin");
 
 const net = std.Io.net;
 
+pub const TimedReadError = net.Stream.Reader.Error ||
+    std.Io.Operation.FileReadStreaming.UnendingError ||
+    std.Io.Operation.NetReceive.Error || std.Io.Timeout.Error ||
+    std.Io.ConcurrentError;
+
+/// Read connected stream bytes under an absolute deadline.
+///
+/// Windows socket handles require the network operation. POSIX stream sockets
+/// are file descriptors, where the streaming file operation avoids asking
+/// recvmsg to populate an irrelevant source address. A zero result uniformly
+/// represents EOF so protocol layers can map it to their own close error.
+pub fn readSomeWithDeadline(
+    io: std.Io,
+    stream: net.Stream,
+    buffer: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) TimedReadError!usize {
+    if (builtin.os.tag == .windows) {
+        var incoming: net.IncomingMessage = .init;
+        const maybe_err, const message_count = (try io.operateTimeout(
+            .{ .net_receive = .{
+                .socket_handle = stream.socket.handle,
+                .message_buffer = (&incoming)[0..1],
+                .data_buffer = buffer,
+                .flags = .{},
+            } },
+            .{ .deadline = deadline },
+        )).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(message_count == 1);
+        return incoming.data.len;
+    }
+
+    var bufs = [_][]u8{buffer};
+    const result = try io.operateTimeout(
+        .{ .file_read_streaming = .{
+            .file = .{
+                .handle = stream.socket.handle,
+                .flags = .{ .nonblocking = false },
+            },
+            .data = &bufs,
+        } },
+        .{ .deadline = deadline },
+    );
+    return result.file_read_streaming catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => return @errorCast(err),
+    };
+}
+
 /// Write two borrowed slices as one logical stream write.
 ///
 /// Zig 0.16's `netWrite` reserves the final `data` item as a splat pattern.

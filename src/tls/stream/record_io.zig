@@ -1,8 +1,8 @@
 //! Socket framing helpers shared by the TLS handshake and record stream.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const vail = @import("vail");
+const stream_io = @import("../../internal/stream_io.zig");
 
 const net = std.Io.net;
 
@@ -19,9 +19,7 @@ pub const Error = net.Stream.Reader.Error ||
         ConnectionClosed,
         RecordTooLarge,
         SequenceOverflow,
-    } || std.Io.Operation.FileReadStreaming.UnendingError ||
-    std.Io.Operation.NetReceive.Error || std.Io.Timeout.Error ||
-    std.Io.ConcurrentError;
+    } || stream_io.TimedReadError;
 
 pub fn readRecord(
     io: std.Io,
@@ -127,37 +125,12 @@ fn readExactWithDeadline(
 ) Error!void {
     var offset: usize = 0;
     while (offset < out.len) {
-        const count = if (builtin.os.tag == .windows) blk: {
-            var incoming: net.IncomingMessage = .init;
-            const maybe_err, const message_count = (try io.operateTimeout(
-                .{ .net_receive = .{
-                    .socket_handle = stream.socket.handle,
-                    .message_buffer = (&incoming)[0..1],
-                    .data_buffer = out[offset..],
-                    .flags = .{},
-                } },
-                .{ .deadline = deadline },
-            )).net_receive;
-            if (maybe_err) |err| return err;
-            std.debug.assert(message_count == 1);
-            break :blk incoming.data.len;
-        } else blk: {
-            var bufs = [_][]u8{out[offset..]};
-            const result = try io.operateTimeout(
-                .{ .file_read_streaming = .{
-                    .file = .{
-                        .handle = stream.socket.handle,
-                        .flags = .{ .nonblocking = false },
-                    },
-                    .data = &bufs,
-                } },
-                .{ .deadline = deadline },
-            );
-            break :blk result.file_read_streaming catch |err| switch (err) {
-                error.EndOfStream => return error.ConnectionClosed,
-                else => return @errorCast(err),
-            };
-        };
+        const count = try stream_io.readSomeWithDeadline(
+            io,
+            stream,
+            out[offset..],
+            deadline,
+        );
         if (count == 0) return error.ConnectionClosed;
         offset += count;
     }

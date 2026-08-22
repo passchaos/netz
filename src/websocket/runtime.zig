@@ -37,6 +37,7 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     InvalidUri,
     UnsupportedScheme,
     MessageTooLarge,
+    TimedReadUnsupported,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
 
 pub const Limits = struct {
@@ -79,6 +80,30 @@ const RuntimeTransport = union(enum) {
             .tls_vail => |conn| conn.read(buffer),
             .tls_server => |conn| conn.read(buffer),
             .linux_io_uring => |conn| conn.read(buffer),
+        };
+    }
+
+    /// Read transport bytes without moving an application-owned absolute
+    /// deadline. Buffered TLS plaintext is still returned immediately; only a
+    /// read that reaches the socket waits against `deadline`.
+    fn readWithDeadline(
+        self: RuntimeTransport,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        return switch (self) {
+            .tcp => |tcp| readSomeWithDeadline(
+                tcp.io,
+                tcp.stream,
+                buffer,
+                deadline,
+            ),
+            .tls_vail => |conn| conn.readWithDeadline(buffer, deadline),
+            .tls_server => |conn| conn.readWithDeadline(buffer, deadline),
+            // Zig's std TLS client and the raw io_uring adapter do not expose
+            // deadline-aware reads. Failing explicitly is safer than silently
+            // weakening an upper-layer inactivity contract.
+            .tls, .linux_io_uring => error.TimedReadUnsupported,
         };
     }
 
@@ -1075,21 +1100,28 @@ pub const Connection = struct {
     }
 
     pub fn receiveFrame(self: *Connection) Error!websocket.Frame {
+        return self.receiveFrameInternal(null);
+    }
+
+    fn receiveFrameInternal(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
         errdefer |err| closeAfterReceiveError(self, err);
         if (self.close_sent and self.close_received) return error.ConnectionClosed;
-        try self.ensureBuffered(2);
+        try self.ensureBufferedWithDeadline(2, deadline);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
         const len_code = second & 0x7f;
         if (len_code == 126) header_len += 2 else if (len_code == 127) header_len += 8;
         if ((second & 0x80) != 0) header_len += 4;
-        try self.ensureBuffered(header_len);
+        try self.ensureBufferedWithDeadline(header_len, deadline);
 
         const header = try websocket.FrameHeader.parse(self.inbuf.items);
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
-        try ensureIncomingFrameBuffered(self, header, total_len);
+        try ensureIncomingFrameBuffered(self, header, total_len, deadline);
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
@@ -1104,8 +1136,15 @@ pub const Connection = struct {
     }
 
     pub fn receiveFrameAuto(self: *Connection) Error!websocket.Frame {
+        return self.receiveFrameAutoInternal(null);
+    }
+
+    fn receiveFrameAutoInternal(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
         while (true) {
-            var frame = try self.receiveFrame();
+            var frame = try self.receiveFrameInternal(deadline);
             errdefer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
@@ -1128,12 +1167,31 @@ pub const Connection = struct {
     }
 
     pub fn receiveMessage(self: *Connection) Error!OwnedMessage {
+        return self.receiveMessageInternal(null);
+    }
+
+    /// Receive one complete message under a caller-owned absolute deadline.
+    ///
+    /// The deadline is deliberately unchanged across continuation and control
+    /// frames. Protocols such as MQTT can therefore enforce one packet-level
+    /// inactivity budget without WebSocket Ping/Pong traffic extending it.
+    pub fn receiveMessageWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedMessage {
+        return self.receiveMessageInternal(deadline);
+    }
+
+    fn receiveMessageInternal(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedMessage {
         errdefer |err| closeAfterReceiveError(self, err);
         var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
         while (true) {
-            var frame = try self.receiveFrameAuto();
+            var frame = try self.receiveFrameAutoInternal(deadline);
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping, .pong => continue,
@@ -1285,7 +1343,7 @@ pub const Connection = struct {
             header.header_len,
             payload_len,
         ) catch return error.PayloadTooLarge;
-        try ensureIncomingFrameBuffered(self, header, total_len);
+        try ensureIncomingFrameBuffered(self, header, total_len, null);
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{
                 .expect_mask = .unmasked,
@@ -1518,9 +1576,20 @@ pub const Connection = struct {
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
+        return self.ensureBufferedWithDeadline(len, null);
+    }
+
+    fn ensureBufferedWithDeadline(
+        self: *Connection,
+        len: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         var scratch: [transport_read_scratch_len]u8 = undefined;
         while (self.inbuf.items.len < len) {
-            const n = try self.transport().read(&scratch);
+            const n = if (deadline) |absolute|
+                try self.transport().readWithDeadline(&scratch, absolute)
+            else
+                try self.transport().read(&scratch);
             if (n == 0) return error.ConnectionClosed;
             // One socket read commonly returns one complete WebSocket frame.
             // ArrayList's geometric append growth retained roughly 6.5 KiB for
@@ -1735,7 +1804,7 @@ pub const H2Connection = struct {
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
-        try ensureIncomingFrameBuffered(self, header, total_len);
+        try ensureIncomingFrameBuffered(self, header, total_len, null);
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
@@ -1998,6 +2067,15 @@ pub const H2Connection = struct {
     }
 
     fn ensureBuffered(self: *H2Connection, len: usize) Error!void {
+        return self.ensureBufferedWithDeadline(len, null);
+    }
+
+    fn ensureBufferedWithDeadline(
+        self: *H2Connection,
+        len: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (deadline != null) return error.TimedReadUnsupported;
         while (self.inbuf.items.len < len) {
             var data = try self.tunnel.read();
             defer data.deinit(self.allocator);
@@ -2195,6 +2273,7 @@ fn ensureIncomingFrameBuffered(
     connection: anytype,
     header: websocket.FrameHeader,
     total_len: usize,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     const parse_options: websocket.ParseFrameOptions = switch (connection.role) {
         .client => .{
@@ -2245,8 +2324,9 @@ fn ensureIncomingFrameBuffered(
                 total_len,
             );
         }
-        try connection.ensureBuffered(
+        try connection.ensureBufferedWithDeadline(
             @min(total_len, connection.inbuf.items.len + 1),
+            deadline,
         );
     }
     if (validate_text) {
@@ -2654,6 +2734,15 @@ fn considerSubprotocolHeader(
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
     var bufs = [_][]u8{buffer};
     return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
+}
+
+fn readSomeWithDeadline(
+    io: std.Io,
+    stream: net.Stream,
+    buffer: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) Error!usize {
+    return stream_io.readSomeWithDeadline(io, stream, buffer, deadline);
 }
 
 fn setLinuxTcpNoDelay(fd: std.os.linux.fd_t) Error!void {

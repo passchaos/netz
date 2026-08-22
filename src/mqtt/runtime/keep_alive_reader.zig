@@ -6,7 +6,7 @@
 //! cannot retain broker resources by trickling a small packet indefinitely.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const stream_io = @import("../../internal/stream_io.zig");
 
 const net = std.Io.net;
 
@@ -14,10 +14,7 @@ pub const progress_threshold: usize = 1000;
 
 pub const Error = error{ConnectionClosed} ||
     net.Stream.Reader.Error ||
-    std.Io.Operation.FileReadStreaming.UnendingError ||
-    std.Io.Operation.NetReceive.Error ||
-    std.Io.Timeout.Error ||
-    std.Io.ConcurrentError;
+    stream_io.TimedReadError;
 
 pub const Reader = struct {
     io: std.Io,
@@ -93,42 +90,12 @@ pub const Reader = struct {
         self: Reader,
         buffer: []u8,
     ) Error!usize {
-        if (builtin.os.tag == .windows) {
-            // Windows socket handles are not interchangeable with File
-            // handles, so use the network operation that Threaded lowers to
-            // AFD. POSIX uses file_read_streaming below to avoid asking
-            // recvmsg for a meaningless source address on connected TCP.
-            var incoming: net.IncomingMessage = .init;
-            const maybe_err, const count = (try self.io.operateTimeout(
-                .{ .net_receive = .{
-                    .socket_handle = self.stream.socket.handle,
-                    .message_buffer = (&incoming)[0..1],
-                    .data_buffer = buffer,
-                    .flags = .{},
-                } },
-                .{ .deadline = self.deadline },
-            )).net_receive;
-            if (maybe_err) |err| return err;
-            std.debug.assert(count == 1);
-            if (incoming.data.len == 0) return error.ConnectionClosed;
-            return incoming.data.len;
-        }
-
-        var bufs = [_][]u8{buffer};
-        const result = try self.io.operateTimeout(
-            .{ .file_read_streaming = .{
-                .file = .{
-                    .handle = self.stream.socket.handle,
-                    .flags = .{ .nonblocking = false },
-                },
-                .data = &bufs,
-            } },
-            .{ .deadline = self.deadline },
+        const count = try stream_io.readSomeWithDeadline(
+            self.io,
+            self.stream,
+            buffer,
+            self.deadline,
         );
-        const count = result.file_read_streaming catch |err| switch (err) {
-            error.EndOfStream => return error.ConnectionClosed,
-            else => return @errorCast(err),
-        };
         if (count == 0) return error.ConnectionClosed;
         return count;
     }

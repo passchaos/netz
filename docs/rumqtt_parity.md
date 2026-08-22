@@ -352,9 +352,9 @@ database.
 The broker now turns the Keep Alive parsed from CONNECT into an enforced
 inbound inactivity deadline instead of retaining it as informational state:
 
-- a non-zero interval closes plain TCP and native vail-backed TLS Network
-  Connections after exactly 1.5x the negotiated value, preserving the half
-  second for odd values rather than truncating to whole seconds;
+- a non-zero interval closes plain TCP, native vail-backed TLS, WS, and WSS
+  Network Connections after exactly 1.5x the negotiated value, preserving the
+  half second for odd values rather than truncating to whole seconds;
 - MQTT 5 Server Keep Alive replaces the CONNECT value on both sides of the
   accepted connection, so the advertised override is the value the broker
   enforces;
@@ -372,11 +372,13 @@ large partial packets. Netz preserves those semantics without a timer task per
 client by applying Zig 0.16 timed socket reads directly in each already-owned
 broker reader. The TLS record layer now applies the same absolute deadline
 across each encrypted header/body read while preserving already-decrypted
-buffered plaintext. Tests cover exact timeout arithmetic including the maximum
-u16 value, byte-progress renewal beyond one whole timeout, native TLS timeout,
-post-timeout Will routing, and a live Keep Alive zero connection remaining
-usable past the one-second expiry boundary. MQTT over WebSocket remains the
-transport that does not yet expose this timed-read path.
+buffered plaintext. WebSocket carries that absolute deadline across frame and
+message boundaries; Ping/Pong traffic cannot renew MQTT activity, while MQTT
+payload progress above the same 1,000-byte threshold can. Tests cover exact
+timeout arithmetic including the maximum u16 value, byte-progress renewal
+beyond one whole timeout, native TLS/WS/WSS timeout, cross-message large-packet
+progress, post-timeout Will routing, and a live Keep Alive zero connection
+remaining usable past the one-second expiry boundary.
 
 ## Live retained-message integration
 
@@ -586,7 +588,9 @@ Like rumqtt's audited `ws_stream_tungstenite` adapter, each write is one binary
 WebSocket message while reads expose a continuous byte stream: an MQTT packet
 may span messages and one message may contain bytes from multiple packets.
 Client masking is done in place on the temporary encoded packet to avoid an
-extra payload copy.
+extra payload copy. Broker Keep Alive enforcement also remains packet-scoped:
+one absolute deadline spans WebSocket fragments, messages, and control frames,
+so Ping/Pong traffic cannot keep an otherwise idle MQTT session alive.
 
 The audited rumqtt client supports MQTT 3.1.1 and MQTT 5 over WebSocket, while
 the rumqttd server path still contains `TODO: Add support for V5 protocol with
