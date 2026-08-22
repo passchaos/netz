@@ -143,6 +143,16 @@ pub fn main(init: std.process.Init) !void {
     const checksums = try allocator.alloc(u64, connections);
     defer allocator.free(checksums);
     @memset(checksums, 0);
+    const latency_samples = if (options.latency)
+        try allocator.alloc(u64, iterations * connections)
+    else
+        null;
+    defer if (latency_samples) |samples| allocator.free(samples);
+    const latency_scratch = if (options.latency)
+        try allocator.alloc(u64, iterations * connections)
+    else
+        null;
+    defer if (latency_scratch) |samples| allocator.free(samples);
     const workers = try allocator.alloc(std.Thread, connections);
     defer allocator.free(workers);
     const Worker = struct {
@@ -154,6 +164,7 @@ pub fn main(init: std.process.Init) !void {
         err: *?anyerror,
         finished_ns: *u64,
         checksum: *u64,
+        latency_samples: ?[]u64,
         seed: u8,
         fragmented: bool,
         mixed: bool,
@@ -184,6 +195,10 @@ pub fn main(init: std.process.Init) !void {
             worker.start.waitUncancelable(worker.io);
             var checksum: u64 = 0;
             for (0..iterations) |iteration| {
+                const started = if (worker.latency_samples != null)
+                    nowNs(worker.io)
+                else
+                    0;
                 checksum +%= try exchange(
                     worker.client,
                     &payload,
@@ -194,6 +209,9 @@ pub fn main(init: std.process.Init) !void {
                         warmup_iterations + iteration,
                     ),
                 );
+                if (worker.latency_samples) |samples| {
+                    samples[iteration] = nowNs(worker.io) -| started;
+                }
             }
             worker.checksum.* = checksum;
             worker.finished_ns.* = nowNs(worker.io);
@@ -211,6 +229,10 @@ pub fn main(init: std.process.Init) !void {
             .err = &worker_errors[index],
             .finished_ns = &finished_ns[index],
             .checksum = &checksums[index],
+            .latency_samples = if (latency_samples) |samples|
+                samples[index * iterations ..][0..iterations]
+            else
+                null,
             .seed = @truncate(index * 17),
             .fragmented = options.fragmented,
             .mixed = options.mixed,
@@ -298,6 +320,13 @@ pub fn main(init: std.process.Init) !void {
         )) / (1024.0 * 1024.0),
         checksum,
     });
+    if (latency_samples) |samples| {
+        printLatencyByPayload(
+            samples,
+            latency_scratch.?,
+            options.mixed,
+        );
+    }
     if (options.stats) {
         const snapshot = counting.snapshot();
         snapshot.print();
@@ -310,6 +339,7 @@ const Options = struct {
     stats: bool = false,
     fragmented: bool = false,
     mixed: bool = false,
+    latency: bool = false,
 };
 
 fn parseOptions(init: std.process.Init) !Options {
@@ -335,6 +365,8 @@ fn parseOptions(init: std.process.Init) !Options {
             options.fragmented = true;
         } else if (std.mem.eql(u8, arg, "--mixed")) {
             options.mixed = true;
+        } else if (std.mem.eql(u8, arg, "--latency")) {
+            options.latency = true;
         } else {
             return error.InvalidArgument;
         }
@@ -419,6 +451,72 @@ fn serverFrameLen(payload_len: usize) usize {
 
 fn payloadLengthFieldBytes(payload_len: usize) usize {
     return if (payload_len <= 125) 0 else if (payload_len <= 65_535) 2 else 8;
+}
+
+fn printLatencyByPayload(
+    samples: []const u64,
+    scratch: []u64,
+    mixed: bool,
+) void {
+    if (mixed) {
+        for (mixed_payload_sizes) |payload_bytes| {
+            printLatencyClass(samples, scratch, true, payload_bytes);
+        }
+    } else {
+        printLatencyClass(samples, scratch, false, fixed_payload_bytes);
+    }
+}
+
+fn printLatencyClass(
+    samples: []const u64,
+    scratch: []u64,
+    mixed: bool,
+    payload_bytes: usize,
+) void {
+    var count: usize = 0;
+    for (samples, 0..) |sample, index| {
+        const iteration = index % iterations;
+        if (payloadLength(
+            mixed,
+            warmup_iterations + iteration,
+        ) != payload_bytes) continue;
+        scratch[count] = sample;
+        count += 1;
+    }
+    std.mem.sortUnstable(
+        u64,
+        scratch[0..count],
+        {},
+        lessThanU64,
+    );
+    std.debug.print(
+        "  payload {d} B latency samples/p50/p99/p99.9 ns: {d}/{d}/{d}/{d}\n",
+        .{
+            payload_bytes,
+            count,
+            percentile(scratch[0..count], 50, 100),
+            percentile(scratch[0..count], 99, 100),
+            percentile(scratch[0..count], 999, 1000),
+        },
+    );
+}
+
+fn percentile(
+    sorted: []const u64,
+    numerator: usize,
+    denominator: usize,
+) u64 {
+    std.debug.assert(sorted.len != 0);
+    const rank = std.math.divCeil(
+        usize,
+        sorted.len * numerator,
+        denominator,
+    ) catch unreachable;
+    return sorted[@min(sorted.len - 1, rank -| 1)];
+}
+
+fn lessThanU64(_: void, lhs: u64, rhs: u64) bool {
+    return lhs < rhs;
 }
 
 fn nowNs(io: std.Io) u64 {

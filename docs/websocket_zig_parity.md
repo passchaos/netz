@@ -260,7 +260,10 @@ medium and 4-KiB application messages. Reports use the exact 200-iteration
 schedule rather than multiplying by an average, and both sides verify the same
 payload checksum. The websocket.zig fixture's fixed 16-entry benchmark arrays
 were replaced with bounded dynamic storage and its connection cap was raised to
-256, matching netz.
+256, matching netz. Passing `--latency` now records every measured exchange
+and reports p50, p99 and p99.9 separately for each payload size. Sampling is
+opt-in so ordinary throughput and allocator runs retain their previous
+instrumentation shape.
 
 Three CPU-0..31 runs at 64 concurrent persistent connections produced:
 
@@ -285,6 +288,28 @@ blocking worker implementation, and its fixed 16-entry benchmark bookkeeping
 was replaced with bounded dynamic arrays. Both harnesses now permit 256
 connections rather than imposing an artificial 16-connection ceiling.
 
+Five alternating CPU-0..31 runs at 128 connections with `--mixed --latency`
+extended the equal-shape evidence beyond the earlier 64-connection point. All
+runs verified 45,506,048 logical payload bytes and checksum 9,762,432. Median
+aggregate results were 1,283 ns/roundtrip and 779,291 roundtrips/s for netz,
+versus 1,639 ns and 610,007 roundtrips/s for websocket.zig, a 1.28x throughput
+advantage. Median-of-run per-class latency percentiles were:
+
+```text
+payload   netz p50/p99/p99.9 us   websocket.zig p50/p99/p99.9 us
+1 B       96.6 / 426 / 1777       154.6 / 487 / 2180
+7 B       88.7 / 345 / 783        148.5 / 460 / 1252
+125 B     93.0 / 430 / 1264       149.7 / 645 / 2900
+126 B     92.2 / 325 / 1570       149.6 / 436 / 2280
+1024 B    95.4 / 333 / 813        154.0 / 496 / 2381
+4096 B    98.9 / 439 / 970        157.6 / 513 / 1509
+```
+
+Netz is lower at every reported class/percentile in this five-run summary.
+The sample count per class is also printed (4,224 or 4,352 here), making
+schedule or aggregation drift visible rather than silently comparing different
+distributions.
+
 One `strace -f -c` run recorded about 1,768 netz `sendmsg` calls. The
 reference recorded about 1,772 `sendmsg` plus 892 `writev` calls: its client
 still sends mask/header separately from payload. Tracing perturbs latency, so
@@ -292,8 +317,10 @@ these counts explain submission shape but are not timing samples.
 
 ## Remaining evidence before a broad completion claim
 
-1. Extend the now-equal-shape mixed-payload benchmark beyond the validated
-   64-connection comparison and add latency percentiles per payload class.
+1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark
+   now reports per-class p50/p99/p99.9 and retains matching checksum/sample
+   counts. Extend to 256 connections or longer runs when investigating scaling
+   beyond the captured 128-connection result.
 2. Compare buffer-pool behavior and peak memory under many mostly-idle
    connections; the reference exposes explicit small/large buffer pools. The
    netz echo benchmark now accepts `--stats` and reports thread-safe allocation
