@@ -175,6 +175,10 @@ TCP and RFC 8441 receive APIs now also complete the RFC 6455 failure handshake:
 malformed frames send Close 1002, invalid message UTF-8 sends 1007, and frame,
 aggregate-message, or decompression limits send 1009 before returning the typed
 local error. Nested frame/message readers suppress duplicate Close frames.
+Both transports also expose absolute-deadline message reads. RFC 8441 carries
+the same deadline through HTTP/2 frame parsing, connection-control frames,
+WebSocket fragmentation and Ping/Pong handling, so upper-layer inactivity
+budgets cannot be extended by transport control traffic.
 One earlier four-connection `--stats` run made 7,151 allocations, allocated
 48,068,236 cumulative bytes and peaked at 1,240,114 live bytes while verifying
 checksum 111,600. Vort's fixed-sync-flush encoder now writes directly into the

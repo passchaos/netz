@@ -98,6 +98,23 @@ const RuntimeTransport = union(enum) {
         };
     }
 
+    pub fn readWithDeadline(
+        self: RuntimeTransport,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        return switch (self) {
+            .tcp => |tcp| stream_io.readSomeWithDeadline(
+                tcp.io,
+                tcp.stream,
+                buffer,
+                deadline,
+            ),
+            .tls_client => |connection| connection.readWithDeadline(buffer, deadline),
+            .tls_server => |connection| connection.readWithDeadline(buffer, deadline),
+        };
+    }
+
     fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
@@ -3639,24 +3656,39 @@ pub const Connection = struct {
     }
 
     fn readBufferedFrame(self: *Connection) Error!frame_io.BorrowedFrame {
-        const borrowed = try self.frame_reader.readTransport(
+        return self.readBufferedFrameWithDeadline(null);
+    }
+
+    fn readBufferedFrameWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!frame_io.BorrowedFrame {
+        const borrowed = try self.frame_reader.readTransportWithDeadline(
             self.allocator,
             self.transportForIo(),
             @min(
                 self.limits.max_frame_payload,
                 self.limits.max_frame_size,
             ),
+            deadline,
         );
         try validateFrameEnvelope(borrowed.frame);
         return borrowed;
     }
 
     fn readOwnedFrame(self: *Connection) Error!OwnedFrame {
+        return self.readOwnedFrameWithDeadline(null);
+    }
+
+    fn readOwnedFrameWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedFrame {
         if (self.pending_client_frame) |frame| {
             self.pending_client_frame = null;
             return frame;
         }
-        const borrowed = try self.readBufferedFrame();
+        const borrowed = try self.readBufferedFrameWithDeadline(deadline);
         const bytes = try self.allocator.dupe(u8, borrowed.bytes);
         errdefer self.allocator.free(bytes);
         return .{
@@ -7395,8 +7427,23 @@ pub const Tunnel = struct {
     }
 
     pub fn read(self: *Tunnel) Error!OwnedTunnelData {
+        return self.readWithDeadlineInternal(null);
+    }
+
+    pub fn readWithDeadline(
+        self: *Tunnel,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedTunnelData {
+        return self.readWithDeadlineInternal(deadline);
+    }
+
+    fn readWithDeadlineInternal(
+        self: *Tunnel,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedTunnelData {
         while (true) {
-            var frame = try self.connection.readOwnedFrame();
+            var frame = try self.connection
+                .readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.connection.allocator);
             if (try self.connection.handleConnectionFrame(frame.frame)) {
                 frame.deinit(self.connection.allocator);

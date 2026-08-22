@@ -1806,21 +1806,28 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveFrame(self: *H2Connection) Error!websocket.Frame {
+        return self.receiveFrameInternal(null);
+    }
+
+    fn receiveFrameInternal(
+        self: *H2Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
         errdefer |err| closeAfterReceiveError(self, err);
         if (self.close_sent and self.close_received) return error.ConnectionClosed;
-        try self.ensureBuffered(2);
+        try self.ensureBufferedWithDeadline(2, deadline);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
         const len_code = second & 0x7f;
         if (len_code == 126) header_len += 2 else if (len_code == 127) header_len += 8;
         if ((second & 0x80) != 0) header_len += 4;
-        try self.ensureBuffered(header_len);
+        try self.ensureBufferedWithDeadline(header_len, deadline);
 
         const header = try websocket.FrameHeader.parse(self.inbuf.items);
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
-        try ensureIncomingFrameBuffered(self, header, total_len, null);
+        try ensureIncomingFrameBuffered(self, header, total_len, deadline);
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
@@ -1835,8 +1842,15 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveFrameAuto(self: *H2Connection) Error!websocket.Frame {
+        return self.receiveFrameAutoInternal(null);
+    }
+
+    fn receiveFrameAutoInternal(
+        self: *H2Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
         while (true) {
-            var frame = try self.receiveFrame();
+            var frame = try self.receiveFrameInternal(deadline);
             errdefer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
@@ -1854,12 +1868,29 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveMessage(self: *H2Connection) Error!OwnedMessage {
+        return self.receiveMessageInternal(null);
+    }
+
+    /// Receive one RFC 8441 message under a caller-owned absolute deadline.
+    /// HTTP/2 connection-control frames and WebSocket control frames share the
+    /// same deadline rather than extending upper-layer inactivity budgets.
+    pub fn receiveMessageWithDeadline(
+        self: *H2Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedMessage {
+        return self.receiveMessageInternal(deadline);
+    }
+
+    fn receiveMessageInternal(
+        self: *H2Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedMessage {
         errdefer |err| closeAfterReceiveError(self, err);
         var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
         while (true) {
-            var frame = try self.receiveFrameAuto();
+            var frame = try self.receiveFrameAutoInternal(deadline);
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping, .pong => continue,
@@ -2091,9 +2122,11 @@ pub const H2Connection = struct {
         len: usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        if (deadline != null) return error.TimedReadUnsupported;
         while (self.inbuf.items.len < len) {
-            var data = try self.tunnel.read();
+            var data = if (deadline) |absolute|
+                try self.tunnel.readWithDeadline(absolute)
+            else
+                try self.tunnel.read();
             defer data.deinit(self.allocator);
             if (data.data.len != 0) try self.inbuf.appendSlice(self.allocator, data.data);
             if (data.end_stream) {
@@ -3923,6 +3956,94 @@ test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP/2 deadline spans control frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        timed_out: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var h2 = try shared.server.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(
+                shared.server.allocator,
+                &h2,
+                .{ .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = 4096,
+                    .max_message_bytes = 4096,
+                } },
+            );
+            defer ws.close();
+            _ = ws.receiveMessageWithDeadline(.fromNow(
+                shared.server.io,
+                .{ .raw = .fromMilliseconds(300), .clock = .awake },
+            )) catch |err| {
+                if (err != error.Timeout) return err;
+                shared.timed_out = true;
+                return;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer h2_client.close();
+    var ws_client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/deadline",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    });
+    defer ws_client.close();
+    for (0..2) |_| {
+        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+        try ws_client.sendPing("keep-http2-busy");
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.timed_out);
 }
 
 test "WebSocket receiveFrameAuto replies to ping" {

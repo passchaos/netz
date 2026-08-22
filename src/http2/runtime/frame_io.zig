@@ -59,7 +59,40 @@ pub const Reader = struct {
         transport: anytype,
         inbound_payload_limit: usize,
     ) !BorrowedFrame {
-        return self.readFrom(allocator, transport, inbound_payload_limit);
+        return self.readTransportWithDeadline(
+            allocator,
+            transport,
+            inbound_payload_limit,
+            null,
+        );
+    }
+
+    pub fn readTransportWithDeadline(
+        self: *Reader,
+        allocator: std.mem.Allocator,
+        transport: anytype,
+        inbound_payload_limit: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !BorrowedFrame {
+        const Source = struct {
+            transport: @TypeOf(transport),
+            deadline: ?std.Io.Clock.Timestamp,
+
+            fn read(source: @This(), buffer: []u8) !usize {
+                if (source.deadline) |absolute| {
+                    return source.transport.readWithDeadline(
+                        buffer,
+                        absolute,
+                    );
+                }
+                return source.transport.read(buffer);
+            }
+        };
+        return self.readFrom(
+            allocator,
+            Source{ .transport = transport, .deadline = deadline },
+            inbound_payload_limit,
+        );
     }
 
     fn readFrom(
