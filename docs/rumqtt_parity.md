@@ -116,7 +116,10 @@ and final snapshots. `zig build interop-mqtt-live-autosave
 -Doptimize=ReleaseFast` creates a durable subscription, waits for an autosave,
 kills the broker without its final save, restores the database in a fresh
 process, and verifies Session Present plus live routing through the restored
-subscription.
+subscription. The same process gate now takes that Session offline, queues an
+opt-in QoS 0 message, waits for a later atomic checkpoint, kills the broker,
+and requires the exact packet once immediately after reconnect before proving
+the restored connection remains usable with PING.
 
 Run the same sequential (window-one) driver against any broker address:
 
@@ -1115,8 +1118,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    Tests cover both direct state and a real active broker connection remaining
    usable after checkpoint, followed by restore. The production example now
    accepts `--autosave-interval-seconds=N`, and the process gate above proves a
-   periodic checkpoint survives forced termination. A replicated/incremental
-   commitlog is still needed to close mutations between intervals.
+   periodic checkpoint survives forced termination with both subscription
+   metadata and an opt-in offline QoS 0 delivery intact. A replicated/
+   incremental commitlog is still needed to close mutations between intervals.
 2. Extend the production-scale publisher-window, latency, allocation and RSS
    comparison above to Mosquitto and additional concurrency/fanout shapes;
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.

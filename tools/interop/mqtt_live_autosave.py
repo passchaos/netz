@@ -67,9 +67,18 @@ def subscribe_packet(packet_id: int, topic_filter: str) -> bytes:
     return packet(0x82, body)
 
 
-def publish_packet(packet_id: int, topic: str, payload: bytes) -> bytes:
-    body = mqtt_string(topic) + packet_id.to_bytes(2, "big") + b"\x00" + payload
-    return packet(0x32, body)
+def publish_packet(
+    topic: str, payload: bytes, *, qos: int, packet_id: int | None = None
+) -> bytes:
+    if qos not in (0, 1):
+        raise ValueError("autosave fixture supports QoS 0/1 only")
+    if (qos == 0) != (packet_id is None):
+        raise ValueError("Packet Identifier is required exactly for QoS 1")
+    body = mqtt_string(topic)
+    if packet_id is not None:
+        body += packet_id.to_bytes(2, "big")
+    body += b"\x00" + payload
+    return packet(0x30 | (qos << 1), body)
 
 
 def recv_exact(sock: socket.socket, count: int) -> bytes:
@@ -134,7 +143,11 @@ def start_broker(
         f"--persistence={database}",
     ]
     if autosave:
-        command.extend(("--no-restore", "--autosave-interval-seconds=1"))
+        command.extend((
+            "--no-restore",
+            "--autosave-interval-seconds=1",
+            "--queue-qos0-messages",
+        ))
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
@@ -176,8 +189,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="netz-mqtt-autosave-") as raw_tmp:
         database = Path(raw_tmp) / "broker.db"
         port = free_port()
-        source = start_broker(args.broker, port, database, 1, autosave=True)
+        source = start_broker(args.broker, port, database, 2, autosave=True)
         subscriber: socket.socket | None = None
+        publisher: socket.socket | None = None
         try:
             baseline = wait_for_checkpoint(database, None)
             subscriber = connect_client(
@@ -191,12 +205,35 @@ def main() -> None:
             subscriber.sendall(b"\xc0\x00")
             if read_packet(subscriber) != (0xD0, b""):
                 raise AssertionError("live client failed after autosave")
+            # Put the durable Session offline, enqueue a QoS 0 Application
+            # Message under the opt-in policy, and wait for a new checkpoint.
+            # This is the process-level counterpart to the Store snapshot test:
+            # the broker is killed before any reconnect can drain the queue.
+            subscriber.sendall(b"\xe0\x00")
+            subscriber.close()
+            subscriber = None
+            publisher = connect_client(
+                port,
+                "autosave-qos0-publisher",
+                clean_start=True,
+                session_present=False,
+            )
+            qos0_baseline = checkpoint_identity(database)
+            publisher.sendall(publish_packet(
+                "autosave/qos0", b"survives-crash", qos=0
+            ))
+            publisher.sendall(b"\xc0\x00")
+            if read_packet(publisher) != (0xD0, b""):
+                raise AssertionError("QoS 0 publisher failed before autosave")
+            wait_for_checkpoint(database, qos0_baseline)
             # Simulate a process crash: the final quiescent save must not run.
             source.kill()
             source.wait(timeout=5)
         finally:
             if subscriber is not None:
                 subscriber.close()
+            if publisher is not None:
+                publisher.close()
             if source.poll() is None:
                 source.kill()
                 source.wait(timeout=5)
@@ -213,13 +250,38 @@ def main() -> None:
                 clean_start=False,
                 session_present=True,
             )
+            qos0_first, qos0_delivery = read_packet(subscriber)
+            if qos0_first != 0x30:
+                raise AssertionError(
+                    f"expected restored QoS 0 PUBLISH, got {qos0_first:#x}"
+                )
+            qos0_topic_len = int.from_bytes(qos0_delivery[0:2], "big")
+            qos0_topic_end = 2 + qos0_topic_len
+            if qos0_delivery[2:qos0_topic_end] != b"autosave/qos0":
+                raise AssertionError(
+                    f"unexpected restored QoS 0 topic: {qos0_delivery.hex()}"
+                )
+            # MQTT 5 QoS 0 has no Packet Identifier; its property-length byte
+            # follows the Topic Name directly. Exact remainder comparison also
+            # proves the Application Message survived the crash byte-for-byte.
+            if qos0_delivery[qos0_topic_end:] != b"\x00survives-crash":
+                raise AssertionError(
+                    f"unexpected restored QoS 0 payload: {qos0_delivery.hex()}"
+                )
+            subscriber.sendall(b"\xc0\x00")
+            if read_packet(subscriber) != (0xD0, b""):
+                raise AssertionError(
+                    "restored QoS 0 was duplicated before PINGRESP"
+                )
             publisher = connect_client(
                 restored_port,
                 "autosave-publisher",
                 clean_start=True,
                 session_present=False,
             )
-            publisher.sendall(publish_packet(1, "autosave/recovered", b"ok"))
+            publisher.sendall(publish_packet(
+                "autosave/recovered", b"ok", qos=1, packet_id=1
+            ))
             puback = expect_packet_type(publisher, 4, "publisher PUBACK")
             if puback[0:2] != b"\x00\x01":
                 raise AssertionError(f"unexpected PUBACK: {puback.hex()}")
@@ -253,7 +315,7 @@ def main() -> None:
                 restored.kill()
                 restored.wait(timeout=5)
 
-    print("MQTT live autosave crash recovery passed")
+    print("MQTT live autosave Session and queued QoS0 crash recovery passed")
 
 
 if __name__ == "__main__":
