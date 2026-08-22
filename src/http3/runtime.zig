@@ -3942,6 +3942,30 @@ pub const HandshakeClient = struct {
         }
     }
 
+    /// Process one peer packet and retain any HTTP/3 events for the normal
+    /// response and push APIs.
+    ///
+    /// Applications normally make progress implicitly through a blocking
+    /// response call. A control-only exchange, such as waiting for the
+    /// server GOAWAY that acknowledges a client-initiated shutdown, has no
+    /// response stream to drive that path. This explicit pump also permits
+    /// event loops to observe GOAWAY while an accepted response remains
+    /// buffered and available to `receiveResponse`.
+    pub fn receiveProgress(self: *HandshakeClient) Error!void {
+        try receiveConnectionResponsePacket(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+            null,
+        );
+    }
+
     /// Advance one response stream without assembling its DATA payload.
     ///
     /// The first call transfers any already-buffered STREAM ranges into the
@@ -17713,11 +17737,17 @@ test "HTTP/3 handshake server performs two-phase graceful shutdown" {
     );
     defer client.deinit();
 
-    var response = try client.request(.{
+    const stream_id = try client.sendRequest(.{
         .method = "GET",
         .path = "/graceful",
         .authority = "localhost",
     });
+    while (client.control.peer_goaway_id == null or
+        client.control.peer_goaway_id.? != 4)
+    {
+        try client.receiveProgress();
+    }
+    var response = try client.receiveResponse(stream_id);
     defer response.deinit(allocator);
     thread.join();
     if (shared.err) |err| return err;

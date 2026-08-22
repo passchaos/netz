@@ -1,20 +1,24 @@
-//! HTTP/3 client for a two-request exchange with the tquic server tool.
+//! HTTP/3 client for request and graceful-drain exchanges with tquic.
 
 const std = @import("std");
 const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 3 or args.len > 4) return error.InvalidArguments;
+    if (args.len < 3 or args.len > 5) return error.InvalidArguments;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (!std.Io.Dir.path.isAbsolute(args[2])) return error.InvalidArguments;
-    const expect_retry = if (args.len == 4 and
-        std.mem.eql(u8, args[3], "--expect-retry"))
-        true
-    else if (args.len == 3)
-        false
-    else
-        return error.InvalidArguments;
+    var expect_retry = false;
+    var graceful = false;
+    for (args[3..]) |arg| {
+        if (std.mem.eql(u8, arg, "--expect-retry") and !expect_retry) {
+            expect_retry = true;
+        } else if (std.mem.eql(u8, arg, "--graceful") and !graceful) {
+            graceful = true;
+        } else {
+            return error.InvalidArguments;
+        }
+    }
     const allocator = init.gpa;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -64,6 +68,10 @@ pub fn main(init: std.process.Init) !void {
         expect_retry,
         client.established.retry_processed,
     );
+    if (graceful) {
+        try runGracefulDrain(allocator, &client, expect_retry);
+        return;
+    }
 
     const requests = [_]struct {
         method: []const u8,
@@ -104,20 +112,68 @@ pub fn main(init: std.process.Init) !void {
             .body = request.body,
         });
         defer response.deinit(allocator);
-        try std.testing.expectEqual(request.status, response.response.status);
-        try std.testing.expectEqualStrings(
+        try validateResponse(
+            response.response,
+            request.status,
             request.expected,
-            response.response.body,
-        );
-        try std.testing.expectEqualStrings(
-            "tquic",
-            responseHeader(response.response.headers, "server") orelse
-                return error.MissingResponseHeader,
         );
     }
     std.debug.print(
         "netz HTTP/3 client interoperated with tquic: verified=true retry={} requests=3 connection_reused=true get=9 range=206/5 post_md5=32\n",
         .{expect_retry},
+    );
+}
+
+fn runGracefulDrain(
+    allocator: std.mem.Allocator,
+    client: *netz.http3.runtime.HandshakeClient,
+    expect_retry: bool,
+) !void {
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/one.txt",
+        .scheme = "https",
+        .authority = "localhost",
+    });
+    try std.testing.expectEqual(@as(u62, 0), stream_id);
+    // Client GOAWAY carries a push ID, not a request-stream boundary. The
+    // request and GOAWAY use distinct packets, and stream 0 stays active in
+    // netz until the complete response is consumed below.
+    try client.sendGoAway(0);
+    var response = try client.receiveResponse(stream_id);
+    defer response.deinit(allocator);
+    try validateResponse(response.response, 200, "tquic-one");
+
+    // tquic acknowledges client shutdown with its highest processed request
+    // stream. Zero is deterministic for this one-stream exchange whether its
+    // event loop handles GOAWAY immediately before or after request FIN.
+    while (client.control.peer_goaway_id == null) {
+        try client.receiveProgress();
+    }
+    try std.testing.expectEqual(@as(?u64, 0), client.control.peer_goaway_id);
+    try std.testing.expectError(error.GoAwayReceived, client.request(.{
+        .method = "GET",
+        .path = "/after-goaway",
+        .scheme = "https",
+        .authority = "localhost",
+    }));
+    std.debug.print(
+        "netz HTTP/3 client gracefully drained tquic: retry={} goaway=0 active_stream=0 active_drained=true next_rejected=true\n",
+        .{expect_retry},
+    );
+}
+
+fn validateResponse(
+    response: netz.http3.DecodedResponse,
+    expected_status: u16,
+    expected_body: []const u8,
+) !void {
+    try std.testing.expectEqual(expected_status, response.status);
+    try std.testing.expectEqualStrings(expected_body, response.body);
+    try std.testing.expectEqualStrings(
+        "tquic",
+        responseHeader(response.headers, "server") orelse
+            return error.MissingResponseHeader,
     );
 }
 

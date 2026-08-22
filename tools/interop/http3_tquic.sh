@@ -19,7 +19,12 @@ fi
 
 work=$(mktemp -d)
 server_pid=
+client_pid=
 cleanup() {
+  if [[ -n "$client_pid" ]]; then
+    kill "$client_pid" 2>/dev/null || true
+    wait "$client_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
@@ -76,6 +81,103 @@ run_netz_client_case() {
   server_pid=
 }
 
+run_netz_client_graceful_case() {
+  local retry=$1
+  local port
+  port=$(free_udp_port)
+  local server_args=() client_args=(--graceful)
+  if [[ "$retry" == true ]]; then
+    server_args+=(--enable-retry)
+    client_args+=(--expect-retry)
+  fi
+  "$tquic_server" -l "127.0.0.1:$port" -c "$work/cert.pem" \
+    -k "$work/key.pem" -r "$work/www" --log-level OFF \
+    "${server_args[@]}" >"$work/tquic-server-graceful-$retry.log" 2>&1 &
+  server_pid=$!
+  sleep 0.2
+  timeout 20s "$netz_client" "$port" "$work/cert.pem" \
+    "${client_args[@]}" \
+    >"$work/netz-client-graceful-$retry.log" 2>&1
+  grep -Fq "netz HTTP/3 client gracefully drained tquic: retry=$retry goaway=0 active_stream=0 active_drained=true next_rejected=true" \
+    "$work/netz-client-graceful-$retry.log"
+  cat "$work/netz-client-graceful-$retry.log"
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=
+}
+
+run_tquic_client_graceful_case() {
+  local retry=$1
+  local port
+  port=$(free_udp_port)
+  local graceful_downloads="$work/downloads-graceful-$retry"
+  mkdir -p "$graceful_downloads"
+  local server_args=(--graceful)
+  if [[ "$retry" == true ]]; then
+    server_args+=(--retry)
+  fi
+  "$netz_server" "$port" "${server_args[@]}" \
+    >"$work/netz-server-graceful-$retry.log" 2>&1 &
+  server_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q "netz HTTP/3 tquic interop server listening" \
+      "$work/netz-server-graceful-$retry.log" && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      cat "$work/netz-server-graceful-$retry.log" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  "$tquic_client" -c "127.0.0.1:$port" -a h3 \
+    --max-concurrent-requests 1 --max-requests-per-conn 2 \
+    --total-requests-per-thread 2 --dump-dir "$graceful_downloads" \
+    --log-level DEBUG "https://localhost:$port/one.txt" \
+    "https://localhost:$port/two.txt" \
+    >"$work/tquic-client-graceful-$retry.log" 2>&1 &
+  client_pid=$!
+  # The stock CLI retries a refused stream forever. Stop it only after its
+  # independent log and body output prove both GOAWAY boundaries, active-stream
+  # completion, and the post-GOAWAY stream_new() rejection.
+  for _ in $(seq 1 100); do
+    if grep -Fq "got GOAWAY with ID 4611686018427387900" \
+        "$work/tquic-client-graceful-$retry.log" && \
+      grep -Fq "got GOAWAY with ID 4" \
+        "$work/tquic-client-graceful-$retry.log" && \
+      grep -Eq "send request error .*error: IdError" \
+        "$work/tquic-client-graceful-$retry.log" && \
+      [[ "$(cat "$graceful_downloads/one.txt" 2>/dev/null)" == \
+        "netz-tquic-one" ]]; then
+      break
+    fi
+    if ! kill -0 "$client_pid" 2>/dev/null; then
+      cat "$work/tquic-client-graceful-$retry.log" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  # Repeat the conditions outside the polling loop so exhausting all retries
+  # cannot fall through as a false pass.
+  grep -Fq "got GOAWAY with ID 4611686018427387900" \
+    "$work/tquic-client-graceful-$retry.log"
+  grep -Fq "got GOAWAY with ID 4" \
+    "$work/tquic-client-graceful-$retry.log"
+  grep -Eq "send request error .*error: IdError" \
+    "$work/tquic-client-graceful-$retry.log"
+  test "$(cat "$graceful_downloads/one.txt")" = "netz-tquic-one"
+  kill "$client_pid" 2>/dev/null || true
+  wait "$client_pid" 2>/dev/null || true
+  client_pid=
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "netz HTTP/3 server gracefully drained tquic: retry=$retry initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true" \
+    "$work/netz-server-graceful-$retry.log"
+  # tquic creates the dump file before stream_new(), so rejection leaves an
+  # empty placeholder rather than no file at all.
+  test ! -s "$graceful_downloads/two.txt"
+  echo "tquic HTTP/3 client gracefully drained by netz: retry=$retry initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true"
+  cat "$work/netz-server-graceful-$retry.log"
+}
+
 run_tquic_client_case() {
   local retry=$1
   local port
@@ -116,5 +218,9 @@ run_tquic_client_case() {
 
 run_netz_client_case false
 run_netz_client_case true
+run_netz_client_graceful_case false
+run_netz_client_graceful_case true
 run_tquic_client_case false
 run_tquic_client_case true
+run_tquic_client_graceful_case false
+run_tquic_client_graceful_case true

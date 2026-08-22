@@ -1,19 +1,23 @@
-//! Two-request HTTP/3 server used by the tquic process interoperability gate.
+//! HTTP/3 server used by the tquic request and graceful-drain process gates.
 
 const std = @import("std");
 const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
+    if (args.len < 2 or args.len > 4) return error.InvalidArguments;
     const port = try std.fmt.parseInt(u16, args[1], 10);
-    const force_retry = if (args.len == 3 and
-        std.mem.eql(u8, args[2], "--retry"))
-        true
-    else if (args.len == 2)
-        false
-    else
-        return error.InvalidArguments;
+    var force_retry = false;
+    var graceful = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--retry") and !force_retry) {
+            force_retry = true;
+        } else if (std.mem.eql(u8, arg, "--graceful") and !graceful) {
+            graceful = true;
+        } else {
+            return error.InvalidArguments;
+        }
+    }
     const allocator = init.gpa;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -63,7 +67,8 @@ pub fn main(init: std.process.Init) !void {
         session.established.retry_processed,
     );
     var seen: [2]bool = .{ false, false };
-    for (0..2) |_| {
+    const request_count: usize = if (graceful) 1 else 2;
+    for (0..request_count) |_| {
         var request = try session.receiveRequest();
         defer request.deinit(allocator);
         try std.testing.expectEqualStrings("GET", request.request.method);
@@ -78,15 +83,40 @@ pub fn main(init: std.process.Init) !void {
         if (seen[index]) return error.DuplicateRequest;
         seen[index] = true;
         const body = if (index == 0) "netz-tquic-one" else "netz-tquic-two";
+        if (graceful) {
+            try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+            // The initial maximum ID stops tquic from opening new requests.
+            // The final ID is one stream beyond the accepted stream, allowing
+            // stream 0 to finish while making the boundary exact.
+            try session.initiateShutdown();
+            try session.completeShutdown();
+            try std.testing.expectEqual(
+                @as(?u64, 4),
+                session.control.local_goaway_id,
+            );
+            try std.testing.expect(!session.drainComplete());
+        }
         try session.sendResponse(request.stream_id, .{
             .status = 200,
             .headers = &.{.{ .name = "x-netz-peer", .value = "tquic" }},
             .body = body,
         });
+        if (graceful) try std.testing.expect(session.drainComplete());
     }
-    try std.Io.sleep(io, .fromMilliseconds(250), .awake);
-    std.debug.print(
-        "netz HTTP/3 server interoperated with tquic: retry={} requests=2 connection_reused=true bodies=14,14\n",
-        .{force_retry},
-    );
+    if (graceful) {
+        // Keep the socket alive briefly after response completion so the
+        // external harness can observe both GOAWAY frames and the refused
+        // follow-up request before this one-shot server exits.
+        try std.Io.sleep(io, .fromMilliseconds(500), .awake);
+        std.debug.print(
+            "netz HTTP/3 server gracefully drained tquic: retry={} initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true\n",
+            .{force_retry},
+        );
+    } else {
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        std.debug.print(
+            "netz HTTP/3 server interoperated with tquic: retry={} requests=2 connection_reused=true bodies=14,14\n",
+            .{force_retry},
+        );
+    }
 }
