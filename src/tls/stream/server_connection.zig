@@ -90,6 +90,19 @@ pub const Connection = struct {
         return self.records.read(self.io, self.stream, out);
     }
 
+    pub fn readWithDeadline(
+        self: *Connection,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        return self.records.readWithDeadline(
+            self.io,
+            self.stream,
+            out,
+            deadline,
+        );
+    }
+
     pub fn writeAll(self: *Connection, bytes: []const u8) Error!void {
         return self.records.writeAll(
             self.io,

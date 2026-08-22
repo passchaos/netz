@@ -167,9 +167,9 @@ pub const Transport = union(enum) {
     /// One deadline covers a complete ordinary Control Packet, preventing a
     /// slow peer from retaining broker resources by trickling a small packet.
     /// As in Mosquitto, a progressing large payload renews the budget only
-    /// while more than 1,000 bytes remain. Only the broker's byte-stream TCP
-    /// transport currently uses this operation; adapters with their own
-    /// buffering must add equivalent deadline-aware reads before opting in.
+    /// while more than 1,000 bytes remain. TCP and vail-backed TLS share this
+    /// deadline model; adapters with independently framed buffering must add
+    /// equivalent timed reads before opting in.
     pub fn readPacketWithInactivityTimeout(
         self: *Transport,
         allocator: std.mem.Allocator,
@@ -184,7 +184,20 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
             ),
-            .tls, .tls_vail, .tls_server, .websocket => error.TimedReadUnsupported,
+            .tls => error.TimedReadUnsupported,
+            .tls_vail => |connection| readStreamPacketWithInactivityTimeout(
+                allocator,
+                connection,
+                max_packet_size,
+                timeout,
+            ),
+            .tls_server => |connection| readStreamPacketWithInactivityTimeout(
+                allocator,
+                connection,
+                max_packet_size,
+                timeout,
+            ),
+            .websocket => error.TimedReadUnsupported,
         };
     }
 };
@@ -231,6 +244,69 @@ fn readStreamPacket(
     if (packet_len > max_packet_size) return error.PacketTooLarge;
     try encoded.resize(allocator, packet_len);
     try readExactTls(connection, encoded.items[payload_start..]);
+
+    const bytes = try encoded.toOwnedSlice(allocator);
+    errdefer allocator.free(bytes);
+    return .{
+        .bytes = bytes,
+        .fixed = try mqtt.FixedHeader.parse(bytes),
+    };
+}
+
+fn readStreamPacketWithInactivityTimeout(
+    allocator: std.mem.Allocator,
+    connection: anytype,
+    max_packet_size: usize,
+    timeout: std.Io.Clock.Duration,
+) Error!OwnedPacket {
+    std.debug.assert(timeout.raw.nanoseconds > 0);
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(allocator);
+    var deadline = std.Io.Clock.Timestamp.fromNow(connection.io, timeout);
+
+    var first: [1]u8 = undefined;
+    try readExactTlsWithDeadline(connection, &first, deadline);
+    try encoded.append(allocator, first[0]);
+
+    var remaining_bytes: [4]u8 = undefined;
+    var remaining_len_len: usize = 0;
+    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+        try readExactTlsWithDeadline(
+            connection,
+            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            deadline,
+        );
+        try encoded.append(allocator, remaining_bytes[remaining_len_len]);
+        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) break;
+    } else return error.MalformedRemainingLength;
+
+    const decoded = try mqtt.decodeRemainingLength(
+        remaining_bytes[0 .. remaining_len_len + 1],
+    );
+    const payload_start = encoded.items.len;
+    const packet_len = std.math.add(
+        usize,
+        payload_start,
+        decoded.value,
+    ) catch return error.PacketTooLarge;
+    if (packet_len > max_packet_size) return error.PacketTooLarge;
+    try encoded.resize(allocator, packet_len);
+
+    var offset = payload_start;
+    if (decoded.value > keep_alive_reader.progress_threshold) {
+        deadline = .fromNow(connection.io, timeout);
+    }
+    while (offset < packet_len) {
+        const count = try connection.readWithDeadline(
+            encoded.items[offset..],
+            deadline,
+        );
+        if (count == 0) return error.ConnectionClosed;
+        offset += count;
+        if (packet_len - offset > keep_alive_reader.progress_threshold) {
+            deadline = .fromNow(connection.io, timeout);
+        }
+    }
 
     const bytes = try encoded.toOwnedSlice(allocator);
     errdefer allocator.free(bytes);
@@ -433,6 +509,22 @@ fn readExactTls(
         const n = try connection.read(buffer[offset..]);
         if (n == 0) return error.ConnectionClosed;
         offset += n;
+    }
+}
+
+fn readExactTlsWithDeadline(
+    connection: anytype,
+    buffer: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) Error!void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const count = try connection.readWithDeadline(
+            buffer[offset..],
+            deadline,
+        );
+        if (count == 0) return error.ConnectionClosed;
+        offset += count;
     }
 }
 

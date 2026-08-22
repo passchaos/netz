@@ -352,9 +352,9 @@ database.
 The broker now turns the Keep Alive parsed from CONNECT into an enforced
 inbound inactivity deadline instead of retaining it as informational state:
 
-- a non-zero interval closes the TCP Network Connection after exactly 1.5x the
-  negotiated value, preserving the half second for odd values rather than
-  truncating to whole seconds;
+- a non-zero interval closes plain TCP and native vail-backed TLS Network
+  Connections after exactly 1.5x the negotiated value, preserving the half
+  second for odd values rather than truncating to whole seconds;
 - MQTT 5 Server Keep Alive replaces the CONNECT value on both sides of the
   accepted connection, so the advertised override is the value the broker
   enforces;
@@ -370,10 +370,13 @@ Mosquitto's audited `src/keepalive.c` schedules clients at
 `last_msg_in + keepalive*3/2`, while `lib/packet_mosq.c` refreshes progress for
 large partial packets. Netz preserves those semantics without a timer task per
 client by applying Zig 0.16 timed socket reads directly in each already-owned
-broker reader. Tests cover exact timeout arithmetic including the maximum
-u16 value, byte-progress renewal beyond one whole timeout, post-timeout Will
-routing, and a live Keep Alive zero connection remaining usable past the
-one-second expiry boundary.
+broker reader. The TLS record layer now applies the same absolute deadline
+across each encrypted header/body read while preserving already-decrypted
+buffered plaintext. Tests cover exact timeout arithmetic including the maximum
+u16 value, byte-progress renewal beyond one whole timeout, native TLS timeout,
+post-timeout Will routing, and a live Keep Alive zero connection remaining
+usable past the one-second expiry boundary. MQTT over WebSocket remains the
+transport that does not yet expose this timed-read path.
 
 ## Live retained-message integration
 

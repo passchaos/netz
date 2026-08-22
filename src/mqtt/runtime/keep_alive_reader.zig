@@ -10,7 +10,7 @@ const builtin = @import("builtin");
 
 const net = std.Io.net;
 
-const progress_threshold: usize = 1000;
+pub const progress_threshold: usize = 1000;
 
 pub const Error = error{ConnectionClosed} ||
     net.Stream.Reader.Error ||

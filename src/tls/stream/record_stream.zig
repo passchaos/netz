@@ -51,6 +51,26 @@ pub const Stream = struct {
         stream: net.Stream,
         out: []u8,
     ) Error!usize {
+        return self.readInternal(io, stream, out, null);
+    }
+
+    pub fn readWithDeadline(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        return self.readInternal(io, stream, out, deadline);
+    }
+
+    fn readInternal(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!usize {
         if (out.len == 0) return 0;
         while (true) {
             if (self.buffered_start != self.buffered_end) {
@@ -72,11 +92,15 @@ pub const Stream = struct {
             if (self.closed) return error.ConnectionClosed;
 
             var encoded: [record_io.max_record_len]u8 = undefined;
-            const record_bytes = try record_io.readRecord(
-                io,
-                stream,
-                &encoded,
-            );
+            const record_bytes = if (deadline) |value|
+                try record_io.readRecordWithDeadline(
+                    io,
+                    stream,
+                    &encoded,
+                    value,
+                )
+            else
+                try record_io.readRecord(io, stream, &encoded);
             var opened_storage: [
                 record_io.max_plaintext_len + 1
             ]u8 = undefined;

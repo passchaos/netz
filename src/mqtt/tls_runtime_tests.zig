@@ -166,6 +166,93 @@ test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT TLS server enforces Keep Alive inactivity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{
+                .key_pair = key_pair,
+            } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        timed_out: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var accepted = try shared.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(shared.server.allocator);
+            _ = accepted.connection.readBrokerEventWithKeepAlive() catch |err| {
+                if (err != error.Timeout) return err;
+                shared.timed_out = true;
+                return;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-tls-keep-alive",
+                .keep_alive_seconds = 1,
+            },
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+        },
+    );
+    defer client.close();
+
+    const started = std.Io.Clock.awake.now(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.timed_out);
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    try std.testing.expect(
+        elapsed.nanoseconds >= 1400 * std.time.ns_per_ms,
+    );
+    try std.testing.expect(elapsed.nanoseconds < 4 * std.time.ns_per_s);
+}
+
 test "MQTT native TLS client identity completes required mTLS" {
     const allocator = std.testing.allocator;
 
