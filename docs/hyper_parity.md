@@ -181,8 +181,32 @@ the H2/WebSocket benchmarks. A short 1-MiB smoke used 37 allocations and
 1,288,250 peak live bytes for 64 x 16-KiB chunked framing. In both cases the
 1-MiB application payload dominates live memory; retained chunk/vector scratch
 adds roughly 225 KiB for chunked framing and allocation counts stay constant
-across body bytes after warmup. Equal Hyper allocator instrumentation is still
-required for a memory ratio.
+across body bytes after warmup. The Hyper harness now accepts the same
+`--stats` switch, enabled through an opt-in `allocation-stats` Cargo feature so
+ordinary timing runs retain the system allocator directly. Its process-wide
+atomic wrapper reports requested allocation/free/reallocation bytes and the
+same size buckets without recursively allocating.
+
+A matched CPU-0 run of the documented 1-MiB-per-direction, twenty-warmup,
+hundred-iteration matrix measured:
+
+```text
+fixed:
+  netz   286.850 us/op, 489 allocations, 1,063,300 peak live bytes
+  Hyper  307.999 us/op, 4,899 allocations, 2,461,724 peak live bytes
+
+16-KiB chunked:
+  netz   304.222 us/op, 495 allocations, 1,269,638 peak live bytes
+  Hyper  440.550 us/op, 34,417 allocations, 2,153,292 peak live bytes
+```
+
+Netz therefore used 90.0% fewer allocation calls and 56.8% less peak live
+memory in fixed mode, and 98.6% fewer calls plus 41.0% less peak live memory in
+chunked mode for this exact process-wide workload. Hyper's fixed-body run also
+requested 100,692,363 cumulative bytes versus netz's 1,095,970; its chunked
+run requested 3,469,637 versus netz's 1,309,426. These are allocator-request
+counters rather than RSS measurements and include setup plus warmup on both
+sides.
 
 The benchmark evidence is complemented by a strict process-boundary semantic
 gate. `zig build interop-http1-hyper -Doptimize=ReleaseFast` builds against the

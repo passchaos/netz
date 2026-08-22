@@ -17,6 +17,13 @@ use hyper::{Method, Request, Response};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 
+#[cfg(feature = "allocation-stats")]
+mod counting_allocator;
+#[cfg(feature = "allocation-stats")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_allocator::CountingAllocator =
+    counting_allocator::CountingAllocator::new();
+
 const DEFAULT_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_CHUNK_BYTES: usize = 16 * 1024;
 const DEFAULT_WARMUP: usize = 20;
@@ -38,6 +45,7 @@ struct Options {
     chunk_bytes: usize,
     warmup: usize,
     iterations: usize,
+    stats: bool,
 }
 
 fn main() {
@@ -145,6 +153,12 @@ fn main() {
     );
     println!("  aggregate body MiB/s: {}", mib_per_second);
     println!("  checksum: {}", checksum);
+    if options.stats {
+        #[cfg(feature = "allocation-stats")]
+        COUNTING_ALLOCATOR.snapshot().print();
+        #[cfg(not(feature = "allocation-stats"))]
+        panic!("--stats requires the allocation-stats Cargo feature");
+    }
 }
 
 async fn exchange(
@@ -222,6 +236,7 @@ fn parse_options() -> Options {
         chunk_bytes: DEFAULT_CHUNK_BYTES,
         warmup: DEFAULT_WARMUP,
         iterations: DEFAULT_ITERATIONS,
+        stats: false,
     };
     for argument in env::args().skip(1) {
         if argument == "--mode=fixed" {
@@ -236,6 +251,8 @@ fn parse_options() -> Options {
             options.warmup = value.parse().expect("warmup");
         } else if let Some(value) = argument.strip_prefix("--iterations=") {
             options.iterations = value.parse().expect("iterations");
+        } else if argument == "--stats" {
+            options.stats = true;
         } else {
             panic!("unsupported argument: {argument}");
         }
