@@ -70,12 +70,12 @@ cat "$work/server.log"
 grep -Fq \
   'wtransport client interop passed: CONNECT DATAGRAM max_datagram_size=' \
   "$work/wtransport-client.log"
-grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
+grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
   "$work/wtransport-client.log"
 grep -Fq \
   'netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
   "$work/server.log"
-grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
+grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
   "$work/server.log"
 
 rust_log="$work/wtransport-server.log"

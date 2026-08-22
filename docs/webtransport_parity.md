@@ -30,7 +30,11 @@ both stream directions, mapped reset code 73, mapped stop code 74, and
 same-session sibling completion, then waits for and validates the server's QUIC
 application close code 0/reason `interop complete`. Session
 close capsules and connection-level shutdown remain separate typed APIs, so the
-gate cannot mistake a clean CONNECT-stream FIN for a peer connection close. The
+gate cannot mistake a clean CONNECT-stream FIN for a peer connection close.
+Immediately before its detailed close, netz now sends WT_DRAIN_SESSION on the
+same ordered CONNECT stream. The audited wtransport driver has no public drain
+event and treats this capsule as unknown, but receiving the following exact
+close code/reason proves it skipped DRAIN without losing capsule framing. The
 response stream is now opened before each peer sends STOP_SENDING, and the
 receiver withholds its reply until it observes that cancellation. In the
 netz-client half, the first mapped STOP_SENDING datagram is deliberately
@@ -66,8 +70,11 @@ its client SETTINGS, so WebTransport negotiation treats that setting as a
 directional server capability while still requiring the client's WebTransport
 and H3 DATAGRAM advertisements.
 The browser also checks the resolved `transport.closed` value exactly: close
-code 77 and reason `netz done`. A cleanly resolved promise alone is not counted
-as evidence for CLOSE_WEBTRANSPORT_SESSION metadata propagation.
+code 77 and reason `netz done`, after the same netz DRAIN-before-CLOSE
+sequence used by native wtransport. Chromium exposes no drain event, so this
+proves ordered capsule consumption rather than application visibility of the
+advisory signal. A cleanly resolved promise alone is not counted as evidence
+for CLOSE_WEBTRANSPORT_SESSION metadata propagation.
 It additionally requires Chrome's real
 `WebTransportDatagramDuplexStream.maxDatagramSize` to be a positive negotiated
 limit, while the netz peer performs its own one-byte-over-limit rejection.
@@ -97,7 +104,7 @@ WebTransport DATAGRAM round trip and transport statistics.
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
 | Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop; interoperates with netz while another stream is being cancelled |
 | Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop and lifecycle/limits; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop; exact mapped codes are verified against netz |
-| Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver handles close while drain support is absent |
+| Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup; external wtransport consumes netz DRAIN before an exactly validated CLOSE | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN and reports the immediately following CLOSE |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
 ## Important interoperability correction
@@ -234,8 +241,9 @@ lightweight protected transport does not own a stateful recovery connection.
    observation, so completion proves a concurrent sibling survives. The
    netz-client half additionally discards the first STOP_SENDING datagram and
    completes only after transport recovery delivers the exact code. Its
-   wtransport-client half also
-   checks the detailed session-close capsule, while its wtransport-server half
+   wtransport-client half also skips a netz WT_DRAIN_SESSION and checks the
+   immediately following detailed session-close capsule, while its
+   wtransport-server half
    checks netz's peer QUIC application-close code and reason handling. Firefox
    and Safari browser automation remain separate gaps.
 3. Add larger long-run stream-churn distributions; concurrent packet-batched

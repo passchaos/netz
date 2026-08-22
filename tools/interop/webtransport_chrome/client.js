@@ -118,6 +118,9 @@ async function runBrowserProbe({port, certificateHash}) {
   await readExact(reuse.readable.getReader(), 'session reused', 'reuse response');
 
   await datagramWriter.write(textEncoder.encode('close ready'));
+  // The netz fixture sends WT_DRAIN_SESSION immediately before CLOSE. The
+  // browser has no drain event, so the exact following close metadata proves
+  // Chromium consumed the advisory capsule without losing stream framing.
   const closeInfo = await withTimeout(transport.closed, 'session close');
   if (closeInfo.closeCode !== 77 || closeInfo.reason !== 'netz done') {
     throw new Error(
@@ -125,7 +128,7 @@ async function runBrowserProbe({port, certificateHash}) {
       `reason=${JSON.stringify(closeInfo.reason)}`,
     );
   }
-  return `Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done`;
+  return `Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done`;
 }
 
 (async () => {

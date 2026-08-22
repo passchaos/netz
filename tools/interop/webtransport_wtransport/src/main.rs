@@ -166,11 +166,13 @@ async fn main() -> Result<()> {
         Err(_) => bail!("session close timed out"),
     }
 
-    // The netz server sends an application-level WebTransport close capsule.
-    // wtransport consumes that capsule and then closes QUIC with H3_NO_ERROR.
+    // Netz sends WT_DRAIN_SESSION immediately before the application-level
+    // close. wtransport has no public drain event, so observing this exact
+    // close proves its CONNECT driver skipped DRAIN without losing the next
+    // capsule's framing; it then closes QUIC with H3_NO_ERROR.
     endpoint.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport client interop passed: CONNECT DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close");
+    println!("wtransport client interop passed: CONNECT DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close");
     Ok(())
 }
 
