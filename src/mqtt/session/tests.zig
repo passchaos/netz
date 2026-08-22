@@ -208,6 +208,36 @@ test "session openConnect and disconnectPacket apply MQTT 5 properties" {
     try std.testing.expect(resumed.session_present);
 }
 
+test "live transient Session takeover starts fresh without Session Present" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+
+    const transient = try store.open(
+        "transient-takeover",
+        true,
+        0,
+        .zero,
+    );
+    const replacement = try store.open(
+        "transient-takeover",
+        false,
+        60,
+        .zero,
+    );
+    try std.testing.expect(replacement.replaced_connection);
+    try std.testing.expect(!replacement.session_present);
+    try std.testing.expect(transient.route_id != replacement.route_id);
+    try std.testing.expectError(
+        error.SessionNotFound,
+        store.stats(transient.handle),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 60),
+        (try store.stats(replacement.handle)).expiry_interval,
+    );
+}
+
 test "session restores complete subscription options and identifier" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});

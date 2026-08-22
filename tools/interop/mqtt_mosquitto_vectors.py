@@ -350,6 +350,145 @@ def duplicate_client_takeover(
             replacement.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def will_takeover_session_matrix(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Direct wire port of Mosquitto 07-will-takeover.py. Exercise both
+    # protocol versions and all old/replacement Session combinations. The old
+    # Will is suppressed only when the replacement continues the same durable
+    # Session; a clean/transient Session on either side makes it due.
+    for proto_ver in (4, 5):
+        for old_clean in (True, False):
+            for replacement_clean in (True, False):
+                helper_id = (
+                    f"will-takeover-helper-{proto_ver}-"
+                    f"{int(old_clean)}-{int(replacement_clean)}"
+                )
+                client_id = (
+                    f"will-takeover-{proto_ver}-"
+                    f"{int(old_clean)}-{int(replacement_clean)}"
+                )
+                topic = "will/takeover/test"
+                ready = mqtt_packets.gen_publish(
+                    topic, 0, b"Client ready", proto_ver=proto_ver
+                )
+                expected_will = mqtt_packets.gen_publish(
+                    topic, 0, b"LWT", proto_ver=proto_ver
+                )
+
+                def session_expiry(clean: bool) -> int:
+                    return 0 if clean else 60
+
+                def connect_packet(
+                    *, clean: bool, with_will: bool
+                ) -> bytes:
+                    options = {
+                        "clean_session": clean,
+                        "proto_ver": proto_ver,
+                    }
+                    if proto_ver == 5:
+                        options["session_expiry"] = session_expiry(clean)
+                    if with_will:
+                        options.update(
+                            will_topic=topic,
+                            will_payload=b"LWT",
+                        )
+                    return mqtt_packets.gen_connect(client_id, **options)
+
+                with NetzBroker(executable, connections=3) as broker:
+                    with (
+                        broker.connect() as helper,
+                        broker.connect() as original,
+                        broker.connect() as replacement,
+                    ):
+                        connect_client(
+                            helper, mqtt_packets, helper_id, proto_ver
+                        )
+                        helper.sendall(
+                            mqtt_packets.gen_subscribe(
+                                1, topic, 0, proto_ver=proto_ver
+                            )
+                        )
+                        expect_packet(
+                            helper,
+                            mqtt_packets.gen_suback(
+                                1, 0, proto_ver=proto_ver
+                            ),
+                            "Will takeover SUBACK",
+                        )
+
+                        original.sendall(
+                            connect_packet(clean=old_clean, with_will=True)
+                        )
+                        expect_packet(
+                            original,
+                            expected_connack(
+                                mqtt_packets, mqtt5_props
+                            )
+                            if proto_ver == 5
+                            else mqtt_packets.gen_connack(proto_ver=4),
+                            "original Will takeover CONNACK",
+                        )
+                        replacement.sendall(
+                            connect_packet(
+                                clean=replacement_clean, with_will=False
+                            )
+                        )
+                        session_present = (
+                            not old_clean and not replacement_clean
+                        )
+                        expect_packet(
+                            replacement,
+                            expected_connack(
+                                mqtt_packets,
+                                mqtt5_props,
+                                session_present=session_present,
+                            )
+                            if proto_ver == 5
+                            else mqtt_packets.gen_connack(
+                                flags=int(session_present), proto_ver=4
+                            ),
+                            "replacement Will takeover CONNACK",
+                        )
+                        if proto_ver == 5:
+                            expect_packet(
+                                original,
+                                mqtt_packets.gen_disconnect(
+                                    reason_code=mqtt5_rc.SESSION_TAKEN_OVER,
+                                    proto_ver=5,
+                                ),
+                                "Will takeover displaced DISCONNECT",
+                            )
+
+                        will_is_due = old_clean or replacement_clean
+                        if will_is_due:
+                            expect_packet(
+                                helper, expected_will, "takeover Will"
+                            )
+                        else:
+                            # PINGRESP is ordered behind any queued Will on the
+                            # helper connection, so an erroneous publication
+                            # cannot hide behind a timeout-only silence check.
+                            helper.sendall(mqtt_packets.gen_pingreq())
+                            expect_packet(
+                                helper,
+                                mqtt_packets.gen_pingresp(),
+                                "PINGRESP without takeover Will",
+                            )
+
+                        replacement.sendall(ready)
+                        expect_packet(
+                            helper, ready, "post-takeover live PUBLISH"
+                        )
+                        if proto_ver == 5:
+                            replacement.sendall(
+                                mqtt_packets.gen_disconnect(proto_ver=5)
+                            )
+                            helper.sendall(
+                                mqtt_packets.gen_disconnect(proto_ver=5)
+                            )
+
+
 def disconnect_session_expiry(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -3293,8 +3432,11 @@ def main() -> None:
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
+    will_takeover_session_matrix(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 53 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 61 scenarios")
 
 
 if __name__ == "__main__":

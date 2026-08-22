@@ -793,15 +793,14 @@ pub const Scheduler = struct {
     ) CloseResult {
         if (clean_start) return .due_now;
         const entry = self.entries.items[index].?;
-        const delay = effectiveDelay(
-            entry.will_delay_interval,
-            entry.session_expiry_interval,
-        );
         const reconnects_before_will = switch (entry.state) {
-            // The broker closes the old connection as part of takeover. A
-            // positive effective delay lets the new Network Connection
-            // continue the same Session before the old Will becomes due.
-            .connected => delay != 0,
+            // A live takeover reconnects to the old Session before the broker
+            // closes its Network Connection. That continuation suppresses the
+            // old Will even when Will Delay is zero. In contrast, a transient
+            // connection has no Session to continue, so replacing its ClientID
+            // must publish the Will. This distinction is observable in both
+            // MQTT 3.1.1 Clean Session and MQTT 5 Session Expiry semantics.
+            .connected => entry.session_expiry_interval != 0,
             .scheduled => now.nanoseconds < entry.deadline_ns,
             .due => false,
         };

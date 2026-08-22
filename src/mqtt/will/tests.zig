@@ -125,7 +125,7 @@ test "will reconnect after deadline remains due" {
     );
 }
 
-test "will live takeover follows clean-start and positive-delay rules" {
+test "will live takeover follows Session continuation rules" {
     const allocator = std.testing.allocator;
     var scheduler = Scheduler.init(allocator, .{});
     defer scheduler.deinit();
@@ -137,8 +137,14 @@ test "will live takeover follows clean-start and positive-delay rules" {
 
     _ = try scheduler.set("zero", sampleWill(0, null), 60);
     try std.testing.expectEqual(
-        will.CloseResult.due_now,
+        will.CloseResult.canceled,
         scheduler.onReconnect("zero", false, .zero),
+    );
+
+    _ = try scheduler.set("transient", sampleWill(30, null), 0);
+    try std.testing.expectEqual(
+        will.CloseResult.due_now,
+        scheduler.onReconnect("transient", false, .zero),
     );
 
     _ = try scheduler.set("clean", sampleWill(5, null), 60);
@@ -375,7 +381,7 @@ test "will setConnect owns parsed bytes and forwards publish properties" {
     );
 }
 
-test "will acceptConnect returns old due handle and installs new Will" {
+test "will acceptConnect cancels live durable Will and installs replacement" {
     const allocator = std.testing.allocator;
     var scheduler = Scheduler.init(allocator, .{});
     defer scheduler.deinit();
@@ -403,18 +409,17 @@ test "will acceptConnect returns old due handle and installs new Will" {
             .properties = &properties,
         },
     }, .zero);
-    try std.testing.expectEqual(will.CloseResult.due_now, accepted.previous);
-    try std.testing.expect(accepted.previous_due != null);
+    try std.testing.expectEqual(will.CloseResult.canceled, accepted.previous);
+    try std.testing.expectEqual(@as(?will.Handle, null), accepted.previous_due);
     try std.testing.expect(accepted.current != null);
     try std.testing.expectEqualStrings(
-        "offline",
-        (try scheduler.view(accepted.previous_due.?)).payload,
+        "new",
+        (try scheduler.view(accepted.current.?)).payload,
     );
     var due_storage: [1]will.Handle = undefined;
     const due = try scheduler.pollDue(.zero, &due_storage);
-    try std.testing.expectEqual(accepted.previous_due.?, due[0]);
-    try scheduler.releaseDue(due[0]);
-    // Releasing the detached old Will must not remove the new ClientID index.
+    try std.testing.expectEqual(@as(usize, 0), due.len);
+    // Canceling the old Will must preserve the new ClientID index.
     try std.testing.expectEqual(
         will.CloseResult.canceled,
         scheduler.onReconnect("same", false, .zero),

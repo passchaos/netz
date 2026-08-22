@@ -809,7 +809,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs fifty-three
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs sixty-one
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -953,6 +953,14 @@ displaced MQTT 5 peer now receives DISCONNECT `0x8e` (Session Taken Over)
 instead of an unexplained EOF, and the replacement remains responsive to
 PING. The in-process takeover test also verifies the reason code while
 retaining its existing single-subscription-owner assertion.
+The eight-case Will takeover matrix directly ports Mosquitto's
+`07-will-takeover.py` across MQTT 3.1.1 and MQTT 5. It combines transient and
+durable old Sessions with clean and continuing replacement connections, checks
+Session Present and the MQTT 5 takeover DISCONNECT, and proves byte-for-byte
+that the old Will is suppressed only when both connections preserve the same
+Session. This exposed and fixed zero-delay Wills being published during a live
+durable-Session takeover; Will Delay controls publication after disconnect,
+not cancellation by a replacement that has already resumed the Session.
 The Session Expiry case ports the timing-observable core of Mosquitto's
 `05-session-expiry-v5.py`: a three-second DISCONNECT override keeps a Session
 present beyond the one-second CONNECT value, the Session is absent after the
@@ -1002,7 +1010,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all fifty-three scenarios pass. This is deliberately described as a selected
+packets; all sixty-one scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1014,5 +1022,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Fifty-three passing packet-vector scenarios do not cover
+   persistence semantics. Sixty-one passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

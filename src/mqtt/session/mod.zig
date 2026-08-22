@@ -787,31 +787,40 @@ pub const Store = struct {
                 self.removeAt(index);
             }
         } else if (self.client_index.get(client_id)) |index| {
-            const generation = self.nextGeneration();
             const session = &self.sessions.items[index].?;
             replaced_connection = session.connected;
-            // Every resumed/takeover Network Connection gets a fresh handle.
-            // This immediately invalidates the old connection's capability to
-            // mutate the shared Session after broker takeover.
-            session.generation = generation;
-            session.connected = true;
-            session.expiry_interval = expiry_interval;
-            session.expires_at_ns = null;
-            for (session.inflight.items) |*maybe_inflight| {
-                if (maybe_inflight.*) |*inflight| {
-                    inflight.needs_send = true;
-                    inflight.retransmission = true;
+            if (session.expiry_interval == 0) {
+                // A live clean/transient connection owns Session State only
+                // until its Network Connection ends. ClientID takeover ends
+                // that connection, so Clean Start=0 cannot resume this state
+                // or report Session Present. Keep `replaced_connection` set so
+                // the broker still sends the required takeover shutdown.
+                self.removeAt(index);
+            } else {
+                const generation = self.nextGeneration();
+                // Every resumed/takeover Network Connection gets a fresh
+                // handle. This immediately invalidates the old connection's
+                // capability to mutate the shared Session after takeover.
+                session.generation = generation;
+                session.connected = true;
+                session.expiry_interval = expiry_interval;
+                session.expires_at_ns = null;
+                for (session.inflight.items) |*maybe_inflight| {
+                    if (maybe_inflight.*) |*inflight| {
+                        inflight.needs_send = true;
+                        inflight.retransmission = true;
+                    }
                 }
+                return .{
+                    .handle = .{
+                        .index = index,
+                        .generation = session.generation,
+                    },
+                    .route_id = session.route_id,
+                    .session_present = true,
+                    .replaced_connection = replaced_connection,
+                };
             }
-            return .{
-                .handle = .{
-                    .index = index,
-                    .generation = session.generation,
-                },
-                .route_id = session.route_id,
-                .session_present = true,
-                .replaced_connection = replaced_connection,
-            };
         }
 
         if (self.session_count >= self.options.max_sessions) {
