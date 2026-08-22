@@ -11,6 +11,9 @@ const default_streams: usize = 1;
 const default_echo_iterations: usize = 5000;
 const echo_payload_bytes: usize = 1024;
 const default_stream_churn_iterations: usize = 100_000;
+const default_lifecycle_churn_iterations: usize = 4096;
+const default_lifecycle_batch: usize = 8;
+const default_reset_every: usize = 2;
 const stream_churn_credit: u64 = 1_048_576;
 const default_connections: usize = 4;
 const max_connections: usize = 64;
@@ -53,7 +56,7 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
     return EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
 }
 
-const Mode = enum { upload, handshake, echo, stream_churn, aggregate, loss, reorder, corrupt };
+const Mode = enum { upload, handshake, echo, stream_churn, lifecycle_churn, aggregate, loss, reorder, corrupt };
 
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
@@ -94,6 +97,11 @@ pub fn main(init: std.process.Init) !void {
     }
     if (config.mode == .stream_churn) {
         try runStreamChurnBenchmark(allocator, io, config, server_key);
+        if (config.stats) counting.snapshot().print();
+        return;
+    }
+    if (config.mode == .lifecycle_churn) {
+        try runLifecycleChurnBenchmark(allocator, io, config, server_key);
         if (config.stats) counting.snapshot().print();
         return;
     }
@@ -169,6 +177,7 @@ const Config = struct {
     rtt_us: u64 = 0,
     reorder_every: usize = 0,
     corrupt_every: usize = 0,
+    reset_every: usize = default_reset_every,
     verify_server: bool = true,
 };
 
@@ -367,7 +376,7 @@ fn runIteration(
         bytes_received: *std.atomic.Value(usize),
         verbose: bool,
         handshake_only: bool,
-        echo_only: bool,
+        local_peer_mode: bool,
         echo_connection: *?netz.quic.handshake.EstablishedConnection,
         server_key: EcdsaP256Sha256.KeyPair,
         err: ?anyerror = null,
@@ -406,7 +415,7 @@ fn runIteration(
                     .max_crypto_buffer = 64 * 1024,
                 },
             );
-            if (shared.echo_only) {
+            if (shared.local_peer_mode) {
                 // Transfer ownership to the benchmark thread. This mirrors
                 // quicz's sequential post-handshake loop so echo latency does
                 // not include one executor handoff per half round trip.
@@ -481,7 +490,8 @@ fn runIteration(
         .verbose = config.verbose,
         .handshake_only = config.mode == .handshake or
             config.mode == .stream_churn,
-        .echo_only = config.mode == .echo,
+        .local_peer_mode = config.mode == .echo or
+            config.mode == .lifecycle_churn,
         .echo_connection = &echo_connection,
         .server_key = server_key,
     };
@@ -575,13 +585,26 @@ fn runIteration(
             .payload_bytes_received = result.opened,
         };
     }
-    if (config.mode == .echo) {
+    if (config.mode == .echo or config.mode == .lifecycle_churn) {
         server_future.await(io);
         joined = true;
         if (shared.err) |err| return err;
         var server_established = echo_connection orelse
             return error.ServerFailed;
         defer server_established.deinit();
+        if (config.mode == .lifecycle_churn) {
+            const result = try runLifecycleChurnRounds(
+                &established.connection,
+                &server_established.connection,
+                config,
+            );
+            return .{
+                .elapsed_ns = result.elapsed_ns,
+                .client_stats = established.connection.stats(),
+                .gso_enabled = client_endpoint.gsoSendEnabled(),
+                .payload_bytes_received = result.streams_completed,
+            };
+        }
         const result = try runEchoRounds(
             allocator,
             &established.connection,
@@ -758,6 +781,206 @@ fn runEchoRounds(
 }
 
 const StreamChurnResult = struct { elapsed_ns: u64, opened: usize };
+
+const LifecycleChurnResult = struct {
+    elapsed_ns: u64,
+    streams_completed: usize,
+};
+
+fn runLifecycleChurnRounds(
+    client: *netz.quic.one_rtt.Connection,
+    server: *netz.quic.one_rtt.Connection,
+    config: Config,
+) !LifecycleChurnResult {
+    var stream_ids: [max_streams]u64 = undefined;
+    var expected_reset: [max_streams]bool = undefined;
+    var completed: usize = 0;
+    var fin_count: usize = 0;
+    var reset_count: usize = 0;
+    var checksum: u64 = 0;
+    var last_stream_id: u64 = 0;
+    const started = nowNs(client.endpoint.io);
+
+    while (completed < config.iterations) {
+        const batch_count = @min(
+            config.streams,
+            config.iterations - completed,
+        );
+        for (0..batch_count) |index| {
+            const ordinal = completed + index;
+            const stream_id = try client.openStream();
+            stream_ids[index] = stream_id;
+            last_stream_id = stream_id;
+            expected_reset[index] = (ordinal + 1) % config.reset_every == 0;
+            if (expected_reset[index]) {
+                try client.resetStream(stream_id, lifecycleResetCode(ordinal));
+                reset_count += 1;
+            } else {
+                const payload = [_]u8{@truncate(ordinal)};
+                try client.send(&.{.{ .stream = .{
+                    .stream_id = stream_id,
+                    .data = &payload,
+                    .fin = true,
+                } }});
+                fin_count += 1;
+            }
+        }
+
+        var server_terminal: u64 = 0;
+        while (@popCount(server_terminal) < batch_count) {
+            var packet = try server.receivePacket();
+            defer packet.deinit(server.endpoint.allocator);
+            for (packet.frames) |frame| switch (frame) {
+                .stream => |stream| {
+                    const index = lifecycleBatchIndex(
+                        stream_ids[0..batch_count],
+                        stream.stream_id,
+                    ) orelse return error.InvalidLifecycleStream;
+                    const bit = @as(u64, 1) << @intCast(index);
+                    if ((server_terminal & bit) != 0 or
+                        expected_reset[index] or
+                        !stream.fin or
+                        stream.data.len != 1 or
+                        stream.data[0] != @as(u8, @truncate(completed + index)))
+                    {
+                        return error.InvalidLifecycleStream;
+                    }
+                    try server.releaseReceivedCapacity(stream.stream_id, 1);
+                    try server.send(&.{.{ .stream = .{
+                        .stream_id = stream.stream_id,
+                        .data = stream.data,
+                        .fin = true,
+                    } }});
+                    server_terminal |= bit;
+                },
+                .reset_stream => |reset| {
+                    const index = lifecycleBatchIndex(
+                        stream_ids[0..batch_count],
+                        reset.stream_id,
+                    ) orelse return error.InvalidLifecycleStream;
+                    const bit = @as(u64, 1) << @intCast(index);
+                    if ((server_terminal & bit) != 0 or
+                        !expected_reset[index] or
+                        reset.final_size != 0 or
+                        reset.application_error_code !=
+                            lifecycleResetCode(completed + index))
+                    {
+                        return error.InvalidLifecycleStream;
+                    }
+                    try server.resetStream(
+                        reset.stream_id,
+                        reset.application_error_code,
+                    );
+                    server_terminal |= bit;
+                },
+                else => {},
+            };
+        }
+        try server.sendAck(0);
+        // The production batch API coalesces each lifecycle group into one
+        // cumulative MAX_STREAMS packet instead of one packet per stream.
+        const released = try server.releaseCompletedPeerStreams(
+            stream_ids[0..batch_count],
+        );
+        if (released.streams_released != batch_count or !released.update_sent) {
+            return error.InvalidLifecycleStream;
+        }
+
+        var client_terminal: u64 = 0;
+        const expected_limit = @as(u64, @intCast(config.streams)) +
+            @as(u64, @intCast(completed + batch_count));
+        while (@popCount(client_terminal) < batch_count or
+            client.peer_max_streams_bidi < expected_limit)
+        {
+            var packet = try client.receivePacket();
+            defer packet.deinit(client.endpoint.allocator);
+            for (packet.frames) |frame| switch (frame) {
+                .stream => |stream| {
+                    const index = lifecycleBatchIndex(
+                        stream_ids[0..batch_count],
+                        stream.stream_id,
+                    ) orelse return error.InvalidLifecycleStream;
+                    const bit = @as(u64, 1) << @intCast(index);
+                    if ((client_terminal & bit) != 0 or
+                        expected_reset[index] or
+                        !stream.fin or
+                        stream.data.len != 1 or
+                        stream.data[0] != @as(u8, @truncate(completed + index)))
+                    {
+                        return error.InvalidLifecycleStream;
+                    }
+                    try client.releaseReceivedCapacity(stream.stream_id, 1);
+                    checksum +%= stream.data[0];
+                    client_terminal |= bit;
+                },
+                .reset_stream => |reset| {
+                    const index = lifecycleBatchIndex(
+                        stream_ids[0..batch_count],
+                        reset.stream_id,
+                    ) orelse return error.InvalidLifecycleStream;
+                    const bit = @as(u64, 1) << @intCast(index);
+                    if ((client_terminal & bit) != 0 or
+                        !expected_reset[index] or
+                        reset.final_size != 0 or
+                        reset.application_error_code !=
+                            lifecycleResetCode(completed + index))
+                    {
+                        return error.InvalidLifecycleStream;
+                    }
+                    checksum +%= reset.application_error_code;
+                    client_terminal |= bit;
+                },
+                else => {},
+            };
+        }
+        try client.sendAck(0);
+        completed += batch_count;
+    }
+
+    const elapsed = nowNs(client.endpoint.io) -| started;
+    const streams_per_second: f64 = if (elapsed == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(completed)) *
+            @as(f64, @floatFromInt(std.time.ns_per_s)) /
+            @as(f64, @floatFromInt(elapsed));
+    std.debug.print(
+        "QUIC real TLS 1.3 on-wire stream lifecycle benchmark\n" ++
+            "  streams completed: {d}\n" ++
+            "  FIN streams: {d}\n" ++
+            "  reset streams: {d}\n" ++
+            "  lifecycle batch: {d}\n" ++
+            "  elapsed ns: {d}\n" ++
+            "  streams/s: {d:.0}\n" ++
+            "  last stream id: {d}\n" ++
+            "  checksum: {d}\n",
+        .{
+            completed,
+            fin_count,
+            reset_count,
+            config.streams,
+            elapsed,
+            streams_per_second,
+            last_stream_id,
+            checksum,
+        },
+    );
+    return .{
+        .elapsed_ns = elapsed,
+        .streams_completed = completed,
+    };
+}
+
+fn lifecycleBatchIndex(stream_ids: []const u64, target: u64) ?usize {
+    for (stream_ids, 0..) |stream_id, index| {
+        if (stream_id == target) return index;
+    }
+    return null;
+}
+
+fn lifecycleResetCode(ordinal: usize) u64 {
+    return 0x40 + @as(u64, @intCast(ordinal % 32));
+}
 
 fn measureStreamChurn(
     connection: *netz.quic.one_rtt.Connection,
@@ -1000,10 +1223,11 @@ fn transferTransportParameters(config: Config) netz.quic.TransportParameters {
     params.initial_max_stream_data_bidi_local = credit;
     params.initial_max_stream_data_bidi_remote = credit;
     params.initial_max_stream_data_uni = credit;
-    params.initial_max_streams_bidi = if (config.mode == .stream_churn)
-        stream_churn_credit
-    else
-        max_streams;
+    params.initial_max_streams_bidi = switch (config.mode) {
+        .stream_churn => stream_churn_credit,
+        .lifecycle_churn => config.streams,
+        else => max_streams,
+    };
     params.initial_max_streams_uni = max_streams;
     params.max_udp_payload_size = max_datagram_size;
     return params;
@@ -1022,6 +1246,7 @@ fn parseArgs(
 
     var config: Config = .{};
     var iterations_set = false;
+    var streams_set = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--mode=upload")) {
             config.mode = .upload;
@@ -1031,6 +1256,8 @@ fn parseArgs(
             config.mode = .echo;
         } else if (std.mem.eql(u8, arg, "--mode=stream-churn")) {
             config.mode = .stream_churn;
+        } else if (std.mem.eql(u8, arg, "--mode=lifecycle-churn")) {
+            config.mode = .lifecycle_churn;
         } else if (std.mem.eql(u8, arg, "--mode=aggregate")) {
             config.mode = .aggregate;
         } else if (std.mem.eql(u8, arg, "--mode=loss")) {
@@ -1052,6 +1279,7 @@ fn parseArgs(
             config.streams = try parsePositiveUsize(
                 arg["--streams=".len..],
             );
+            streams_set = true;
         } else if (std.mem.startsWith(u8, arg, "--batch-packets=")) {
             config.batch_packets = try parsePositiveUsize(
                 arg["--batch-packets=".len..],
@@ -1080,6 +1308,10 @@ fn parseArgs(
             config.corrupt_every = try parsePositiveUsize(
                 arg["--corrupt-every=".len..],
             );
+        } else if (std.mem.startsWith(u8, arg, "--reset-every=")) {
+            config.reset_every = try parsePositiveUsize(
+                arg["--reset-every=".len..],
+            );
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
@@ -1104,6 +1336,12 @@ fn parseArgs(
     if (config.mode == .stream_churn and !iterations_set) {
         config.iterations = default_stream_churn_iterations;
     }
+    if (config.mode == .lifecycle_churn and !iterations_set) {
+        config.iterations = default_lifecycle_churn_iterations;
+    }
+    if (config.mode == .lifecycle_churn and !streams_set) {
+        config.streams = default_lifecycle_batch;
+    }
     if ((config.mode == .loss or config.mode == .reorder or
         config.mode == .corrupt) and
         config.transfer_bytes == default_transfer_bytes)
@@ -1123,6 +1361,9 @@ fn parseArgs(
         config.batch_packets > max_packet_batch_size or
         config.streams > config.transfer_bytes)
     {
+        return error.InvalidArgument;
+    }
+    if (config.mode == .lifecycle_churn and config.reset_every == 0) {
         return error.InvalidArgument;
     }
     if (config.mode == .reorder and config.reorder_every < 2) {
@@ -1158,6 +1399,24 @@ fn runEchoBenchmark(
 }
 
 fn runStreamChurnBenchmark(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+    server_key: EcdsaP256Sha256.KeyPair,
+) !void {
+    const result = try runIteration(
+        allocator,
+        io,
+        config,
+        0,
+        server_key,
+    );
+    if (result.payload_bytes_received != config.iterations) {
+        return error.InvalidStreamCount;
+    }
+}
+
+fn runLifecycleChurnBenchmark(
     allocator: std.mem.Allocator,
     io: std.Io,
     config: Config,

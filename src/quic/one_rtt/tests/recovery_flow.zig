@@ -1536,6 +1536,108 @@ test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit
     try std.testing.expectEqual(@as(u64, 2), uni_credit.frames[0].max_streams_uni.maximum_streams);
 }
 
+test "QUIC 1-RTT connection batches completed peer stream credit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xb5} ** quic.protection.secret_len);
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_streams_bidi = 2,
+        .initial_send_max_streams_uni = 1,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_streams_bidi = 2,
+        .initial_receive_max_streams_uni = 1,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&.{
+        .{ .stream = .{ .stream_id = 0, .data = "first", .fin = true } },
+        .{ .stream = .{ .stream_id = 4, .data = "second", .fin = true } },
+        .{ .stream = .{ .stream_id = 2, .data = "uni", .fin = true } },
+    });
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try server.releaseReceivedCapacity(0, "first".len);
+    try server.releaseReceivedCapacity(4, "second".len);
+    try server.releaseReceivedCapacity(2, "uni".len);
+    try server.resetStream(0, 80);
+    var first_reset = try client.receivePacket();
+    defer first_reset.deinit(allocator);
+    try server.resetStream(4, 84);
+    var second_reset = try client.receivePacket();
+    defer second_reset.deinit(allocator);
+
+    const packets_before = server.stats().packets_sent;
+    try std.testing.expectError(
+        error.StreamStateError,
+        server.releaseCompletedPeerStreams(&.{ 0, 1, 4 }),
+    );
+    try std.testing.expectEqual(packets_before, server.stats().packets_sent);
+    const released = try server.releaseCompletedPeerStreams(
+        &.{ 0, 4, 2, 4 },
+    );
+    try std.testing.expectEqual(@as(usize, 3), released.streams_released);
+    try std.testing.expect(released.update_sent);
+    // One packet carries the final cumulative limit for both directions.
+    try std.testing.expectEqual(
+        packets_before + 1,
+        server.stats().packets_sent,
+    );
+
+    var credit = try client.receivePacket();
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), credit.frames.len);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        credit.frames[0].max_streams_bidi.maximum_streams,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        credit.frames[1].max_streams_uni.maximum_streams,
+    );
+    try std.testing.expectEqual(@as(u64, 4), client.peer_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 2), client.peer_max_streams_uni);
+
+    const repeated = try server.releaseCompletedPeerStreams(&.{ 0, 2, 4 });
+    try std.testing.expectEqual(@as(usize, 0), repeated.streams_released);
+    try std.testing.expect(!repeated.update_sent);
+    try std.testing.expectEqual(
+        packets_before + 1,
+        server.stats().packets_sent,
+    );
+
+    // Both returned bidi slots and the returned uni slot are usable.
+    try std.testing.expectEqual(@as(u64, 8), try client.openStream());
+    try std.testing.expectEqual(@as(u64, 12), try client.openStream());
+    try std.testing.expectEqual(@as(u64, 6), try client.openUniStream());
+}
+
 test "QUIC 1-RTT connection rejects peer-created streams beyond receive limit" {
     const allocator = std.testing.allocator;
 

@@ -299,6 +299,13 @@ pub const StopSendingInfo = struct {
     application_error_code: u64,
 };
 
+pub const PeerStreamReleaseResult = struct {
+    /// Number of previously unreleased terminal streams accepted by the call.
+    streams_released: usize,
+    /// Whether a packet carrying one or more MAX_STREAMS updates was sent.
+    update_sent: bool,
+};
+
 const ReservedStreamCredit = struct {
     stream_id: u64,
     bytes: u64,
@@ -3296,6 +3303,90 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u64,
     ) Error!bool {
+        const result = try self.releaseCompletedPeerStreams(&.{stream_id});
+        return result.update_sent;
+    }
+
+    /// Return stream-count credit for several terminal peer streams at once.
+    ///
+    /// At most one MAX_STREAMS frame per direction is emitted, so closing a
+    /// concurrent batch costs one packet instead of one packet per stream.
+    /// Duplicate IDs are ignored. Validation and packet transmission happen
+    /// before local limits or release flags change, preserving retryability on
+    /// invalid input, allocation failure, congestion, pacing, or socket error.
+    pub fn releaseCompletedPeerStreams(
+        self: *Connection,
+        stream_ids: []const u64,
+    ) Error!PeerStreamReleaseResult {
+        var bidi_released: u64 = 0;
+        var uni_released: u64 = 0;
+        for (stream_ids, 0..) |stream_id, index| {
+            if (containsStreamId(stream_ids[0..index], stream_id)) continue;
+            if (try self.peerStreamReadyForCredit(stream_id)) {
+                switch (streamDirection(stream_id)) {
+                    .bidirectional => bidi_released += 1,
+                    .unidirectional => uni_released += 1,
+                }
+            }
+        }
+        const released_u64 = std.math.add(
+            u64,
+            bidi_released,
+            uni_released,
+        ) catch return error.StreamStateError;
+        const released = std.math.cast(usize, released_u64) orelse
+            return error.StreamStateError;
+        if (released == 0) return .{
+            .streams_released = 0,
+            .update_sent = false,
+        };
+
+        const next_bidi = advanceStreamLimit(
+            self.recv_max_streams_bidi,
+            bidi_released,
+        );
+        const next_uni = advanceStreamLimit(
+            self.recv_max_streams_uni,
+            uni_released,
+        );
+        var frames: [2]quic.Frame = undefined;
+        var frame_count: usize = 0;
+        if (next_bidi != self.recv_max_streams_bidi) {
+            frames[frame_count] = .{ .max_streams_bidi = .{
+                .maximum_streams = next_bidi,
+            } };
+            frame_count += 1;
+        }
+        if (next_uni != self.recv_max_streams_uni) {
+            frames[frame_count] = .{ .max_streams_uni = .{
+                .maximum_streams = next_uni,
+            } };
+            frame_count += 1;
+        }
+        if (frame_count != 0) try self.sendTrackedFrames(frames[0..frame_count]);
+
+        // No connection method may run concurrently with this mutation. The
+        // second pass therefore selects exactly the preflighted streams while
+        // avoiding temporary heap storage proportional to the batch size.
+        for (stream_ids, 0..) |stream_id, index| {
+            if (containsStreamId(stream_ids[0..index], stream_id)) continue;
+            if (try self.peerStreamReadyForCredit(stream_id)) {
+                self.findRecvStreamEntry(stream_id).?
+                    .stream_count_credit_released = true;
+            }
+        }
+        self.recv_max_streams_bidi = next_bidi;
+        self.recv_max_streams_uni = next_uni;
+        return .{
+            .streams_released = released,
+            .update_sent = frame_count != 0,
+        };
+    }
+
+    fn peerStreamReadyForCredit(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!bool {
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             return error.StreamStateError;
         }
@@ -3305,8 +3396,7 @@ pub const Connection = struct {
         if (!recv_stream.recv_state.complete() and recv_stream.reset == null) {
             return false;
         }
-        const direction = streamDirection(stream_id);
-        if (direction == .bidirectional) {
+        if (streamDirection(stream_id) == .bidirectional) {
             const send_stream = self.findSendStreamEntry(stream_id) orelse
                 return false;
             if (send_stream.final_size == null and
@@ -3315,27 +3405,6 @@ pub const Connection = struct {
                 return false;
             }
         }
-
-        const limit = switch (direction) {
-            .bidirectional => &self.recv_max_streams_bidi,
-            .unidirectional => &self.recv_max_streams_uni,
-        };
-        if (limit.* == quic.max_stream_count) {
-            recv_stream.stream_count_credit_released = true;
-            return false;
-        }
-        const next_limit = limit.* + 1;
-        const frame: quic.Frame = switch (direction) {
-            .bidirectional => .{ .max_streams_bidi = .{
-                .maximum_streams = next_limit,
-            } },
-            .unidirectional => .{ .max_streams_uni = .{
-                .maximum_streams = next_limit,
-            } },
-        };
-        try self.sendTrackedFrames(&.{frame});
-        limit.* = next_limit;
-        recv_stream.stream_count_credit_released = true;
         return true;
     }
 
@@ -6540,6 +6609,18 @@ fn streamDirection(stream_id: u64) StreamDirection {
 
 fn streamCountForId(stream_id: u64) u64 {
     return (stream_id >> 2) + 1;
+}
+
+fn containsStreamId(stream_ids: []const u64, target: u64) bool {
+    for (stream_ids) |stream_id| {
+        if (stream_id == target) return true;
+    }
+    return false;
+}
+
+fn advanceStreamLimit(current: u64, released: u64) u64 {
+    std.debug.assert(current <= quic.max_stream_count);
+    return current + @min(released, quic.max_stream_count - current);
 }
 
 fn peerAddressSameIp(a: net.IpAddress, b: net.IpAddress) bool {
