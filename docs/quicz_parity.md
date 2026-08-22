@@ -196,6 +196,14 @@ benchmarks.
    Broader peer coverage is still not audited; recent
    Cloudflare/Google/Facebook probes failed or timed out and are intentionally
    not counted as coverage.
+   The synchronous handshake now preserves a first 1-RTT packet coalesced
+   behind the peer's Handshake flight in both endpoint roles. The server-side
+   path was required by Chrome's Handshake Finished plus HTTP/3 control stream;
+   the client path now retains the symmetric server Handshake plus application
+   suffix as well, including its ECN marking, instead of silently discarding
+   an early HANDSHAKE_DONE, SETTINGS, or application packet. Deterministic
+   tests cover both wire shapes before the external matrix below.
+
    Raw QUIC now has a separate process-boundary client gate:
    `zig build interop-quic-quic-go -Doptimize=ReleaseFast` builds quic-go
    v0.59.0 from the audited `~/Work/quicz` fixture, loads its generated

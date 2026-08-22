@@ -33,9 +33,12 @@ pub const ReceivedHandshakeCrypto = struct {
     from: net.IpAddress,
     packet: quic.protection.OpenedHandshakePacket,
     crypto_data: []u8,
-    /// Optional application-data suffix from the same UDP datagram. A client
-    /// may coalesce its first 1-RTT packet behind the Handshake Finished.
+    /// Optional application-data suffix from the same UDP datagram. A peer may
+    /// coalesce its first 1-RTT packet behind its Handshake flight.
     coalesced_one_rtt: ?[]u8 = null,
+    /// ECN marking carried by the UDP datagram containing `coalesced_one_rtt`.
+    /// It is ignored when no application-data suffix was retained.
+    coalesced_one_rtt_ecn: quic.packet_space.EcnCodepoint = .not_ect,
 
     pub fn deinit(self: *ReceivedHandshakeCrypto, allocator: std.mem.Allocator) void {
         self.packet.deinit(allocator);

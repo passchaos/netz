@@ -998,6 +998,7 @@ fn connectAttempt(
         endpoint,
         server_initial.from,
         server_datagram.bytes[server_initial_info.len..],
+        server_datagram.ecn,
         handshake.server_quic,
         0,
         options.max_crypto_buffer,
@@ -1261,6 +1262,13 @@ fn connectAttempt(
         ),
     );
     errdefer established.deinit();
+    if (server_handshake.coalesced_one_rtt) |one_rtt| {
+        try established.connection.preloadReceivedDatagram(
+            server_handshake.from,
+            one_rtt,
+            server_handshake.coalesced_one_rtt_ecn,
+        );
+    }
     if (options.early_data) |early_data| {
         if (!retry_processed) {
             try established.connection.importSentEarlyData(
@@ -1767,6 +1775,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         endpoint,
         client_handshake_datagram.from,
         client_handshake_datagram.bytes,
+        client_handshake_datagram.ecn,
         handshake.client_quic,
         0,
         options.max_crypto_buffer,
@@ -1870,7 +1879,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         try established.connection.preloadReceivedDatagram(
             client_handshake.from,
             bytes,
-            client_handshake_datagram.ecn,
+            client_handshake.coalesced_one_rtt_ecn,
         );
     }
     if (pending_early_data) |*early_data| {
@@ -1894,6 +1903,7 @@ fn openClientHandshakeCryptoFromDatagram(
     endpoint: *quic.runtime.Endpoint,
     from: net.IpAddress,
     datagram: []const u8,
+    datagram_ecn: quic.packet_space.EcnCodepoint,
     keys: quic.protection.PacketProtectionKeys,
     expected_packet_number: u64,
     max_crypto_buffer: usize,
@@ -1963,14 +1973,15 @@ fn openClientHandshakeCryptoFromDatagram(
                 null
             else
                 try endpoint.allocator.dupe(u8, one_rtt_tail);
-            errdefer if (coalesced_one_rtt) |bytes| {
-                endpoint.allocator.free(bytes);
+            errdefer if (coalesced_one_rtt) |retained| {
+                endpoint.allocator.free(retained);
             };
             const result = quic.initial_exchange.ReceivedHandshakeCrypto{
                 .from = from,
                 .packet = first_packet.?,
                 .crypto_data = crypto_data,
                 .coalesced_one_rtt = coalesced_one_rtt,
+                .coalesced_one_rtt_ecn = datagram_ecn,
             };
             first_packet = null;
             return result;
@@ -2092,6 +2103,7 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
         &endpoint,
         .{ .ip4 = .loopback(4433) },
         coalesced,
+        .not_ect,
         handshake_keys,
         0,
         1024,
@@ -2311,6 +2323,7 @@ fn receiveServerHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
     from: net.IpAddress,
     coalesced_tail: []const u8,
+    coalesced_ecn: quic.packet_space.EcnCodepoint,
     handshake_keys: quic.protection.PacketProtectionKeys,
     expected_packet_number: u64,
     max_crypto_buffer: usize,
@@ -2323,6 +2336,7 @@ fn receiveServerHandshakeCrypto(
     var first_packet: ?quic.protection.OpenedHandshakePacket = null;
     errdefer if (first_packet) |*packet| packet.deinit(endpoint.allocator);
     var response_from = from;
+    var response_ecn = coalesced_ecn;
     var next_expected = expected_packet_number;
     const passive_deadline = recovery.passiveTimeout().toDeadline(endpoint.io);
     var pending_tail = coalesced_tail;
@@ -2341,6 +2355,7 @@ fn receiveServerHandshakeCrypto(
                 passive_deadline,
             );
             response_from = owned_datagram.?.from;
+            response_ecn = owned_datagram.?.ecn;
             var datagram_tail: []const u8 = owned_datagram.?.bytes;
             const packet = (nextHandshakePacketFromCoalescedTail(
                 &datagram_tail,
@@ -2395,10 +2410,23 @@ fn receiveServerHandshakeCrypto(
         if (splitServerFlight(available, require_certificate)) |_| {
             const crypto_data = try endpoint.allocator.dupe(u8, available);
             errdefer endpoint.allocator.free(crypto_data);
+            const one_rtt_tail = try coalescedOneRttTail(
+                pending_tail,
+                allow_zero_fixed_bit,
+            );
+            const coalesced_one_rtt = if (one_rtt_tail.len == 0)
+                null
+            else
+                try endpoint.allocator.dupe(u8, one_rtt_tail);
+            errdefer if (coalesced_one_rtt) |retained| {
+                endpoint.allocator.free(retained);
+            };
             const out = quic.initial_exchange.ReceivedHandshakeCrypto{
                 .from = response_from,
                 .packet = first_packet.?,
                 .crypto_data = crypto_data,
+                .coalesced_one_rtt = coalesced_one_rtt,
+                .coalesced_one_rtt_ecn = response_ecn,
             };
             first_packet = null;
             return out;
@@ -2550,11 +2578,26 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
     );
     defer allocator.free(crypto_packet);
     try coalesced.appendSlice(allocator, crypto_packet);
+    const application_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x54} ** quic.protection.secret_len,
+    );
+    const application_packet = try quic.protection.sealShortPacket(
+        allocator,
+        application_keys,
+        .{
+            .destination_connection_id = &dcid,
+            .packet_number = 3,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    defer allocator.free(application_packet);
+    try coalesced.appendSlice(allocator, application_packet);
 
     var received = try receiveServerHandshakeCrypto(
         &endpoint,
         endpoint.address(),
         coalesced.items,
+        .ce,
         keys,
         0,
         1024,
@@ -2564,6 +2607,15 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
     );
     defer received.deinit(allocator);
     try std.testing.expectEqualStrings(&tls_flight, received.crypto_data);
+    try std.testing.expectEqualSlices(
+        u8,
+        application_packet,
+        received.coalesced_one_rtt.?,
+    );
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ce,
+        received.coalesced_one_rtt_ecn,
+    );
 }
 
 fn openClientEarlyData(
