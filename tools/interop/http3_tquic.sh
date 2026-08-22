@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+netz_client=${1:?netz HTTP/3 client executable path}
+netz_server=${2:?netz HTTP/3 server executable path}
+tquic_root=${TQUIC_ROOT:-"$HOME/Work/tquic"}
+tquic_client="$tquic_root/target/release/tquic_client"
+tquic_server="$tquic_root/target/release/tquic_server"
+
+if [[ ! -f "$tquic_root/tools/Cargo.toml" ]]; then
+  echo "tquic checkout not found under $tquic_root" >&2
+  exit 127
+fi
+if [[ ! -f "$tquic_root/deps/boringssl/CMakeLists.txt" ]]; then
+  git -C "$tquic_root" submodule update --init --depth 1 deps/boringssl
+fi
+(cd "$tquic_root" && cargo build --manifest-path tools/Cargo.toml \
+  --release --bin tquic_client --bin tquic_server)
+
+work=$(mktemp -d)
+server_pid=
+cleanup() {
+  if [[ -n "$server_pid" ]]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+free_udp_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+cat >"$work/cert.pem" <<'EOF'
+-----BEGIN CERTIFICATE-----
+MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
+-----END CERTIFICATE-----
+EOF
+cat >"$work/key.pem" <<'EOF'
+-----BEGIN EC PRIVATE KEY-----
+MDECAQEEIBI0VniavN7xI0VniavN7xI0VniavN7xI0VniavN7xI0oAoGCCqGSM49AwEH
+-----END EC PRIVATE KEY-----
+EOF
+mkdir -p "$work/www" "$work/downloads"
+printf 'tquic-one' >"$work/www/one.txt"
+printf 'tquic-two' >"$work/www/two.txt"
+
+port=$(free_udp_port)
+"$tquic_server" -l "127.0.0.1:$port" -c "$work/cert.pem" \
+  -k "$work/key.pem" -r "$work/www" --log-level OFF \
+  >"$work/tquic-server.log" 2>&1 &
+server_pid=$!
+sleep 0.2
+timeout 20s "$netz_client" "$port" >"$work/netz-client.log" 2>&1
+grep -Fq 'netz HTTP/3 client interoperated with tquic: requests=2 connection_reused=true bodies=9,9' "$work/netz-client.log"
+cat "$work/netz-client.log"
+kill "$server_pid" 2>/dev/null || true
+wait "$server_pid" 2>/dev/null || true
+server_pid=
+
+port=$(free_udp_port)
+"$netz_server" "$port" >"$work/netz-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 100); do
+  grep -q 'netz HTTP/3 tquic interop server listening' \
+    "$work/netz-server.log" && break
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/netz-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+timeout 20s "$tquic_client" -c "127.0.0.1:$port" -a h3 \
+  --max-concurrent-requests 2 --max-requests-per-conn 2 \
+  --total-requests-per-thread 2 --dump-dir "$work/downloads" \
+  --log-level OFF "https://localhost:$port/one.txt" \
+  "https://localhost:$port/two.txt" >"$work/tquic-client.log" 2>&1
+wait "$server_pid"
+server_pid=
+grep -Fq 'requests: sent 2, finish 2, success 2' "$work/tquic-client.log"
+grep -Fq 'netz HTTP/3 server interoperated with tquic: requests=2 connection_reused=true bodies=14,14' "$work/netz-server.log"
+test "$(cat "$work/downloads/one.txt")" = 'netz-tquic-one'
+test "$(cat "$work/downloads/two.txt")" = 'netz-tquic-two'
+cat "$work/tquic-client.log"
+cat "$work/netz-server.log"

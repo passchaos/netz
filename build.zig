@@ -240,6 +240,39 @@ pub fn build(b: *std.Build) void {
     );
     http3_quic_go_step.dependOn(&http3_quic_go.step);
 
+    const http3_tquic_client = b.addExecutable(.{
+        .name = "netz-http3-tquic-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_tquic_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_tquic_server = b.addExecutable(.{
+        .name = "netz-http3-tquic-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_tquic_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_tquic = b.addSystemCommand(
+        &.{"tools/interop/http3_tquic.sh"},
+    );
+    http3_tquic.addArtifactArg(http3_tquic_client);
+    http3_tquic.addArtifactArg(http3_tquic_server);
+    const http3_tquic_step = b.step(
+        "interop-http3-tquic",
+        "Run bidirectional HTTP/3 interoperability with tquic",
+    );
+    http3_tquic_step.dependOn(&http3_tquic.step);
+
     const websocket_hyper_h2_client = b.addExecutable(.{
         .name = "netz-websocket-hyper-h2-client",
         .root_module = b.createModule(.{

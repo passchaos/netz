@@ -1608,7 +1608,18 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             client_initial.coalesced_tail,
         );
     } else if (client_initial.coalesced_tail.len != 0) {
-        return error.InvalidHandshakeFlight;
+        // RFC 9000 requires the first client datagram to be at least 1200
+        // bytes. tquic reaches that size with an all-zero suffix outside the
+        // Initial packet's encoded Length, while other stacks can coalesce
+        // more Initial packets. Preserve the authenticated first packet and
+        // tolerate only those two harmless suffix shapes; reject other packet
+        // number spaces because accepting undecryptable 0-RTT or Handshake
+        // bytes would bypass the state that owns them.
+        try validateClientInitialTail(
+            client_initial.coalesced_tail,
+            options.version,
+            accept_zero_fixed_bit,
+        );
     }
 
     var server_hello: std.ArrayList(u8) = .empty;
@@ -2715,6 +2726,88 @@ fn validateRejectedEarlyData(bytes: []const u8) Error!void {
     }
     // RFC 9001 permits rejecting 0-RTT while continuing PSK resumption. The
     // authenticated-length packet is deliberately left undecrypted.
+}
+
+fn validateClientInitialTail(
+    bytes: []const u8,
+    version: quic.Version,
+    allow_zero_fixed_bit: bool,
+) Error!void {
+    var tail = bytes;
+    while (tail.len != 0) {
+        if (std.mem.allEqual(u8, tail, 0)) return;
+        const info = try quic.protection
+            .peekProtectedLongPacketInfoWithFixedBitPolicy(
+            tail,
+            allow_zero_fixed_bit,
+        );
+        if (info.version != version.wireValue() or
+            info.packet_type != .initial)
+        {
+            return error.InvalidHandshakeFlight;
+        }
+        tail = tail[info.len..];
+    }
+}
+
+test "QUIC server accepts Initial packets and datagram padding after ClientHello" {
+    const allocator = std.testing.allocator;
+    const dcid = "server01";
+    const scid = "client01";
+    const keys = quic.protection.deriveInitialSecrets(dcid).client;
+    const padding = [_]u8{@intFromEnum(quic.FrameType.padding)};
+    const initial = try quic.protection.sealInitialPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+            .packet_number = 1,
+            .payload = &padding,
+        },
+    );
+    defer allocator.free(initial);
+    try validateClientInitialTail(
+        initial,
+        .version_1,
+        false,
+    );
+    try validateClientInitialTail(
+        &([_]u8{0} ** 906),
+        .version_1,
+        false,
+    );
+    var initial_and_padding: std.ArrayList(u8) = .empty;
+    defer initial_and_padding.deinit(allocator);
+    try initial_and_padding.appendSlice(allocator, initial);
+    try initial_and_padding.appendNTimes(allocator, 0, 64);
+    try validateClientInitialTail(
+        initial_and_padding.items,
+        .version_1,
+        false,
+    );
+
+    const zero_rtt = try quic.protection.sealZeroRttPacket(
+        allocator,
+        quic.protection.deriveAes128Keys(
+            [_]u8{0x42} ** quic.protection.secret_len,
+        ),
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+            .packet_number = 0,
+            .payload = &padding,
+        },
+    );
+    defer allocator.free(zero_rtt);
+    try std.testing.expectError(
+        error.InvalidHandshakeFlight,
+        validateClientInitialTail(
+            zero_rtt,
+            .version_1,
+            false,
+        ),
+    );
 }
 
 fn establishedConnection(
