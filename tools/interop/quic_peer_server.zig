@@ -35,6 +35,8 @@ const Mode = enum {
     nat_rebinding,
     v2,
     s2n,
+    s2n_reset,
+    s2n_stop,
 };
 
 fn receiveExpectedStream(
@@ -430,7 +432,7 @@ pub fn main(init: std.process.Init) !void {
                 );
             }
         },
-        .reset => {
+        .reset, .s2n_reset => {
             while (established.connection.streamResetReceived(0) == null) {
                 try receivePacket(&established.connection, allocator);
             }
@@ -446,7 +448,7 @@ pub fn main(init: std.process.Init) !void {
             );
             try sendEcho(&established.connection, 4, payloads[1]);
         },
-        .stop => {
+        .stop, .s2n_stop => {
             // quic-go can append probe bytes immediately after "stop" while
             // waiting for STOP_SENDING. Validate only the stable prefix before
             // cancelling its send side; RESET_STREAM supplies the final size.
@@ -540,22 +542,32 @@ pub fn main(init: std.process.Init) !void {
         .nat_rebinding => unreachable,
     }
 
-    if (mode == .peer_close or mode == .s2n) {
+    if (mode == .peer_close or mode == .s2n or
+        mode == .s2n_reset or mode == .s2n_stop)
+    {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
         // the application-close assertion cannot truncate stream validation.
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         try established.connection.closeApplication(58, "netz interop complete");
-        if (mode == .s2n) {
-            std.debug.print(
+        switch (mode) {
+            .s2n => std.debug.print(
                 "netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58\n",
                 .{},
-            );
-        } else {
-            std.debug.print(
+            ),
+            .s2n_reset => std.debug.print(
+                "netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
+                .{},
+            ),
+            .s2n_stop => std.debug.print(
+                "netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
+                .{},
+            ),
+            .peer_close => std.debug.print(
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
-            );
+            ),
+            else => unreachable,
         }
         return;
     }
@@ -596,6 +608,8 @@ pub fn main(init: std.process.Init) !void {
         ),
         .peer_close => unreachable,
         .s2n => unreachable,
+        .s2n_reset => unreachable,
+        .s2n_stop => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

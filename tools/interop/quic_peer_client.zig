@@ -12,6 +12,7 @@ const key_update_payloads = [_][]const u8{
     "phase-one",
     "phase-two",
 };
+const Scenario = enum { echo, reset, stop };
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -23,6 +24,8 @@ pub fn main(init: std.process.Init) !void {
     var expect_retry = false;
     var expect_key_update = false;
     var peer: enum { quic_go, s2n_quic } = .quic_go;
+    var scenario: Scenario = .echo;
+    var scenario_set = false;
     var version: netz.quic.Version = .version_1;
     for (args[3..]) |arg| {
         if (std.mem.eql(u8, arg, "--expect-retry")) {
@@ -37,6 +40,13 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--peer=s2n-quic")) {
             if (peer != .quic_go) return error.InvalidArgument;
             peer = .s2n_quic;
+        } else if (std.mem.startsWith(u8, arg, "--scenario=")) {
+            if (scenario_set) return error.InvalidArgument;
+            scenario_set = true;
+            scenario = std.meta.stringToEnum(
+                Scenario,
+                arg["--scenario=".len..],
+            ) orelse return error.InvalidArgument;
         } else {
             return error.InvalidArgument;
         }
@@ -45,6 +55,9 @@ pub fn main(init: std.process.Init) !void {
     if (peer == .s2n_quic and
         (expect_retry or expect_key_update or version != .version_1))
     {
+        return error.InvalidArgument;
+    }
+    if (peer == .quic_go and scenario != .echo) {
         return error.InvalidArgument;
     }
     const key_exchange_groups: []const netz.quic.tls_client_hello.NamedGroup =
@@ -154,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
         {
             return error.UnexpectedKeyUpdate;
         }
-    } else {
+    } else if (scenario == .echo) {
         var stream_ids: [payloads.len]u64 = undefined;
         for (payloads, 0..) |payload, index| {
             stream_ids[index] = try established.connection.openStream();
@@ -198,9 +211,13 @@ pub fn main(init: std.process.Init) !void {
                     established.connection.receivedStreamComplete(stream_id);
             }
         }
-    }
+    } else try exerciseCancellation(
+        &established.connection,
+        allocator,
+        scenario,
+    );
 
-    // The quic-go fixture closes only after both stream FINs are complete.
+    // Each external fixture closes only after its stream operations complete.
     // Keep pumping QUIC rather than treating echo completion as proof of a
     // clean connection shutdown, and validate its peer application metadata.
     while (established.connection.peerCloseInfo() == null) {
@@ -234,7 +251,7 @@ pub fn main(init: std.process.Init) !void {
             "netz QUIC client interoperated with quic-go: verified=true version={d} key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57\n",
             .{if (version == .version_2) @as(u8, 2) else 1},
         );
-    } else {
+    } else if (scenario == .echo) {
         std.debug.print(
             "netz QUIC client interoperated with {s}: verified=true version={d} retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
             .{
@@ -246,7 +263,75 @@ pub fn main(init: std.process.Init) !void {
                 expect_retry,
             },
         );
+    } else switch (scenario) {
+        .reset => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57\n",
+            .{},
+        ),
+        .stop => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=57\n",
+            .{},
+        ),
+        .echo => unreachable,
     }
+}
+
+fn exerciseCancellation(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    scenario: Scenario,
+) !void {
+    const target_payload = switch (scenario) {
+        .reset => "reset",
+        .stop => "stop",
+        .echo => unreachable,
+    };
+    const target_stream_id = try connection.openStream();
+    if (target_stream_id != 0) return error.UnexpectedStreamId;
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = target_stream_id,
+        .offset = 0,
+        .data = target_payload,
+        .fin = scenario == .reset,
+    } }});
+
+    // Put the sibling on the wire before waiting for cancellation so its echo
+    // proves RESET_STREAM/STOP_SENDING affected only the target stream.
+    const sibling_stream_id = try connection.openStream();
+    if (sibling_stream_id != 4) return error.UnexpectedStreamId;
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = sibling_stream_id,
+        .offset = 0,
+        .data = payloads[1],
+        .fin = true,
+    } }});
+
+    switch (scenario) {
+        .reset => {
+            while (connection.streamResetReceived(target_stream_id) == null) {
+                try receivePacket(connection, allocator);
+            }
+            const reset = connection.streamResetReceived(target_stream_id).?;
+            if (reset.application_error_code != 41 or reset.final_size != 0) {
+                return error.UnexpectedResetError;
+            }
+        },
+        .stop => {
+            while (connection.streamStopped(target_stream_id) == null) {
+                try receivePacket(connection, allocator);
+            }
+            if (connection.streamStopped(target_stream_id).?.application_error_code != 42) {
+                return error.UnexpectedStopSendingError;
+            }
+        },
+        .echo => unreachable,
+    }
+    try receiveExpectedStream(
+        connection,
+        allocator,
+        sibling_stream_id,
+        payloads[1],
+    );
 }
 
 fn echoStream(
@@ -287,5 +372,48 @@ fn echoStream(
         }
         var packet = try connection.receivePacketServicingTimers();
         packet.deinit(allocator);
+    }
+}
+
+fn receivePacket(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+) !void {
+    var packet = try connection.receivePacketServicingTimers();
+    packet.deinit(allocator);
+}
+
+fn receiveExpectedStream(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    expected: []const u8,
+) !void {
+    var received: usize = 0;
+    while (received < expected.len or
+        !connection.receivedStreamComplete(stream_id))
+    {
+        if (connection.availableReceivedStream(stream_id)) |available| {
+            if (available.len != 0) {
+                const end = std.math.add(usize, received, available.len) catch
+                    return error.UnexpectedEcho;
+                if (end > expected.len or !std.mem.eql(
+                    u8,
+                    available,
+                    expected[received..end],
+                )) return error.UnexpectedEcho;
+                try connection.releaseReceivedCapacity(
+                    stream_id,
+                    available.len,
+                );
+                received = end;
+            }
+        }
+        if (received == expected.len and
+            connection.receivedStreamComplete(stream_id))
+        {
+            return;
+        }
+        try receivePacket(connection, allocator);
     }
 }

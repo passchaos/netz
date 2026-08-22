@@ -81,33 +81,49 @@ openssl x509 -req -in "$work/s2n.csr" -CA "$work/s2n-ca.pem" \
 cargo build --quiet --release --locked --manifest-path "$fixture_manifest"
 s2n_peer="$repo_root/tools/interop/quic_s2n/target/release/netz-quic-s2n-interop"
 
-port=$(free_udp_port)
-"$s2n_peer" server "$port" "$work/s2n-cert.pem" "$work/s2n-key.pem" \
-  >"$work/s2n-server.log" 2>&1 &
-server_pid=$!
-for _ in $(seq 1 200); do
-  grep -q 's2n-quic interop server listening=' "$work/s2n-server.log" && break
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    exit 1
-  fi
-  sleep 0.05
-done
-grep -q 's2n-quic interop server listening=' "$work/s2n-server.log" || {
-  echo 'timed out waiting for s2n-quic server' >&2
-  exit 1
+run_netz_client_case() {
+  local scenario=$1
+  local client_result=$2
+  local server_result=$3
+  local port
+  port=$(free_udp_port)
+  local server_log="$work/s2n-server-$scenario.log"
+  local client_log="$work/netz-client-$scenario.log"
+
+  "$s2n_peer" server "$port" "$work/s2n-cert.pem" \
+    "$work/s2n-key.pem" "$scenario" >"$server_log" 2>&1 &
+  server_pid=$!
+  : >"$client_log"
+  for _ in $(seq 1 200); do
+    grep -q 's2n-quic interop server listening=' "$server_log" && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.05
+  done
+  grep -q 's2n-quic interop server listening=' "$server_log" || {
+    echo 'timed out waiting for s2n-quic server' >&2
+    return 1
+  }
+  timeout 20s "$netz_client" "$port" "$work/s2n-ca.pem" \
+    --peer=s2n-quic "--scenario=$scenario" >"$client_log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "$client_result" "$client_log"
+  grep -Fq "$server_result" "$server_log"
+  cat "$client_log"
+  cat "$server_log"
 }
-timeout 20s "$netz_client" "$port" "$work/s2n-ca.pem" \
-  --peer=s2n-quic >"$work/netz-client.log" 2>&1
-wait "$server_pid"
-server_pid=
-grep -Fq \
+
+run_netz_client_case echo \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 retry=false alpn=hq-interop streams=2 bytes=10 peer_close=57' \
-  "$work/netz-client.log"
-grep -Fq \
-  's2n-quic server interoperated with netz: version=1 alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57' \
-  "$work/s2n-server.log"
-cat "$work/netz-client.log"
-cat "$work/s2n-server.log"
+  's2n-quic server interoperated with netz: version=1 alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57'
+run_netz_client_case reset \
+  'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57' \
+  's2n-quic server interoperated with netz: version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57'
+run_netz_client_case stop \
+  'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=57' \
+  's2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=57'
 
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
@@ -115,29 +131,46 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 -----END CERTIFICATE-----
 EOF
 
-port=$(free_udp_port)
-"$netz_server" "$port" s2n >"$work/netz-server.log" 2>&1 &
-server_pid=$!
-for _ in $(seq 1 200); do
-  grep -q 'netz QUIC interop server listening' "$work/netz-server.log" && break
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    exit 1
-  fi
-  sleep 0.05
-done
-grep -q 'netz QUIC interop server listening' "$work/netz-server.log" || {
-  echo 'timed out waiting for netz QUIC server' >&2
-  exit 1
+run_s2n_client_case() {
+  local scenario=$1
+  local server_mode=$2
+  local client_result=$3
+  local server_result=$4
+  local port
+  port=$(free_udp_port)
+  local server_log="$work/netz-server-$scenario.log"
+  local client_log="$work/s2n-client-$scenario.log"
+
+  "$netz_server" "$port" "$server_mode" >"$server_log" 2>&1 &
+  server_pid=$!
+  : >"$client_log"
+  for _ in $(seq 1 200); do
+    grep -q 'netz QUIC interop server listening' "$server_log" && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.05
+  done
+  grep -q 'netz QUIC interop server listening' "$server_log" || {
+    echo 'timed out waiting for netz QUIC server' >&2
+    return 1
+  }
+  timeout 20s "$s2n_peer" client "$port" "$work/netz-ca.pem" \
+    "$scenario" >"$client_log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "$client_result" "$client_log"
+  grep -Fq "$server_result" "$server_log"
+  cat "$client_log"
+  cat "$server_log"
 }
-timeout 20s "$s2n_peer" client "$port" "$work/netz-ca.pem" \
-  >"$work/s2n-client.log" 2>&1
-wait "$server_pid"
-server_pid=
-grep -Fq \
+
+run_s2n_client_case echo s2n \
   's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop streams=2 bytes=10 peer_close=58' \
-  "$work/s2n-client.log"
-grep -Fq \
-  'netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58' \
-  "$work/netz-server.log"
-cat "$work/s2n-client.log"
-cat "$work/netz-server.log"
+  'netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58'
+run_s2n_client_case reset s2n_reset \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58' \
+  'netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58'
+run_s2n_client_case stop s2n_stop \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=58' \
+  'netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=58'
