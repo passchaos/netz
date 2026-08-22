@@ -310,6 +310,14 @@ The sample count per class is also printed (4,224 or 4,352 here), making
 schedule or aggregation drift visible rather than silently comparing different
 distributions.
 
+The maximum shared 256-connection setting also completed three alternating
+CPU-0..31 latency runs. Median aggregate results were 1,062 ns/roundtrip and
+941,113 roundtrips/s for netz versus 1,394 ns and 717,186 roundtrips/s for the
+reference, a 1.31x advantage. All runs verified 91,012,096 logical payload
+bytes, checksum 19,800,064, and matching per-class sample counts of 8,448 or
+8,704. Per-run tail values remain scheduler-sensitive at this saturation
+level, so the 128-connection table above is the detailed class comparison.
+
 One `strace -f -c` run recorded about 1,768 netz `sendmsg` calls. The
 reference recorded about 1,772 `sendmsg` plus 892 `writev` calls: its client
 still sends mask/header separately from payload. Tracing perturbs latency, so
@@ -319,8 +327,9 @@ these counts explain submission shape but are not timing samples.
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark
    now reports per-class p50/p99/p99.9 and retains matching checksum/sample
-   counts. Extend to 256 connections or longer runs when investigating scaling
-   beyond the captured 128-connection result.
+   counts. The maximum 256-connection setting also completes with matching
+   accounting and a 1.31x median aggregate advantage; use longer runs when
+   investigating scaling beyond these short saturation samples.
 2. Compare buffer-pool behavior and peak memory under many mostly-idle
    connections; the reference exposes explicit small/large buffer pools. The
    netz echo benchmark now accepts `--stats` and reports thread-safe allocation
@@ -349,7 +358,11 @@ these counts explain submission shape but are not timing samples.
    Netz therefore retained 12.6% less at peak and 14.4% less at report time at
    twice the earlier concurrency. It made 2,823 allocation calls versus 595,
    preserving the explicit trade-off: exact growth lowers resident memory but
-   intentionally performs more small allocator operations.
+   intentionally performs more small allocator operations. Three matched
+   256-connection runs were likewise byte-stable: netz used 2,290,692 peak and
+   1,150,464 final live bytes versus websocket.zig's 2,528,794 peak and
+   1,286,588 final bytes, reductions of 9.4% and 10.6% at the maximum supported
+   benchmark concurrency.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
