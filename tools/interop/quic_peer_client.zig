@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (expect_retry and expect_key_update) return error.InvalidArgument;
     if (peer == .s2n_quic and
-        (expect_retry or expect_key_update or version != .version_1))
+        (expect_key_update or version != .version_1))
     {
         return error.InvalidArgument;
     }

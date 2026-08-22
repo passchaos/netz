@@ -14,6 +14,27 @@ enum Scenario {
     Reset,
     Stop,
     Flow,
+    Retry,
+}
+
+#[derive(Debug)]
+struct RetryPolicy {
+    force: bool,
+}
+
+impl s2n_quic::provider::endpoint_limits::Limiter for RetryPolicy {
+    fn on_connection_attempt(
+        &mut self,
+        _attempt: &s2n_quic::provider::endpoint_limits::ConnectionAttempt,
+    ) -> s2n_quic::provider::endpoint_limits::Outcome {
+        if self.force {
+            // A validated Retry Initial bypasses this limiter; only an
+            // unvalidated attempt reaches this branch.
+            s2n_quic::provider::endpoint_limits::Outcome::retry()
+        } else {
+            s2n_quic::provider::endpoint_limits::Outcome::allow()
+        }
+    }
 }
 
 #[tokio::main]
@@ -36,7 +57,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow] | client PORT CA [echo|reset|stop]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry] | client PORT CA [echo|reset|stop]"
         ),
     }
 }
@@ -47,6 +68,7 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "reset" => Ok(Scenario::Reset),
         "stop" => Ok(Scenario::Stop),
         "flow" => Ok(Scenario::Flow),
+        "retry" => Ok(Scenario::Retry),
         value => bail!("unknown scenario: {value}"),
     }
 }
@@ -75,6 +97,9 @@ async fn run_server(
     let mut server = Server::builder()
         .with_tls(tls)?
         .with_limits(scenario_limits(scenario)?)?
+        .with_endpoint_limits(RetryPolicy {
+            force: scenario == Scenario::Retry,
+        })?
         .with_io(address)?
         .start()?;
     println!("s2n-quic interop server listening={address}");
@@ -93,7 +118,7 @@ async fn run_server(
     );
 
     match scenario {
-        Scenario::Echo => echo_two_streams(&mut connection).await?,
+        Scenario::Echo | Scenario::Retry => echo_two_streams(&mut connection).await?,
         Scenario::Reset => serve_reset(&mut connection).await?,
         Scenario::Stop => serve_stop(&mut connection).await?,
         Scenario::Flow => serve_flow(&mut connection).await?,
@@ -118,12 +143,18 @@ async fn run_server(
         Scenario::Flow => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288 peer_close=57"
         ),
+        Scenario::Retry => println!(
+            "s2n-quic server interoperated with netz: version=1 retry=true alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57"
+        ),
     }
     Ok(())
 }
 
 async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
-    ensure!(scenario != Scenario::Flow, "flow is a server-only scenario");
+    ensure!(
+        scenario != Scenario::Flow && scenario != Scenario::Retry,
+        "flow and retry are server-only scenarios"
+    );
     // Clear platform roots first so a successful connection proves that the
     // checked-in netz localhost certificate, rather than ambient trust, was
     // used to authenticate the server.
@@ -151,6 +182,7 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::Reset => request_reset(&mut connection).await?,
         Scenario::Stop => request_stop(&mut connection).await?,
         Scenario::Flow => unreachable!(),
+        Scenario::Retry => unreachable!(),
     }
 
     let close = timeout(TIMEOUT, connection.accept_bidirectional_stream())
@@ -177,6 +209,7 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
             "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=58"
         ),
         Scenario::Flow => unreachable!(),
+        Scenario::Retry => unreachable!(),
     }
     Ok(())
 }

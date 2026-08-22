@@ -128,6 +128,37 @@ run_netz_client_case flow \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 flow_blocked=true stream_bytes=12288 echo_bytes=12288 peer_close=57' \
   's2n-quic server interoperated with netz: version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288 peer_close=57'
 
+port=$(free_udp_port)
+"$s2n_peer" server "$port" "$work/s2n-cert.pem" \
+  "$work/s2n-key.pem" retry >"$work/s2n-server-retry.log" 2>&1 &
+server_pid=$!
+: >"$work/netz-client-retry.log"
+for _ in $(seq 1 200); do
+  grep -q 's2n-quic interop server listening=' \
+    "$work/s2n-server-retry.log" && break
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    exit 1
+  fi
+  sleep 0.05
+done
+grep -q 's2n-quic interop server listening=' \
+  "$work/s2n-server-retry.log" || {
+  echo 'timed out waiting for s2n-quic Retry server' >&2
+  exit 1
+}
+timeout 20s "$netz_client" "$port" "$work/s2n-ca.pem" \
+  --peer=s2n-quic --expect-retry >"$work/netz-client-retry.log" 2>&1
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz QUIC client interoperated with s2n-quic: verified=true version=1 retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
+  "$work/netz-client-retry.log"
+grep -Fq \
+  's2n-quic server interoperated with netz: version=1 retry=true alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57' \
+  "$work/s2n-server-retry.log"
+cat "$work/netz-client-retry.log"
+cat "$work/s2n-server-retry.log"
+
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
 MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
