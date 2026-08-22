@@ -14,6 +14,7 @@ const Config = struct {
     retain_available: bool = true,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
+    maximum_keep_alive_seconds: ?u16 = null,
     wildcard_subscription_available: bool = true,
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
@@ -62,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
+            .maximum_keep_alive_seconds = config.maximum_keep_alive_seconds,
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
                 .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
@@ -260,6 +262,19 @@ fn parseArgs(
                 arg["--server-keep-alive=".len..],
                 10,
             );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--maximum-keep-alive=",
+        )) {
+            config.maximum_keep_alive_seconds = try std.fmt.parseInt(
+                u16,
+                arg["--maximum-keep-alive=".len..],
+                10,
+            );
+            if (config.maximum_keep_alive_seconds.? == 0) {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.eql(u8, arg, "--no-retain")) {
             config.retain_available = false;
         } else if (std.mem.eql(

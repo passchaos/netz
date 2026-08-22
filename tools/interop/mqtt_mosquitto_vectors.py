@@ -315,6 +315,68 @@ def server_keep_alive(executable: Path, mqtt_packets, mqtt5_props) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def maximum_keep_alive(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Port Mosquitto 01-connect-max-keepalive.py for MQTT 3.1.1 and extend it
+    # to MQTT 5, where the broker can accept the connection by advertising a
+    # replacement Server Keep Alive. A requested zero is also over policy: it
+    # would otherwise disable timeout enforcement entirely.
+    maximum = 100
+    for requested in (101, 0, maximum):
+        with NetzBroker(
+            executable,
+            extra_args=(f"--maximum-keep-alive={maximum}",),
+        ) as broker:
+            with broker.connect() as sock:
+                sock.sendall(mqtt_packets.gen_connect(
+                    f"max-keepalive-v311-{requested}",
+                    proto_ver=4,
+                    keepalive=requested,
+                ))
+                expected = mqtt_packets.gen_connack(
+                    rc=2 if requested != maximum else 0,
+                    proto_ver=4,
+                )
+                expect_packet(
+                    sock, expected,
+                    f"MQTT 3.1.1 maximum Keep Alive {requested}",
+                )
+                if requested == maximum:
+                    sock.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
+
+    for requested in (101, 0, maximum):
+        with NetzBroker(
+            executable,
+            extra_args=(f"--maximum-keep-alive={maximum}",),
+        ) as broker:
+            with broker.connect() as sock:
+                sock.sendall(mqtt_packets.gen_connect(
+                    f"max-keepalive-v5-{requested}",
+                    proto_ver=5,
+                    keepalive=requested,
+                ))
+                extra = (
+                    mqtt5_props.gen_uint16_prop(
+                        mqtt5_props.SERVER_KEEP_ALIVE, maximum
+                    )
+                    if requested != maximum
+                    else b""
+                )
+                expect_packet(
+                    sock,
+                    expected_connack(
+                        mqtt_packets, mqtt5_props,
+                        extra_properties=extra,
+                    ),
+                    f"MQTT 5 maximum Keep Alive {requested}",
+                )
+                sock.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    sock, mqtt_packets.gen_pingresp(),
+                    f"MQTT 5 maximum Keep Alive PING {requested}",
+                )
+                sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def duplicate_client_takeover(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -4778,6 +4840,7 @@ def main() -> None:
     retained_tombstone_properties(args.broker, mqtt_packets, mqtt5_props)
     assigned_client_identifier(args.broker, mqtt_packets, mqtt5_props)
     server_keep_alive(args.broker, mqtt_packets, mqtt5_props)
+    maximum_keep_alive(args.broker, mqtt_packets, mqtt5_props)
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -4785,7 +4848,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 102 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 108 scenarios")
 
 
 if __name__ == "__main__":

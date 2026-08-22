@@ -153,6 +153,87 @@ test "broker Keep Alive zero disables inactivity timeout" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker maximum Keep Alive replaces MQTT 5 and refuses MQTT 3.1.1" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 4,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .maximum_keep_alive_seconds = 10,
+            .accept = .{ .max_outgoing_inflight = 64 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 4,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]u16{ 11, 0 }) |requested| {
+        var attempt = try context.runtime_mod.Client.connectAttempt(
+            allocator,
+            io,
+            broker.address(),
+            .{
+                .protocol = .v5,
+                .client_id = "maximum-keep-alive-v5",
+                .keep_alive_seconds = requested,
+            },
+        );
+        defer attempt.deinit(allocator);
+        try std.testing.expect(attempt.accepted());
+        try std.testing.expectEqual(
+            @as(?u16, 10),
+            mqtt.serverKeepAlive(attempt.connack.connack.properties),
+        );
+        try std.testing.expectEqual(
+            @as(u16, 10),
+            attempt.connection.?.keep_alive_seconds,
+        );
+        try attempt.connection.?.disconnect(0);
+    }
+
+    for ([_]u16{ 11, 0 }) |requested| {
+        var attempt = try context.runtime_mod.Client.connectAttempt(
+            allocator,
+            io,
+            broker.address(),
+            .{
+                .protocol = .v3_1_1,
+                .client_id = "maximum-keep-alive-v311",
+                .keep_alive_seconds = requested,
+            },
+        );
+        defer attempt.deinit(allocator);
+        try std.testing.expect(!attempt.accepted());
+        try std.testing.expectEqual(
+            @as(u8, 0x02),
+            attempt.connack.connack.reason_code,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            attempt.connack.connack.properties.len,
+        );
+    }
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker auto-detects MQTT 3.1.1 and MQTT 5 on one listener" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

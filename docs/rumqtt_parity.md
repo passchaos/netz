@@ -23,7 +23,7 @@ and equal-wire broker results are kept separate.
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
 | Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `queue_qos0_messages` |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
-| Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5 |
+| Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
@@ -856,7 +856,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 102
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 108
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -1003,6 +1003,13 @@ against the new example-broker `--server-keep-alive` policy switch. A client
 requests 61 seconds, the exact CONNACK advertises the configured 60-second
 replacement after netz's fixed capabilities, and a subsequent PING proves the
 negotiated connection remains usable.
+Six maximum-Keep-Alive cases port Mosquitto's
+`01-connect-max-keepalive.py` boundary for MQTT 3.1.1 and extend it to MQTT 5.
+Requests above 100 seconds and zero (which would disable Keep Alive) receive
+legacy CONNACK return code 2 in MQTT 3.1.1, while MQTT 5 accepts them with an
+exact Server Keep Alive value of 100. Requests exactly at the limit are
+accepted without an unnecessary override, and MQTT 5 PING verifies each
+accepted connection remains usable.
 Four malformed-Will cases directly port Mosquitto's `07-will-no-flag.py` and
 `07-will-null-topic.py` for MQTT 3.1.1 and MQTT 5. They remove the complete
 Will Payload field while keeping CONNECT's declared length self-consistent, or
@@ -1137,7 +1144,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all 102 scenarios pass. This is deliberately described as a selected
+packets; all 108 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
