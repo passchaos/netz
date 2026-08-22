@@ -197,11 +197,13 @@ benchmarks.
    `~/Work/tquic` checkout and performs two GET/response-body exchanges on one
    HTTP/3 connection in both endpoint directions, both normally and with the
    server forcing QUIC Retry. The netz-client direction checks tquic's exact
-   response bodies, `server: tquic`, and its own observed Retry state; the
+   response bodies, `server: tquic`, the server certificate/hostname, and its
+   own observed Retry state; the
    tquic-client direction checks request-success counters and dumped response
    files, while the netz server independently validates both paths and whether
-   Retry completed. This broadens the implementation matrix without treating
-   tquic's CLI, which exposes no CA option, as certificate-validation evidence.
+   Retry completed. Only the tquic-client direction lacks trust validation
+   because that CLI exposes no CA option; the netz-client direction is
+   certificate verified.
    Broader public peer coverage is still not audited; recent
    Cloudflare/Google/Facebook probes failed or timed out and are intentionally
    not counted as coverage.

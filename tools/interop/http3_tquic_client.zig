@@ -5,12 +5,13 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
+    if (args.len < 3 or args.len > 4) return error.InvalidArguments;
     const port = try std.fmt.parseInt(u16, args[1], 10);
-    const expect_retry = if (args.len == 3 and
-        std.mem.eql(u8, args[2], "--expect-retry"))
+    if (!std.Io.Dir.path.isAbsolute(args[2])) return error.InvalidArguments;
+    const expect_retry = if (args.len == 4 and
+        std.mem.eql(u8, args[3], "--expect-retry"))
         true
-    else if (args.len == 2)
+    else if (args.len == 3)
         false
     else
         return error.InvalidArguments;
@@ -18,6 +19,19 @@ pub fn main(init: std.process.Init) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
+    const now = std.Io.Clock.real.now(io);
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    try ca_bundle.addCertsFromFilePathAbsolute(
+        allocator,
+        io,
+        now,
+        args[2],
+    );
+    var verifier = netz.quic.tls.trust.BundleVerifier{
+        .bundle = &ca_bundle,
+        .now_seconds = now.toSeconds(),
+    };
     var original_dcid: [8]u8 = undefined;
     var client_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &original_dcid);
@@ -34,13 +48,12 @@ pub fn main(init: std.process.Init) !void {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                .server_auth = verifier.clientVerifier(),
                 // Keep the retry flight in one Initial. The tquic endpoint
                 // routes each Initial datagram before connection state exists,
                 // so a multi-datagram post-quantum ClientHello would be split
                 // across distinct provisional connections in that peer.
                 .key_exchange_groups = &.{.x25519},
-                // The upstream tquic CLI does not provide a CA option. This
-                // direction matches that peer by leaving trust policy unset.
                 .max_crypto_buffer = 64 * 1024,
             },
             .session = .{ .max_stream_buffer = 64 * 1024 },
@@ -72,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with tquic: retry={} requests=2 connection_reused=true bodies=9,9\n",
+        "netz HTTP/3 client interoperated with tquic: verified=true retry={} requests=2 connection_reused=true bodies=9,9\n",
         .{expect_retry},
     );
 }
