@@ -300,7 +300,15 @@ pub const PendingAcceptedClient = struct {
         if (resolved.maximum_keep_alive_seconds == 0) {
             return error.InvalidProperty;
         }
-        if (resolved.reason_code != 0) return resolved;
+        if (resolved.reason_code != 0) {
+            // Refused connections cannot carry successful-negotiation state.
+            // Normalizing here also prevents a caller-supplied Session Present
+            // bit or capability setting from producing an invalid CONNACK.
+            resolved.session_present = false;
+            resolved.assigned_client_identifier = null;
+            resolved.server_keep_alive_seconds = null;
+            return resolved;
+        }
         const connect = self.connect.connect;
         if (connect.client_id.len == 0 and
             !resolved.allow_zero_length_client_id)
@@ -309,6 +317,9 @@ pub const PendingAcceptedClient = struct {
                 .v3_1_1 => 0x02,
                 .v5 => 0x80,
             };
+            resolved.session_present = false;
+            resolved.assigned_client_identifier = null;
+            resolved.server_keep_alive_seconds = null;
             return resolved;
         }
         if (resolved.maximum_keep_alive_seconds) |maximum| {
@@ -322,7 +333,12 @@ pub const PendingAcceptedClient = struct {
                 connect.keep_alive_seconds > maximum)
             {
                 switch (connect.protocol) {
-                    .v3_1_1 => resolved.reason_code = 0x02,
+                    .v3_1_1 => {
+                        resolved.reason_code = 0x02;
+                        resolved.session_present = false;
+                        resolved.assigned_client_identifier = null;
+                        resolved.server_keep_alive_seconds = null;
+                    },
                     .v5 => resolved.server_keep_alive_seconds = if (resolved.server_keep_alive_seconds) |explicit|
                         @min(explicit, maximum)
                     else
@@ -2511,9 +2527,15 @@ test "MQTT runtime resolves connection acceptance policies" {
     pending.connect.connect.protocol = .v3_1_1;
     pending.connect.connect.keep_alive_seconds = 11;
     const v311_options = try pending.resolvedOptions(.{
+        .session_present = true,
+        .assigned_client_identifier = "must-not-leak",
+        .server_keep_alive_seconds = 9,
         .maximum_keep_alive_seconds = 10,
     });
     try std.testing.expectEqual(@as(u8, 0x02), v311_options.reason_code);
+    try std.testing.expect(!v311_options.session_present);
+    try std.testing.expect(v311_options.assigned_client_identifier == null);
+    try std.testing.expect(v311_options.server_keep_alive_seconds == null);
 
     pending.connect.connect.protocol = .v5;
     pending.connect.connect.keep_alive_seconds = 10;
