@@ -18,6 +18,13 @@ use tokio::sync::Barrier;
 mod tokiort;
 use tokiort::{TokioExecutor, TokioIo};
 
+#[cfg(feature = "allocation-stats")]
+mod counting_allocator;
+#[cfg(feature = "allocation-stats")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_allocator::CountingAllocator =
+    counting_allocator::CountingAllocator::new();
+
 const DEFAULT_PARALLEL: usize = 10;
 const DEFAULT_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_STREAM_WINDOW: u32 = 8 * 1024;
@@ -36,6 +43,7 @@ struct Options {
     connection_window: u32,
     warmup: usize,
     iterations: usize,
+    stats: bool,
 }
 
 fn main() {
@@ -137,6 +145,12 @@ fn main() {
     println!("  ns/batch: {}", elapsed_ns / options.iterations as u64);
     println!("  body MiB/s: {}", mib_per_second);
     println!("  checksum: {}", checksum);
+    if options.stats {
+        #[cfg(feature = "allocation-stats")]
+        COUNTING_ALLOCATOR.snapshot().print();
+        #[cfg(not(feature = "allocation-stats"))]
+        panic!("--stats requires the allocation-stats Cargo feature");
+    }
 }
 
 async fn exchange(
@@ -174,6 +188,7 @@ fn parse_options() -> Options {
         connection_window: DEFAULT_CONNECTION_WINDOW,
         warmup: DEFAULT_WARMUP,
         iterations: DEFAULT_ITERATIONS,
+        stats: false,
     };
     for argument in env::args().skip(1) {
         if let Some(value) = argument.strip_prefix("--parallel=") {
@@ -188,6 +203,8 @@ fn parse_options() -> Options {
             options.warmup = value.parse().expect("warmup");
         } else if let Some(value) = argument.strip_prefix("--iterations=") {
             options.iterations = value.parse().expect("iterations");
+        } else if argument == "--stats" {
+            options.stats = true;
         } else {
             panic!("unsupported argument: {argument}");
         }

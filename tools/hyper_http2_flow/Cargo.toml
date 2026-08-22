@@ -4,6 +4,9 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+allocation-stats = []
+
 [[bin]]
 name = "netz-hyper-http2-interop-server"
 path = "src/bin/interop_server.rs"

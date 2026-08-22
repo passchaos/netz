@@ -511,7 +511,13 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    scheduler, so this is internal timing evidence rather than a cross-stack
    ratio.
 2. Run the new `bench-http2-flow --stats` allocator telemetry on the full
-   netz/Hyper comparison matrix. The netz benchmark now reports allocation
+   netz/Hyper comparison matrix. **Completed for the primary constrained-window
+   shape:** both harnesses now report allocation calls, realloc/remap calls,
+   cumulative bytes, live bytes, peak live bytes and common size buckets from
+   thread-safe process-wide allocator wrappers. The Hyper wrapper delegates to
+   `System` and records requested sizes without recursively allocating;
+   `tools/bench_hyper_http2_flow.sh` enables it only when passed `--stats`.
+   The netz benchmark reports allocation
    calls, cumulative allocated/freed bytes, live bytes, peak live bytes and
    size buckets through a shared thread-safe benchmark allocator; a two-stream
    64-KiB/8-KiB-window smoke observed 293 allocations and 288,461 peak live
@@ -531,6 +537,16 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    three runs; stable samples were 7.08-7.10 ms/batch and peak live memory
    remained about 1.29 MB. Push-promise ownership uses the same block-aware
    deinitializer, and tests cover both ordinary and pushed headers.
+   A matched CPU-0 run of the documented 10-stream/1-MiB/8-KiB-window, five-
+   warmup/twenty-iteration shape measured netz at 10.258 ms/batch and Hyper at
+   11.560 ms/batch. Netz used 5,164 allocation calls, 12,992,891 cumulative
+   allocated bytes and 1,309,495 peak live bytes; Hyper used 53,886 allocation
+   calls, 11,617 reallocations, 297,019,815 cumulative allocated bytes and
+   1,334,388 peak live bytes. Thus netz used 90.4% fewer allocation calls,
+   95.6% fewer cumulative requested bytes and 1.9% less peak live memory in
+   this exact workload. These process-wide counters include runtime setup and
+   warmup in both implementations and are a matched workload result, not a
+   universal allocator or RSS claim.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
    in h2spec v2.6.0 strict server mode (`H2SPEC=/tmp/h2spec-download/h2spec zig
    build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-08-21).
