@@ -43,6 +43,11 @@ follow an Initial ACK in the same UDP datagram, modern peers may omit the older
 Capsule-Protocol and per-session stream-limit settings, and HTTP/3 critical
 stream IDs must not be hidden from WebTransport association based only on
 their numeric values.
+Both native endpoint roles now expose the negotiated WebTransport application
+payload limit as `maxDatagramSize`, subtracting QUIC DATAGRAM framing and the
+session-ID prefix. The gate compares this with wtransport's corresponding API
+and requires both implementations to reject an allocation-backed payload one
+byte above their independently reported limit before continuing normally.
 
 The Chrome gate drives the browser's real `WebTransport` API through
 Puppeteer, not a native QUIC substitute. It generates a fresh P-256 localhost
@@ -60,6 +65,9 @@ and H3 DATAGRAM advertisements.
 The browser also checks the resolved `transport.closed` value exactly: close
 code 77 and reason `netz done`. A cleanly resolved promise alone is not counted
 as evidence for CLOSE_WEBTRANSPORT_SESSION metadata propagation.
+It additionally requires Chrome's real
+`WebTransportDatagramDuplexStream.maxDatagramSize` to be a positive negotiated
+limit, while the netz peer performs its own one-byte-over-limit rejection.
 
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:

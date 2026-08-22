@@ -51,6 +51,17 @@ async fn main() -> Result<()> {
     let connection = timeout(TIMEOUT, endpoint.connect(url))
         .await
         .context("CONNECT timed out")??;
+    let max_datagram_size = connection
+        .max_datagram_size()
+        .context("peer did not negotiate DATAGRAM")?;
+    let oversized = vec![0xa5; max_datagram_size + 1];
+    ensure!(
+        matches!(
+            connection.send_datagram(&oversized),
+            Err(wtransport::error::SendDatagramError::TooLarge)
+        ),
+        "oversized DATAGRAM was not rejected"
+    );
 
     connection.send_datagram(CLIENT_DATAGRAM)?;
     let datagram = timeout(TIMEOUT, connection.receive_datagram())
@@ -159,7 +170,7 @@ async fn main() -> Result<()> {
     // wtransport consumes that capsule and then closes QUIC with H3_NO_ERROR.
     endpoint.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport client interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close");
+    println!("wtransport client interop passed: CONNECT DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close");
     Ok(())
 }
 
@@ -178,6 +189,17 @@ async fn run_server() -> Result<()> {
         .await?;
     ensure!(request.path() == "/interop", "unexpected CONNECT path");
     let connection = request.accept().await?;
+    let max_datagram_size = connection
+        .max_datagram_size()
+        .context("peer did not negotiate DATAGRAM")?;
+    let oversized = vec![0xa5; max_datagram_size + 1];
+    ensure!(
+        matches!(
+            connection.send_datagram(&oversized),
+            Err(wtransport::error::SendDatagramError::TooLarge)
+        ),
+        "oversized DATAGRAM was not rejected"
+    );
 
     let datagram = timeout(TIMEOUT, connection.receive_datagram())
         .await
@@ -271,7 +293,7 @@ async fn run_server() -> Result<()> {
     connection.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
     println!(
-        "wtransport server interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 reuse=true"
+        "wtransport server interop passed: CONNECT DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=73 stop=74 reuse=true"
     );
     Ok(())
 }

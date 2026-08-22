@@ -98,8 +98,14 @@ server_pid=
 cat "$work/client.log"
 cat "$work/server.log"
 grep -Fq \
-  'Chrome WebTransport interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done' \
+  'Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=' \
   "$work/client.log"
 grep -Fq \
-  'netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
+  'bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done' \
+  "$work/client.log"
+grep -Fq \
+  'netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
+  "$work/server.log"
+grep -Fq \
+  'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close' \
   "$work/server.log"

@@ -121,6 +121,18 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer client.deinit();
+    const max_datagram_size = client.maxDatagramSize();
+    if (max_datagram_size == 0) return error.UnexpectedDatagramLimit;
+    const oversized_datagram = try allocator.alloc(
+        u8,
+        max_datagram_size + 1,
+    );
+    defer allocator.free(oversized_datagram);
+    @memset(oversized_datagram, 0xa5);
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        client.sendDatagram(oversized_datagram),
+    );
 
     try client.sendDatagram(client_datagram);
     var datagram = try client.receiveDatagram();
@@ -214,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedConnectionClose,
     }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT DATAGRAM bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
-        .{},
+        "netz WebTransport client interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
+        .{max_datagram_size},
     );
 }

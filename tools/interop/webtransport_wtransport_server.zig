@@ -151,6 +151,18 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, session.request.request.path, "/interop")) {
         return error.UnexpectedPath;
     }
+    const max_datagram_size = session.maxDatagramSize();
+    if (max_datagram_size == 0) return error.UnexpectedDatagramLimit;
+    const oversized_datagram = try allocator.alloc(
+        u8,
+        max_datagram_size + 1,
+    );
+    defer allocator.free(oversized_datagram);
+    @memset(oversized_datagram, 0xa5);
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        session.sendDatagram(oversized_datagram),
+    );
     std.debug.print("netz WebTransport interop accepted CONNECT\n", .{});
 
     var datagram = try session.receiveDatagram();
@@ -303,7 +315,7 @@ pub fn main(init: std.process.Init) !void {
     try session.close(77, "netz done");
     try std.Io.sleep(io, .fromMilliseconds(100), .awake);
     std.debug.print(
-        "netz WebTransport server interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close\n",
-        .{},
+        "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close\n",
+        .{max_datagram_size},
     );
 }

@@ -55,6 +55,10 @@ async function runBrowserProbe({port, certificateHash}) {
     serverCertificateHashes: [{algorithm: 'sha-256', value: hash.buffer}],
   });
   await withTimeout(transport.ready, 'WebTransport ready');
+  const maxDatagramSize = transport.datagrams.maxDatagramSize;
+  if (!Number.isInteger(maxDatagramSize) || maxDatagramSize <= 0) {
+    throw new Error(`invalid maxDatagramSize: ${maxDatagramSize}`);
+  }
 
   const datagramWriter = transport.datagrams.writable.getWriter();
   const datagramReader = transport.datagrams.readable.getReader();
@@ -121,7 +125,7 @@ async function runBrowserProbe({port, certificateHash}) {
       `reason=${JSON.stringify(closeInfo.reason)}`,
     );
   }
-  return 'Chrome WebTransport interop passed: CONNECT DATAGRAM bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done';
+  return `Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true close=77/netz-done`;
 }
 
 (async () => {

@@ -396,7 +396,17 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn maxDatagramPayloadSize(self: AcceptedHandshakeSession) ?usize {
-        return webtransport.maxDatagramPayloadSize(self.h3.established.connection.maxDatagramPayloadSize(), self.session_id);
+        if (!self.datagramsNegotiated()) return null;
+        return webtransport.maxDatagramPayloadSize(
+            self.h3.established.connection.maxDatagramPayloadSize(),
+            self.session_id,
+        );
+    }
+
+    /// WebTransport API spelling for the maximum application payload accepted
+    /// by `sendDatagram`, after QUIC DATAGRAM and Session ID overhead.
+    pub fn maxDatagramSize(self: AcceptedHandshakeSession) usize {
+        return self.maxDatagramPayloadSize() orelse 0;
     }
 
     pub fn datagramsNegotiated(self: AcceptedHandshakeSession) bool {
@@ -776,7 +786,17 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn maxDatagramPayloadSize(self: HandshakeClientSession) ?usize {
-        return webtransport.maxDatagramPayloadSize(self.h3.established.connection.maxDatagramPayloadSize(), self.session_id);
+        if (!self.datagramsNegotiated()) return null;
+        return webtransport.maxDatagramPayloadSize(
+            self.h3.established.connection.maxDatagramPayloadSize(),
+            self.session_id,
+        );
+    }
+
+    /// WebTransport API spelling for the negotiated send-payload limit. Zero
+    /// means HTTP Datagrams were not negotiated.
+    pub fn maxDatagramSize(self: HandshakeClientSession) usize {
+        return self.maxDatagramPayloadSize() orelse 0;
     }
 
     pub fn datagramsNegotiated(self: HandshakeClientSession) bool {
@@ -1601,6 +1621,11 @@ fn sendHandshakeDatagramFromConnection(
     session_id: webtransport.SessionId,
     payload: []const u8,
 ) Error!void {
+    const max_payload = webtransport.maxDatagramPayloadSize(
+        connection.maxDatagramPayloadSize(),
+        session_id,
+    ) orelse return error.DatagramsNotNegotiated;
+    if (payload.len > max_payload) return error.DatagramTooLarge;
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(connection.endpoint.allocator);
     try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, connection.endpoint.allocator);
@@ -2125,6 +2150,15 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
             var accepted = try server_ptr.accept();
             defer accepted.deinit();
             try std.testing.expect(accepted.session_id.isClientInitiatedBidirectional());
+            const max_datagram_size = accepted.maxDatagramSize();
+            try std.testing.expect(max_datagram_size != 0);
+            const oversized = try server_ptr.h3.quic_server.endpoint.allocator
+                .alloc(u8, max_datagram_size + 1);
+            defer server_ptr.h3.quic_server.endpoint.allocator.free(oversized);
+            try std.testing.expectError(
+                error.DatagramTooLarge,
+                accepted.sendDatagram(oversized),
+            );
 
             var client_bidi = try accepted.receiveStream();
             defer client_bidi.deinit();
@@ -2208,6 +2242,14 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
         },
     });
     defer client.deinit();
+    const max_datagram_size = client.maxDatagramSize();
+    try std.testing.expect(max_datagram_size != 0);
+    const oversized = try allocator.alloc(u8, max_datagram_size + 1);
+    defer allocator.free(oversized);
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        client.sendDatagram(oversized),
+    );
 
     const client_bidi_id = try client.openBidirectionalStream();
     try client.sendStream(client_bidi_id, "client-bidi", true);
