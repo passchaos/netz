@@ -77,7 +77,10 @@ grep -Fq \
   'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=cleartext informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries: informational=103,100 early_final=417 body_sent=0' \
+  'netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=cleartext buffered_server_bytes=18 client_bytes=17 reply_bytes=18' \
+  "$work/netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries and CONNECT tunnel: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18' \
   "$work/hyper-server.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
@@ -122,6 +125,12 @@ grep -Fq \
 grep -Fq \
   'netz HTTP/1 server completed Hyper Expect exchange: transport=cleartext interim=1 body=12 response_body=14' \
   "$work/netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17' \
+  "$work/hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=cleartext server_preface=17 client_bytes=18 reply_bytes=17' \
+  "$work/netz-server.log"
 echo 'Hyper HTTP/1 client -> netz server interop passed'
 
 port=$(free_tcp_port)
@@ -153,6 +162,12 @@ grep -Fq \
 grep -Fq \
   'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=tls informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
   "$work/tls-netz-client.log"
+grep -Fq \
+  'netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=tls buffered_server_bytes=18 client_bytes=17 reply_bytes=18' \
+  "$work/tls-netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries and CONNECT tunnel: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18' \
+  "$work/tls-hyper-server.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper HTTPS server -> netz client interop passed'
 
@@ -183,6 +198,12 @@ grep -Fq \
   "$work/tls-netz-server.log"
 grep -Fq \
   'netz HTTP/1 server completed Hyper Expect exchange: transport=tls interim=1 body=12 response_body=14' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17' \
+  "$work/tls-hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=tls server_preface=17 client_bytes=18 reply_bytes=17' \
   "$work/tls-netz-server.log"
 cat "$work/tls-hyper-client.log"
 cat "$work/tls-netz-server.log"

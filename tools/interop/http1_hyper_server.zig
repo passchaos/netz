@@ -115,6 +115,45 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 server completed Hyper Expect exchange: transport={s} interim=1 body=12 response_body=14\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+
+    var connect_request = try connection.readRequest(.{});
+    defer connect_request.deinit(allocator);
+    if (connect_request.request.method != .CONNECT or
+        !std.mem.eql(
+            u8,
+            connect_request.request.target,
+            "tunnel.example:443",
+        ) or
+        !headerEquals(
+            connect_request.request.headers,
+            "host",
+            "tunnel.example:443",
+        ))
+    {
+        return error.InvalidConnectRequest;
+    }
+    var tunnel = try connection.acceptConnectTunnel(
+        connect_request.request,
+        &.{},
+    );
+    // Write before reading so Hyper must preserve bytes received immediately
+    // after the successful CONNECT response while handing off its HTTP parser.
+    try tunnel.write("netz tunnel ready");
+    var payload: [18]u8 = undefined;
+    var payload_len: usize = 0;
+    while (payload_len < payload.len) {
+        const count = try tunnel.read(payload[payload_len..]);
+        if (count == 0) return error.ConnectionClosed;
+        payload_len += count;
+    }
+    if (!std.mem.eql(u8, &payload, "hyper tunnel bytes")) {
+        return error.InvalidTunnelPayload;
+    }
+    try tunnel.write("netz tunnel reply");
+    std.debug.print(
+        "netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport={s} server_preface=17 client_bytes=18 reply_bytes=17\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
 }
 
 fn headerEquals(

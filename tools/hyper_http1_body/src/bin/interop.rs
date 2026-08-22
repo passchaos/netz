@@ -20,6 +20,7 @@ use hyper::header::{HeaderMap, HeaderValue};
 use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper::server::conn::http1 as server_http1;
 use hyper::service::service_fn;
+use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -57,7 +58,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
     let mut connections = Vec::new();
-    for connection_index in 0..4 {
+    for connection_index in 0..5 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let tls_acceptor = cert_path.as_ref().map(|cert| {
@@ -89,6 +90,24 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                 3 => serve_expect_rejection(io)
                     .await
                     .expect("serve 417 Expect boundary"),
+                4 => {
+                    let (completion, mut completed) = tokio::sync::mpsc::channel(1);
+                    server_http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(io),
+                            service_fn(move |request| {
+                                handle_connect_request(request, completion.clone())
+                            }),
+                        )
+                        .with_upgrades()
+                        .await
+                        .expect("serve netz CONNECT tunnel");
+                    completed
+                        .recv()
+                        .await
+                        .expect("CONNECT tunnel task completion")
+                        .expect("CONNECT tunnel exchange");
+                }
                 _ => unreachable!(),
             }
         }));
@@ -96,7 +115,65 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries: informational=103,100 early_final=417 body_sent=0");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz Expect boundaries and CONNECT tunnel: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18");
+}
+
+async fn handle_connect_request(
+    mut request: Request<Incoming>,
+    completion: tokio::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<Response<Body>, std::io::Error> {
+    if request.method() != Method::CONNECT
+        || request.uri().authority().map(|value| value.as_str()) != Some("tunnel.example:443")
+        || request.headers().get("host") != Some(&HeaderValue::from_static("tunnel.example:443"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected CONNECT request",
+        ));
+    }
+    tokio::spawn(async move {
+        let result = match hyper::upgrade::on(&mut request).await {
+            Ok(upgraded) => serve_connect_tunnel(upgraded)
+                .await
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(format!("upgrade CONNECT request: {error}")),
+        };
+        let _ = completion.send(result).await;
+    });
+    Ok(Response::new(StreamBody::new(ThreeFrameBody {
+        first: None,
+        second: None,
+        trailers: None,
+    })))
+}
+
+async fn serve_connect_tunnel(upgraded: Upgraded) -> Result<(), std::io::Error> {
+    let parts = upgraded
+        .downcast::<TokioIo<MaybeTls>>()
+        .map_err(|_| std::io::Error::other("unexpected upgraded IO type"))?;
+    let mut tunnel = parts.io.inner;
+    // Sending immediately after the 200 response intentionally exercises
+    // netz's buffered-response-suffix handoff into Tunnel.read().
+    tunnel.write_all(b"hyper tunnel ready").await?;
+    let mut payload = parts.read_buf.to_vec();
+    while payload.len() < b"netz tunnel bytes".len() {
+        let mut chunk = [0; 64];
+        let count = tunnel.read(&mut chunk).await?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "CONNECT tunnel closed before client payload",
+            ));
+        }
+        payload.extend_from_slice(&chunk[..count]);
+    }
+    if payload != b"netz tunnel bytes" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected CONNECT tunnel payload: {payload:?}"),
+        ));
+    }
+    tunnel.write_all(b"hyper tunnel reply").await
 }
 
 async fn read_expect_head(
@@ -298,7 +375,10 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         .await
         .expect("Hyper HTTP/1 handshake");
     tokio::spawn(async move {
-        connection.await.expect("drive Hyper HTTP/1 connection");
+        connection
+            .with_upgrades()
+            .await
+            .expect("drive Hyper HTTP/1 connection");
     });
 
     let mut request_trailers = HeaderMap::new();
@@ -368,6 +448,55 @@ async fn run_client(port: u16, ca_path: Option<String>) {
     assert_eq!(body, b"netz-continued");
     assert!(trailers.is_none());
     println!("Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14");
+
+    let request = Request::builder()
+        .method(Method::CONNECT)
+        .uri("tunnel.example:443")
+        .header("host", "tunnel.example:443")
+        .body(empty_body())
+        .expect("CONNECT request");
+    let mut response = sender
+        .send_request(request)
+        .await
+        .expect("send Hyper CONNECT request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let upgraded = hyper::upgrade::on(&mut response)
+        .await
+        .expect("upgrade netz CONNECT response");
+    let parts = upgraded
+        .downcast::<TokioIo<MaybeTls>>()
+        .expect("downcast upgraded netz transport");
+    let mut tunnel = parts.io.inner;
+    let mut preface = parts.read_buf.to_vec();
+    while preface.len() < b"netz tunnel ready".len() {
+        let mut chunk = [0; 64];
+        let count = tunnel
+            .read(&mut chunk)
+            .await
+            .expect("read netz tunnel preface");
+        assert_ne!(count, 0, "netz tunnel closed before preface");
+        preface.extend_from_slice(&chunk[..count]);
+    }
+    assert_eq!(preface, b"netz tunnel ready");
+    tunnel
+        .write_all(b"hyper tunnel bytes")
+        .await
+        .expect("write Hyper tunnel payload");
+    let mut reply = [0; 17];
+    tunnel
+        .read_exact(&mut reply)
+        .await
+        .expect("read netz tunnel reply");
+    assert_eq!(&reply, b"netz tunnel reply");
+    println!("Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17");
+}
+
+fn empty_body() -> Body {
+    StreamBody::new(ThreeFrameBody {
+        first: None,
+        second: None,
+        trailers: None,
+    })
 }
 
 fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfig> {

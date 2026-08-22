@@ -236,6 +236,46 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport={s} informational=103,100 early_final=417 body_sent=0 connection_reusable=false\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+
+    var tunnel_client = try connect(
+        allocator,
+        io,
+        port,
+        limits,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
+    );
+    defer tunnel_client.close();
+    var tunnel = try tunnel_client.openConnectTunnel(
+        "tunnel.example:443",
+        &.{},
+    );
+    var initial: [18]u8 = undefined;
+    var initial_len: usize = 0;
+    while (initial_len < initial.len) {
+        const count = try tunnel.read(initial[initial_len..]);
+        if (count == 0) return error.ConnectionClosed;
+        initial_len += count;
+    }
+    if (!std.mem.eql(u8, &initial, "hyper tunnel ready")) {
+        return error.InvalidTunnelResponse;
+    }
+    try tunnel.write("netz tunnel bytes");
+    var reply: [18]u8 = undefined;
+    var reply_len: usize = 0;
+    while (reply_len < reply.len) {
+        const count = try tunnel.read(reply[reply_len..]);
+        if (count == 0) return error.ConnectionClosed;
+        reply_len += count;
+    }
+    if (!std.mem.eql(u8, &reply, "hyper tunnel reply")) {
+        return error.InvalidTunnelResponse;
+    }
+    std.debug.print(
+        "netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport={s} buffered_server_bytes=18 client_bytes=17 reply_bytes=18\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
 }
 
 fn connect(

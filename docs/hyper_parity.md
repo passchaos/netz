@@ -236,6 +236,15 @@ vectored writer, persistent connection, and CONNECT tunnel surface over either
 raw TCP or its native TLS transport. This is functional HTTP/1.1 and HTTPS
 interoperability evidence rather than a benchmark proxy.
 
+The same process gate now exercises that CONNECT surface directly in both
+endpoint roles over cleartext and TLS. Each server writes its protocol preface
+immediately after the 200 response so the receiving HTTP implementation must
+preserve any already-read tunnel suffix during parser handoff. The clients then
+send 17/18-byte opaque payloads and validate exact replies in the reverse
+direction. Hyper uses `upgrade::on` with `with_upgrades`, while netz uses
+`openConnectTunnel` and `acceptConnectTunnel`; the gate awaits tunnel-task
+completion instead of inferring success from the HTTP status.
+
 ## HTTP/2 consecutive and parallel round trips
 
 Hyper's `benches/end_to_end.rs` defines consecutive empty GET, consecutive
