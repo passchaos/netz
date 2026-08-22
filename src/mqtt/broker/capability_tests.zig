@@ -581,3 +581,157 @@ test "broker disconnects MQTT 5 peer after oversized packet declaration" {
     );
     try joinServer(thread, &joined, &serve);
 }
+
+test "broker enforces Application Message payload limit by QoS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 2,
+                .max_payload_size = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "payload-limit-sub" },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "payload/limit", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "payload-limit-pub" },
+    );
+    defer publisher.close();
+
+    // A one-byte payload is accepted and delivered normally. Two-byte QoS 0
+    // is discarded, while QoS 1/2 return Packet Too Large and never route.
+    try publisher.publish("payload/limit", "A", .{});
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings("A", delivered.publish.payload);
+
+    try publisher.publish("payload/limit", "AB", .{});
+    _ = try publisher.writePublish("payload/limit", "AB", .{
+        .qos = .at_least_once,
+    });
+    var puback = try publisher.readPubAck();
+    defer puback.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x95), puback.ack.reason_code);
+
+    _ = try publisher.writePublish("payload/limit", "AB", .{
+        .qos = .exactly_once,
+    });
+    var pubrec = try publisher.readPubRec();
+    defer pubrec.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x95), pubrec.ack.reason_code);
+    try std.testing.expectError(
+        error.PublishRefused,
+        publisher.applyPubRec(pubrec.ack),
+    );
+    try publisher.ping();
+
+    // PINGRESP must be next; any accidentally routed oversized PUBLISH would
+    // make this typed read fail before it could hide behind later traffic.
+    try subscriber.ping();
+    try context.disconnectAllFn(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker refuses oversized Will payload before Session registration" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 1,
+                .max_payload_size = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var refused = try context.runtime_mod.Client.connectAttempt(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "oversized-will",
+            .will = .{
+                .topic = "will/payload/limit",
+                .payload = "AB",
+            },
+        },
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x95),
+        refused.connack.connack.reason_code,
+    );
+
+    var accepted = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "boundary-will",
+            .will = .{
+                .topic = "will/payload/limit",
+                .payload = "A",
+            },
+        },
+    );
+    accepted.close();
+    try joinServer(thread, &joined, &serve);
+}

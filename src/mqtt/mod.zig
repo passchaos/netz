@@ -1174,6 +1174,7 @@ fn validateAckReasonCode(packet_type: PacketType, reason_code: u8) Error!void {
             0x87, // Not authorized.
             0x90, // Topic Name invalid.
             0x91, // Packet Identifier in use.
+            0x95, // Packet too large.
             0x97, // Quota exceeded.
             0x99, // Payload format invalid.
             => {},

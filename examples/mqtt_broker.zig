@@ -9,6 +9,7 @@ const Config = struct {
     max_session_inflight_payload_bytes: usize = 0,
     max_outgoing_inflight: u16 = 64,
     max_packet_size: usize = 16 * 1024 * 1024,
+    max_payload_size: usize = 0,
     maximum_qos: ?netz.mqtt.QoS = null,
     retain_available: bool = true,
     topic_alias_maximum: u16 = 16,
@@ -46,6 +47,7 @@ pub fn main(init: std.process.Init) !void {
             .limits = .{
                 .max_connections = config.connections,
                 .max_queued_deliveries_per_connection = config.max_queued_deliveries,
+                .max_payload_size = config.max_payload_size,
                 .runtime = .{ .max_packet_size = config.max_packet_size },
             },
             .accept = .{
@@ -212,6 +214,16 @@ fn parseArgs(
         )) {
             config.max_packet_size = try parsePositiveUsize(
                 arg["--max-packet-size=".len..],
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--max-payload-size=",
+        )) {
+            config.max_payload_size = try std.fmt.parseInt(
+                usize,
+                arg["--max-payload-size=".len..],
+                10,
             );
         } else if (std.mem.startsWith(
             u8,

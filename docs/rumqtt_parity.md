@@ -14,6 +14,7 @@ and equal-wire broker results are kept separate.
 | MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
+| Application Message size policy | Independent payload-byte cap for live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto `message_size_limit`; rumqttd `max_payload_size` |
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
@@ -855,7 +856,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs ninety-four
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 102
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -971,6 +972,15 @@ Three additional negative cases directly port Mosquitto's
 `12-prop-maximum-packet-size-broker.py` boundary behavior. They compare the
 advertised CONNACK properties and exact DISCONNECT `0x9b`, `0x9a`, and `0x95`
 packets after raw clients deliberately ignore those limits.
+Eight additional MQTT 3.1.1/5 cases port Mosquitto's QoS 0, QoS 1, and Will
+Application Message size-limit vectors and add the corresponding QoS 2 case.
+The example broker exposes an
+independent `--max-payload-size`; a payload exactly at the boundary is routed,
+oversized QoS 0 is discarded while both connections stay usable, and oversized
+QoS 1/2 receives MQTT 5 PUBACK/PUBREC `0x95` (or completes the property-free
+MQTT 3.1.1 acknowledgement handshake) without downstream delivery. Oversized Wills are refused before Session/Will
+registration with MQTT 5 CONNACK `0x95` or legacy v3 CONNACK `0x05`, while a
+boundary-sized Will is installed and published after an ungraceful close.
 Five more raw cases verify exact `0x94`, `0x93`, `0x9e`, `0xa1`, and `0xa2`
 DISCONNECT packets for Topic Alias, Receive Maximum, shared-subscription,
 Subscription Identifier, and wildcard-subscription violations. The latter
@@ -1127,7 +1137,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all ninety scenarios pass. This is deliberately described as a selected
+packets; all 102 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1154,5 +1164,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. Ninety passing packet-vector scenarios do not cover
+   persistence semantics. The 102 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

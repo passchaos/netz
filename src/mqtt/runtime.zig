@@ -956,21 +956,25 @@ pub const Connection = struct {
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         try properties.appendSlice(self.allocator, options.properties);
-        if (self.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
+        // Negotiated capabilities describe an accepted connection. On a
+        // refusal, preserve only caller-supplied diagnostic properties so a
+        // bare error CONNACK stays byte-compatible with common brokers.
+        const accepted = options.reason_code == 0;
+        if (accepted and self.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
             try properties.append(self.allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
         }
-        if (self.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and self.limits.max_packet_size <= std.math.maxInt(u32)) {
+        if (accepted and self.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and self.limits.max_packet_size <= std.math.maxInt(u32)) {
             try properties.append(self.allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(self.limits.max_packet_size) } });
         }
-        if (self.protocol == .v5) {
+        if (accepted and self.protocol == .v5) {
             try appendTopicAliasMaximumSetting(&properties, self.allocator, options.properties, options.topic_alias_maximum);
         }
-        if (self.protocol == .v5 and mqtt.serverKeepAlive(options.properties) == null) {
+        if (accepted and self.protocol == .v5 and mqtt.serverKeepAlive(options.properties) == null) {
             if (options.server_keep_alive_seconds) |keep_alive| {
                 try properties.append(self.allocator, .{ .two_byte = .{ .id = .server_keep_alive, .value = keep_alive } });
             }
         }
-        if (self.protocol == .v5 and mqtt.maximumQoS(options.properties) == null) {
+        if (accepted and self.protocol == .v5 and mqtt.maximumQoS(options.properties) == null) {
             if (options.maximum_qos) |maximum_qos| {
                 // MQTT 5 Maximum QoS can only advertise a restriction to QoS 0
                 // or QoS 1.  QoS 2 support is the default, so do not encode the
@@ -980,16 +984,16 @@ pub const Connection = struct {
                 }
             }
         }
-        if (self.protocol == .v5 and mqtt.retainAvailable(options.properties) == null and !options.retain_available) {
+        if (accepted and self.protocol == .v5 and mqtt.retainAvailable(options.properties) == null and !options.retain_available) {
             try properties.append(self.allocator, .{ .byte = .{ .id = .retain_available, .value = 0 } });
         }
-        if (self.protocol == .v5 and mqtt.wildcardSubscriptionAvailable(options.properties) == null and !options.wildcard_subscription_available) {
+        if (accepted and self.protocol == .v5 and mqtt.wildcardSubscriptionAvailable(options.properties) == null and !options.wildcard_subscription_available) {
             try properties.append(self.allocator, .{ .byte = .{ .id = .wildcard_subscription_available, .value = 0 } });
         }
-        if (self.protocol == .v5 and mqtt.subscriptionIdentifierAvailable(options.properties) == null and !options.subscription_identifier_available) {
+        if (accepted and self.protocol == .v5 and mqtt.subscriptionIdentifierAvailable(options.properties) == null and !options.subscription_identifier_available) {
             try properties.append(self.allocator, .{ .byte = .{ .id = .subscription_identifier_available, .value = 0 } });
         }
-        if (self.protocol == .v5 and mqtt.sharedSubscriptionAvailable(options.properties) == null and !options.shared_subscription_available) {
+        if (accepted and self.protocol == .v5 and mqtt.sharedSubscriptionAvailable(options.properties) == null and !options.shared_subscription_available) {
             try properties.append(self.allocator, .{ .byte = .{ .id = .shared_subscription_available, .value = 0 } });
         }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
@@ -2629,6 +2633,7 @@ test "MQTT client connectAttempt exposes refused CONNACK reason" {
     try std.testing.expect(!attempt.accepted());
     try std.testing.expect(attempt.connection == null);
     try std.testing.expectEqual(@as(u8, 0x87), attempt.connack.connack.reason_code);
+    try std.testing.expectEqual(@as(usize, 0), attempt.connack.connack.properties.len);
 
     thread.join();
     if (shared.err) |err| return err;

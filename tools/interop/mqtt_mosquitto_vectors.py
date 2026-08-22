@@ -935,6 +935,199 @@ def publish_capability_disconnects(
                 )
 
 
+def application_message_payload_limit(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Direct wire ports of Mosquitto 02-subpub-qos0-oversize-payload.py,
+    # 02-subpub-qos1-oversize-payload.py, and 07-will-oversize-payload.py.
+    # This limit applies to Application Message payload bytes, independently
+    # from the complete encoded-packet limit advertised in CONNACK.
+    topic = "message/size/limit"
+    for proto_ver in (4, 5):
+        with NetzBroker(
+            executable,
+            connections=2,
+            extra_args=("--max-payload-size=1",),
+        ) as broker:
+            with broker.connect() as subscriber, broker.connect() as publisher:
+                connect_client(
+                    subscriber, mqtt_packets,
+                    f"payload-limit-sub-{proto_ver}", proto_ver,
+                )
+                subscriber.sendall(mqtt_packets.gen_subscribe(
+                    53, topic, 1, proto_ver=proto_ver
+                ))
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(53, 1, proto_ver=proto_ver),
+                    f"payload limit SUBACK v{proto_ver}",
+                )
+                connect_client(
+                    publisher, mqtt_packets,
+                    f"payload-limit-pub-{proto_ver}", proto_ver,
+                )
+
+                # The inclusive one-byte boundary routes normally.
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=1, mid=1, payload="A",
+                    proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_puback(1, proto_ver=proto_ver),
+                    f"payload boundary PUBACK v{proto_ver}",
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic, qos=1, mid=1, payload="A",
+                        proto_ver=proto_ver,
+                    ),
+                    f"payload boundary PUBLISH v{proto_ver}",
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_puback(1, proto_ver=proto_ver)
+                )
+
+                # Oversized QoS 0 is discarded without closing the publisher.
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=0, payload="AB", proto_ver=proto_ver
+                ))
+                publisher.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    publisher, mqtt_packets.gen_pingresp(),
+                    f"QoS 0 payload limit publisher PINGRESP v{proto_ver}",
+                )
+
+                # QoS 1 is also discarded, but its acknowledgement releases
+                # the Packet Identifier and carries MQTT 5's precise reason.
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=1, mid=2, payload="AB",
+                    proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_puback(
+                        2, proto_ver=proto_ver,
+                        reason_code=(
+                            mqtt5_rc.PACKET_TOO_LARGE
+                            if proto_ver == 5 else -1
+                        ),
+                    ),
+                    f"QoS 1 payload limit PUBACK v{proto_ver}",
+                )
+
+                # Mosquitto has no dedicated QoS 2 form of this payload-limit
+                # vector. Exercise the same policy at that QoS: MQTT 5's
+                # negative PUBREC terminates the transaction, whereas v3 must
+                # finish the representable PUBREC/PUBREL/PUBCOMP exchange.
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=2, mid=3, payload="AB",
+                    proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    publisher,
+                    mqtt_packets.gen_pubrec(
+                        3, proto_ver=proto_ver,
+                        reason_code=(
+                            mqtt5_rc.PACKET_TOO_LARGE
+                            if proto_ver == 5 else -1
+                        ),
+                    ),
+                    f"QoS 2 payload limit PUBREC v{proto_ver}",
+                )
+                if proto_ver == 4:
+                    publisher.sendall(mqtt_packets.gen_pubrel(
+                        3, proto_ver=proto_ver
+                    ))
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_pubcomp(3, proto_ver=proto_ver),
+                        "QoS 2 payload limit PUBCOMP v4",
+                    )
+                publisher.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    publisher, mqtt_packets.gen_pingresp(),
+                    f"QoS 2 payload limit publisher PINGRESP v{proto_ver}",
+                )
+                subscriber.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    subscriber, mqtt_packets.gen_pingresp(),
+                    f"payload limit subscriber PINGRESP v{proto_ver}",
+                )
+                if proto_ver == 5:
+                    publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+                    subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with NetzBroker(
+            executable,
+            connections=3,
+            extra_args=("--max-payload-size=1",),
+        ) as broker:
+            # Reject an oversized Will during CONNECT, then prove a boundary
+            # Will can be installed and emitted by an ungraceful close.
+            with broker.connect() as subscriber:
+                connect_client(
+                    subscriber, mqtt_packets,
+                    f"will-payload-limit-sub-{proto_ver}", proto_ver,
+                )
+                subscriber.sendall(mqtt_packets.gen_subscribe(
+                    53, topic, 0, proto_ver=proto_ver
+                ))
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(53, 0, proto_ver=proto_ver),
+                    f"Will payload limit SUBACK v{proto_ver}",
+                )
+                with broker.connect() as oversized_will:
+                    oversized_will.sendall(mqtt_packets.gen_connect(
+                        f"payload-limit-will-bad-{proto_ver}",
+                        will_topic=topic, will_payload=b"AB",
+                        proto_ver=proto_ver,
+                    ))
+                    expect_packet(
+                        oversized_will,
+                        mqtt_packets.gen_connack(
+                            rc=(
+                                mqtt5_rc.PACKET_TOO_LARGE
+                                if proto_ver == 5 else 5
+                            ),
+                            proto_ver=proto_ver,
+                            properties=None if proto_ver == 5 else b"",
+                        ),
+                        f"oversized Will CONNACK v{proto_ver}",
+                    )
+
+                with broker.connect() as boundary_will:
+                    boundary_will.sendall(mqtt_packets.gen_connect(
+                        f"payload-limit-will-ok-{proto_ver}",
+                        will_topic=topic, will_payload=b"A",
+                        proto_ver=proto_ver,
+                    ))
+                    expect_packet(
+                        boundary_will,
+                        expected_connack(mqtt_packets, mqtt5_props)
+                        if proto_ver == 5
+                        else mqtt_packets.gen_connack(proto_ver=4),
+                        f"boundary Will CONNACK v{proto_ver}",
+                    )
+                    boundary_will.close()
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic, qos=0, payload="A", proto_ver=proto_ver
+                    ),
+                    f"boundary Will PUBLISH v{proto_ver}",
+                )
+                subscriber.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    subscriber, mqtt_packets.gen_pingresp(),
+                    f"Will payload limit PINGRESP v{proto_ver}",
+                )
+                if proto_ver == 5:
+                    subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def maximum_packet_size_disconnect(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -4516,6 +4709,9 @@ def main() -> None:
     publish_capability_disconnects(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
+    application_message_payload_limit(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     maximum_packet_size_disconnect(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -4589,7 +4785,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 94 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 102 scenarios")
 
 
 if __name__ == "__main__":

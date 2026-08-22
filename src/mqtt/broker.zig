@@ -37,6 +37,14 @@ pub const PendingQoS2Store = qos2_mod.Store;
 pub const Limits = struct {
     max_connections: usize = 1024,
     max_queued_deliveries_per_connection: usize = 256,
+    /// Maximum MQTT Application Message payload in bytes; zero is unlimited.
+    ///
+    /// This is intentionally distinct from `runtime.max_packet_size`: packet
+    /// size bounds transport memory, while this policy can reject or discard
+    /// a large payload without penalizing its Topic Name or MQTT 5 properties.
+    /// It mirrors Mosquitto's `message_size_limit` and rumqttd's
+    /// `max_payload_size`.
+    max_payload_size: usize = 0,
     /// Aggregate cap for inbound QoS 2 Application Messages awaiting PUBREL.
     ///
     /// Per-connection Receive Maximum remains enforced by `runtime.Connection`;
@@ -682,6 +690,22 @@ pub const Broker = struct {
                 self.options.accept,
             );
             errdefer pending.deinit(self.allocator);
+            if (pending.connect.connect.will) |will| {
+                if (self.payloadTooLarge(will.payload)) {
+                    // MQTT 5 has a precise Packet Too Large CONNACK reason.
+                    // MQTT 3.1.1 has no equivalent and Mosquitto uses its
+                    // legacy Not Authorized refusal for this policy failure.
+                    var refused = try pending.finish(.{
+                        .reason_code = switch (pending.connect.connect.protocol) {
+                            .v5 => 0x95,
+                            .v3_1_1 => 0x05,
+                        },
+                    });
+                    refused.deinit(self.allocator);
+                    clients_started += 1;
+                    continue;
+                }
+            }
             if (pending.connection.authentication.phase ==
                 .authenticating)
             {
@@ -1505,6 +1529,13 @@ pub const Broker = struct {
         if (mqtt.subscriptionIdentifier(publish.properties) != null) {
             return error.InvalidProperty;
         }
+        if (self.payloadTooLarge(publish.payload)) {
+            return self.rejectOversizedPublish(
+                publisher_id,
+                publisher,
+                publish,
+            );
+        }
         if (publish.qos == .exactly_once) {
             return self.recordQoS2Publish(
                 publisher_id,
@@ -1518,6 +1549,38 @@ pub const Broker = struct {
             publish,
             true,
         );
+    }
+
+    fn payloadTooLarge(self: Broker, payload: []const u8) bool {
+        return self.options.limits.max_payload_size != 0 and
+            payload.len > self.options.limits.max_payload_size;
+    }
+
+    fn rejectOversizedPublish(
+        self: *Broker,
+        publisher_id: router_mod.SubscriberId,
+        publisher: *runtime.Connection,
+        publish: mqtt.Publish,
+    ) Error!void {
+        // Oversized QoS 0 Application Messages are silently discarded. QoS
+        // 1/2 still complete their transport handshake so the peer can reuse
+        // its Packet Identifier; MQTT 5 additionally carries the precise
+        // Packet Too Large reason that MQTT 3.1.1 cannot represent.
+        const packet_id = publish.packet_id orelse return;
+        const slot = try self.slotForSubscriber(publisher_id);
+        slot.writer_mutex.lockUncancelable(self.io);
+        defer slot.writer_mutex.unlock(self.io);
+        switch (publish.qos) {
+            .at_most_once => unreachable,
+            .at_least_once => try publisher.writePubAck(
+                packet_id,
+                protocolReason(publisher.protocol, 0x95),
+            ),
+            .exactly_once => try publisher.writePubRec(
+                packet_id,
+                protocolReason(publisher.protocol, 0x95),
+            ),
+        }
     }
 
     fn recordQoS2Publish(
