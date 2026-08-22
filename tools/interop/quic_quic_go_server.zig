@@ -1,4 +1,4 @@
-//! One-shot QUIC v1 server for process-boundary interop with quic-go.
+//! One-shot QUIC v1/v2 server for process-boundary interop with quic-go.
 
 const std = @import("std");
 const netz = @import("netz");
@@ -33,6 +33,7 @@ const Mode = enum {
     migration,
     migration_loss,
     nat_rebinding,
+    v2,
 };
 
 fn receiveExpectedStream(
@@ -217,6 +218,11 @@ pub fn main(init: std.process.Init) !void {
     }
     var established = try netz.quic.handshake.accept(&endpoint, .{
         .local_connection_id = &server_cid,
+        .version = if (mode == .v2) .version_2 else .version_1,
+        .available_versions = if (mode == .v2)
+            &.{.version_2}
+        else
+            &.{ .version_1, .version_2 },
         .alpn_protocol = "hq-interop",
         .local_transport_parameters = local_transport_parameters,
         .identity = .{
@@ -407,7 +413,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     switch (mode) {
-        .echo, .application_pto, .initial_pto, .peer_close => {
+        .echo, .application_pto, .initial_pto, .peer_close, .v2 => {
             for (payloads, 0..) |expected, index| {
                 const stream_id: u64 = @intCast(index * 4);
                 try receiveExpectedStream(
@@ -584,5 +590,9 @@ pub fn main(init: std.process.Init) !void {
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,
+        .v2 => std.debug.print(
+            "netz QUIC v2 server interoperated with quic-go: version=2 alpn=hq-interop streams=2 bytes=10\n",
+            .{},
+        ),
     }
 }

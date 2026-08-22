@@ -66,8 +66,48 @@ timeout 20s "$client" "$port" "$work/ca.pem"
 echo 'quic-go server -> netz client interop passed'
 wait "$server_pid"
 server_pid=
-grep -q 'handshake_done=true retry=false key_updates=0 echo_streams=2 echo_bytes=10' \
+grep -q 'handshake_done=true version=1 retry=false key_updates=0 echo_streams=2 echo_bytes=10' \
   "$work/server.log"
+
+port=$(free_udp_port)
+"$work/quic-go-server" \
+  -addr "127.0.0.1:$port" \
+  -ca-out "$work/v2-ca.pem" \
+  -v2-only \
+  >"$work/v2-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/v2-ca.pem" ]] && grep -q 'listening=' "$work/v2-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/v2-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "$work/v2-ca.pem" ]] || ! grep -q 'listening=' \
+    "$work/v2-server.log"; then
+  echo 'timed out waiting for QUIC v2 quic-go server' >&2
+  cat "$work/v2-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$client" "$port" "$work/v2-ca.pem" \
+    --version=2 >"$work/v2-client.log" 2>&1; then
+  cat "$work/v2-client.log" >&2
+  cat "$work/v2-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+cat "$work/v2-client.log"
+grep -Fq \
+  'netz QUIC client interoperated with quic-go: verified=true version=2 retry=false alpn=hq-interop streams=2 bytes=10 peer_close=57' \
+  "$work/v2-client.log"
+grep -Fq \
+  'handshake_done=true version=2 retry=false key_updates=0 echo_streams=2 echo_bytes=10' \
+  "$work/v2-server.log"
+echo 'quic-go QUIC v2 server -> netz client interop passed'
 
 port=$(free_udp_port)
 "$work/quic-go-server" \
@@ -103,10 +143,10 @@ wait "$server_pid"
 server_pid=
 cat "$work/retry-client.log"
 grep -Fq \
-  'netz QUIC client interoperated with quic-go: verified=true retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
+  'netz QUIC client interoperated with quic-go: verified=true version=1 retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
   "$work/retry-client.log"
 grep -Fq \
-  'handshake_done=true retry=true key_updates=0 echo_streams=2 echo_bytes=10' \
+  'handshake_done=true version=1 retry=true key_updates=0 echo_streams=2 echo_bytes=10' \
   "$work/retry-server.log"
 echo 'quic-go forced Retry server -> netz client interop passed'
 
@@ -147,7 +187,7 @@ grep -Fq \
   'netz QUIC client interoperated with quic-go: verified=true key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57' \
   "$work/key-update-client.log"
 grep -Fq \
-  'handshake_done=true retry=false key_updates=2 echo_streams=3 echo_bytes=31' \
+  'handshake_done=true version=1 retry=false key_updates=2 echo_streams=3 echo_bytes=31' \
   "$work/key-update-server.log"
 echo 'netz client -> quic-go server key-update interop passed'
 
@@ -229,8 +269,13 @@ run_quic_go_client_scenario() {
 run_quic_go_client_scenario \
   echo \
   '' \
-  'go_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes=10' \
+  'go_quic_echo_client: handshake_done=true version=1 echo_streams=2 echo_bytes=10' \
   'alpn=hq-interop streams=2 bytes=10'
+run_quic_go_client_scenario \
+  v2 \
+  -v2-only \
+  'go_quic_echo_client: handshake_done=true version=2 echo_streams=2 echo_bytes=10' \
+  'version=2 alpn=hq-interop streams=2 bytes=10'
 run_quic_go_client_scenario \
   reset \
   -expect-reset \

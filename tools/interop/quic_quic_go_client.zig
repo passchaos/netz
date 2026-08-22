@@ -1,4 +1,4 @@
-//! Certificate-verified QUIC v1 stream interop client for the quic-go fixture
+//! Certificate-verified QUIC v1/v2 stream interop client for the quic-go fixture
 //! maintained in the audited local quicz checkout.
 
 const std = @import("std");
@@ -13,18 +13,29 @@ const key_update_payloads = [_][]const u8{
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 5) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
-    const mode = if (args.len == 4) args[3] else "";
-    const expect_retry = std.mem.eql(u8, mode, "--expect-retry");
-    const expect_key_update =
-        std.mem.eql(u8, mode, "--expect-key-update");
-    if (args.len == 4 and !expect_retry and !expect_key_update) {
-        return error.InvalidArgument;
+    var expect_retry = false;
+    var expect_key_update = false;
+    var version: netz.quic.Version = .version_1;
+    for (args[3..]) |arg| {
+        if (std.mem.eql(u8, arg, "--expect-retry")) {
+            if (expect_retry) return error.InvalidArgument;
+            expect_retry = true;
+        } else if (std.mem.eql(u8, arg, "--expect-key-update")) {
+            if (expect_key_update) return error.InvalidArgument;
+            expect_key_update = true;
+        } else if (std.mem.eql(u8, arg, "--version=2")) {
+            if (version == .version_2) return error.InvalidArgument;
+            version = .version_2;
+        } else {
+            return error.InvalidArgument;
+        }
     }
+    if (expect_retry and expect_key_update) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -63,6 +74,11 @@ pub fn main(init: std.process.Init) !void {
         .{
             .original_destination_connection_id = &original_dcid,
             .local_connection_id = &client_cid,
+            .version = version,
+            .available_versions = if (version == .version_2)
+                &.{.version_2}
+            else
+                &.{ .version_1, .version_2 },
             .server_name = "localhost",
             .alpn_protocols = &.{"hq-interop"},
             .server_auth = verifier.clientVerifier(),
@@ -197,8 +213,8 @@ pub fn main(init: std.process.Init) !void {
         );
     } else {
         std.debug.print(
-            "netz QUIC client interoperated with quic-go: verified=true retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
-            .{expect_retry},
+            "netz QUIC client interoperated with quic-go: verified=true version={d} retry={} alpn=hq-interop streams=2 bytes=10 peer_close=57\n",
+            .{ if (version == .version_2) @as(u8, 2) else 1, expect_retry },
         );
     }
 }

@@ -209,6 +209,14 @@ benchmarks.
    v0.59.0 from the audited `~/Work/quicz` fixture, loads its generated
    localhost CA into netz's verifier, requires TLS 1.3 `hq-interop` ALPN, and
    verifies two independent bidirectional STREAM echoes plus FIN. The same gate
+   forces RFC 9369 QUIC v2 in both directions on separate connections: netz
+   selects v2 against a v2-only quic-go server, and a v2-only quic-go client
+   completes the same two-stream exchange against a v2-only netz server. Both
+   external peers inspect and report the negotiated version rather than
+   inferring it from successful TLS or application data. The gate therefore
+   covers v2 long-header type mapping, Initial salts/labels, transport-parameter
+   version information, 1-RTT streams, FIN, and application close handling.
+   The same gate
    repeats that exchange against a quic-go `Transport` whose
    `VerifySourceAddress` callback always requires Retry. Netz exposes and
    asserts the authenticated Retry transition, then still completes both
