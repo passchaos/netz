@@ -284,7 +284,12 @@ fn serveBroker(
         // Conformance/fuzz harnesses deliberately open malformed connections.
         // Serve one finite slot at a time so an expected protocol rejection
         // does not terminate the process before later valid-vector probes.
-        for (0..connections) |_| broker.serve(1) catch {};
+        for (0..connections) |_| broker.serve(1) catch |err| switch (err) {
+            // Autosave uses this helper as a cancelable Select task. Never
+            // swallow its shutdown signal while ignoring peer errors.
+            error.Canceled => return err,
+            else => {},
+        };
     } else {
         try broker.serve(connections);
     }
