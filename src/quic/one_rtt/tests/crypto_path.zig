@@ -69,6 +69,74 @@ test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     try std.testing.expectEqual(@as(u64, 2), client.localOneRttKeyUpdateCount());
 }
 
+test "QUIC v2 1-RTT connection uses versioned key updates" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const version = quic.Version.version_2;
+    const client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_cid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    const client_keys = try quic.protection.deriveAes128KeysForVersion(
+        version.wireValue(),
+        [_]u8{0x39} ** quic.protection.secret_len,
+    );
+    const server_keys = try quic.protection.deriveAes128KeysForVersion(
+        version.wireValue(),
+        [_]u8{0x3a} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .version = version,
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .version = version,
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.initiateKeyUpdate();
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "v2-updated",
+        .fin = true,
+    } }});
+    var updated = try server.receivePacket();
+    defer updated.deinit(allocator);
+    try std.testing.expect(updated.peer_initiated_key_update);
+    try std.testing.expect(server.peerOneRttKeyPhase());
+    try std.testing.expectEqualStrings(
+        "v2-updated",
+        updated.frames[0].stream.data,
+    );
+}
+
 test "QUIC 1-RTT automatically updates before the AEAD confidentiality limit" {
     const allocator = std.testing.allocator;
 

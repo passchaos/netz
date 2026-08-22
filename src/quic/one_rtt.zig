@@ -171,6 +171,8 @@ pub const openZeroRttBytes = zero_rtt.openBytes;
 pub const ConnectionConfig = struct {
     pub const EndpointRole = enum { client, server };
 
+    /// Negotiated version used by version-specific 1-RTT key updates.
+    version: quic.Version = .version_1,
     peer: net.IpAddress,
     receive_keys: quic.protection.PacketProtectionKeys,
     send_keys: quic.protection.PacketProtectionKeys,
@@ -723,8 +725,16 @@ pub const Connection = struct {
                 config.receive_window,
                 config.max_receive_window orelse config.receive_window,
             ),
-            .send_key_phase = .init(config.send_keys, false),
-            .receive_key_phase = .init(config.receive_keys, false),
+            .send_key_phase = try .initForVersion(
+                config.version.wireValue(),
+                config.send_keys,
+                false,
+            ),
+            .receive_key_phase = try .initForVersion(
+                config.version.wireValue(),
+                config.receive_keys,
+                false,
+            ),
             .peer_max_streams_bidi = config.initial_send_max_streams_bidi,
             .peer_max_streams_uni = config.initial_send_max_streams_uni,
             .recv_max_streams_bidi = config.initial_receive_max_streams_bidi,

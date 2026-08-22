@@ -204,6 +204,7 @@ pub const OneRttConfig = struct {
 
     fn apply(
         self: OneRttConfig,
+        version: quic.Version,
         peer: net.IpAddress,
         receive_keys: quic.protection.PacketProtectionKeys,
         send_keys: quic.protection.PacketProtectionKeys,
@@ -214,6 +215,7 @@ pub const OneRttConfig = struct {
         peer_transport_parameters: quic.TransportParameters,
     ) quic.one_rtt.ConnectionConfig {
         return .{
+            .version = version,
             .peer = peer,
             .receive_keys = receive_keys,
             .send_keys = send_keys,
@@ -1237,6 +1239,7 @@ fn connectAttempt(
     }
     var established = try establishedConnection(
         endpoint,
+        options.version,
         server_initial.from,
         application.server_quic,
         application.client_quic,
@@ -1850,6 +1853,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     }
     var established = try establishedConnection(
         endpoint,
+        options.version,
         client_initial.from,
         application.client_quic,
         application.server_quic,
@@ -2715,6 +2719,7 @@ fn validateRejectedEarlyData(bytes: []const u8) Error!void {
 
 fn establishedConnection(
     endpoint: *quic.runtime.Endpoint,
+    version: quic.Version,
     peer: net.IpAddress,
     receive_keys: quic.protection.PacketProtectionKeys,
     send_keys: quic.protection.PacketProtectionKeys,
@@ -2737,6 +2742,7 @@ fn establishedConnection(
     const alpn_owned = try endpoint.allocator.dupe(u8, alpn);
     errdefer endpoint.allocator.free(alpn_owned);
     var connection = try quic.one_rtt.Connection.init(endpoint, config.apply(
+        version,
         peer,
         receive_keys,
         send_keys,

@@ -184,7 +184,7 @@ wait "$server_pid"
 server_pid=
 cat "$work/key-update-client.log"
 grep -Fq \
-  'netz QUIC client interoperated with quic-go: verified=true key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57' \
+  'netz QUIC client interoperated with quic-go: verified=true version=1 key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57' \
   "$work/key-update-client.log"
 grep -Fq \
   'handshake_done=true version=1 retry=false key_updates=2 echo_streams=3 echo_bytes=31' \

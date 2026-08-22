@@ -216,6 +216,12 @@ benchmarks.
    inferring it from successful TLS or application data. The gate therefore
    covers v2 long-header type mapping, Initial salts/labels, transport-parameter
    version information, 1-RTT streams, FIN, and application close handling.
+   Version identity is also retained in established connection state so RFC
+   9369's `quicv2 ku` key-update secret and subsequent `quicv2 key`/`iv`
+   derivations are used after the handshake; a two-endpoint v2 regression
+   decrypts the first updated-key stream and checks the peer transition. The
+   audited quic-go v0.59.0 updater still derives `quic ku` unconditionally, so
+   that version-specific update is not misrepresented as external interop.
    The same gate
    repeats that exchange against a quic-go `Transport` whose
    `VerifySourceAddress` callback always requires Retry. Netz exposes and

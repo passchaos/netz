@@ -278,6 +278,7 @@ pub const ShortPacketKeyUpdateKeys = struct {
 /// generation for reordered packets, and the key phase bit that is visible in
 /// short headers after header protection is removed.
 pub const KeyPhaseState = struct {
+    version: u32,
     current: PacketProtectionKeys,
     next: PacketProtectionKeys,
     current_key_phase: bool,
@@ -288,9 +289,23 @@ pub const KeyPhaseState = struct {
     discarded_previous_key_phase: ?bool = null,
 
     pub fn init(current: PacketProtectionKeys, current_key_phase: bool) KeyPhaseState {
+        return initForVersion(
+            version_1_wire,
+            current,
+            current_key_phase,
+        ) catch unreachable;
+    }
+
+    /// Bind later key updates to the negotiated version's HKDF labels.
+    pub fn initForVersion(
+        version: u32,
+        current: PacketProtectionKeys,
+        current_key_phase: bool,
+    ) VersionError!KeyPhaseState {
         return .{
+            .version = version,
             .current = current,
-            .next = nextPacketProtectionKeys(current),
+            .next = try nextPacketProtectionKeysForVersion(version, current),
             .current_key_phase = current_key_phase,
         };
     }
@@ -366,7 +381,10 @@ pub const KeyPhaseState = struct {
         self.previous_key_phase = self.current_key_phase;
         self.previous_discard_deadline_nanos = null;
         self.current = self.next;
-        self.next = nextPacketProtectionKeys(self.current);
+        self.next = nextPacketProtectionKeysForVersion(
+            self.version,
+            self.current,
+        ) catch unreachable;
         self.current_key_phase = !self.current_key_phase;
         self.key_update_count +|= 1;
     }

@@ -208,8 +208,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (expect_key_update) {
         std.debug.print(
-            "netz QUIC client interoperated with quic-go: verified=true key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57\n",
-            .{},
+            "netz QUIC client interoperated with quic-go: verified=true version={d} key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57\n",
+            .{if (version == .version_2) @as(u8, 2) else 1},
         );
     } else {
         std.debug.print(

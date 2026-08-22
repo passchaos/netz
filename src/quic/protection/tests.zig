@@ -228,6 +228,37 @@ test "QUIC v2 Initial secrets use v2 salt and labels" {
     try std.testing.expect(!std.mem.eql(u8, &v1_next, &v2_next));
 }
 
+test "QUIC v2 key phase state retains v2 update labels" {
+    const traffic_secret =
+        vail.tls.secret.Secret.fromSha256([_]u8{0x47} ** 32);
+    const keys = try protection.deriveKeysForSecretForVersion(
+        version_2_wire_for_test,
+        .aes_128_gcm_sha256,
+        traffic_secret,
+    );
+    const expected_next =
+        try protection.nextPacketProtectionKeysForVersion(
+            version_2_wire_for_test,
+            keys,
+        );
+    var state = try protection.KeyPhaseState.initForVersion(
+        version_2_wire_for_test,
+        keys,
+        false,
+    );
+    state.initiateKeyUpdate();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        expected_next.traffic_secret.bytes(),
+        state.currentKeys().traffic_secret.bytes(),
+    );
+    const wrong_v1_next = protection.nextPacketProtectionKeys(keys);
+    try std.testing.expect(!state.currentKeys().traffic_secret.eql(
+        &wrong_v1_next.traffic_secret,
+    ));
+}
+
 test "QUIC versioned key derivation rejects unsupported versions" {
     const unsupported_version: u32 = 0xface_b00c;
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
