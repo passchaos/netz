@@ -762,6 +762,65 @@ def hostile_initial_packets(executable: Path, mqtt_packets) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def malformed_will_connects(executable: Path, mqtt_packets) -> None:
+    # Direct wire ports of Mosquitto 07-will-no-flag.py and
+    # 07-will-null-topic.py for MQTT 3.1.1 and MQTT 5. A malformed CONNECT is
+    # rejected before Session/Will installation; a final valid connection
+    # proves the finite broker remains usable after all four failures.
+    cases: list[tuple[str, bytes]] = []
+    for proto_ver in (4, 5):
+        complete = mqtt_packets.gen_connect(
+            f"will-missing-payload-{proto_ver}",
+            will_topic="will/malformed/topic",
+            will_qos=1,
+            will_retain=True,
+            proto_ver=proto_ver,
+        )
+        malformed = bytearray(complete[:-2])
+        # These small fixtures have a one-byte Remaining Length. Removing the
+        # final binary-length field must be reflected in that byte so the
+        # parser reaches the truncated Will payload rather than rejecting the
+        # packet envelope first.
+        if malformed[1] & 0x80:
+            raise AssertionError("unexpected multi-byte CONNECT length")
+        malformed[1] -= 2
+        cases.append((f"missing Will payload v{proto_ver}", bytes(malformed)))
+        cases.append((
+            f"empty Will Topic v{proto_ver}",
+            mqtt_packets.gen_connect(
+                f"will-empty-topic-{proto_ver}",
+                will_topic="",
+                will_payload=b"will-message",
+                proto_ver=proto_ver,
+            ),
+        ))
+
+    with NetzBroker(
+        executable, connections=len(cases) + 1, ignore_errors=True
+    ) as broker:
+        for label, packet in cases:
+            with broker.connect() as sock:
+                sock.sendall(packet)
+                try:
+                    response = sock.recv(1)
+                    if response:
+                        raise AssertionError(
+                            f"{label} received unexpected bytes: "
+                            + response.hex()
+                        )
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+        with broker.connect() as healthy:
+            connect_v5(healthy, mqtt_packets, "after-malformed-wills")
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy,
+                mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after malformed Wills",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def publish_capability_disconnects(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -3373,6 +3432,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_opts
     )
     hostile_initial_packets(args.broker, mqtt_packets)
+    malformed_will_connects(args.broker, mqtt_packets)
     publish_capability_disconnects(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -3436,7 +3496,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 61 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 65 scenarios")
 
 
 if __name__ == "__main__":
