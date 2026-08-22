@@ -153,6 +153,48 @@ echo 'quic-go forced Retry server -> netz client interop passed'
 port=$(free_udp_port)
 "$work/quic-go-server" \
   -addr "127.0.0.1:$port" \
+  -ca-out "$work/v2-retry-ca.pem" \
+  -v2-only -force-retry \
+  >"$work/v2-retry-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/v2-retry-ca.pem" ]] && \
+      grep -q 'force_retry=true' "$work/v2-retry-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/v2-retry-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "$work/v2-retry-ca.pem" ]] || ! \
+    grep -q 'force_retry=true' "$work/v2-retry-server.log"; then
+  echo 'timed out waiting for forced-Retry QUIC v2 server' >&2
+  cat "$work/v2-retry-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$client" "$port" "$work/v2-retry-ca.pem" \
+    --version=2 --expect-retry \
+    >"$work/v2-retry-client.log" 2>&1; then
+  cat "$work/v2-retry-client.log" >&2
+  cat "$work/v2-retry-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+cat "$work/v2-retry-client.log"
+grep -Fq \
+  'netz QUIC client interoperated with quic-go: verified=true version=2 retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
+  "$work/v2-retry-client.log"
+grep -Fq \
+  'handshake_done=true version=2 retry=true key_updates=0 echo_streams=2 echo_bytes=10' \
+  "$work/v2-retry-server.log"
+echo 'quic-go forced Retry QUIC v2 server -> netz client interop passed'
+
+port=$(free_udp_port)
+"$work/quic-go-server" \
+  -addr "127.0.0.1:$port" \
   -ca-out "$work/key-update-ca.pem" \
   -key-updates 2 \
   >"$work/key-update-server.log" 2>&1 &

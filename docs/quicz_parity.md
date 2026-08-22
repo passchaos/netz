@@ -229,6 +229,9 @@ benchmarks.
    streams and validates application close code 57 on that connection. This is
    direct external coverage for Retry integrity, token replay into the second
    Initial, ODCID/RSCID transport-parameter binding and post-Retry 1-RTT state.
+   A second forced-Retry connection repeats those assertions with both peers
+   constrained to QUIC v2, additionally covering the RFC 9369 Retry integrity
+   key/nonce and v2 long-header mapping across the complete retry handshake.
    A separate connection proves live 1-RTT key updates instead of relying only
    on local crypto vectors: netz sends a baseline stream, initiates key phase
    one, waits for an ACK of that generation before initiating phase two, and
