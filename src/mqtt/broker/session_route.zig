@@ -18,6 +18,7 @@ pub const EncodedPacket = struct {
     bytes: []u8,
     packet_id: u16,
     kind: enum {
+        qos0_publish,
         publish,
         pubrel,
     },
@@ -36,40 +37,33 @@ pub fn encodeTransmission(
 ) session.Error!EncodedPacket {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
-    const metadata: struct {
-        packet_id: u16,
-        kind: @FieldType(EncodedPacket, "kind"),
-    } = switch (transmission) {
-        .publish => |publish| .{
-            .packet_id = publish.packet_id,
-            .kind = .publish,
-        },
-        .pubrel => |pubrel| .{
-            .packet_id = pubrel.packet_id,
-            .kind = .pubrel,
-        },
-    };
+    var packet_id: u16 = 0;
+    var kind: @FieldType(EncodedPacket, "kind") = .pubrel;
     switch (transmission) {
         .publish => |publish| {
             var capped = publish;
             capped.qos = minQos(capped.qos, maximum_qos);
+            packet_id = publish.packet_id;
+            kind = if (capped.qos == .at_most_once)
+                .qos0_publish
+            else
+                .publish;
             try capped.write(
                 &encoded,
                 allocator,
                 protocol,
             );
         },
-        .pubrel => |pubrel| try pubrel.write(
-            &encoded,
-            allocator,
-            protocol,
-        ),
+        .pubrel => |pubrel| {
+            packet_id = pubrel.packet_id;
+            try pubrel.write(&encoded, allocator, protocol);
+        },
     }
     return .{
         .allocator = allocator,
         .bytes = try encoded.toOwnedSlice(allocator),
-        .packet_id = metadata.packet_id,
-        .kind = metadata.kind,
+        .packet_id = packet_id,
+        .kind = kind,
     };
 }
 
@@ -104,6 +98,34 @@ test "Session transmission encoding caps publish QoS" {
     defer parsed.deinit(allocator);
     try std.testing.expectEqual(mqtt.QoS.at_least_once, parsed.qos);
     try std.testing.expectEqual(@as(?u16, 7), parsed.packet_id);
+}
+
+test "Session transmission capped to QoS0 omits packet identifier" {
+    const allocator = std.testing.allocator;
+    const transmission = session.Transmission{ .publish = .{
+        .topic = "maximum/qos0",
+        .payload = "payload",
+        .qos = .at_least_once,
+        .retain = false,
+        .dup = true,
+        .packet_id = 7,
+        .properties = &.{},
+        .message_expiry_interval = null,
+    } };
+    var encoded = try encodeTransmission(
+        allocator,
+        .v5,
+        transmission,
+        .at_most_once,
+    );
+    defer encoded.deinit();
+    try std.testing.expectEqual(.qos0_publish, encoded.kind);
+    try std.testing.expectEqual(@as(u16, 7), encoded.packet_id);
+    var parsed = try mqtt.Publish.parse(allocator, .v5, encoded.bytes);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, parsed.qos);
+    try std.testing.expect(!parsed.dup);
+    try std.testing.expectEqual(@as(?u16, null), parsed.packet_id);
 }
 
 pub fn connectionSubscriberId(

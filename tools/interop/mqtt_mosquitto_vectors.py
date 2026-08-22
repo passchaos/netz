@@ -1561,6 +1561,119 @@ def outgoing_qos1_reconnect_dup(
                 )
 
 
+def offline_qos0_queue_policy(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Mosquitto's queue_qos0_messages defaults to false and is explicitly an
+    # opt-in for persistent clients. Exercise both policy states with MQTT
+    # 3.1.1 and MQTT 5: Session Present proves the subscription survived, and
+    # the following PINGRESP proves either exact single delivery or exact drop.
+    topic = "03/b2c/qos0/offline/test"
+    payload = "offline-qos0"
+    for proto_ver in (4, 5):
+        for enabled in (False, True):
+            client_id = f"offline-qos0-{proto_ver}-{int(enabled)}"
+            persistent_connect = mqtt_packets.gen_connect(
+                client_id,
+                clean_session=False,
+                proto_ver=proto_ver,
+                session_expiry=60 if proto_ver == 5 else None,
+            )
+
+            def connack(session_present: bool) -> bytes:
+                if proto_ver == 5:
+                    return expected_connack(
+                        mqtt_packets,
+                        mqtt5_props,
+                        session_present=session_present,
+                    )
+                return mqtt_packets.gen_connack(
+                    flags=int(session_present),
+                    rc=0,
+                    proto_ver=proto_ver,
+                )
+
+            extra_args = ("--queue-qos0-messages",) if enabled else ()
+            with NetzBroker(
+                executable,
+                connections=3,
+                extra_args=extra_args,
+            ) as broker:
+                with broker.connect() as subscriber:
+                    subscriber.sendall(persistent_connect)
+                    expect_packet(
+                        subscriber,
+                        connack(False),
+                        f"offline QoS0 initial CONNACK v{proto_ver} "
+                        f"enabled={enabled}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_subscribe(
+                        1, topic, 0, proto_ver=proto_ver
+                    ))
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_suback(1, 0, proto_ver=proto_ver),
+                        f"offline QoS0 SUBACK v{proto_ver} "
+                        f"enabled={enabled}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_disconnect(
+                        proto_ver=proto_ver
+                    ))
+
+                with broker.connect() as publisher:
+                    connect_client(
+                        publisher,
+                        mqtt_packets,
+                        f"offline-qos0-pub-{proto_ver}-{int(enabled)}",
+                        proto_ver,
+                    )
+                    publisher.sendall(mqtt_packets.gen_publish(
+                        topic, qos=0, payload=payload, proto_ver=proto_ver
+                    ))
+                    # QoS 0 has no acknowledgement. PINGRESP establishes that
+                    # routing completed while the subscriber was offline.
+                    publisher.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        publisher,
+                        mqtt_packets.gen_pingresp(),
+                        f"offline QoS0 publisher PINGRESP v{proto_ver} "
+                        f"enabled={enabled}",
+                    )
+                    publisher.sendall(mqtt_packets.gen_disconnect(
+                        proto_ver=proto_ver
+                    ))
+
+                with broker.connect() as resumed:
+                    resumed.sendall(persistent_connect)
+                    expect_packet(
+                        resumed,
+                        connack(True),
+                        f"offline QoS0 resumed CONNACK v{proto_ver} "
+                        f"enabled={enabled}",
+                    )
+                    if enabled:
+                        expect_packet(
+                            resumed,
+                            mqtt_packets.gen_publish(
+                                topic,
+                                qos=0,
+                                payload=payload,
+                                proto_ver=proto_ver,
+                            ),
+                            f"offline QoS0 queued PUBLISH v{proto_ver}",
+                        )
+                    resumed.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        resumed,
+                        mqtt_packets.gen_pingresp(),
+                        f"offline QoS0 single/drop PINGRESP v{proto_ver} "
+                        f"enabled={enabled}",
+                    )
+                    resumed.sendall(mqtt_packets.gen_disconnect(
+                        proto_ver=proto_ver
+                    ))
+
+
 def outgoing_qos2_reconnect_stages(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -4418,6 +4531,7 @@ def main() -> None:
     persistent_no_local(args.broker, mqtt_packets)
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
+    offline_qos0_queue_policy(args.broker, mqtt_packets, mqtt5_props)
     offline_queued_payload_bytes(args.broker, mqtt_packets)
     outgoing_inflight_payload_bytes(args.broker, mqtt_packets)
     acknowledgement_length_forms(args.broker, mqtt_packets, mqtt5_props)
@@ -4475,7 +4589,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 90 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 94 scenarios")
 
 
 if __name__ == "__main__":

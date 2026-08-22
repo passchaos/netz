@@ -416,6 +416,88 @@ test "broker drops QoS 0 while a persistent Session is offline" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker optionally queues QoS 0 while a persistent Session is offline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.TestContext.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+            },
+            .queue_qos0_messages = true,
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 3 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "queued-offline-qos0",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "offline/qos0/queued" }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try subscriber.disconnect(0);
+    try waitForPeerClose(&subscriber);
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "queued-offline-qos0-publisher",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish("offline/qos0/queued", "queued", .{});
+    try publisher.ping();
+
+    var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "queued-offline-qos0",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    var delivery = try resumed.readPublish();
+    defer delivery.deinit(allocator);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, delivery.publish.qos);
+    try std.testing.expectEqualStrings("queued", delivery.publish.payload);
+    try resumed.ping();
+
+    try disconnectAll(&.{ &publisher, &resumed });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker Session Expiry override removes restored subscriptions" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

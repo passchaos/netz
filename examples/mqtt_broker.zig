@@ -17,6 +17,7 @@ const Config = struct {
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
     upgrade_outgoing_qos: bool = false,
+    queue_qos0_messages: bool = false,
     persistence_path: ?[]const u8 = null,
     autosave_interval_seconds: ?u32 = null,
     restore: bool = true,
@@ -58,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
                 .shared_subscription_available = config.shared_subscription_available,
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
+            .queue_qos0_messages = config.queue_qos0_messages,
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
                 .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
@@ -272,6 +274,12 @@ fn parseArgs(
             "--upgrade-outgoing-qos",
         )) {
             config.upgrade_outgoing_qos = true;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--queue-qos0-messages",
+        )) {
+            config.queue_qos0_messages = true;
         } else if (std.mem.startsWith(
             u8,
             arg,

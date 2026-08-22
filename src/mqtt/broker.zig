@@ -62,6 +62,10 @@ pub const Options = struct {
     /// requires min(source QoS, granted subscription QoS), which remains the
     /// default.
     upgrade_outgoing_qos: bool = false,
+    /// Mosquitto-compatible opt-in for retaining QoS 0 Application Messages
+    /// while a persistent Session is offline. The MQTT-oriented default drops
+    /// those messages because delivery has no reliability guarantee.
+    queue_qos0_messages: bool = false,
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -490,9 +494,9 @@ pub const Broker = struct {
     /// concurrent snapshot calls are serialized by `persistence_mutex`.
     ///
     /// Volatile per-connection queues are deliberately excluded. Durable QoS
-    /// 1/2 fanout lives in Session State before a live flush begins, while QoS
-    /// 0, transient-Session delivery, and transient inbound QoS 2 do not
-    /// survive a broker crash.
+    /// 1/2 fanout and opt-in queued QoS 0 live in Session State before a live
+    /// flush begins, while transient-Session delivery and transient inbound
+    /// QoS 2 do not survive a broker crash.
     pub fn saveLiveSnapshot(
         self: *Broker,
         dir: std.Io.Dir,
@@ -1737,13 +1741,14 @@ pub const Broker = struct {
             // Cap the route even if the stored subscription predates the
             // listener's current Maximum QoS setting.
             route.qos = minQos(route.qos, self.maximumQoS());
-            if (route.qos == .at_most_once or
+            if ((route.qos == .at_most_once and
+                (!self.options.queue_qos0_messages or online)) or
                 (online and !destination.?.session_persistent))
             {
-                // Mosquitto delivers QoS 0 directly to an online
-                // persistent client, but drops it while that client is
-                // offline unless its non-default queue_qos0 option is
-                // enabled. QoS 1/2 can take the same shared-Publication
+                // Mosquitto always delivers QoS 0 directly to an online
+                // persistent client. It drops QoS 0 while offline unless its
+                // non-default queue_qos0 option is enabled. QoS 1/2 can take
+                // the same shared-Publication
                 // path when Session Expiry is zero: the runtime keeps the
                 // Packet Identifier state until ACK, and no payload is
                 // allowed to survive this Network Connection.
@@ -2167,7 +2172,7 @@ pub const Broker = struct {
                         continue;
                     },
                     else => {
-                        if (packet.kind == .publish) {
+                        if (packet.kind != .pubrel) {
                             self.state_mutex.lockUncancelable(self.io);
                             if (slot.session_handle) |handle| {
                                 self.sessions.retryUnsentPublish(
@@ -2180,6 +2185,25 @@ pub const Broker = struct {
                         return err;
                     },
                 };
+                if (packet.kind == .qos0_publish) {
+                    self.state_mutex.lockUncancelable(self.io);
+                    const completion = if (slot.session_handle) |handle|
+                        self.sessions.completeQoS0Transmission(
+                            handle,
+                            packet.packet_id,
+                        )
+                    else {};
+                    self.state_mutex.unlock(self.io);
+                    // A concurrent ClientID takeover invalidates the old
+                    // Session handle, but the old writer still owns this exact
+                    // pending generation and may commit it. Ignore only a
+                    // genuinely stale/missing transaction, after releasing
+                    // the global state barrier.
+                    completion catch |err| switch (err) {
+                        error.SessionNotFound => {},
+                        else => return err,
+                    };
+                }
                 continue;
             }
             self.state_mutex.lockUncancelable(self.io);

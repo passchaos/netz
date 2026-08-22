@@ -20,11 +20,11 @@ and equal-wire broker results are kept separate.
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
-| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
+| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `queue_qos0_messages` |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5 |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
-| Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
+| Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
@@ -47,7 +47,7 @@ persists:
 - unexpired retained messages, forwarding properties and publisher identity,
 - durable ClientID Session metadata and stable router identity,
 - complete subscription options and Subscription Identifier,
-- offline queued QoS 1/2 messages,
+- offline queued QoS 1/2 messages and opt-in queued QoS 0 messages,
 - outgoing inflight QoS 1/2 state, Packet Identifier and PUBREL continuation,
 - scheduled Wills with ClientID, full Application Message properties, canonical
   publisher identity and exact remaining delay,
@@ -486,8 +486,11 @@ described below.
   offline subscriptions indexed without stale slot identities.
 - Online and offline persistent QoS 1/2 fanout, including retained replay,
   enters the Session Store; it is the sole owner of those Packet Identifiers.
-  QoS 0 remains on the lightweight live queue and, like Mosquitto's default
-  `queue_qos0_messages=false`, is dropped while the Session is offline.
+  QoS 0 remains on the lightweight live queue while the subscriber is online.
+  Like Mosquitto, the broker drops it for an offline Session by default; the
+  `queue_qos0_messages` option (example switch `--queue-qos0-messages`) opts
+  durable Sessions into bounded offline storage. Queued QoS 0 uses no Packet
+  Identifier or QoS 1/2 inflight credit, and is retired after its socket write.
 - CONNACK is written before the first Session transmission, then drain obeys
   the peer's current Receive Maximum.
 - PUBACK/PUBREC/PUBCOMP are dispatched to Session State when it owns that
@@ -505,6 +508,11 @@ described below.
   may actually have reached a prior Network Connection, not for a locally
   failed first attempt; a focused Store test and 20 repeated broker resume runs
   cover both sides of the boundary.
+- A selected queued QoS 0 message remains Session-owned until the detached
+  socket write commits. Write failure or disconnect returns it to the queue,
+  and a concurrent live snapshot includes the selected message ahead of the
+  remaining queue. This preserves queue order, byte/count bounds and crash
+  durability without inventing a wire Packet Identifier or ACK state.
 
 This follows Mosquitto's queued/inflight split and reconnect reset while
 avoiding the audited rumqttd limitation that rejects valid out-of-order ACKs.
@@ -816,7 +824,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs ninety
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs ninety-four
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -996,6 +1004,12 @@ receives but does not acknowledge the first QoS 1 delivery, closes abruptly,
 then reconnects with Session Present. Netz retransmits the same payload and
 Packet Identifier with DUP=1; after PUBACK, an immediate PINGRESP proves the
 inflight transaction was removed rather than delivered again.
+Four MQTT 3.1.1/5 offline QoS 0 scenarios cover both values of Mosquitto's
+`queue_qos0_messages` policy. Each persistent subscriber disconnects before a
+QoS 0 publication and reconnects with Session Present. With the default, an
+immediate PINGRESP proves the message was dropped; with the opt-in enabled, the
+exact property-free QoS 0 PUBLISH precedes PINGRESP, proving single delivery
+without a Packet Identifier.
 Two more scenarios port Mosquitto's
 `03-publish-b2c-disconnect-qos2.py` for MQTT 3.1.1 and MQTT 5. The first
 reconnect observes the unacknowledged QoS 2 PUBLISH with its original Packet
@@ -1095,9 +1109,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    queued and outgoing inflight QoS state intact; a connected Will is persisted
    with ungraceful-crash semantics and its effective delay starts at the
    checkpoint.
-   Volatile QoS 0/transient connection queues and transient inbound QoS 2
-   transactions remain intentionally excluded; inbound QoS 2 owned by a
-   durable Session is restored.
+   Volatile online QoS 0/transient connection queues and transient inbound QoS
+   2 transactions remain intentionally excluded; opt-in offline QoS 0 and
+   inbound QoS 2 owned by a durable Session are restored.
    Tests cover both direct state and a real active broker connection remaining
    usable after checkpoint, followed by restore. The production example now
    accepts `--autosave-interval-seconds=N`, and the process gate above proves a

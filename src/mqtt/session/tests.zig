@@ -1,5 +1,6 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
+const persistence = @import("../persistence/codec.zig");
 const session = @import("mod.zig");
 
 const Store = session.Store;
@@ -78,6 +79,257 @@ test "session maps MQTT versions to expiry semantics" {
         @as(u32, 0),
         Store.expiryForConnect(.v3_1_1, true, &.{}),
     );
+}
+
+test "session optionally queues QoS0 without MQTT packet identifiers" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("offline-qos0", false, 60, .zero);
+    try std.testing.expectEqual(
+        session.EnqueueResult.queued,
+        try store.enqueuePublish(
+            opened.handle,
+            "offline/qos0",
+            "queued",
+            .{ .qos = .at_most_once, .now = .zero },
+        ),
+    );
+    var output: [1]Transmission = undefined;
+    const selected = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, selected[0].publish.qos);
+    try std.testing.expectEqual(@as(u16, 0), selected[0].publish.packet_id);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try selected[0].publish.write(&encoded, allocator, .v5);
+    var parsed = try mqtt.Publish.parse(allocator, .v5, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, parsed.qos);
+    try std.testing.expectEqual(@as(?u16, null), parsed.packet_id);
+    try std.testing.expectEqualStrings("queued", parsed.payload);
+    try store.completeQoS0Transmission(opened.handle, 0);
+    const stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.inflight_count);
+}
+
+test "session queued QoS0 rollback preserves ordering and byte accounting" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{
+        .max_inflight_per_session = 1,
+        .max_queued_per_session = 2,
+        .max_queued_payload_bytes_per_session = 7,
+    });
+    defer store.deinit();
+    const opened = try store.open("qos0-rollback", false, 60, .zero);
+    _ = try store.enqueuePublish(opened.handle, "queued/zero", "zero", .{
+        .qos = .at_most_once,
+        .now = .zero,
+    });
+    _ = try store.enqueuePublish(opened.handle, "queued/one", "one", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+
+    var output: [1]Transmission = undefined;
+    const selected = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqualStrings(
+        "queued/zero",
+        selected[0].publish.topic,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        (try store.stats(opened.handle)).queued_payload_bytes,
+    );
+    try std.testing.expectError(
+        error.QueueFull,
+        store.enqueuePublish(opened.handle, "queued/two", "two", .{
+            .qos = .at_most_once,
+            .now = .zero,
+        }),
+    );
+    var count_bounded = Store.init(allocator, .{
+        .max_inflight_per_session = 1,
+        .max_queued_per_session = 2,
+    });
+    defer count_bounded.deinit();
+    const counted = try count_bounded.open(
+        "qos0-count-bound",
+        false,
+        60,
+        .zero,
+    );
+    _ = try count_bounded.enqueuePublish(
+        counted.handle,
+        "queued/zero",
+        "zero",
+        .{ .qos = .at_most_once, .now = .zero },
+    );
+    _ = try count_bounded.enqueuePublish(
+        counted.handle,
+        "queued/one",
+        "one",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    _ = try count_bounded.drainInto(counted.handle, .zero, 1, &output);
+    try std.testing.expectError(
+        error.QueueFull,
+        count_bounded.enqueuePublish(
+            counted.handle,
+            "queued/two",
+            "two",
+            .{ .qos = .at_most_once, .now = .zero },
+        ),
+    );
+    try count_bounded.completeQoS0Transmission(counted.handle, 0);
+    try store.retryUnsentPublish(opened.handle, 0);
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        (try store.stats(opened.handle)).queued_payload_bytes,
+    );
+
+    const retried = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqualStrings(
+        "queued/zero",
+        retried[0].publish.topic,
+    );
+    try store.completeQoS0Transmission(opened.handle, 0);
+    const qos1 = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqualStrings(
+        "queued/one",
+        qos1[0].publish.topic,
+    );
+}
+
+test "session queued QoS0 does not consume QoS1 inflight capacity" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{
+        .max_inflight_per_session = 1,
+    });
+    defer store.deinit();
+    const opened = try store.open("qos0-window", false, 60, .zero);
+    _ = try store.enqueuePublish(opened.handle, "window/zero", "zero", .{
+        .qos = .at_most_once,
+        .now = .zero,
+    });
+    _ = try store.enqueuePublish(opened.handle, "window/one", "one", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+
+    var output: [1]Transmission = undefined;
+    const qos0 = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, qos0[0].publish.qos);
+    try store.completeQoS0Transmission(opened.handle, 0);
+    const qos1 = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, qos1[0].publish.qos);
+    try std.testing.expectEqual(@as(usize, 1), (try store.stats(opened.handle)).inflight_count);
+}
+
+test "session snapshot preserves QoS0 selected for a live write" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("qos0-snapshot", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "snapshot/zero",
+        "durable",
+        .{ .qos = .at_most_once, .now = .zero },
+    );
+    var output: [1]Transmission = undefined;
+    _ = try store.drainInto(opened.handle, .zero, 1, &output);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try store.writeSnapshot(&encoded, allocator, .zero);
+    var restored = Store.init(allocator, .{});
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(&cursor, .zero, 0);
+    try cursor.finish();
+
+    const resumed = try restored.open(
+        "qos0-snapshot",
+        false,
+        60,
+        .zero,
+    );
+    const delivery = try restored.drainInto(
+        resumed.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), delivery.len);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, delivery[0].publish.qos);
+    try std.testing.expectEqualStrings("durable", delivery[0].publish.payload);
+    try restored.completeQoS0Transmission(resumed.handle, 0);
+}
+
+test "session takeover lets the original writer resolve pending QoS0" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const first = try store.open("qos0-takeover", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        first.handle,
+        "takeover/zero",
+        "once",
+        .{ .qos = .at_most_once, .now = .zero },
+    );
+    var output: [1]Transmission = undefined;
+    _ = try store.drainInto(first.handle, .zero, 1, &output);
+
+    const second = try store.open("qos0-takeover", false, 60, .zero);
+    try std.testing.expectError(
+        error.InflightFull,
+        store.drainInto(second.handle, .zero, 1, &output),
+    );
+    try store.retryUnsentPublish(first.handle, 0);
+    const retried = try store.drainInto(
+        second.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqualStrings("once", retried[0].publish.payload);
+    try std.testing.expectError(
+        error.SessionNotFound,
+        store.completeQoS0Transmission(first.handle, 0),
+    );
+    try store.completeQoS0Transmission(second.handle, 0);
 }
 
 test "session duplicate ClientID takeover invalidates prior handle" {
@@ -303,13 +555,10 @@ test "session queues offline QoS and drains receive maximum" {
         .qos = .exactly_once,
         .now = .zero,
     });
-    try std.testing.expectError(
-        error.InvalidQoS,
-        store.enqueuePublish(opened.handle, "jobs/qos0", "zero", .{
-            .qos = .at_most_once,
-            .now = .zero,
-        }),
-    );
+    _ = try store.enqueuePublish(opened.handle, "jobs/qos0", "zero", .{
+        .qos = .at_most_once,
+        .now = .zero,
+    });
 
     const resumed = try store.open("offline", false, 60, .zero);
     var output: [2]Transmission = undefined;

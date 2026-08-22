@@ -129,8 +129,13 @@ pub const PublishTransmission = struct {
             .{
                 .qos = self.qos,
                 .retain = self.retain,
-                .dup = self.dup,
-                .packet_id = self.packet_id,
+                .dup = self.qos != .at_most_once and self.dup,
+                // Zero is an internal completion sentinel for queued QoS 0;
+                // MQTT forbids a Packet Identifier in its wire PUBLISH.
+                .packet_id = if (self.qos == .at_most_once)
+                    null
+                else
+                    self.packet_id,
                 .properties = properties.items,
             },
         );
@@ -237,6 +242,14 @@ const Inflight = struct {
     retransmission: bool,
 };
 
+const PendingQoS0 = struct {
+    publish: OwnedPublish,
+    /// Generation of the Network Connection that owns the serialized write.
+    /// Completion from that writer remains valid across a ClientID takeover,
+    /// while unrelated stale handles cannot consume a newer pending message.
+    generation: u64,
+};
+
 const Session = struct {
     generation: u64,
     route_id: u64,
@@ -257,6 +270,11 @@ const Session = struct {
     inflight: std.ArrayList(?Inflight) = .empty,
     inflight_count: usize = 0,
     inflight_payload_bytes: usize = 0,
+    /// Owns one QoS 0 publication between queue selection and completion of
+    /// the corresponding socket write. No MQTT acknowledgement can own QoS 0,
+    /// so this transient slot keeps borrowed transmission slices valid and
+    /// lets a failed write return the message to the durable queue.
+    pending_qos0: ?PendingQoS0 = null,
     packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
     incoming_qos2: std.AutoHashMapUnmanaged(u16, void) = .empty,
     next_packet_id: u16 = 1,
@@ -279,6 +297,9 @@ const Session = struct {
             }
         }
         self.inflight.deinit(allocator);
+        if (self.pending_qos0) |*pending| {
+            pending.publish.deinit(allocator);
+        }
         self.packet_index.deinit(allocator);
         self.incoming_qos2.deinit(allocator);
         allocator.free(self.client_id);
@@ -397,6 +418,15 @@ pub const Store = struct {
                 u16,
                 session.next_packet_id,
             );
+            // A live checkpoint can race with the network write only at the
+            // broker state barrier. Once selected, pending QoS 0 is no longer
+            // in `queued`, but it is still durable until the writer commits.
+            // Serialize it ahead of the remaining queue so a crash before the
+            // commit cannot silently lose the opt-in message.
+            const pending_qos0 = if (session.pending_qos0) |pending|
+                pending.publish
+            else
+                null;
 
             try persistence.appendInt(
                 out,
@@ -413,7 +443,15 @@ pub const Store = struct {
                 );
             }
 
-            var queued_count: u32 = 0;
+            var queued_count: u32 = @intFromBool(
+                if (pending_qos0) |publish|
+                    publishRemainingExpiryNs(
+                        publish,
+                        now.nanoseconds,
+                    ) != 0
+                else
+                    false,
+            );
             for (session.queued.items[session.queued_head..]) |maybe_publish| {
                 const publish = maybe_publish orelse continue;
                 if (publishRemainingExpiryNs(
@@ -429,6 +467,20 @@ pub const Store = struct {
                 u32,
                 queued_count,
             );
+            if (pending_qos0) |publish| {
+                const remaining_ns = publishRemainingExpiryNs(
+                    publish,
+                    now.nanoseconds,
+                );
+                if (remaining_ns != 0) {
+                    try writePublishSnapshot(
+                        out,
+                        allocator,
+                        publish,
+                        remaining_ns,
+                    );
+                }
+            }
             for (session.queued.items[session.queued_head..]) |maybe_publish| {
                 const publish = maybe_publish orelse continue;
                 const remaining_ns = publishRemainingExpiryNs(
@@ -950,6 +1002,11 @@ pub const Store = struct {
             self.removeAt(handle.index);
             return;
         }
+        // A QoS 0 packet selected for a socket write has no retransmission or
+        // acknowledgement state. If the connection ends before the writer
+        // reports success, put it back at the front of the durable queue so
+        // the opt-in offline-QoS0 policy does not silently lose it.
+        rollbackPendingQos0(session, handle.generation);
         session.connected = false;
         session.expires_at_ns = expiryDeadline(
             now.nanoseconds,
@@ -1214,12 +1271,18 @@ pub const Store = struct {
 
     pub fn stats(self: *Store, handle: Handle) Error!Stats {
         const session = try self.getSession(handle);
+        const pending_qos0 = session.pending_qos0;
         return .{
             .connected = session.connected,
             .expiry_interval = session.expiry_interval,
             .subscription_count = session.subscription_count,
-            .queued_count = session.queued_count,
-            .queued_payload_bytes = session.queued_payload_bytes,
+            .queued_count = session.queued_count +|
+                @intFromBool(pending_qos0 != null),
+            .queued_payload_bytes = session.queued_payload_bytes +|
+                if (pending_qos0) |pending|
+                    pending.publish.payload.len
+                else
+                    0,
             .inflight_count = session.inflight_count,
             .inflight_payload_bytes = session.inflight_payload_bytes,
             .incoming_qos2_count = session.incoming_qos2.count(),
@@ -1299,7 +1362,6 @@ pub const Store = struct {
             now: std.Io.Timestamp,
         },
     ) Error!EnqueueResult {
-        if (options.qos == .at_most_once) return error.InvalidQoS;
         try mqtt.validateTopicName(topic);
         try mqtt.validatePublishProperties(options.properties);
         try validateQueuedPayload(options.properties, payload);
@@ -1314,12 +1376,25 @@ pub const Store = struct {
         // wait for draining or expiry to release byte budget. Prune first so an
         // expired head never blocks a fresh Application Message.
         self.pruneExpiredPublishes(session, options.now.nanoseconds);
-        if (session.queued_count >= self.options.max_queued_per_session) {
+        // A selected QoS 0 publication still consumes the same logical queue
+        // count and payload-byte admission budget until its socket write is
+        // committed. This prevents concurrent routing from exceeding the
+        // configured queue bound while that element is temporarily detached.
+        const pending_qos0_count: usize = @intFromBool(
+            session.pending_qos0 != null,
+        );
+        const pending_qos0_payload_bytes = if (session.pending_qos0) |pending|
+            pending.publish.payload.len
+        else
+            0;
+        if (session.queued_count +| pending_qos0_count >=
+            self.options.max_queued_per_session)
+        {
             return error.QueueFull;
         }
         if (queuedPayloadLimitReached(
             self.options,
-            session.queued_payload_bytes,
+            session.queued_payload_bytes +| pending_qos0_payload_bytes,
         )) {
             return error.QueueFull;
         }
@@ -1342,11 +1417,12 @@ pub const Store = struct {
             session.queued_payload_bytes,
             publish.payload.len,
         ) catch return error.SessionByteLimitExceeded;
-        if (session.queued_count == 0) {
+        if (session.queued_count == 0 and session.pending_qos0 == null) {
             session.queued.items.len = 0;
             session.queued_head = 0;
-        } else if (session.queued.items.len >=
-            self.options.max_queued_per_session)
+        } else if (session.pending_qos0 == null and
+            session.queued.items.len >=
+                self.options.max_queued_per_session)
         {
             compactQueue(session);
         }
@@ -1371,8 +1447,47 @@ pub const Store = struct {
         if (receive_maximum == 0) return error.InvalidProperty;
         const session = try self.getSession(handle);
         self.pruneExpiredPublishes(session, now.nanoseconds);
+        // The returned slices borrow Session-owned memory. The caller must
+        // finish or roll back a previously selected QoS 0 publication before
+        // requesting another batch.
+        if (session.pending_qos0 != null) return error.InflightFull;
         var written: usize = 0;
         var publish_window_used = countSentPublishInflight(session.*);
+        var blocked_qos_publish = false;
+        const max_inflight = @min(
+            self.options.max_inflight_per_session,
+            @as(usize, std.math.maxInt(u16)),
+        );
+        var new_inflight_capacity = @min(
+            out.len,
+            session.queued_count,
+            @as(usize, receive_maximum) -| @min(
+                @as(usize, receive_maximum),
+                publish_window_used,
+            ),
+            max_inflight -| session.inflight_count,
+        );
+        if (inflightPayloadLimitReached(
+            self.options,
+            session.inflight_payload_bytes,
+        )) {
+            new_inflight_capacity = 0;
+        }
+        // Reserve the worst-case QoS 1/2 additions before changing any
+        // retransmission flags. QoS 0 may make the estimate conservative, but
+        // this keeps an allocation failure from partially consuming a drain.
+        try session.packet_index.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(new_inflight_capacity),
+        );
+        const append_needed = new_inflight_capacity -| countNullSlots(
+            Inflight,
+            session.inflight.items,
+        );
+        try session.inflight.ensureUnusedCapacity(
+            self.allocator,
+            append_needed,
+        );
         for (session.inflight.items) |*maybe_inflight| {
             if (written == out.len) break;
             const inflight = &(maybe_inflight.* orelse continue);
@@ -1388,6 +1503,7 @@ pub const Store = struct {
                 // A peer can lower Receive Maximum on reconnect. Preserve
                 // those already-sent PUBLISH packets for a later drain call
                 // rather than violating the new connection's window.
+                blocked_qos_publish = true;
                 continue;
             }
             out[written] = transmission;
@@ -1399,50 +1515,59 @@ pub const Store = struct {
         }
         if (written == out.len) return out[0..written];
 
-        var available = @as(usize, receive_maximum) -|
-            @min(@as(usize, receive_maximum), publish_window_used);
-        available = @min(available, out.len - written);
-        available = @min(available, session.queued_count);
-        if (inflightPayloadLimitReached(
-            self.options,
-            session.inflight_payload_bytes,
-        )) {
-            available = 0;
-        }
-        if (available == 0) return out[0..written];
-        const max_inflight = @min(
-            self.options.max_inflight_per_session,
-            @as(usize, std.math.maxInt(u16)),
-        );
-        if (session.inflight_count + available > max_inflight) {
-            return error.InflightFull;
-        }
-        try session.packet_index.ensureUnusedCapacity(
-            self.allocator,
-            @intCast(available),
-        );
-        const append_needed = available -| countNullSlots(
-            Inflight,
-            session.inflight.items,
-        );
-        try session.inflight.ensureUnusedCapacity(
-            self.allocator,
-            append_needed,
-        );
-
         var queue_index = session.queued_head;
-        while (available != 0 and
+        while (written != out.len and
             queue_index < session.queued.items.len)
         {
             if (session.queued.items[queue_index]) |publish_value| {
+                var publish = publish_value;
+                if (publish.qos == .at_most_once) {
+                    // Preserve FIFO ordering with QoS 1/2. QoS 0 consumes no
+                    // Receive Maximum credit, but it must not overtake an
+                    // earlier durable PUBLISH that is waiting for such credit.
+                    if (blocked_qos_publish) break;
+                    out[written] = .{ .publish = .{
+                        .topic = publish.topic,
+                        .payload = publish.payload,
+                        .qos = .at_most_once,
+                        .retain = publish.retain,
+                        .dup = false,
+                        .packet_id = 0,
+                        .properties = publish.properties,
+                        .message_expiry_interval = remainingExpiry(
+                            publish,
+                            now.nanoseconds,
+                        ),
+                    } };
+                    // Unlike QoS 1/2, no ACK can own this publication after
+                    // return. Keep it alive in a transient owner until
+                    // the caller confirms or rolls back the socket write.
+                    session.queued.items[queue_index] = null;
+                    session.queued_count -= 1;
+                    session.queued_payload_bytes -= publish.payload.len;
+                    session.pending_qos0 = .{
+                        .publish = publish,
+                        .generation = session.generation,
+                    };
+                    written += 1;
+                    publish = undefined;
+                    queue_index += 1;
+                    break;
+                }
+                if (publish_window_used >=
+                    @as(usize, receive_maximum))
+                {
+                    blocked_qos_publish = true;
+                    break;
+                }
                 if (inflightPayloadLimitReached(
                     self.options,
                     session.inflight_payload_bytes,
                 )) break;
-                var publish = publish_value;
-                session.queued.items[queue_index] = null;
-                session.queued_count -= 1;
-                session.queued_payload_bytes -= publish.payload.len;
+                if (session.inflight_count >= max_inflight) {
+                    blocked_qos_publish = true;
+                    break;
+                }
                 const packet_id = try reservePacketId(session);
                 const state: InflightState = switch (publish.qos) {
                     .at_least_once => .await_puback,
@@ -1460,6 +1585,9 @@ pub const Store = struct {
                         .retransmission = false,
                     },
                 );
+                session.queued.items[queue_index] = null;
+                session.queued_count -= 1;
+                session.queued_payload_bytes -= publish.payload.len;
                 session.packet_index.putAssumeCapacityNoClobber(
                     packet_id,
                     inflight_index,
@@ -1470,12 +1598,12 @@ pub const Store = struct {
                     session.inflight_payload_bytes,
                     publish.payload.len,
                 ) catch unreachable;
+                publish_window_used += 1;
                 out[written] = .{ .publish = publishTransmission(
                     session.inflight.items[inflight_index].?,
                     now.nanoseconds,
                 ) };
                 written += 1;
-                available -= 1;
                 publish = undefined;
             }
             queue_index += 1;
@@ -1495,6 +1623,17 @@ pub const Store = struct {
         handle: Handle,
         packet_id: u16,
     ) Error!void {
+        if (packet_id == 0) {
+            const session = try self.pendingQoS0Session(handle);
+            const publish = session.pending_qos0.?.publish;
+            session.pending_qos0 = null;
+            std.debug.assert(session.queued_head != 0);
+            session.queued_head -= 1;
+            session.queued.items[session.queued_head] = publish;
+            session.queued_count += 1;
+            session.queued_payload_bytes += publish.payload.len;
+            return;
+        }
         const session = try self.getSession(handle);
         const index = session.packet_index.get(packet_id) orelse
             return error.InvalidAcknowledgement;
@@ -1563,6 +1702,16 @@ pub const Store = struct {
         handle: Handle,
         packet_id: u16,
     ) Error!DropAction {
+        if (packet_id == 0) {
+            const session = try self.pendingQoS0Session(handle);
+            var publish = session.pending_qos0.?.publish;
+            session.pending_qos0 = null;
+            session.allocation_bytes -= publish.allocation_bytes;
+            self.total_bytes -= publish.allocation_bytes;
+            publish.deinit(self.allocator);
+            advanceQueueHead(session);
+            return .dropped;
+        }
         const session = try self.getSession(handle);
         const index = session.packet_index.get(packet_id) orelse
             return .ignored;
@@ -1570,6 +1719,69 @@ pub const Store = struct {
         if (inflight.state == .await_pubcomp) return .ignored;
         self.removeInflight(session, index);
         return .dropped;
+    }
+
+    /// Commit a Session PUBLISH whose encoded wire QoS is 0. Native queued
+    /// QoS 0 uses the zero sentinel; a QoS 1/2 transaction capped to QoS 0 by
+    /// the broker's Maximum QoS is removed because no ACK will follow.
+    pub fn completeQoS0Transmission(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        if (packet_id != 0) {
+            const session = try self.getSession(handle);
+            const index = session.packet_index.get(packet_id) orelse
+                return error.InvalidAcknowledgement;
+            const inflight = &session.inflight.items[index].?;
+            if (inflight.state != .await_puback and
+                inflight.state != .await_pubrec)
+            {
+                return error.InvalidAcknowledgement;
+            }
+            self.removeInflight(session, index);
+            return;
+        }
+        const session = try self.pendingQoS0Session(handle);
+        var publish = session.pending_qos0.?.publish;
+        session.pending_qos0 = null;
+        session.allocation_bytes -= publish.allocation_bytes;
+        self.total_bytes -= publish.allocation_bytes;
+        publish.deinit(self.allocator);
+        advanceQueueHead(session);
+    }
+
+    fn pendingQoS0Session(
+        self: *Store,
+        handle: Handle,
+    ) Error!*Session {
+        if (handle.index >= self.sessions.items.len) {
+            return error.SessionNotFound;
+        }
+        const session = &(self.sessions.items[handle.index] orelse
+            return error.SessionNotFound);
+        const pending = session.pending_qos0 orelse {
+            if (session.generation != handle.generation) {
+                return error.SessionNotFound;
+            }
+            return error.InvalidAcknowledgement;
+        };
+        if (pending.generation != handle.generation) {
+            return error.SessionNotFound;
+        }
+        return session;
+    }
+
+    fn rollbackPendingQos0(session: *Session, generation: u64) void {
+        const pending = session.pending_qos0 orelse return;
+        if (pending.generation != generation) return;
+        const publish = pending.publish;
+        session.pending_qos0 = null;
+        std.debug.assert(session.queued_head != 0);
+        session.queued_head -= 1;
+        session.queued.items[session.queued_head] = publish;
+        session.queued_count += 1;
+        session.queued_payload_bytes += publish.payload.len;
     }
 
     pub fn recordIncomingQoS2(
@@ -1991,7 +2203,7 @@ fn advanceQueueHead(session: *Session) void {
     {
         session.queued_head += 1;
     }
-    if (session.queued_count == 0) {
+    if (session.queued_count == 0 and session.pending_qos0 == null) {
         // Reusing the retained allocation at index zero keeps a sustained
         // online Session bounded by its live backlog rather than by the total
         // number of messages observed since CONNECT.
