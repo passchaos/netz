@@ -458,6 +458,20 @@ pub const ConcurrentServeResult = struct {
     }
 };
 
+fn appendTransportBytesPrecise(
+    buffer: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) std.mem.Allocator.Error!void {
+    const required = std.math.add(
+        usize,
+        buffer.items.len,
+        bytes.len,
+    ) catch return error.OutOfMemory;
+    try buffer.ensureTotalCapacityPrecise(allocator, required);
+    buffer.appendSliceAssumeCapacity(bytes);
+}
+
 fn ServeTask(comptime HandlerContext: type) type {
     return struct {
         connection: Connection,
@@ -1508,7 +1522,15 @@ pub const Connection = struct {
         while (self.inbuf.items.len < len) {
             const n = try self.transport().read(&scratch);
             if (n == 0) return error.ConnectionClosed;
-            try self.inbuf.appendSlice(self.allocator, scratch[0..n]);
+            // One socket read commonly returns one complete WebSocket frame.
+            // ArrayList's geometric append growth retained roughly 6.5 KiB for
+            // every 4 KiB benchmark connection. Exact growth preserves the
+            // same reuse while retaining only bytes the transport delivered.
+            try appendTransportBytesPrecise(
+                &self.inbuf,
+                self.allocator,
+                scratch[0..n],
+            );
         }
     }
 
@@ -4178,6 +4200,27 @@ test "WebSocket incoming message finalization frees failed payloads" {
         .payload = bad_utf8,
         .compressed = false,
     }, 1024));
+}
+
+test "WebSocket TCP receive storage grows to the exact delivered size" {
+    const allocator = std.testing.allocator;
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    const first = [_]u8{0xaa} ** 4104;
+    try appendTransportBytesPrecise(&buffer, allocator, &first);
+    try std.testing.expectEqual(first.len, buffer.items.len);
+    try std.testing.expectEqual(first.len, buffer.capacity);
+
+    buffer.clearRetainingCapacity();
+    const small = [_]u8{0xbb} ** 7;
+    try appendTransportBytesPrecise(&buffer, allocator, &small);
+    try std.testing.expectEqual(first.len, buffer.capacity);
+
+    const extra = [_]u8{0xcc} ** 4098;
+    try appendTransportBytesPrecise(&buffer, allocator, &extra);
+    try std.testing.expectEqual(small.len + extra.len, buffer.items.len);
+    try std.testing.expectEqual(small.len + extra.len, buffer.capacity);
 }
 
 test "WebSocket runtimes reject duplicate close sends" {

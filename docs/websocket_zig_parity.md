@@ -305,11 +305,17 @@ these counts explain submission shape but are not timing samples.
    the websocket.zig harness and extend beyond 16 mostly-idle connections before
    making a memory ratio. The fixed 16-connection benchmark bookkeeping has
    since been replaced by bounded dynamic arrays and the cap raised to 256 in
-   both harnesses. Equal 64-connection mixed-payload telemetry recorded 1,095
-   allocations and 851,974 peak live bytes for netz versus 402 allocations and
-   683,242 peak live bytes for websocket.zig. Netz is faster in this shape but
-   not yet smaller; future work should reduce its per-connection runtime state
-   before making a memory-superiority claim.
+   both harnesses. Equal 64-connection mixed-payload telemetry initially
+   recorded 1,095 allocations and 851,974 peak live bytes for netz versus 402
+   allocations and 683,242 peak live bytes for websocket.zig. The dominant
+   difference was ArrayList's geometric growth retaining roughly 6.5 KiB for
+   each 4,104-byte cleartext frame. The TCP receive path now grows retained
+   storage to the exact delivered byte count while preserving reuse. A matched
+   rerun used 572,420 peak live bytes for netz versus 683,242 for websocket.zig
+   (16.2% lower); netz also ended before deferred connection teardown with
+   286,592 live bytes versus 363,580 (21.2% lower). Exact growth causes more
+   small allocation/remap events across the mixed schedule, so the result is a
+   resident-memory advantage rather than an allocation-count claim.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
