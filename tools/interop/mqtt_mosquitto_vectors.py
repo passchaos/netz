@@ -821,6 +821,69 @@ def malformed_will_connects(executable: Path, mqtt_packets) -> None:
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def zero_length_will_payload(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 07-will-null.py. A zero-length Will Payload
+    # is valid and distinct from the malformed case where its two-byte length
+    # field is absent. Verify exact delivery for both protocol versions and use
+    # PING ordering to reject a duplicate or non-empty publication.
+    topic = "will/null/test"
+    for proto_ver in (4, 5):
+        with NetzBroker(executable, connections=2) as broker:
+            with broker.connect() as subscriber, broker.connect() as source:
+                connect_client(
+                    subscriber,
+                    mqtt_packets,
+                    f"will-null-subscriber-{proto_ver}",
+                    proto_ver,
+                )
+                subscriber.sendall(
+                    mqtt_packets.gen_subscribe(
+                        53, topic, 0, proto_ver=proto_ver
+                    )
+                )
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_suback(53, 0, proto_ver=proto_ver),
+                    f"zero-length Will SUBACK v{proto_ver}",
+                )
+                source.sendall(
+                    mqtt_packets.gen_connect(
+                        f"will-null-source-{proto_ver}",
+                        will_topic=topic,
+                        will_payload=b"",
+                        proto_ver=proto_ver,
+                    )
+                )
+                expect_packet(
+                    source,
+                    expected_connack(mqtt_packets, mqtt5_props)
+                    if proto_ver == 5
+                    else mqtt_packets.gen_connack(proto_ver=4),
+                    f"zero-length Will source CONNACK v{proto_ver}",
+                )
+                # Closing the socket without DISCONNECT publishes the Will.
+                source.close()
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_publish(
+                        topic, qos=0, payload=None, proto_ver=proto_ver
+                    ),
+                    f"zero-length Will PUBLISH v{proto_ver}",
+                )
+                subscriber.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    subscriber,
+                    mqtt_packets.gen_pingresp(),
+                    f"PINGRESP after zero-length Will v{proto_ver}",
+                )
+                if proto_ver == 5:
+                    subscriber.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=5)
+                    )
+
+
 def publish_capability_disconnects(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -3433,6 +3496,7 @@ def main() -> None:
     )
     hostile_initial_packets(args.broker, mqtt_packets)
     malformed_will_connects(args.broker, mqtt_packets)
+    zero_length_will_payload(args.broker, mqtt_packets, mqtt5_props)
     publish_capability_disconnects(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -3496,7 +3560,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 65 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 67 scenarios")
 
 
 if __name__ == "__main__":
