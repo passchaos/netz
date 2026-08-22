@@ -68,7 +68,7 @@ run_netz_client_case() {
   timeout 20s "$netz_client" "$port" "$work/cert.pem" \
     "${client_args[@]}" \
     >"$work/netz-client-$retry.log" 2>&1
-  grep -Fq "netz HTTP/3 client interoperated with tquic: verified=true retry=$retry requests=2 connection_reused=true bodies=9,9" \
+  grep -Fq "netz HTTP/3 client interoperated with tquic: verified=true retry=$retry requests=3 connection_reused=true get=9 range=206/5 post_md5=32" \
     "$work/netz-client-$retry.log"
   cat "$work/netz-client-$retry.log"
   kill "$server_pid" 2>/dev/null || true

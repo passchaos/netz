@@ -65,17 +65,48 @@ pub fn main(init: std.process.Init) !void {
         client.established.retry_processed,
     );
 
-    for ([_][]const u8{ "/one.txt", "/two.txt" }, 0..) |path, index| {
-        var response = try client.request(.{
+    const requests = [_]struct {
+        method: []const u8,
+        path: []const u8,
+        headers: []const netz.http3.Qpack.HeaderField = &.{},
+        body: []const u8 = &.{},
+        status: u16,
+        expected: []const u8,
+    }{
+        .{
             .method = "GET",
-            .path = path,
+            .path = "/one.txt",
+            .status = 200,
+            .expected = "tquic-one",
+        },
+        .{
+            .method = "GET",
+            .path = "/two.txt",
+            .headers = &.{.{ .name = "range", .value = "bytes=2-6" }},
+            .status = 206,
+            .expected = "uic-t",
+        },
+        .{
+            .method = "POST",
+            .path = "/digest",
+            .body = "netz-post-body",
+            .status = 200,
+            .expected = "0a448f311c486f9b70bec2fe6c24fb3a",
+        },
+    };
+    for (requests) |request| {
+        var response = try client.request(.{
+            .method = request.method,
+            .path = request.path,
             .scheme = "https",
             .authority = "localhost",
+            .headers = request.headers,
+            .body = request.body,
         });
         defer response.deinit(allocator);
-        try std.testing.expectEqual(@as(u16, 200), response.response.status);
+        try std.testing.expectEqual(request.status, response.response.status);
         try std.testing.expectEqualStrings(
-            if (index == 0) "tquic-one" else "tquic-two",
+            request.expected,
             response.response.body,
         );
         try std.testing.expectEqualStrings(
@@ -85,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with tquic: verified=true retry={} requests=2 connection_reused=true bodies=9,9\n",
+        "netz HTTP/3 client interoperated with tquic: verified=true retry={} requests=3 connection_reused=true get=9 range=206/5 post_md5=32\n",
         .{expect_retry},
     );
 }
