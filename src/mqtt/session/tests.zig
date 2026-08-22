@@ -113,7 +113,7 @@ test "session optionally queues QoS0 without MQTT packet identifiers" {
     try std.testing.expectEqual(mqtt.QoS.at_most_once, parsed.qos);
     try std.testing.expectEqual(@as(?u16, null), parsed.packet_id);
     try std.testing.expectEqualStrings("queued", parsed.payload);
-    try store.completeQoS0Transmission(opened.handle, 0);
+    try store.completeQoS0Transmission(opened.handle, opened.route_id, 0);
     const stats = try store.stats(opened.handle);
     try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
     try std.testing.expectEqual(@as(usize, 0), stats.inflight_count);
@@ -192,7 +192,11 @@ test "session queued QoS0 rollback preserves ordering and byte accounting" {
             .{ .qos = .at_most_once, .now = .zero },
         ),
     );
-    try count_bounded.completeQoS0Transmission(counted.handle, 0);
+    try count_bounded.completeQoS0Transmission(
+        counted.handle,
+        counted.route_id,
+        0,
+    );
     try store.retryUnsentPublish(opened.handle, 0);
     try std.testing.expectEqual(
         @as(usize, 7),
@@ -209,7 +213,7 @@ test "session queued QoS0 rollback preserves ordering and byte accounting" {
         "queued/zero",
         retried[0].publish.topic,
     );
-    try store.completeQoS0Transmission(opened.handle, 0);
+    try store.completeQoS0Transmission(opened.handle, opened.route_id, 0);
     const qos1 = try store.drainInto(
         opened.handle,
         .zero,
@@ -246,7 +250,7 @@ test "session queued QoS0 does not consume QoS1 inflight capacity" {
         &output,
     );
     try std.testing.expectEqual(mqtt.QoS.at_most_once, qos0[0].publish.qos);
-    try store.completeQoS0Transmission(opened.handle, 0);
+    try store.completeQoS0Transmission(opened.handle, opened.route_id, 0);
     const qos1 = try store.drainInto(
         opened.handle,
         .zero,
@@ -255,6 +259,34 @@ test "session queued QoS0 does not consume QoS1 inflight capacity" {
     );
     try std.testing.expectEqual(mqtt.QoS.at_least_once, qos1[0].publish.qos);
     try std.testing.expectEqual(@as(usize, 1), (try store.stats(opened.handle)).inflight_count);
+}
+
+test "session retires QoS1 transmission capped to wire QoS0" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("qos0-cap", false, 60, .zero);
+    _ = try store.enqueuePublish(opened.handle, "cap/one", "one", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+    var output: [1]Transmission = undefined;
+    const selected = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    const packet_id = selected[0].publish.packet_id;
+    try std.testing.expect(packet_id != 0);
+    try store.completeQoS0Transmission(
+        opened.handle,
+        opened.route_id,
+        packet_id,
+    );
+    const stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 0), stats.inflight_count);
+    try std.testing.expect(!store.ownsPacketId(opened.handle, packet_id));
 }
 
 test "session snapshot preserves QoS0 selected for a live write" {
@@ -295,7 +327,11 @@ test "session snapshot preserves QoS0 selected for a live write" {
     try std.testing.expectEqual(@as(usize, 1), delivery.len);
     try std.testing.expectEqual(mqtt.QoS.at_most_once, delivery[0].publish.qos);
     try std.testing.expectEqualStrings("durable", delivery[0].publish.payload);
-    try restored.completeQoS0Transmission(resumed.handle, 0);
+    try restored.completeQoS0Transmission(
+        resumed.handle,
+        resumed.route_id,
+        0,
+    );
 }
 
 test "session takeover lets the original writer resolve pending QoS0" {
@@ -327,9 +363,9 @@ test "session takeover lets the original writer resolve pending QoS0" {
     try std.testing.expectEqualStrings("once", retried[0].publish.payload);
     try std.testing.expectError(
         error.SessionNotFound,
-        store.completeQoS0Transmission(first.handle, 0),
+        store.completeQoS0Transmission(first.handle, first.route_id, 0),
     );
-    try store.completeQoS0Transmission(second.handle, 0);
+    try store.completeQoS0Transmission(second.handle, second.route_id, 0);
 }
 
 test "session duplicate ClientID takeover invalidates prior handle" {

@@ -1727,10 +1727,13 @@ pub const Store = struct {
     pub fn completeQoS0Transmission(
         self: *Store,
         handle: Handle,
+        route_id: u64,
         packet_id: u16,
     ) Error!void {
         if (packet_id != 0) {
-            const session = try self.getSession(handle);
+            const current = self.handleForRouteId(route_id) orelse
+                return error.SessionNotFound;
+            const session = try self.getSession(current);
             const index = session.packet_index.get(packet_id) orelse
                 return error.InvalidAcknowledgement;
             const inflight = &session.inflight.items[index].?;

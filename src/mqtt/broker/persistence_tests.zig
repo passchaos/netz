@@ -384,6 +384,7 @@ test "MQTT live snapshot checkpoints connected durable state" {
     var restored = try createBroker(allocator, io);
     defer restored.deinit();
     try restored.restoreSnapshot(tmp.dir, "broker.db");
+    const restored_now = std.Io.Clock.awake.now(io);
 
     const restored_handle = restored.sessions.find(
         "live-checkpoint",
@@ -420,9 +421,11 @@ test "MQTT live snapshot checkpoints connected durable state" {
         restored.will_publishers.get(restored_will).?,
     );
     const deadline = restored.wills.nextDeadline().?;
-    try std.testing.expect(
-        deadline.nanoseconds > std.Io.Clock.awake.now(io).nanoseconds,
-    );
+    // The live checkpoint starts the restored crash Will's ten-second delay.
+    // Compare against the restore timestamp captured immediately beforehand;
+    // asking the wall clock again after all assertions makes this test flaky
+    // under a heavily loaded or instrumented test runner.
+    try std.testing.expect(deadline.nanoseconds > restored_now.nanoseconds);
 }
 
 test "MQTT live snapshot omits transient inbound QoS 2" {

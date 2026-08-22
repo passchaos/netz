@@ -160,7 +160,16 @@ const Registration = struct {
     replaced_owner_id: ?router_mod.SubscriberId,
 };
 
-const EncodedSessionPacket = session_route.EncodedPacket;
+const EncodedSessionPacket = struct {
+    encoded: session_route.EncodedPacket,
+    handle: session_mod.Handle,
+    route_id: u64,
+
+    fn deinit(self: *EncodedSessionPacket) void {
+        self.encoded.deinit();
+        self.* = undefined;
+    }
+};
 const subscriberId = session_route.connectionSubscriberId;
 const nextConnectionGeneration = session_route.nextConnectionGeneration;
 const sessionSubscriberId = session_route.sessionSubscriberId;
@@ -2153,52 +2162,49 @@ pub const Broker = struct {
                 var packet = packet_value;
                 defer packet.deinit();
                 slot.connection.?.writeEncodedSessionPacket(
-                    packet.bytes,
+                    packet.encoded.bytes,
                 ) catch |err| switch (err) {
                     error.OutgoingPacketTooLarge => {
-                        if (packet.kind == .pubrel) return err;
+                        if (packet.encoded.kind == .pubrel) return err;
                         // Match Mosquitto's oversized outgoing handling: once
                         // the peer's Maximum Packet Size rejects a PUBLISH,
                         // remove that transaction and continue draining rather
                         // than permanently consuming Session inflight credit.
                         self.state_mutex.lockUncancelable(self.io);
-                        if (slot.session_handle) |handle| {
-                            _ = self.sessions.dropOversizedPublish(
-                                handle,
-                                packet.packet_id,
-                            ) catch {};
-                        }
+                        _ = self.sessions.dropOversizedPublish(
+                            packet.handle,
+                            packet.encoded.packet_id,
+                        ) catch {};
                         self.state_mutex.unlock(self.io);
                         continue;
                     },
                     else => {
-                        if (packet.kind != .pubrel) {
+                        if (packet.encoded.kind != .pubrel) {
                             self.state_mutex.lockUncancelable(self.io);
-                            if (slot.session_handle) |handle| {
-                                self.sessions.retryUnsentPublish(
-                                    handle,
-                                    packet.packet_id,
-                                ) catch {};
-                            }
+                            self.sessions.retryUnsentPublish(
+                                packet.handle,
+                                packet.encoded.packet_id,
+                            ) catch {};
                             self.state_mutex.unlock(self.io);
                         }
                         return err;
                     },
                 };
-                if (packet.kind == .qos0_publish) {
+                if (packet.encoded.kind == .qos0_publish) {
                     self.state_mutex.lockUncancelable(self.io);
-                    const completion = if (slot.session_handle) |handle|
-                        self.sessions.completeQoS0Transmission(
-                            handle,
-                            packet.packet_id,
-                        )
-                    else {};
+                    const completion = self.sessions
+                        .completeQoS0Transmission(
+                        packet.handle,
+                        packet.route_id,
+                        packet.encoded.packet_id,
+                    );
                     self.state_mutex.unlock(self.io);
                     // A concurrent ClientID takeover invalidates the old
-                    // Session handle, but the old writer still owns this exact
-                    // pending generation and may commit it. Ignore only a
-                    // genuinely stale/missing transaction, after releasing
-                    // the global state barrier.
+                    // Session handle. Native QoS 0 completion is tied to that
+                    // writer generation, while a QoS 1/2 transaction capped
+                    // to wire QoS 0 is resolved by stable route identity.
+                    // Ignore only a genuinely stale/missing transaction after
+                    // releasing the global state barrier.
                     completion catch |err| switch (err) {
                         error.SessionNotFound => {},
                         else => return err,
@@ -2298,6 +2304,7 @@ pub const Broker = struct {
         const connection = &(slot.connection orelse return null);
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
+        const route_id = try self.sessions.routeId(handle);
 
         var storage: [1]session_mod.Transmission = undefined;
         const transmissions = self.sessions.drainInto(
@@ -2310,12 +2317,27 @@ pub const Broker = struct {
             else => return err,
         };
         if (transmissions.len == 0) return null;
-        return try session_route.encodeTransmission(
+        const transmission = transmissions[0];
+        const encoded = session_route.encodeTransmission(
             self.allocator,
             connection.protocol,
-            transmissions[0],
+            transmission,
             self.maximumQoS(),
-        );
+        ) catch |err| {
+            switch (transmission) {
+                .publish => |publish| self.sessions.retryUnsentPublish(
+                    handle,
+                    publish.packet_id,
+                ) catch {},
+                .pubrel => {},
+            }
+            return err;
+        };
+        return .{
+            .encoded = encoded,
+            .handle = handle,
+            .route_id = route_id,
+        };
     }
 
     fn runWillDriver(
