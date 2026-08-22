@@ -609,7 +609,14 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    reset stream, restoring the shared credit so those bytes cannot be mistaken
    for or starve the concurrent sibling; the callback-error path likewise
    restores the triggering DATA's charged connection credit before
-   cancellation. The gate builds the locked Rust harness offline after its
+   cancellation. A deterministic buffered-frame regression also forces that
+   cleanup WINDOW_UPDATE to fail with a terminal peer-close error after the
+   late DATA and sibling response have arrived together. The client ignores
+   only `SocketUnconnected`/`ConnectionResetByPeer` in this reset-cleanup path,
+   restores the rolled-back local connection credit, and still returns the
+   complete sibling response with exact final window accounting; ordinary
+   capacity-release write failures remain observable. The gate builds the
+   locked Rust harness offline after its
    crates are cached and fails on either process or
    any exact value mismatch. The same command now repeats the complete
    bidirectional request/trailer and concurrent cancellation scenarios over

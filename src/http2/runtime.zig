@@ -4909,7 +4909,9 @@ pub const Connection = struct {
                 // shared credit so discarded bytes cannot starve siblings.
                 _ = try http2.DataPayload.parse(frame);
                 try self.recv_connection_window.receive(frame.payload.len);
-                try self.releaseConnectionCapacity(frame.payload.len);
+                try self.releaseLateResetConnectionCapacity(
+                    frame.payload.len,
+                );
             },
             .headers => {
                 // HPACK state is connection-wide even when the carrying stream
@@ -5003,6 +5005,32 @@ pub const Connection = struct {
         }
     }
 
+    fn releaseLateResetConnectionCapacity(
+        self: *Connection,
+        amount: usize,
+    ) Error!void {
+        if (amount == 0) return;
+        // One inbound DATA payload is bounded by SETTINGS_MAX_FRAME_SIZE,
+        // whose protocol maximum fits in a single WINDOW_UPDATE increment.
+        const increment = std.math.cast(u31, amount) orelse
+            return error.MessageTooLarge;
+        self.sendWindowUpdates(null, increment, null) catch |err| switch (err) {
+            error.SocketUnconnected,
+            error.ConnectionResetByPeer,
+            => {
+                // sendWindowUpdates rolls its receive-window increment back
+                // when the write fails. A terminal peer close is harmless in
+                // this cleanup-only path: frame_reader may still hold a
+                // complete sibling response that arrived before the close.
+                // Restore the logical credit locally so parsing those buffered
+                // frames observes the same accounting as a successful update.
+                self.recv_connection_window.update(increment) catch
+                    unreachable;
+            },
+            else => return err,
+        };
+    }
+
     fn sendWindowUpdates(
         self: *Connection,
         stream_id: ?u31,
@@ -5022,11 +5050,24 @@ pub const Connection = struct {
         var encoded: [2 * (http2.FrameHeader.encoded_len + 4)]u8 =
             undefined;
         var encoded_len: usize = 0;
-        if (connection_increment) |increment| {
-            try self.recv_connection_window.update(increment);
-            errdefer self.recv_connection_window.adjust(
+        var updated_connection: ?u31 = null;
+        errdefer if (updated_connection) |increment| {
+            self.recv_connection_window.adjust(
                 -@as(i64, increment),
             ) catch unreachable;
+        };
+        var updated_stream: ?struct {
+            window: *FlowWindow,
+            increment: u31,
+        } = null;
+        errdefer if (updated_stream) |update| {
+            update.window.adjust(
+                -@as(i64, update.increment),
+            ) catch unreachable;
+        };
+        if (connection_increment) |increment| {
+            try self.recv_connection_window.update(increment);
+            updated_connection = increment;
             try encodeWindowUpdateFrame(
                 encoded[encoded_len..][0 .. http2.FrameHeader.encoded_len + 4],
                 0,
@@ -5037,7 +5078,10 @@ pub const Connection = struct {
         if (stream_increment) |increment| {
             const window = try self.recvStreamWindow(stream_id.?);
             try window.update(increment);
-            errdefer window.adjust(-@as(i64, increment)) catch unreachable;
+            updated_stream = .{
+                .window = window,
+                .increment = increment,
+            };
             try encodeWindowUpdateFrame(
                 encoded[encoded_len..][0 .. http2.FrameHeader.encoded_len + 4],
                 stream_id.?,
@@ -14834,6 +14878,104 @@ test "HTTP/2 client ignores in-flight frames after local reset" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client drains buffered sibling after reset peer close" {
+    const allocator = std.testing.allocator;
+
+    // Model the exact race deterministically: one transport read has already
+    // retained both streams, then the peer closes before the client returns
+    // connection credit for DATA that raced with its RST_STREAM.
+    var buffered_frames: std.ArrayList(u8) = .empty;
+    try appendFrameBytes(
+        &buffered_frames,
+        allocator,
+        .data,
+        0,
+        1,
+        "late",
+    );
+    try appendFrameBytes(
+        &buffered_frames,
+        allocator,
+        .headers,
+        flag_end_headers,
+        3,
+        &.{0x88}, // HPACK static-table index for `:status: 200`.
+    );
+    try appendFrameBytes(
+        &buffered_frames,
+        allocator,
+        .data,
+        flag_end_stream,
+        3,
+        "ok",
+    );
+
+    const ClosedWriter = struct {
+        writes: usize = 0,
+        fail_with_network_down: bool = false,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.fail_with_network_down) return error.NetworkDown;
+            return error.SocketUnconnected;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: ClosedWriter = .{};
+    var closed_vtable = threaded.io().vtable.*;
+    closed_vtable.netWrite = ClosedWriter.write;
+    const closed_io = std.Io{
+        .userdata = &writer,
+        .vtable = &closed_vtable,
+    };
+
+    var connection = Connection{
+        .io = closed_io,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .frame_reader = .{ .buffer = buffered_frames },
+    };
+    defer {
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.frame_reader.deinit(allocator);
+    }
+    connection.rememberLocallyResetStream(1);
+
+    var response = try connection.readResponse(3, "GET", false);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), writer.writes);
+    try std.testing.expectEqualStrings("ok", response.body);
+    try std.testing.expectEqual(
+        @as(i64, default_flow_window - "ok".len),
+        connection.recv_connection_window.value,
+    );
+
+    connection.recv_connection_window.value -= 7;
+    writer.fail_with_network_down = true;
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.releaseLateResetConnectionCapacity(7),
+    );
+    // Non-terminal transport failures remain observable and the generic
+    // WINDOW_UPDATE transaction must roll its optimistic accounting back.
+    try std.testing.expectEqual(
+        @as(i64, default_flow_window - "ok".len - 7),
+        connection.recv_connection_window.value,
+    );
 }
 
 test "HTTP/2 ignores unknown extension connection frames" {
