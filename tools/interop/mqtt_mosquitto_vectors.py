@@ -377,6 +377,61 @@ def maximum_keep_alive(executable: Path, mqtt_packets, mqtt5_props) -> None:
                 sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def zero_length_client_id_policy(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Port the global policy cases from Mosquitto 01-connect-zero-length-id.py.
+    # The existing assigned-ID gate covers the default allow path; these cases
+    # require exact version-specific refusal bytes when assignment is disabled.
+    for proto_ver, reason_code in ((4, 2), (5, 128)):
+        with NetzBroker(
+            executable,
+            extra_args=("--no-zero-length-client-id",),
+        ) as broker:
+            with broker.connect() as sock:
+                sock.sendall(mqtt_packets.gen_connect(
+                    "", proto_ver=proto_ver, clean_session=True
+                ))
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_connack(
+                        rc=reason_code, proto_ver=proto_ver, properties=None
+                    ),
+                    f"zero-length Client ID refusal v{proto_ver}",
+                )
+
+    # A policy refusal must not poison the listener or reserve anonymous state.
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=("--no-zero-length-client-id",),
+    ) as broker:
+        with broker.connect() as refused, broker.connect() as named:
+            refused.sendall(mqtt_packets.gen_connect(
+                "", proto_ver=5, clean_session=True
+            ))
+            expect_packet(
+                refused,
+                mqtt_packets.gen_connack(
+                    rc=128, proto_ver=5, properties=None
+                ),
+                "zero-length Client ID refusal before named client",
+            )
+            named.sendall(mqtt_packets.gen_connect(
+                "named-after-anonymous-refusal", proto_ver=5
+            ))
+            expect_packet(
+                named, expected_connack(mqtt_packets, mqtt5_props),
+                "named client after zero-length refusal",
+            )
+            named.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                named, mqtt_packets.gen_pingresp(),
+                "named client PING after zero-length refusal",
+            )
+            named.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def duplicate_client_takeover(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -4841,6 +4896,7 @@ def main() -> None:
     assigned_client_identifier(args.broker, mqtt_packets, mqtt5_props)
     server_keep_alive(args.broker, mqtt_packets, mqtt5_props)
     maximum_keep_alive(args.broker, mqtt_packets, mqtt5_props)
+    zero_length_client_id_policy(args.broker, mqtt_packets, mqtt5_props)
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -4848,7 +4904,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 108 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 111 scenarios")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ const Config = struct {
     wildcard_subscription_available: bool = true,
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
+    allow_zero_length_client_id: bool = true,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     persistence_path: ?[]const u8 = null,
@@ -64,6 +65,7 @@ pub fn main(init: std.process.Init) !void {
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
             .maximum_keep_alive_seconds = config.maximum_keep_alive_seconds,
+            .allow_zero_length_client_id = config.allow_zero_length_client_id,
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
                 .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
@@ -295,6 +297,12 @@ fn parseArgs(
             "--no-shared-subscriptions",
         )) {
             config.shared_subscription_available = false;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--no-zero-length-client-id",
+        )) {
+            config.allow_zero_length_client_id = false;
         } else if (std.mem.eql(
             u8,
             arg,

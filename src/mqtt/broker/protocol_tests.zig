@@ -755,6 +755,73 @@ test "broker assigns unique MQTT 5 anonymous Client Identifiers" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker can reject zero-length Client Identifiers before registration" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .allow_zero_length_client_id = false,
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 3,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+        var attempt = try context.runtime_mod.Client.connectAttempt(
+            allocator,
+            io,
+            broker.address(),
+            .{
+                .protocol = protocol,
+                .client_id = "",
+                .clean_start = true,
+            },
+        );
+        defer attempt.deinit(allocator);
+        try std.testing.expect(!attempt.accepted());
+        try std.testing.expectEqual(
+            @as(u8, if (protocol == .v3_1_1) 0x02 else 0x80),
+            attempt.connack.connack.reason_code,
+        );
+        try std.testing.expect(
+            !attempt.connack.connack.session_present,
+        );
+    }
+
+    // Refusal must not reserve the empty Client ID or any generated Session
+    // identity. A subsequent named client is accepted and remains usable.
+    var named = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{ .protocol = .v5, .client_id = "named-after-refusal" },
+    );
+    defer named.close();
+    try named.ping();
+    try named.disconnect(0);
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker assigned MQTT 5 Client Identifier can resume Session" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

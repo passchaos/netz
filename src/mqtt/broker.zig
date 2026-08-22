@@ -61,6 +61,10 @@ pub const Options = struct {
     /// Mosquitto limits `auto_id_prefix` to 50 bytes; matching that cap keeps
     /// the generated identifier below MQTT's u16 UTF-8 string bound.
     auto_client_id_prefix: []const u8 = "netz-",
+    /// Permit a clean-start CONNECT with an empty Client Identifier and assign
+    /// a unique identifier. Disabling this rejects before any Session, Will,
+    /// or subscription state is created.
+    allow_zero_length_client_id: bool = true,
     router: router_mod.Options = .{},
     retained: retained_mod.Options = .{},
     session: session_mod.Options = .{},
@@ -696,6 +700,22 @@ pub const Broker = struct {
                 self.options.accept,
             );
             errdefer pending.deinit(self.allocator);
+            if (pending.connect.connect.client_id.len == 0 and
+                !self.options.allow_zero_length_client_id)
+            {
+                // MQTT 3.1.1 calls this Identifier Rejected. Mosquitto uses
+                // Unspecified Error for MQTT 5 when its equivalent policy is
+                // disabled, and both versions require Session Present=false.
+                var refused = try pending.finish(.{
+                    .reason_code = switch (pending.connect.connect.protocol) {
+                        .v3_1_1 => 0x02,
+                        .v5 => 0x80,
+                    },
+                });
+                refused.deinit(self.allocator);
+                clients_started += 1;
+                continue;
+            }
             const keep_alive_limit_exceeded = if (self.options.maximum_keep_alive_seconds) |maximum|
                 pending.connect.connect.keep_alive_seconds == 0 or
                     pending.connect.connect.keep_alive_seconds > maximum
