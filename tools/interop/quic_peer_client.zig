@@ -12,7 +12,8 @@ const key_update_payloads = [_][]const u8{
     "phase-one",
     "phase-two",
 };
-const Scenario = enum { echo, reset, stop };
+const Scenario = enum { echo, reset, stop, flow };
+const flow_control_payload = [_]u8{'f'} ** 12_288;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -211,11 +212,18 @@ pub fn main(init: std.process.Init) !void {
                     established.connection.receivedStreamComplete(stream_id);
             }
         }
-    } else try exerciseCancellation(
-        &established.connection,
-        allocator,
-        scenario,
-    );
+    } else switch (scenario) {
+        .reset, .stop => try exerciseCancellation(
+            &established.connection,
+            allocator,
+            scenario,
+        ),
+        .flow => try exerciseFlowControl(
+            &established.connection,
+            allocator,
+        ),
+        .echo => unreachable,
+    }
 
     // Each external fixture closes only after its stream operations complete.
     // Keep pumping QUIC rather than treating echo completion as proof of a
@@ -272,6 +280,10 @@ pub fn main(init: std.process.Init) !void {
             "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=57\n",
             .{},
         ),
+        .flow => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 flow_blocked=true stream_bytes=12288 echo_bytes=12288 peer_close=57\n",
+            .{},
+        ),
         .echo => unreachable,
     }
 }
@@ -284,7 +296,7 @@ fn exerciseCancellation(
     const target_payload = switch (scenario) {
         .reset => "reset",
         .stop => "stop",
-        .echo => unreachable,
+        .echo, .flow => unreachable,
     };
     const target_stream_id = try connection.openStream();
     if (target_stream_id != 0) return error.UnexpectedStreamId;
@@ -324,13 +336,62 @@ fn exerciseCancellation(
                 return error.UnexpectedStopSendingError;
             }
         },
-        .echo => unreachable,
+        .echo, .flow => unreachable,
     }
     try receiveExpectedStream(
         connection,
         allocator,
         sibling_stream_id,
         payloads[1],
+    );
+}
+
+fn exerciseFlowControl(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+) !void {
+    const stream_id = try connection.openStream();
+    if (stream_id != 0) return error.UnexpectedStreamId;
+    const initial_credit = connection.streamSendCredit(stream_id);
+    if (initial_credit.connection != 8 * 1024 or
+        initial_credit.stream != 2 * 1024)
+    {
+        return error.UnexpectedFlowControlLimit;
+    }
+    const max_chunk_len: usize = 1024;
+    var offset: usize = 0;
+    var flow_blocked = false;
+    while (offset < flow_control_payload.len) {
+        const end = @min(offset + max_chunk_len, flow_control_payload.len);
+        connection.send(&.{.{ .stream = .{
+            .stream_id = stream_id,
+            .offset = offset,
+            .data = flow_control_payload[offset..end],
+            .fin = end == flow_control_payload.len,
+        } }}) catch |err| switch (err) {
+            error.FlowControlBlocked => {
+                flow_blocked = true;
+                try receivePacket(connection, allocator);
+                continue;
+            },
+            error.CongestionLimited => {
+                try receivePacket(connection, allocator);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
+                continue;
+            },
+            else => return err,
+        };
+        offset = end;
+    }
+    if (!flow_blocked) return error.FlowControlNotExercised;
+    try receiveExpectedStream(
+        connection,
+        allocator,
+        stream_id,
+        &flow_control_payload,
     );
 }
 

@@ -13,6 +13,7 @@ enum Scenario {
     Echo,
     Reset,
     Stop,
+    Flow,
 }
 
 #[tokio::main]
@@ -35,7 +36,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop] | client PORT CA [echo|reset|stop]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow] | client PORT CA [echo|reset|stop]"
         ),
     }
 }
@@ -45,6 +46,7 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "echo" => Ok(Scenario::Echo),
         "reset" => Ok(Scenario::Reset),
         "stop" => Ok(Scenario::Stop),
+        "flow" => Ok(Scenario::Flow),
         value => bail!("unknown scenario: {value}"),
     }
 }
@@ -70,7 +72,11 @@ async fn run_server(
         .with_certificate(Path::new(certificate), Path::new(private_key))?
         .build()?;
     let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    let mut server = Server::builder().with_tls(tls)?.with_io(address)?.start()?;
+    let mut server = Server::builder()
+        .with_tls(tls)?
+        .with_limits(scenario_limits(scenario)?)?
+        .with_io(address)?
+        .start()?;
     println!("s2n-quic interop server listening={address}");
 
     let mut connection = timeout(TIMEOUT, server.accept())
@@ -90,6 +96,7 @@ async fn run_server(
         Scenario::Echo => echo_two_streams(&mut connection).await?,
         Scenario::Reset => serve_reset(&mut connection).await?,
         Scenario::Stop => serve_stop(&mut connection).await?,
+        Scenario::Flow => serve_flow(&mut connection).await?,
     }
     // Let the endpoint transmit both queued responses before application close
     // supersedes stream output in this deliberately short-lived fixture.
@@ -108,11 +115,15 @@ async fn run_server(
         Scenario::Stop => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=57"
         ),
+        Scenario::Flow => println!(
+            "s2n-quic server interoperated with netz: version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288 peer_close=57"
+        ),
     }
     Ok(())
 }
 
 async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
+    ensure!(scenario != Scenario::Flow, "flow is a server-only scenario");
     // Clear platform roots first so a successful connection proves that the
     // checked-in netz localhost certificate, rather than ambient trust, was
     // used to authenticate the server.
@@ -139,6 +150,7 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::Echo => request_two_echoes(&mut connection).await?,
         Scenario::Reset => request_reset(&mut connection).await?,
         Scenario::Stop => request_stop(&mut connection).await?,
+        Scenario::Flow => unreachable!(),
     }
 
     let close = timeout(TIMEOUT, connection.accept_bidirectional_stream())
@@ -164,8 +176,21 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::Stop => println!(
             "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=58"
         ),
+        Scenario::Flow => unreachable!(),
     }
     Ok(())
+}
+
+fn scenario_limits(scenario: Scenario) -> Result<s2n_quic::provider::limits::Limits> {
+    let limits = s2n_quic::provider::limits::Limits::new();
+    if scenario != Scenario::Flow {
+        return Ok(limits);
+    }
+    // These receive limits are advertised to netz. The 12 KiB request cannot
+    // complete without multiple MAX_DATA and MAX_STREAM_DATA updates.
+    Ok(limits
+        .with_data_window(8 * 1024)?
+        .with_bidirectional_remote_data_window(2 * 1024)?)
 }
 
 async fn accept_bidi(connection: &mut Connection) -> Result<s2n_quic::stream::BidirectionalStream> {
@@ -240,6 +265,24 @@ async fn echo_sibling(connection: &mut Connection) -> Result<()> {
     );
     sibling.send(Bytes::copy_from_slice(PAYLOADS[1])).await?;
     sibling.finish()?;
+    Ok(())
+}
+
+async fn serve_flow(connection: &mut Connection) -> Result<()> {
+    let mut stream = accept_bidi(connection).await?;
+    ensure!(stream.id() == 0, "unexpected flow-control stream id");
+    let request = receive_all(&mut stream).await?;
+    ensure!(
+        request.len() == 12_288 && request.iter().all(|byte| *byte == b'f'),
+        "unexpected flow-control request"
+    );
+    stream.send(Bytes::from(request)).await?;
+    // This is the only response in the flow-control scenario. Waiting for the
+    // FIN ACK guarantees netz received all 12 KiB before application close
+    // supersedes any outstanding stream data.
+    timeout(TIMEOUT, stream.close())
+        .await
+        .context("flow-control response acknowledgement timed out")??;
     Ok(())
 }
 
