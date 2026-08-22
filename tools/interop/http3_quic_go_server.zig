@@ -12,9 +12,16 @@ const cancellation_prefix = "n" ** read_before_cancel;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const version: netz.quic.Version = if (args.len == 3 and
+        std.mem.eql(u8, args[2], "--version=2"))
+        .version_2
+    else if (args.len == 2)
+        .version_1
+    else
+        return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -44,6 +51,11 @@ pub fn main(init: std.process.Init) !void {
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
+                .version = version,
+                .available_versions = if (version == .version_2)
+                    &.{.version_2}
+                else
+                    &.{ .version_1, .version_2 },
                 .local_transport_parameters = local_transport_parameters,
                 .initial_one_rtt_config = .{
                     .receive_window = connection_receive_window,
@@ -157,8 +169,13 @@ pub fn main(init: std.process.Init) !void {
     }});
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz HTTP/3 server interoperated with quic-go: cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window={d} read_before_cancel={d} large_response={d} request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
-        .{ stream_receive_window, read_before_cancel, cancellation_response_size },
+        "netz HTTP/3 server interoperated with quic-go: version={d} cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window={d} read_before_cancel={d} large_response={d} request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
+        .{
+            if (version == .version_2) @as(u8, 2) else 1,
+            stream_receive_window,
+            read_before_cancel,
+            cancellation_response_size,
+        },
     );
 }
 

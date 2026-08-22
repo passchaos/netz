@@ -5,6 +5,17 @@ client=${1:?netz HTTP/3 client executable path}
 server=${2:?netz HTTP/3 server executable path}
 quicz_root=${QUICZ_ROOT:-"$HOME/Work/quicz"}
 fixture_dir="$quicz_root/examples/interop/go_echo_client"
+version=${NETZ_HTTP3_INTEROP_VERSION:-1}
+if [[ "$version" != 1 && "$version" != 2 ]]; then
+  echo "invalid HTTP/3 QUIC version: $version" >&2
+  exit 2
+fi
+go_version_args=()
+netz_version_args=()
+if [[ "$version" == 2 ]]; then
+  go_version_args=(-v2-only)
+  netz_version_args=(--version=2)
+fi
 if [[ ! -f "$fixture_dir/http3_peer/main.go" ]]; then
   echo "quic-go HTTP/3 fixture not found under $fixture_dir" >&2
   exit 127
@@ -40,6 +51,7 @@ PY
 port=$(free_udp_port)
 "$work/quic-go-http3-peer" \
   -mode server -addr "127.0.0.1:$port" -ca-out "$work/quic-go-ca.pem" \
+  "${go_version_args[@]}" \
   >"$work/quic-go-server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
@@ -62,6 +74,7 @@ if [[ ! -s "$work/quic-go-ca.pem" ]] || ! \
   exit 1
 fi
 if ! timeout 20s "$client" "$port" "$work/quic-go-ca.pem" \
+    "${netz_version_args[@]}" \
     >"$work/netz-client.log" 2>&1; then
   cat "$work/netz-client.log" >&2
   cat "$work/quic-go-server.log" >&2
@@ -70,10 +83,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window=8192 read_before_cancel>=12288 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
+  "version=$version cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window=8192 read_before_cancel>=12288 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1" \
   "$work/netz-client.log"
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=8192 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1' \
+  "version=$version cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=8192 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1" \
   "$work/quic-go-server.log"
 cat "$work/netz-client.log"
 cat "$work/quic-go-server.log"
@@ -85,7 +98,8 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 EOF
 
 port=$(free_udp_port)
-"$server" "$port" >"$work/netz-server.log" 2>&1 &
+"$server" "$port" "${netz_version_args[@]}" \
+  >"$work/netz-server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
   if grep -q 'netz HTTP/3 quic-go interop server listening' \
@@ -106,6 +120,7 @@ if ! grep -q 'netz HTTP/3 quic-go interop server listening' \
 fi
 if ! timeout 20s "$work/quic-go-http3-peer" \
     -mode client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
+    "${go_version_args[@]}" \
     >"$work/quic-go-client.log" 2>&1; then
   cat "$work/quic-go-client.log" >&2
   cat "$work/netz-server.log" >&2
@@ -114,10 +129,14 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 stop_sending_transmissions>=2 concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
+  "version=$version cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 stop_sending_transmissions>=2 concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1" \
   "$work/quic-go-client.log"
 grep -Fq \
-  'cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1' \
+  "version=$version cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1" \
   "$work/netz-server.log"
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"
+
+if [[ "$version" == 1 ]]; then
+  NETZ_HTTP3_INTEROP_VERSION=2 "$0" "$client" "$server"
+fi

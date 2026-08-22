@@ -34,11 +34,18 @@ const CancellationLoss = struct {
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
+    const version: netz.quic.Version = if (args.len == 4 and
+        std.mem.eql(u8, args[3], "--version=2"))
+        .version_2
+    else if (args.len == 3)
+        .version_1
+    else
+        return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -87,6 +94,11 @@ pub fn main(init: std.process.Init) !void {
             .handshake = .{
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
+                .version = version,
+                .available_versions = if (version == .version_2)
+                    &.{.version_2}
+                else
+                    &.{ .version_1, .version_2 },
                 .server_name = "localhost",
                 .server_auth = verifier.clientVerifier(),
                 .max_crypto_buffer = 64 * 1024,
@@ -239,8 +251,13 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with quic-go: cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window={d} read_before_cancel>={d} large_response={d} request_body=12 request_trailers=1 response_body=16 response_trailers=1\n",
-        .{ stream_receive_window, read_before_cancel, cancellation_response_size },
+        "netz HTTP/3 client interoperated with quic-go: version={d} cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window={d} read_before_cancel>={d} large_response={d} request_body=12 request_trailers=1 response_body=16 response_trailers=1\n",
+        .{
+            if (version == .version_2) @as(u8, 2) else 1,
+            stream_receive_window,
+            read_before_cancel,
+            cancellation_response_size,
+        },
     );
 }
 
