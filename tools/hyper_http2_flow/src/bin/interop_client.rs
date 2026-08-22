@@ -172,6 +172,7 @@ fn main() {
             .expect("sibling request");
 
         let mut sibling_sender = sender.clone();
+        let mut graceful_sender = sender.clone();
         let cancel_flow = async move {
             let cancel_response = sender
                 .send_request(cancel_request)
@@ -227,6 +228,46 @@ fn main() {
         println!(
             "Hyper HTTP/2 client canceled flow-blocked netz stream and completed concurrent sibling: rst=CANCEL window={} received={} sibling={}",
             CONSTRAINED_STREAM_WINDOW, cancel_received, sibling_received,
+        );
+
+        let graceful_request = Request::builder()
+            .method(Method::GET)
+            .uri(
+                Uri::builder()
+                    .scheme("http")
+                    .authority("localhost")
+                    .path_and_query("/graceful?from=hyper")
+                    .build()
+                    .expect("graceful request URI"),
+            )
+            .body(empty_body())
+            .expect("graceful request");
+        let graceful_response = graceful_sender
+            .send_request(graceful_request)
+            .await
+            .expect("active request survives netz GOAWAY");
+        assert_eq!(graceful_response.status(), StatusCode::OK);
+        let graceful_body = graceful_response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect drained response")
+            .to_bytes();
+        assert_eq!(graceful_body, b"netz-drained".as_slice());
+
+        // Awaiting readiness drives receipt of the peer GOAWAY before the
+        // attempted stream 9 request, proving rejection occurs at the HTTP/2
+        // connection layer rather than from a coincidental TCP close.
+        let refusal = graceful_sender
+            .ready()
+            .await
+            .expect_err("new request unexpectedly allowed after GOAWAY");
+        assert!(
+            refusal.is_closed(),
+            "unexpected post-GOAWAY readiness error: {refusal}"
+        );
+        println!(
+            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=7 new_request_refused=true"
         );
     });
 }

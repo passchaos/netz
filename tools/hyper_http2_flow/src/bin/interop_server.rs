@@ -6,6 +6,7 @@
 use std::convert::Infallible;
 use std::env;
 use std::fs::File;
+use std::future::Future;
 use std::io::{self, BufReader, Write};
 use std::path::Path;
 use std::pin::Pin;
@@ -71,18 +72,42 @@ fn main() {
             }
             None => MaybeTls::Clear(stream),
         };
-        let canceled = Arc::new(CancelSignal::default());
+        let signals = Arc::new(LifecycleSignals::default());
         let mut builder = server_http2::Builder::new(TokioExecutor);
         builder
             .initial_stream_window_size(CONSTRAINED_STREAM_WINDOW)
             .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW);
-        builder
-            .serve_connection(
+        let mut connection = Box::pin(builder.serve_connection(
                 TokioIo::new(io),
-                service_fn(move |request| handle(request, canceled.clone())),
-            )
+                service_fn({
+                    let signals = signals.clone();
+                    move |request| handle(request, signals.clone())
+                }),
+            ));
+        let mut graceful_started = Box::pin(signals.graceful_started.notified());
+        futures_util::future::poll_fn(|cx| {
+            if let Poll::Ready(result) = connection.as_mut().poll(cx) {
+                result.expect("serve netz HTTP/2 client before drain");
+                panic!("HTTP/2 connection closed before graceful request");
+            }
+            match graceful_started.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+        // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY, synchronizes
+        // one RTT with PING, then narrows the boundary to the highest request
+        // it processed. Release the active response only after shutdown starts
+        // so the netz client must drain that stream through both GOAWAYs.
+        connection.as_mut().graceful_shutdown();
+        signals.graceful_release.notify_one();
+        connection
             .await
-            .expect("serve netz HTTP/2 client");
+            .expect("gracefully drain netz HTTP/2 client");
+        println!(
+            "Hyper HTTP/2 server gracefully drained netz client: active_stream=7 new_request_refused=true"
+        );
     });
 }
 
@@ -107,7 +132,7 @@ fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfi
 
 async fn handle(
     request: Request<Incoming>,
-    canceled: Arc<CancelSignal>,
+    signals: Arc<LifecycleSignals>,
 ) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, io::Error> {
     if request.uri().path_and_query().map(|value| value.as_str()) == Some("/cancel?from=netz") {
         ensure_request(&request, Method::GET, "/cancel?from=netz")?;
@@ -117,7 +142,7 @@ async fn handle(
                 // h2 must retain its unsent suffix after delivering exactly
                 // the client's 8-KiB stream credit.
                 first: Some(Bytes::from(vec![b'h'; CANCEL_RESPONSE_BYTES])),
-                signal: canceled,
+                signal: signals.cancel.clone(),
             })
             .boxed(),
         );
@@ -131,8 +156,8 @@ async fn handle(
     }
     if request.uri().path_and_query().map(|value| value.as_str()) == Some("/sibling?from=netz") {
         ensure_request(&request, Method::GET, "/sibling?from=netz")?;
-        while !canceled.observed.load(Ordering::Acquire) {
-            canceled.notified.notified().await;
+        while !signals.cancel.observed.load(Ordering::Acquire) {
+            signals.cancel.notified.notified().await;
         }
         let frames = stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from(
             vec![b's'; SIBLING_RESPONSE_BYTES],
@@ -142,6 +167,17 @@ async fn handle(
             .headers_mut()
             .insert("x-hyper-sibling", HeaderValue::from_static("after-cancel"));
         return Ok(response);
+    }
+    if request.uri().path_and_query().map(|value| value.as_str()) == Some("/graceful?from=netz") {
+        ensure_request(&request, Method::GET, "/graceful?from=netz")?;
+        signals.graceful_started.notify_one();
+        signals.graceful_release.notified().await;
+        return Ok(Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"hyper-drained"),
+            ))]))
+            .boxed(),
+        ));
     }
     if request.method() != Method::POST
         || request.uri().path_and_query().map(|value| value.as_str()) != Some("/interop?from=netz")
@@ -221,6 +257,13 @@ fn ensure_request(
 struct CancelSignal {
     observed: AtomicBool,
     notified: Notify,
+}
+
+#[derive(Default)]
+struct LifecycleSignals {
+    cancel: Arc<CancelSignal>,
+    graceful_started: Notify,
+    graceful_release: Notify,
 }
 
 struct CancelResponseFrames {

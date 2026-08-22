@@ -527,7 +527,7 @@ connection credit while a more urgent stream has no stream credit.
 | --- | --- | --- |
 | HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue, ordered 1xx observation and bounded interim chains | Mature RFC behavior and broad production use |
-| HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, push, priorities, flow control, tunnels/RFC 8441; certificate-verified TLS interop with Hyper is exercised in both endpoint roles | Tokio h2 integration and production client/server |
+| HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, push, priorities, flow control, graceful GOAWAY draining, tunnels/RFC 8441; certificate-verified TLS interop with Hyper is exercised in both endpoint roles | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
 | HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |
 | HTTP/1 chunked 1-MiB duplex | 284.04-286.06 us/op pinned | 414.64-417.45 us/op pinned |
@@ -647,7 +647,14 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    bidirectional request/trailer and concurrent cancellation scenarios over
    TLS 1.3: the netz client validates the fixture certificate and both sides
    require ALPN `h2`. This is direct encrypted Hyper interoperability rather
-   than an inference from local TLS tests.
+   than an inference from local TLS tests. The matrix also exercises graceful
+   shutdown in both directions. Hyper starts its recommended two-phase GOAWAY
+   while stream 7 is active; netz answers the synchronization PING, drains that
+   stream through the narrowed boundary, and refuses to open stream 9. On a
+   fresh reverse connection, netz sends `GOAWAY(last_stream_id=7, NO_ERROR)`,
+   completes stream 7, and Hyper refuses a subsequent request. Both cases run
+   over h2c and certificate-verified TLS, so this is peer-visible draining
+   evidence rather than inference from local GOAWAY tests.
 4. **Completed:** combine the bidirectional process-boundary cancellation
    cases with constrained flow-control windows and concurrent streams. The
    gate described above verifies exact CANCEL codes, target-only termination,

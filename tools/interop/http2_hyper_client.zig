@@ -155,6 +155,39 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/2 client canceled flow-blocked Hyper stream and completed concurrent sibling: transport={s} rst=CANCEL window={} received={} sibling={}\n",
         .{ if (tls_enabled) "tls" else "h2c", constrained_stream_window, cancellation.body_bytes, sibling.body.len },
     );
+
+    // Hyper begins graceful shutdown while stream 7 is active. Netz processes
+    // the initial GOAWAY/PING synchronization and narrower final GOAWAY while
+    // still completing that accepted stream, then rejects stream 9 locally.
+    var graceful = try connection.startRequest(.{
+        .method = "GET",
+        .path = "/graceful?from=netz",
+        .scheme = "http",
+        .authority = "localhost",
+        .body_length = 0,
+    });
+    defer graceful.deinit();
+    try graceful.finish();
+    var graceful_response = try graceful.readResponse();
+    defer graceful_response.deinit(allocator);
+    if (graceful_response.status != 200 or
+        !std.mem.eql(u8, graceful_response.body, "hyper-drained"))
+    {
+        return error.InvalidResponse;
+    }
+    try std.testing.expectError(
+        error.ConnectionGoAway,
+        connection.request(.{
+            .method = "GET",
+            .path = "/after-goaway",
+            .scheme = "http",
+            .authority = "localhost",
+        }),
+    );
+    std.debug.print(
+        "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=7 new_request_refused=true\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
 }
 
 const CancelContext = struct {

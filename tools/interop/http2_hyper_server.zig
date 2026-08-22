@@ -178,6 +178,34 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/2 server observed flow-blocked Hyper cancellation and completed concurrent sibling: transport={s} rst=CANCEL window={} offered={} sibling={}\n",
         .{ if (tls_enabled) "tls" else "h2c", constrained_stream_window, cancel_response_bytes, sibling_response_bytes },
     );
+
+    var graceful_request = try connection.readRequest();
+    defer graceful_request.deinit(allocator);
+    if (graceful_request.stream_id != 7 or
+        !std.mem.eql(
+            u8,
+            graceful_request.path,
+            "/graceful?from=hyper",
+        ))
+    {
+        return error.InvalidRequest;
+    }
+    // Stream 7 is already accepted, so the narrowed GOAWAY boundary permits
+    // its response to drain while preventing Hyper from opening stream 9.
+    try connection.sendGoAway(
+        graceful_request.stream_id,
+        .no_error,
+        "netz-draining",
+    );
+    try connection.writeResponse(graceful_request.stream_id, .{
+        .status = 200,
+        .body = "netz-drained",
+        .request_method = graceful_request.method,
+    });
+    std.debug.print(
+        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=7 new_request_refused=true\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
 }
 
 fn requestByPath(
