@@ -348,6 +348,87 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 streaming response observes informational heads" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "HTTP/1.1 103 Early Hints\r\n" ++
+        "Link: </stream.css>; rel=preload\r\n\r\n" ++
+        "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nstream";
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+
+    const TestError = runtime.Error;
+    const Reader = @import("body_reader.zig").Reader(TestError);
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+
+        fn readSome(raw_context: ?*anyopaque, out: []u8) TestError!usize {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            if (self.offset == self.bytes.len) return 0;
+            const count = @min(out.len, self.bytes.len - self.offset);
+            @memcpy(out[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+    };
+    const Context = struct {
+        informational: usize = 0,
+        final_head: bool = false,
+        body: std.ArrayList(u8) = .empty,
+
+        fn observe(
+            raw_context: *anyopaque,
+            head: runtime.InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw_context));
+            if (head.status != 103 or !std.mem.eql(
+                u8,
+                head.header("link") orelse @panic("missing Link"),
+                "</stream.css>; rel=preload",
+            )) @panic("unexpected informational response");
+            self.informational += 1;
+        }
+
+        fn begin(self: *@This(), head: Reader.ResponseHead) !void {
+            try std.testing.expectEqual(@as(u16, 200), head.status);
+            self.final_head = true;
+        }
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+
+    var source = Source{ .bytes = raw };
+    var context = Context{};
+    defer context.body.deinit(allocator);
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .informational_context = &context,
+        .on_informational = Context.observe,
+        .inbuf = &inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{},
+    };
+    var response = try reader.readResponse(
+        .GET,
+        &context,
+        Context.begin,
+        Context.consume,
+    );
+    defer response.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), context.informational);
+    try std.testing.expect(context.final_head);
+    try std.testing.expectEqualStrings("stream", context.body.items);
+}
+
 test "HTTP/1 streaming response reads chunked trailers and writer handoff" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -158,6 +158,22 @@ pub const ResponseHead = struct {
     }
 };
 
+/// Borrowed metadata for a bodyless informational response. Runtime observer
+/// callbacks may inspect these slices only until the callback returns.
+pub const InformationalResponseHead = struct {
+    version: Version,
+    status: u16,
+    reason: []const u8,
+    headers: []const Header,
+
+    pub fn header(
+        self: InformationalResponseHead,
+        name: []const u8,
+    ) ?[]const u8 {
+        return wire.findHeader(self.headers, name);
+    }
+};
+
 pub const max_chunk_extension_bytes: usize = 16 * 1024;
 
 pub const BodyFraming = enum {

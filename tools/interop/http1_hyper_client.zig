@@ -89,6 +89,74 @@ pub fn main(init: std.process.Init) !void {
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 
+    // Hyper's public `on_informational` API has a netz counterpart. Exercise
+    // more than status skipping: validate both borrowed 103/102 header blocks
+    // in order before accepting the final response on the same connection.
+    var informational_client = try connect(
+        allocator,
+        io,
+        port,
+        limits,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
+    );
+    defer informational_client.close();
+    const Informational = struct {
+        statuses: [2]u16 = undefined,
+        count: usize = 0,
+
+        fn observe(
+            raw: *anyopaque,
+            head: netz.http1.runtime.InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.count >= self.statuses.len) {
+                @panic("too many informational responses");
+            }
+            self.statuses[self.count] = head.status;
+            if (head.status == 103 and !headerEquals(
+                head.headers,
+                "link",
+                "</asset.css>; rel=preload",
+            )) @panic("unexpected Early Hints Link");
+            if (head.status == 102 and !headerEquals(
+                head.headers,
+                "x-hyper-progress",
+                "accepted",
+            )) @panic("unexpected Processing metadata");
+            self.count += 1;
+        }
+    };
+    var informational = Informational{};
+    var informational_response =
+        try informational_client.requestWithInformational(
+            .{
+                .target = "/informational?from=netz",
+                .host = "localhost",
+            },
+            .{
+                .context = &informational,
+                .on_response = Informational.observe,
+            },
+        );
+    defer informational_response.deinit(allocator);
+    if (informational.count != 2 or
+        !std.mem.eql(u16, &informational.statuses, &.{ 103, 102 }) or
+        informational_response.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            informational_response.response.body,
+            "hyper-informational",
+        ))
+    {
+        return error.InvalidInformationalResponse;
+    }
+    std.debug.print(
+        "netz HTTP/1 client observed Hyper informational responses: transport={s} statuses=103,102 headers=2 final=200 body=19\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
+
     // Use a fresh connection so the first scenario's Hyper service lifecycle
     // cannot accidentally satisfy this request. Only send the declared body
     // after Hyper has emitted its automatic interim response.

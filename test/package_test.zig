@@ -89,6 +89,26 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 64 * 1024), (netz.http1.runtime.Limits{}).max_head_bytes);
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamBuffered"));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "InformationalObserver",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "InformationalResponseHead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "requestWithInformational",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "requestStreamingWithInformational",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.RequestWriter,
+        "waitForContinueWithInformational",
+    ));
     try std.testing.expect(@hasDecl(netz.http1, "ResponseContext"));
     try std.testing.expect(@hasDecl(netz.http1, "parseResponseForRequest"));
     try std.testing.expect(@hasDecl(netz.http1, "RequestHead"));

@@ -74,6 +74,9 @@ grep -Fq \
   'netz HTTP/1 client observed Hyper 100 Continue: transport=cleartext interim=1 body=11 response_body=15' \
   "$work/netz-client.log"
 grep -Fq \
+  'netz HTTP/1 client observed Hyper informational responses: transport=cleartext statuses=103,102 headers=2 final=200 body=19' \
+  "$work/netz-client.log"
+grep -Fq \
   'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=cleartext informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
   "$work/netz-client.log"
 grep -Fq \
@@ -83,7 +86,7 @@ grep -Fq \
   'netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=cleartext buffered_server_bytes=19 client_bytes=18 reply_bytes=19' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz Expect, CONNECT, and Upgrade boundaries: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
+  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
   "$work/hyper-server.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
@@ -172,13 +175,16 @@ grep -Fq \
   'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=tls informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
   "$work/tls-netz-client.log"
 grep -Fq \
+  'netz HTTP/1 client observed Hyper informational responses: transport=tls statuses=103,102 headers=2 final=200 body=19' \
+  "$work/tls-netz-client.log"
+grep -Fq \
   'netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=tls buffered_server_bytes=18 client_bytes=17 reply_bytes=18' \
   "$work/tls-netz-client.log"
 grep -Fq \
   'netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=tls buffered_server_bytes=19 client_bytes=18 reply_bytes=19' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz Expect, CONNECT, and Upgrade boundaries: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
+  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
   "$work/tls-hyper-server.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper HTTPS server -> netz client interop passed'

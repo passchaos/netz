@@ -58,7 +58,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
     let mut connections = Vec::new();
-    for connection_index in 0..6 {
+    for connection_index in 0..7 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let tls_acceptor = cert_path.as_ref().map(|cert| {
@@ -75,7 +75,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                 None => MaybeTls::Clear(stream),
             };
             match connection_index {
-                0 | 1 => {
+                0 | 2 => {
                     server_http1::Builder::new()
                         .serve_connection(
                             TokioIo::new(io),
@@ -84,13 +84,16 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         .await
                         .expect("serve netz HTTP/1 client");
                 }
-                2 => serve_expect_hints(io)
+                1 => serve_informational(io)
+                    .await
+                    .expect("serve observable informational responses"),
+                3 => serve_expect_hints(io)
                     .await
                     .expect("serve 103 then 100 Expect boundary"),
-                3 => serve_expect_rejection(io)
+                4 => serve_expect_rejection(io)
                     .await
                     .expect("serve 417 Expect boundary"),
-                4 => {
+                5 => {
                     let (completion, mut completed) = tokio::sync::mpsc::channel(1);
                     server_http1::Builder::new()
                         .serve_connection(
@@ -108,7 +111,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         .expect("CONNECT tunnel task completion")
                         .expect("CONNECT tunnel exchange");
                 }
-                5 => {
+                6 => {
                     let (completion, mut completed) = tokio::sync::mpsc::channel(1);
                     server_http1::Builder::new()
                         .serve_connection(
@@ -133,7 +136,18 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz Expect, CONNECT, and Upgrade boundaries: informational=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19");
+}
+
+async fn serve_informational(mut stream: MaybeTls) -> Result<(), std::io::Error> {
+    read_request_head(&mut stream, "GET", "/informational?from=netz", None).await?;
+    stream
+        .write_all(
+            b"HTTP/1.1 103 Early Hints\r\nLink: </asset.css>; rel=preload\r\n\r\n\
+              HTTP/1.1 102 Processing\r\nX-Hyper-Progress: accepted\r\n\r\n\
+              HTTP/1.1 200 OK\r\nContent-Length: 19\r\nConnection: close\r\n\r\nhyper-informational",
+        )
+        .await
 }
 
 async fn handle_upgrade_request(
@@ -257,6 +271,15 @@ async fn read_expect_head(
     target: &str,
     content_length: usize,
 ) -> Result<(), std::io::Error> {
+    read_request_head(stream, "POST", target, Some(content_length)).await
+}
+
+async fn read_request_head(
+    stream: &mut MaybeTls,
+    method: &str,
+    target: &str,
+    expected_body_length: Option<usize>,
+) -> Result<(), std::io::Error> {
     let mut bytes = Vec::new();
     let head_end = loop {
         if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -278,7 +301,7 @@ async fn read_expect_head(
         }
         bytes.extend_from_slice(&chunk[..count]);
     };
-    if bytes.len() != head_end {
+    if expected_body_length.is_some() && bytes.len() != head_end {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "netz sent an expected body before 100 Continue",
@@ -287,11 +310,17 @@ async fn read_expect_head(
     let head = std::str::from_utf8(&bytes).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 request head")
     })?;
-    let request_line = format!("POST {target} HTTP/1.1\r\n");
-    let length = format!("Content-Length: {content_length}\r\n");
+    let request_line = format!("{method} {target} HTTP/1.1\r\n");
+    let expected_headers = expected_body_length.map(|content_length| {
+        (
+            "Expect: 100-continue\r\n",
+            format!("Content-Length: {content_length}\r\n"),
+        )
+    });
     if !head.starts_with(&request_line)
-        || !head.contains("Expect: 100-continue\r\n")
-        || !head.contains(&length)
+        || expected_headers
+            .as_ref()
+            .is_some_and(|(expect, length)| !head.contains(expect) || !head.contains(length))
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -346,7 +375,7 @@ async fn handle_request(
     request: Request<Incoming>,
     connection_index: usize,
 ) -> Result<Response<Body>, std::io::Error> {
-    if connection_index == 1 {
+    if connection_index == 2 {
         return handle_expected_request(request).await;
     }
     if request.method() != Method::POST

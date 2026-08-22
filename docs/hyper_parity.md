@@ -221,10 +221,16 @@ shape with status 201 and exact response metadata. Each direction then performs
 an `Expect: 100-continue` exchange. The sender withholds its declared request
 body until the other implementation emits an HTTP/1.1 100 response, and the
 receiver verifies the body plus final response. Hyper observes netz's interim
-response through its `on_informational` extension; netz uses the new
-`RequestWriter.waitForContinue`, which also consumes preceding non-100 1xx
+response through its `on_informational` extension. Netz now exposes the same
+shape through `InformationalObserver` on aggregate and streaming client reads;
+callbacks receive each ordered borrowed 1xx head, while a configurable count
+limit prevents an endless interim-response chain from causing unbounded work.
+The Hyper fixture sends 103 Early Hints and 102 Processing with distinct
+headers before a final 200, and the netz client validates every status/header
+over both cleartext and certificate-verified TLS. Netz also uses
+`RequestWriter.waitForContinue`, which consumes preceding non-100 1xx
 responses and returns a typed owned final response if the server rejects the
-expectation before the body. The external client gate now exercises both
+expectation before the body. The external client gate exercises both
 branches against raw wire responses in the same Hyper/Tokio fixture: a 103
 Early Hints followed by 100 Continue releases the exact ten-byte body, while a
 417 response causes netz to send zero body bytes, return the owned rejection,
@@ -519,8 +525,8 @@ connection credit while a more urgent stream has no stream credit.
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling |
-| HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
+| HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling |
+| HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue, ordered 1xx observation and bounded interim chains | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, push, priorities, flow control, tunnels/RFC 8441; certificate-verified TLS interop with Hyper is exercised in both endpoint roles | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
 | HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |

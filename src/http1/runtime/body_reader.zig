@@ -18,6 +18,12 @@ pub fn Reader(comptime RuntimeError: type) type {
             context: ?*anyopaque,
             head: []const u8,
         ) RuntimeError!void = null,
+        informational_context: ?*anyopaque = null,
+        informational_responses_seen: ?*usize = null,
+        on_informational: ?*const fn (
+            context: *anyopaque,
+            response: http1.InformationalResponseHead,
+        ) void = null,
         inbuf: *std.ArrayList(u8),
         offset: usize = 0,
         limits: Limits,
@@ -28,6 +34,7 @@ pub fn Reader(comptime RuntimeError: type) type {
         pub const Limits = struct {
             max_head_bytes: usize,
             max_body_bytes: usize,
+            max_informational_responses: usize = 16,
         };
 
         pub const Request = struct {
@@ -236,6 +243,9 @@ pub fn Reader(comptime RuntimeError: type) type {
             comptime begin: anytype,
             comptime consume: anytype,
         ) !Response {
+            var local_informational_count: usize = 0;
+            const informational_count = self.informational_responses_seen orelse
+                &local_informational_count;
             while (true) {
                 const head_bytes = try self.readHeadBytes();
                 var head_needs_free = true;
@@ -261,11 +271,31 @@ pub fn Reader(comptime RuntimeError: type) type {
                 if (head.status >= 100 and head.status < 200 and
                     head.status != 101)
                 {
-                    // Informational responses terminate at the head. Reject a
-                    // declared length before skipping to the final response so
-                    // those bytes cannot be reinterpreted as another status line.
-                    if (head.content_length != null) {
-                        return error.InvalidContentLength;
+                    // Informational responses terminate at the head. Reject
+                    // body framing before continuing so bytes cannot be
+                    // reinterpreted as another status line.
+                    try http1.validateResponseBodyForStatus(
+                        head.status,
+                        head.headers,
+                        &.{},
+                        &.{},
+                    );
+                    informational_count.* += 1;
+                    if (informational_count.* >
+                        self.limits.max_informational_responses)
+                    {
+                        return error.TooManyInformationalResponses;
+                    }
+                    if (self.on_informational) |observe| {
+                        observe(
+                            self.informational_context.?,
+                            .{
+                                .version = head.version,
+                                .status = head.status,
+                                .reason = head.reason,
+                                .headers = head.headers,
+                            },
+                        );
                     }
                     self.allocator.free(head_bytes);
                     head_needs_free = false;
