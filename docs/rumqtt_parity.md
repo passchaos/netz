@@ -1045,8 +1045,20 @@ wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
 
-1. Add incremental autosave or a replicated commitlog for crash windows between
-   quiescent snapshots.
+1. **Partially completed:** `Broker.saveLiveSnapshot` now checkpoints while
+   clients remain connected. A persistence mutex serializes snapshot writers,
+   while the broker state barrier is held only long enough to encode a detached
+   immutable image; file write, fsync, and atomic replacement happen after
+   traffic is unblocked. Durable connected Sessions restore offline with
+   queued and outgoing inflight QoS state intact; a connected Will is persisted
+   with ungraceful-crash semantics and its effective delay starts at the
+   checkpoint.
+   Volatile QoS 0/transient connection queues and transient inbound QoS 2
+   transactions remain intentionally excluded; inbound QoS 2 owned by a
+   durable Session is restored.
+   Tests cover both direct state and a real active broker connection remaining
+   usable after checkpoint, followed by restore. A replicated/incremental
+   commitlog is still needed to close mutations between periodic checkpoints.
 2. Extend the production-scale publisher-window, latency, allocation and RSS
    comparison above to Mosquitto and additional concurrency/fanout shapes;
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.

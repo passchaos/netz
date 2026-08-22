@@ -192,10 +192,53 @@ pub const Scheduler = struct {
         now: std.Io.Timestamp,
         publishers: *const PublisherMap,
     ) (Error || persistence.Error)!void {
+        return self.writeSnapshotMode(
+            out,
+            allocator,
+            now,
+            publishers,
+            false,
+        );
+    }
+
+    /// Persist Wills from a live broker checkpoint.
+    ///
+    /// A process crash is an ungraceful disconnect. Connected Wills therefore
+    /// become scheduled from the checkpoint instant, while Wills already in
+    /// the deadline heap retain their exact remaining delay. Entries claimed
+    /// by the Will publisher remain rejected because their routing transaction
+    /// may already have committed elsewhere in broker state.
+    pub fn writeLiveSnapshot(
+        self: *Scheduler,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+        publishers: *const PublisherMap,
+    ) (Error || persistence.Error)!void {
+        return self.writeSnapshotMode(
+            out,
+            allocator,
+            now,
+            publishers,
+            true,
+        );
+    }
+
+    fn writeSnapshotMode(
+        self: *Scheduler,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+        publishers: *const PublisherMap,
+        include_connected: bool,
+    ) (Error || persistence.Error)!void {
         var snapshot_count: u32 = 0;
         for (self.entries.items) |maybe_entry| {
             const entry = maybe_entry orelse continue;
-            if (entry.state != .scheduled or entry.heap_index == null) {
+            if (entry.state == .due or
+                (entry.state == .connected and !include_connected) or
+                (entry.state == .scheduled and entry.heap_index == null))
+            {
                 return error.SnapshotBusy;
             }
             snapshot_count = std.math.add(
@@ -250,7 +293,13 @@ pub const Scheduler = struct {
                 out,
                 allocator,
                 u64,
-                @intCast(@max(entry.deadline_ns - now.nanoseconds, 0)),
+                @intCast(if (entry.state == .connected)
+                    @as(i96, effectiveDelay(
+                        entry.will_delay_interval,
+                        entry.session_expiry_interval,
+                    )) * std.time.ns_per_s
+                else
+                    @max(entry.deadline_ns - now.nanoseconds, 0)),
             );
             try persistence.appendOptionalInt(
                 out,

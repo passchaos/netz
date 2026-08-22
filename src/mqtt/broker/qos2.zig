@@ -237,10 +237,56 @@ pub const Store = struct {
         context: anytype,
         comptime publisherExists: anytype,
     ) (Error || persistence.Error)!void {
+        return self.writeSnapshotMode(
+            out,
+            allocator,
+            now,
+            context,
+            publisherExists,
+            false,
+        );
+    }
+
+    /// Persist durable inbound QoS 2 transactions from a live checkpoint.
+    /// Transactions owned by transient Sessions are connection-scoped and are
+    /// omitted; a broker restart cannot resume those clients or their Packet
+    /// Identifier namespace.
+    pub fn writeLiveSnapshot(
+        self: *Store,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+        context: anytype,
+        comptime publisherExists: anytype,
+    ) (Error || persistence.Error)!void {
+        return self.writeSnapshotMode(
+            out,
+            allocator,
+            now,
+            context,
+            publisherExists,
+            true,
+        );
+    }
+
+    fn writeSnapshotMode(
+        self: *Store,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+        context: anytype,
+        comptime publisherExists: anytype,
+        skip_transient_publishers: bool,
+    ) (Error || persistence.Error)!void {
         var snapshot_count: u32 = 0;
         var iterator = self.entries.iterator();
         while (iterator.next()) |entry| {
             if (!publisherExists(context, entry.key_ptr.publisher_id)) {
+                if (skip_transient_publishers and
+                    sessionRouteId(entry.key_ptr.publisher_id) == null)
+                {
+                    continue;
+                }
                 return error.CorruptSnapshot;
             }
             if (remainingExpiryNs(
@@ -256,6 +302,12 @@ pub const Store = struct {
         try persistence.appendInt(out, allocator, u32, snapshot_count);
         iterator = self.entries.iterator();
         while (iterator.next()) |entry| {
+            if (!publisherExists(context, entry.key_ptr.publisher_id) and
+                skip_transient_publishers and
+                sessionRouteId(entry.key_ptr.publisher_id) == null)
+            {
+                continue;
+            }
             const pending = entry.value_ptr.*;
             const remaining_ns = remainingExpiryNs(
                 pending,
@@ -377,6 +429,12 @@ fn keepPendingProperty(property: mqtt.Property) bool {
     // stored.
     return !(property == .two_byte and
         property.two_byte.id == .topic_alias);
+}
+
+fn sessionRouteId(id: router.SubscriberId) ?u64 {
+    const tag: u64 = 1 << 63;
+    if ((id & tag) == 0) return null;
+    return id & ~tag;
 }
 
 fn remainingExpiry(

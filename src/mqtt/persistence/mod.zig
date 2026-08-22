@@ -42,6 +42,11 @@ pub const RestoredState = struct {
     pending_qos2: pending_qos2.Store,
 };
 
+/// Encode and atomically install a quiescent broker-state snapshot.
+///
+/// `Broker.saveSnapshot` additionally validates broker lifecycle state and
+/// serializes concurrent writers; this lower-level entry point remains useful
+/// to callers that compose the persistence stores directly.
 pub fn saveAtomic(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -58,7 +63,21 @@ pub fn saveAtomic(
         realtime_now,
     );
     defer allocator.free(encoded);
+    try saveEncodedAtomic(io, dir, sub_path, encoded);
+}
 
+/// Atomically install an already-encoded snapshot.
+///
+/// Live brokers encode while holding their state barrier, then release that
+/// barrier before the potentially slow filesystem write and fsync. Keeping
+/// the durable replacement here ensures both quiescent and live checkpoints
+/// use exactly the same atomic-file contract.
+pub fn saveEncodedAtomic(
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    encoded: []const u8,
+) Error!void {
     var atomic = try dir.createFileAtomic(io, sub_path, .{
         .replace = true,
         .permissions = snapshotPermissions(),
@@ -109,6 +128,40 @@ pub fn encode(
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error![]u8 {
+    return encodeMode(
+        allocator,
+        state,
+        monotonic_now,
+        realtime_now,
+        false,
+    );
+}
+
+/// Encode a coherent live-broker checkpoint. Connected durable Sessions are
+/// already represented as offline by their snapshot format; connected Wills
+/// use crash semantics and begin their effective delay at this checkpoint.
+pub fn encodeLive(
+    allocator: std.mem.Allocator,
+    state: State,
+    monotonic_now: std.Io.Timestamp,
+    realtime_now: std.Io.Timestamp,
+) Error![]u8 {
+    return encodeMode(
+        allocator,
+        state,
+        monotonic_now,
+        realtime_now,
+        true,
+    );
+}
+
+fn encodeMode(
+    allocator: std.mem.Allocator,
+    state: State,
+    monotonic_now: std.Io.Timestamp,
+    realtime_now: std.Io.Timestamp,
+    live_checkpoint: bool,
+) Error![]u8 {
     var retained_bytes: std.ArrayList(u8) = .empty;
     defer retained_bytes.deinit(allocator);
     try state.retained.writeSnapshot(
@@ -125,31 +178,51 @@ pub fn encode(
     );
     var will_bytes: std.ArrayList(u8) = .empty;
     defer will_bytes.deinit(allocator);
-    try state.wills.writeSnapshot(
-        &will_bytes,
-        allocator,
-        monotonic_now,
-        state.will_publishers,
-    );
+    if (live_checkpoint) {
+        try state.wills.writeLiveSnapshot(
+            &will_bytes,
+            allocator,
+            monotonic_now,
+            state.will_publishers,
+        );
+    } else {
+        try state.wills.writeSnapshot(
+            &will_bytes,
+            allocator,
+            monotonic_now,
+            state.will_publishers,
+        );
+    }
     var qos2_bytes: std.ArrayList(u8) = .empty;
     defer qos2_bytes.deinit(allocator);
-    try state.pending_qos2.writeSnapshot(
-        &qos2_bytes,
-        allocator,
-        monotonic_now,
-        state.sessions,
-        struct {
-            fn exists(
-                sessions: *session.Store,
-                publisher_id: u64,
-            ) bool {
-                return sessionRouteId(publisher_id) != null and
-                    sessions.handleForRouteId(
-                        sessionRouteId(publisher_id).?,
-                    ) != null;
-            }
-        }.exists,
-    );
+    const PublisherLookup = struct {
+        fn exists(
+            sessions: *session.Store,
+            publisher_id: u64,
+        ) bool {
+            return sessionRouteId(publisher_id) != null and
+                sessions.handleForRouteId(
+                    sessionRouteId(publisher_id).?,
+                ) != null;
+        }
+    };
+    if (live_checkpoint) {
+        try state.pending_qos2.writeLiveSnapshot(
+            &qos2_bytes,
+            allocator,
+            monotonic_now,
+            state.sessions,
+            PublisherLookup.exists,
+        );
+    } else {
+        try state.pending_qos2.writeSnapshot(
+            &qos2_bytes,
+            allocator,
+            monotonic_now,
+            state.sessions,
+            PublisherLookup.exists,
+        );
+    }
 
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);

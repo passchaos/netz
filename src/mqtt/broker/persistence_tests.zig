@@ -328,6 +328,253 @@ test "MQTT snapshot save rejects live transient broker state" {
     );
 }
 
+test "MQTT live snapshot checkpoints connected durable state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try createBroker(allocator, io);
+    defer source.deinit();
+    const now = std.Io.Clock.awake.now(io);
+    const opened = try source.sessions.open(
+        "live-checkpoint",
+        false,
+        std.math.maxInt(u32),
+        now,
+    );
+    _ = try source.sessions.setSubscription(
+        opened.handle,
+        .{
+            .topic_filter = "live/#",
+            .qos = .at_least_once,
+        },
+        23,
+    );
+    _ = try source.sessions.enqueuePublish(
+        opened.handle,
+        "live/queued",
+        "persisted",
+        .{ .qos = .at_least_once, .now = now },
+    );
+    var transmission_storage: [1]mqtt.session.Transmission = undefined;
+    const transmissions = try source.sessions.drainInto(
+        opened.handle,
+        now,
+        1,
+        &transmission_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), transmissions.len);
+    const packet_id = transmissions[0].publish.packet_id;
+
+    const will_handle = try source.wills.set(
+        "live-checkpoint",
+        delayedWill(10, true),
+        60,
+    );
+    try source.will_publishers.put(
+        allocator,
+        will_handle,
+        sessionRouteSubscriberId(opened.route_id),
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source.saveLiveSnapshot(tmp.dir, "broker.db");
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "broker.db");
+
+    const restored_handle = restored.sessions.find(
+        "live-checkpoint",
+        std.Io.Clock.awake.now(io),
+    ).?;
+    const stats = try restored.sessions.stats(restored_handle);
+    try std.testing.expect(!stats.connected);
+    try std.testing.expectEqual(@as(usize, 1), stats.subscription_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.inflight_count);
+    var retransmission_storage: [1]mqtt.session.Transmission = undefined;
+    const retransmissions = try restored.sessions.drainInto(
+        restored_handle,
+        std.Io.Clock.awake.now(io),
+        1,
+        &retransmission_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retransmissions.len);
+    try std.testing.expect(retransmissions[0].publish.dup);
+    try std.testing.expectEqual(packet_id, retransmissions[0].publish.packet_id);
+    try std.testing.expectEqualStrings(
+        "persisted",
+        retransmissions[0].publish.payload,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        restored.router.subscriptionCount(),
+    );
+
+    const restored_will = restored.wills.handleForClient(
+        "live-checkpoint",
+    ).?;
+    try std.testing.expectEqual(
+        sessionRouteSubscriberId(opened.route_id),
+        restored.will_publishers.get(restored_will).?,
+    );
+    const deadline = restored.wills.nextDeadline().?;
+    try std.testing.expect(
+        deadline.nanoseconds > std.Io.Clock.awake.now(io).nanoseconds,
+    );
+}
+
+test "MQTT live snapshot omits transient inbound QoS 2" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try createBroker(allocator, io);
+    defer source.deinit();
+    const now = std.Io.Clock.awake.now(io);
+    const transient_publisher: u64 = 11;
+    _ = try source.pending_qos2.record(
+        transient_publisher,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "transient/qos2",
+            .packet_id = 7,
+            .properties = &.{},
+            .payload = "not-durable",
+        },
+        now,
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source.saveLiveSnapshot(tmp.dir, "broker.db");
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "broker.db");
+    try std.testing.expectEqual(@as(usize, 0), restored.pending_qos2.count());
+}
+
+test "MQTT live snapshot rejects provisional registrations" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try createBroker(allocator, io);
+    defer broker.deinit();
+    broker.slots[0].active = true;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(
+        error.SnapshotBusy,
+        broker.saveLiveSnapshot(tmp.dir, "broker.db"),
+    );
+}
+
+test "MQTT live snapshot checkpoints an active broker connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                // Include an unused slot so the checkpoint also proves that
+                // inactive connection state cannot block live persistence.
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+            },
+        },
+    );
+    var serve = struct {
+        broker: *Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(1) catch |err| {
+                self.err = err;
+            };
+        }
+    }{ .broker = &source };
+    const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
+    var joined = false;
+    defer if (!joined) {
+        if (source.slots[0].connection) |*connection| {
+            connection.shutdown() catch {};
+        }
+        thread.join();
+    };
+
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = std.math.maxInt(u32),
+    } }};
+    var live = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        source.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "active-checkpoint",
+            .clean_start = false,
+            .properties = &expiry,
+            .will = delayedWill(10, false),
+        },
+    );
+    defer live.close();
+    var suback = try live.subscribe(
+        &.{.{ .topic_filter = "active/#", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    const packet_id = try live.writePublish(
+        "active/inbound-qos2",
+        "pending",
+        .{ .qos = .exactly_once },
+    );
+    var pubrec = try live.readPubRec();
+    defer pubrec.deinit(allocator);
+    try std.testing.expectEqual(packet_id.?, pubrec.ack.packet_id);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source.saveLiveSnapshot(tmp.dir, "broker.db");
+    // Checkpointing must not disconnect or otherwise poison the live client.
+    try live.ping();
+    try live.disconnect(0);
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+    // The source's post-checkpoint DISCONNECT intentionally canceled its live
+    // Will. The restored broker below models a crash at the checkpoint, so it
+    // must recover the independently encoded pre-disconnect Will instead.
+    source.deinit();
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "broker.db");
+    const restored_handle = restored.sessions.find(
+        "active-checkpoint",
+        std.Io.Clock.awake.now(io),
+    ).?;
+    const stats = try restored.sessions.stats(restored_handle);
+    try std.testing.expect(!stats.connected);
+    try std.testing.expectEqual(@as(usize, 1), stats.subscription_count);
+    try std.testing.expect(
+        restored.wills.handleForClient("active-checkpoint") != null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), restored.pending_qos2.count());
+}
+
 test "MQTT broker restart resumes Session and live routing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

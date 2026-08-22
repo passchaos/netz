@@ -300,6 +300,7 @@ pub const Broker = struct {
     ) = .empty,
     will_publishers: will_mod.PublisherMap = .empty,
     slots: []ClientSlot,
+    persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
 
     pub fn listen(
@@ -423,45 +424,109 @@ pub const Broker = struct {
 
     /// Atomically persist retained messages and durable Session State.
     ///
-    /// The state mutex gives the snapshot one coherent routing/persistence
-    /// point. Saving is intentionally restricted to a quiescent broker because
-    /// a live writer may already own an outgoing frame that has not yet been
-    /// reflected by its acknowledgement state. File I/O is synchronous:
-    /// callers choose the autosave/shutdown cadence, just as Mosquitto's broker
-    /// loop chooses when to run its database backup.
+    /// This strict API retains the original quiescent-only contract. Use
+    /// `saveLiveSnapshot` for a running broker. Both variants encode under the
+    /// state mutex and perform synchronous file I/O only after releasing it; a
+    /// separate persistence mutex preserves call order between concurrent
+    /// checkpoint writers.
     pub fn saveSnapshot(
         self: *Broker,
         dir: std.Io.Dir,
         sub_path: []const u8,
     ) Error!void {
-        self.state_mutex.lockUncancelable(self.io);
-        defer self.state_mutex.unlock(self.io);
-        for (self.slots) |slot| {
-            if (slot.active or slot.connection != null or
-                slot.queuedCount() != 0)
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            for (self.slots) |slot| {
+                if (slot.active or slot.connection != null or
+                    slot.queuedCount() != 0)
+                {
+                    return error.SnapshotBusy;
+                }
+            }
+            if (self.session_owners.count() != 0 or
+                self.will_publishers.count() != self.wills.count())
             {
                 return error.SnapshotBusy;
             }
-        }
-        if (self.session_owners.count() != 0 or
-            self.will_publishers.count() != self.wills.count())
-        {
-            return error.SnapshotBusy;
-        }
-        try persistence_mod.saveAtomic(
-            self.allocator,
+            break :blk try persistence_mod.encode(
+                self.allocator,
+                .{
+                    .retained = &self.retained,
+                    .sessions = &self.sessions,
+                    .wills = &self.wills,
+                    .will_publishers = &self.will_publishers,
+                    .pending_qos2 = &self.pending_qos2,
+                },
+                std.Io.Clock.awake.now(self.io),
+                std.Io.Clock.real.now(self.io),
+            );
+        };
+        defer self.allocator.free(encoded);
+        try persistence_mod.saveEncodedAtomic(
             self.io,
             dir,
             sub_path,
-            .{
-                .retained = &self.retained,
-                .sessions = &self.sessions,
-                .wills = &self.wills,
-                .will_publishers = &self.will_publishers,
-                .pending_qos2 = &self.pending_qos2,
-            },
-            std.Io.Clock.awake.now(self.io),
-            std.Io.Clock.real.now(self.io),
+            encoded,
+        );
+    }
+
+    /// Persist durable broker state while clients remain connected.
+    ///
+    /// The global state mutex freezes all durable ownership transitions while
+    /// encoding deep-copies every persistent value. Outgoing Session frames
+    /// are selected under this same mutex before their writer releases it, so
+    /// a checkpoint falls cleanly before or after that selection; restoring
+    /// any selected transaction retransmits it with DUP as MQTT requires. The
+    /// expensive write, fsync, and atomic rename happen after traffic is
+    /// unblocked. Callers can invoke this periodically to implement autosave;
+    /// concurrent snapshot calls are serialized by `persistence_mutex`.
+    ///
+    /// Volatile per-connection queues are deliberately excluded. Durable QoS
+    /// 1/2 fanout lives in Session State before a live flush begins, while QoS
+    /// 0, transient-Session delivery, and transient inbound QoS 2 do not
+    /// survive a broker crash.
+    pub fn saveLiveSnapshot(
+        self: *Broker,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+    ) Error!void {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            for (self.slots) |slot| {
+                // Registration becomes durable only once CONNACK succeeds and
+                // the accepted connection is attached. Retrying while this
+                // short transaction is in flight prevents a failed accept
+                // from manufacturing Session Present after restart.
+                if (slot.active and slot.connection == null) {
+                    return error.SnapshotBusy;
+                }
+            }
+            break :blk try persistence_mod.encodeLive(
+                self.allocator,
+                .{
+                    .retained = &self.retained,
+                    .sessions = &self.sessions,
+                    .wills = &self.wills,
+                    .will_publishers = &self.will_publishers,
+                    .pending_qos2 = &self.pending_qos2,
+                },
+                std.Io.Clock.awake.now(self.io),
+                std.Io.Clock.real.now(self.io),
+            );
+        };
+        defer self.allocator.free(encoded);
+
+        try persistence_mod.saveEncodedAtomic(
+            self.io,
+            dir,
+            sub_path,
+            encoded,
         );
     }
 
@@ -475,6 +540,8 @@ pub const Broker = struct {
         dir: std.Io.Dir,
         sub_path: []const u8,
     ) Error!void {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         for (self.slots) |slot| {
