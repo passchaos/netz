@@ -5,8 +5,15 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArguments;
+    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
     const port = try std.fmt.parseInt(u16, args[1], 10);
+    const expect_retry = if (args.len == 3 and
+        std.mem.eql(u8, args[2], "--expect-retry"))
+        true
+    else if (args.len == 2)
+        false
+    else
+        return error.InvalidArguments;
     const allocator = init.gpa;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -27,6 +34,11 @@ pub fn main(init: std.process.Init) !void {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                // Keep the retry flight in one Initial. The tquic endpoint
+                // routes each Initial datagram before connection state exists,
+                // so a multi-datagram post-quantum ClientHello would be split
+                // across distinct provisional connections in that peer.
+                .key_exchange_groups = &.{.x25519},
                 // The upstream tquic CLI does not provide a CA option. This
                 // direction matches that peer by leaving trust policy unset.
                 .max_crypto_buffer = 64 * 1024,
@@ -35,6 +47,10 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer client.deinit();
+    try std.testing.expectEqual(
+        expect_retry,
+        client.established.retry_processed,
+    );
 
     for ([_][]const u8{ "/one.txt", "/two.txt" }, 0..) |path, index| {
         var response = try client.request(.{
@@ -56,8 +72,8 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with tquic: requests=2 connection_reused=true bodies=9,9\n",
-        .{},
+        "netz HTTP/3 client interoperated with tquic: retry={} requests=2 connection_reused=true bodies=9,9\n",
+        .{expect_retry},
     );
 }
 

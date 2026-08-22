@@ -51,41 +51,69 @@ mkdir -p "$work/www" "$work/downloads"
 printf 'tquic-one' >"$work/www/one.txt"
 printf 'tquic-two' >"$work/www/two.txt"
 
-port=$(free_udp_port)
-"$tquic_server" -l "127.0.0.1:$port" -c "$work/cert.pem" \
-  -k "$work/key.pem" -r "$work/www" --log-level OFF \
-  >"$work/tquic-server.log" 2>&1 &
-server_pid=$!
-sleep 0.2
-timeout 20s "$netz_client" "$port" >"$work/netz-client.log" 2>&1
-grep -Fq 'netz HTTP/3 client interoperated with tquic: requests=2 connection_reused=true bodies=9,9' "$work/netz-client.log"
-cat "$work/netz-client.log"
-kill "$server_pid" 2>/dev/null || true
-wait "$server_pid" 2>/dev/null || true
-server_pid=
-
-port=$(free_udp_port)
-"$netz_server" "$port" >"$work/netz-server.log" 2>&1 &
-server_pid=$!
-for _ in $(seq 1 100); do
-  grep -q 'netz HTTP/3 tquic interop server listening' \
-    "$work/netz-server.log" && break
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    cat "$work/netz-server.log" >&2
-    exit 1
+run_netz_client_case() {
+  local retry=$1
+  local port
+  port=$(free_udp_port)
+  local server_args=() client_args=()
+  if [[ "$retry" == true ]]; then
+    server_args+=(--enable-retry)
+    client_args+=(--expect-retry)
   fi
-  sleep 0.05
-done
-timeout 20s "$tquic_client" -c "127.0.0.1:$port" -a h3 \
-  --max-concurrent-requests 2 --max-requests-per-conn 2 \
-  --total-requests-per-thread 2 --dump-dir "$work/downloads" \
-  --log-level OFF "https://localhost:$port/one.txt" \
-  "https://localhost:$port/two.txt" >"$work/tquic-client.log" 2>&1
-wait "$server_pid"
-server_pid=
-grep -Fq 'requests: sent 2, finish 2, success 2' "$work/tquic-client.log"
-grep -Fq 'netz HTTP/3 server interoperated with tquic: requests=2 connection_reused=true bodies=14,14' "$work/netz-server.log"
-test "$(cat "$work/downloads/one.txt")" = 'netz-tquic-one'
-test "$(cat "$work/downloads/two.txt")" = 'netz-tquic-two'
-cat "$work/tquic-client.log"
-cat "$work/netz-server.log"
+  "$tquic_server" -l "127.0.0.1:$port" -c "$work/cert.pem" \
+    -k "$work/key.pem" -r "$work/www" --log-level OFF \
+    "${server_args[@]}" >"$work/tquic-server-$retry.log" 2>&1 &
+  server_pid=$!
+  sleep 0.2
+  timeout 20s "$netz_client" "$port" "${client_args[@]}" \
+    >"$work/netz-client-$retry.log" 2>&1
+  grep -Fq "netz HTTP/3 client interoperated with tquic: retry=$retry requests=2 connection_reused=true bodies=9,9" \
+    "$work/netz-client-$retry.log"
+  cat "$work/netz-client-$retry.log"
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=
+}
+
+run_tquic_client_case() {
+  local retry=$1
+  local port
+  port=$(free_udp_port)
+  local server_args=()
+  if [[ "$retry" == true ]]; then
+    server_args+=(--retry)
+  fi
+  "$netz_server" "$port" "${server_args[@]}" \
+    >"$work/netz-server-$retry.log" 2>&1 &
+  server_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'netz HTTP/3 tquic interop server listening' \
+      "$work/netz-server-$retry.log" && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      cat "$work/netz-server-$retry.log" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  timeout 20s "$tquic_client" -c "127.0.0.1:$port" -a h3 \
+    --max-concurrent-requests 2 --max-requests-per-conn 2 \
+    --total-requests-per-thread 2 --dump-dir "$work/downloads" \
+    --log-level OFF "https://localhost:$port/one.txt" \
+    "https://localhost:$port/two.txt" \
+    >"$work/tquic-client-$retry.log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq 'requests: sent 2, finish 2, success 2' \
+    "$work/tquic-client-$retry.log"
+  grep -Fq "netz HTTP/3 server interoperated with tquic: retry=$retry requests=2 connection_reused=true bodies=14,14" \
+    "$work/netz-server-$retry.log"
+  test "$(cat "$work/downloads/one.txt")" = 'netz-tquic-one'
+  test "$(cat "$work/downloads/two.txt")" = 'netz-tquic-two'
+  cat "$work/tquic-client-$retry.log"
+  cat "$work/netz-server-$retry.log"
+}
+
+run_netz_client_case false
+run_netz_client_case true
+run_tquic_client_case false
+run_tquic_client_case true

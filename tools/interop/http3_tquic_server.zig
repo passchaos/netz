@@ -5,8 +5,15 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArguments;
+    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
     const port = try std.fmt.parseInt(u16, args[1], 10);
+    const force_retry = if (args.len == 3 and
+        std.mem.eql(u8, args[2], "--retry"))
+        true
+    else if (args.len == 2)
+        false
+    else
+        return error.InvalidArguments;
     const allocator = init.gpa;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -33,6 +40,15 @@ pub fn main(init: std.process.Init) !void {
                     .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
                 },
                 .max_crypto_buffer = 64 * 1024,
+                .retry = if (force_retry) .{
+                    .secret = [_]u8{0x72} **
+                        netz.quic.address_validation_token.secret_len,
+                    .peer_address = "127.0.0.1",
+                    .issued_ns = 1,
+                    .lifetime_ns = 60 * std.time.ns_per_s,
+                    .nonce = [_]u8{0x73} **
+                        netz.quic.address_validation_token.nonce_len,
+                } else null,
             },
             .session = .{ .max_stream_buffer = 64 * 1024 },
         },
@@ -42,6 +58,10 @@ pub fn main(init: std.process.Init) !void {
 
     var session = try server.accept();
     defer session.deinit();
+    try std.testing.expectEqual(
+        force_retry,
+        session.established.retry_processed,
+    );
     var seen: [2]bool = .{ false, false };
     for (0..2) |_| {
         var request = try session.receiveRequest();
@@ -66,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz HTTP/3 server interoperated with tquic: requests=2 connection_reused=true bodies=14,14\n",
-        .{},
+        "netz HTTP/3 server interoperated with tquic: retry={} requests=2 connection_reused=true bodies=14,14\n",
+        .{force_retry},
     );
 }
