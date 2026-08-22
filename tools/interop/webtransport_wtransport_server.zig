@@ -64,7 +64,10 @@ fn receiveExpectedStream(
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    // Browser certificate hashes impose a <=14-day validity window, so the
+    // Chrome gate supplies a freshly generated DER leaf and raw P-256 scalar.
+    // Native wtransport interop keeps using the stable built-in test identity.
+    if (args.len != 2 and args.len != 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
 
@@ -75,14 +78,39 @@ pub fn main(init: std.process.Init) !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var certificate_der: [
+    var built_in_certificate_der: [
         netz.tls.testing.certificate_der_len
     ]u8 = undefined;
     try std.base64.standard.Decoder.decode(
-        &certificate_der,
+        &built_in_certificate_der,
         netz.tls.testing.certificate_base64,
     );
-    const key_pair = try netz.tls.testing.serverKeyPair();
+    var owned_certificate_der: ?[]u8 = null;
+    defer if (owned_certificate_der) |bytes| allocator.free(bytes);
+    var owned_private_scalar: ?[]u8 = null;
+    defer if (owned_private_scalar) |bytes| allocator.free(bytes);
+    const certificate_der: []const u8 = if (args.len == 4) blk: {
+        owned_certificate_der = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            args[2],
+            allocator,
+            .limited(16 * 1024),
+        );
+        break :blk owned_certificate_der.?;
+    } else &built_in_certificate_der;
+    const key_pair = if (args.len == 4) blk: {
+        owned_private_scalar = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            args[3],
+            allocator,
+            .limited(33),
+        );
+        if (owned_private_scalar.?.len != 32) return error.InvalidArgument;
+        const secret = try std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey
+            .fromBytes(owned_private_scalar.?[0..32].*);
+        break :blk try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair
+            .fromSecretKey(secret);
+    } else try netz.tls.testing.serverKeyPair();
     const server_cid = [_]u8{ 0x77, 0x74, 0x69, 0x6f, 0x70, 0x00, 0x00, 0x01 };
 
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
@@ -100,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
                 .local_connection_id = &server_cid,
                 .max_crypto_buffer = 64 * 1024,
                 .identity = .{
-                    .certificate_chain = &.{&certificate_der},
+                    .certificate_chain = &.{certificate_der},
                     .signer = .{ .ecdsa_p256_sha256 = .{
                         .key_pair = key_pair,
                     } },

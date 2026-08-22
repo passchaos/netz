@@ -14,6 +14,7 @@ zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
+zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 ```
 
 The external interoperability gate builds the audited `~/Work/wtransport`
@@ -42,6 +43,20 @@ follow an Initial ACK in the same UDP datagram, modern peers may omit the older
 Capsule-Protocol and per-session stream-limit settings, and HTTP/3 critical
 stream IDs must not be hidden from WebTransport association based only on
 their numeric values.
+
+The Chrome gate drives the browser's real `WebTransport` API through
+Puppeteer, not a native QUIC substitute. It generates a fresh P-256 localhost
+identity because the browser's `serverCertificateHashes` exception requires a
+certificate validity period of at most two weeks. The gate verifies CONNECT,
+DATAGRAM, bidirectional and unidirectional streams, RESET_STREAM code 71,
+STOP_SENDING code 72, sibling reuse, and clean session close. Chrome coalesces
+its Handshake Finished and first 1-RTT control-stream packet in one UDP
+datagram; netz now retains that short-header suffix through the blocking TLS
+transition instead of silently dropping the peer's HTTP/3 SETTINGS. Chrome
+also correctly omits the server-facing ENABLE_CONNECT_PROTOCOL setting from
+its client SETTINGS, so WebTransport negotiation treats that setting as a
+directional server capability while still requiring the client's WebTransport
+and H3 DATAGRAM advertisements.
 
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:
@@ -194,9 +209,12 @@ lightweight protected transport does not own a stateful recovery connection.
    a full `one_rtt.Connection`; association streams must not be advertised
    until ACK, recovery, flow control and reset/stop state share one connection
    owner.
-2. Add browser WebTransport evidence. The checked-in wtransport gate now
-   covers both client/server directions across CONNECT, DATAGRAM, and
-   bidirectional/unidirectional streams. Each direction now sends and observes
+2. Expand browser coverage beyond Chromium. The checked-in Chrome gate now
+   covers real browser CONNECT, DATAGRAM, bidirectional/unidirectional streams,
+   exact mapped RESET_STREAM and STOP_SENDING codes, sibling reuse, and close.
+   The wtransport gate also covers both client/server directions across
+   CONNECT, DATAGRAM, and bidirectional/unidirectional streams. Each direction
+   now sends and observes
    exact mapped RESET_STREAM and STOP_SENDING codes. The next bidirectional
    stream is opened before cancellation and the response is gated on peer
    observation, so completion proves a concurrent sibling survives. The
@@ -204,8 +222,8 @@ lightweight protected transport does not own a stateful recovery connection.
    completes only after transport recovery delivers the exact code. Its
    wtransport-client half also
    checks the detailed session-close capsule, while its wtransport-server half
-   checks netz's peer QUIC application-close code and reason handling. Browser
-   coverage remains distinct and is not inferred from this native peer.
+   checks netz's peer QUIC application-close code and reason handling. Firefox
+   and Safari browser automation remain separate gaps.
 3. Add larger long-run stream-churn distributions; concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The

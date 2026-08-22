@@ -288,7 +288,11 @@ pub fn defaultSettings(settings: http3.Settings) http3.Settings {
 }
 
 pub fn ensureNegotiated(local: http3.Settings, peer: http3.Settings) Error!void {
-    if (!local.enable_connect_protocol or !peer.enable_connect_protocol) return error.WebTransportNotNegotiated;
+    // RFC 9220's ENABLE_CONNECT_PROTOCOL setting is an HTTP/3 capability that
+    // servers advertise to clients. A WebTransport client proves its use of
+    // Extended CONNECT with the validated :protocol pseudo-header; Chromium
+    // therefore does not echo the setting in its client SETTINGS frame.
+    if (!local.enable_connect_protocol) return error.WebTransportNotNegotiated;
     if (!enabled(local) or !enabled(peer)) return error.WebTransportNotNegotiated;
 }
 
@@ -558,6 +562,13 @@ test "WebTransport settings negotiation and datagram budget" {
     };
     try ensureDatagramsNegotiated(local, peer);
     try std.testing.expect(enabled(peer));
+    var chrome_peer = peer;
+    chrome_peer.enable_connect_protocol = false;
+    try ensureDatagramsNegotiated(local, chrome_peer);
+    try std.testing.expectError(
+        error.WebTransportNotNegotiated,
+        ensureDatagramsNegotiated(.{}, chrome_peer),
+    );
     try std.testing.expectEqual(@as(?usize, 1199), maxDatagramPayloadSize(1200, .init(0)));
     try std.testing.expectEqual(@as(?usize, 1198), maxDatagramPayloadSize(1200, .init(256)));
     try std.testing.expectError(error.DatagramsNotNegotiated, ensureDatagramsNegotiated(local, .{

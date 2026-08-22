@@ -342,6 +342,18 @@ pub fn build(b: *std.Build) void {
         &webtransport_wtransport.step,
     );
 
+    const webtransport_chrome = b.addSystemCommand(&.{
+        "tools/interop/webtransport_chrome.sh",
+    });
+    webtransport_chrome.addArtifactArg(
+        webtransport_wtransport_server,
+    );
+    const webtransport_chrome_step = b.step(
+        "interop-webtransport-chrome",
+        "Exercise WebTransport CONNECT, datagrams, streams, cancellation, and close with Chrome",
+    );
+    webtransport_chrome_step.dependOn(&webtransport_chrome.step);
+
     const example_specs = [_]struct {
         exe_name: []const u8,
         path: []const u8,

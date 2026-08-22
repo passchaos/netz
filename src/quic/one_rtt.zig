@@ -599,6 +599,11 @@ fn isDiscardedLongHeaderPacket(bytes: []const u8) bool {
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
     config: ConnectionConfig,
+    /// One 1-RTT packet may share the UDP datagram that completes the TLS
+    /// Handshake packet-number space. The blocking handshake must retain that
+    /// suffix until the application runtime is installed; otherwise HTTP/3 can
+    /// lose the peer's control stream and first request permanently.
+    pending_received_datagram: ?quic.runtime.OwnedBytes = null,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
     received: quic.packet_space.ReceivedPacketTracker,
@@ -768,6 +773,9 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        if (self.pending_received_datagram) |*datagram| {
+            datagram.deinit(self.endpoint.allocator);
+        }
         self.received.deinit();
         self.sent.deinit();
         self.recovery.deinit();
@@ -4144,6 +4152,62 @@ pub const Connection = struct {
         return self.receivePacketAt(self.monotonicNowNs());
     }
 
+    /// Retain the application-data suffix of a coalesced handshake datagram.
+    ///
+    /// QUIC short headers carry no packet length, so this slice must be the last
+    /// packet in its UDP datagram. It is intentionally consumed through the
+    /// normal receive pipeline later, allowing HTTP/3 to observe its STREAM
+    /// frames while transport state is updated exactly once.
+    pub fn preloadReceivedDatagram(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!void {
+        if (bytes.len == 0 or self.pending_received_datagram != null) {
+            return error.InvalidPacket;
+        }
+        self.pending_received_datagram = .{
+            .from = from,
+            .bytes = try self.endpoint.allocator.dupe(u8, bytes),
+            .ecn = ecn,
+        };
+    }
+
+    fn takePendingReceivedDatagram(
+        self: *Connection,
+    ) ?quic.runtime.OwnedBytes {
+        const pending = self.pending_received_datagram orelse return null;
+        self.pending_received_datagram = null;
+        return pending;
+    }
+
+    fn receivePendingPacketAt(
+        self: *Connection,
+        now_ns: ?u64,
+    ) Error!?ReceivedPacket {
+        var pending = self.takePendingReceivedDatagram() orelse return null;
+        defer pending.deinit(self.endpoint.allocator);
+        return try self.processReceivedBytesAt(
+            pending.from,
+            pending.bytes,
+            pending.ecn,
+            now_ns,
+        );
+    }
+
+    fn receivePendingPacketBatchAt(
+        self: *Connection,
+        now_ns: ?u64,
+    ) Error!?ReceivedPacketBatch {
+        var packet = (try self.receivePendingPacketAt(now_ns)) orelse
+            return null;
+        errdefer packet.deinit(self.endpoint.allocator);
+        const packets = try self.endpoint.allocator.alloc(ReceivedPacket, 1);
+        packets[0] = packet;
+        return .{ .allocator = self.endpoint.allocator, .packets = packets };
+    }
+
     /// Receive one packet while continuing to service QUIC timers.
     ///
     /// Blocking HTTP/3 helpers use this when they are waiting for ACK,
@@ -4154,6 +4218,8 @@ pub const Connection = struct {
     /// the next transport deadline, services the timer on timeout, and then
     /// resumes waiting.
     pub fn receivePacketServicingTimers(self: *Connection) Error!ReceivedPacket {
+        if (try self.receivePendingPacketAt(self.monotonicNowNs())) |packet|
+            return packet;
         while (true) {
             var datagram = try self.receiveBytesServicingTimers();
             defer datagram.deinit(self.endpoint.allocator);
@@ -4281,6 +4347,7 @@ pub const Connection = struct {
 
     pub fn receivePacketAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        if (try self.receivePendingPacketAt(now_ns)) |packet| return packet;
         while (true) {
             var datagram = try self.endpoint.receiveBytes();
             defer datagram.deinit(self.endpoint.allocator);
@@ -4309,6 +4376,8 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
+        if (try self.receivePendingPacketAt(self.monotonicNowNs())) |packet|
+            return packet;
         const deadline = timeout.toDeadline(self.endpoint.io);
         while (true) {
             var datagram = try self.endpoint.receiveBytesTimeout(deadline);
@@ -4439,6 +4508,7 @@ pub const Connection = struct {
 
     pub fn receivePacketBatchAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacketBatch {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        if (try self.receivePendingPacketBatchAt(now_ns)) |batch| return batch;
         while (true) {
             var datagrams = try self.endpoint.receiveBytesBatch();
             defer datagrams.deinit(self.endpoint.allocator);
@@ -4493,6 +4563,8 @@ pub const Connection = struct {
     pub fn receivePacketBatchServicingTimers(
         self: *Connection,
     ) Error!ReceivedPacketBatch {
+        if (try self.receivePendingPacketBatchAt(self.monotonicNowNs())) |batch|
+            return batch;
         while (true) {
             const timer = self.nextTimerDeadline() orelse {
                 return self.receivePacketBatchServicingAckDrivenRecovery();
@@ -4641,6 +4713,18 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
+        if (self.takePendingReceivedDatagram()) |pending_value| {
+            var pending = pending_value;
+            defer pending.deinit(self.endpoint.allocator);
+            return self.processReceivedBytesVisitingAt(
+                pending.from,
+                pending.bytes,
+                pending.ecn,
+                now_ns,
+                context,
+                visitor,
+            );
+        }
         while (true) {
             const datagram = try self.endpoint.receiveBytesInto(
                 self.receive_packet_buffer.allocatedSlice(),
@@ -4666,6 +4750,18 @@ pub const Connection = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
+        if (self.takePendingReceivedDatagram()) |pending_value| {
+            var pending = pending_value;
+            defer pending.deinit(self.endpoint.allocator);
+            return self.processReceivedBytesVisitingAt(
+                pending.from,
+                pending.bytes,
+                pending.ecn,
+                self.monotonicNowNs(),
+                context,
+                visitor,
+            );
+        }
         const datagram = try self.receiveBytesIntoServicingTimers();
 
         const Context = @TypeOf(context);
@@ -4844,6 +4940,18 @@ pub const Connection = struct {
 
     pub fn servicePacketBatchAt(self: *Connection, now_ns: ?u64) Error!usize {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        if (self.takePendingReceivedDatagram()) |pending_value| {
+            var pending = pending_value;
+            defer pending.deinit(self.endpoint.allocator);
+            var packet = try self.processReceivedBytesAt(
+                pending.from,
+                pending.bytes,
+                pending.ecn,
+                now_ns,
+            );
+            packet.deinit(self.endpoint.allocator);
+            return 1;
+        }
         var datagrams = try self.endpoint.receiveBytesBatch();
         defer datagrams.deinit(self.endpoint.allocator);
 

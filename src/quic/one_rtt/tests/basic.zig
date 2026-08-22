@@ -42,6 +42,75 @@ fn sendPayloadForTest(
     try endpoint.sendBytes(peer, packet);
 }
 
+test "QUIC 1-RTT consumes a preloaded coalesced-handshake suffix first" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x8f} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+    });
+    defer connection.deinit();
+
+    const payload = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 3,
+        .data = "client control",
+        .fin = false,
+    } }};
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try payload[0].write(&encoded, allocator);
+    const packet = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "server",
+        .packet_number = 3,
+        .payload = encoded.items,
+    });
+    defer allocator.free(packet);
+    // `preloadReceivedDatagram` takes a copy, matching the handshake's need to
+    // release the larger coalesced UDP receive buffer before returning.
+    try connection.preloadReceivedDatagram(sender.address(), packet, .ect0);
+    try std.testing.expectError(
+        error.InvalidPacket,
+        connection.preloadReceivedDatagram(sender.address(), packet, .not_ect),
+    );
+
+    var received = try connection.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), received.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 1), received.frames.len);
+    try std.testing.expectEqualStrings(
+        "client control",
+        received.frames[0].stream.data,
+    );
+    try std.testing.expectError(
+        error.InvalidPacket,
+        connection.preloadReceivedDatagram(sender.address(), &.{}, .not_ect),
+    );
+}
+
 test "QUIC 1-RTT batch send protects consecutive packets" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

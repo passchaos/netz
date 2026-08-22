@@ -1866,6 +1866,13 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         ),
     );
     errdefer established.deinit();
+    if (client_handshake.coalesced_one_rtt) |bytes| {
+        try established.connection.preloadReceivedDatagram(
+            client_handshake.from,
+            bytes,
+            client_handshake_datagram.ecn,
+        );
+    }
     if (pending_early_data) |*early_data| {
         try established.connection.applyEarlyDataFrames(
             early_data.packet.packet_number,
@@ -1947,10 +1954,23 @@ fn openClientHandshakeCryptoFromDatagram(
                 u8,
                 reassembler.available(),
             );
+            errdefer endpoint.allocator.free(crypto_data);
+            const one_rtt_tail = try coalescedOneRttTail(
+                datagram,
+                allow_zero_fixed_bit,
+            );
+            const coalesced_one_rtt = if (one_rtt_tail.len == 0)
+                null
+            else
+                try endpoint.allocator.dupe(u8, one_rtt_tail);
+            errdefer if (coalesced_one_rtt) |bytes| {
+                endpoint.allocator.free(bytes);
+            };
             const result = quic.initial_exchange.ReceivedHandshakeCrypto{
                 .from = from,
                 .packet = first_packet.?,
                 .crypto_data = crypto_data,
+                .coalesced_one_rtt = coalesced_one_rtt,
             };
             first_packet = null;
             return result;
@@ -1960,6 +1980,24 @@ fn openClientHandshakeCryptoFromDatagram(
         }
     }
     return error.MissingCryptoFrame;
+}
+
+fn coalescedOneRttTail(
+    bytes: []const u8,
+    allow_zero_fixed_bit: bool,
+) Error![]const u8 {
+    var tail = bytes;
+    // Long-header packets carry an explicit length and can be skipped. The
+    // first short header consumes the rest of the UDP datagram by definition.
+    while (tail.len != 0 and (tail[0] & 0x80) != 0) {
+        const info = try quic.protection
+            .peekProtectedLongPacketInfoWithFixedBitPolicy(
+            tail,
+            allow_zero_fixed_bit,
+        );
+        tail = tail[info.len..];
+    }
+    return tail;
 }
 
 test "QUIC server finds Client Finished behind coalesced Initial" {
@@ -2022,11 +2060,31 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
         },
     );
     defer allocator.free(handshake);
+    const application_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var application_payload: std.ArrayList(u8) = .empty;
+    defer application_payload.deinit(allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 2,
+        .data = "client control",
+        .fin = false,
+    } }).write(&application_payload, allocator);
+    const application = try quic.protection.sealShortPacket(
+        allocator,
+        application_keys,
+        .{
+            .destination_connection_id = dcid,
+            .packet_number = 3,
+            .payload = application_payload.items,
+        },
+    );
+    defer allocator.free(application);
 
     const coalesced = try std.mem.concat(
         allocator,
         u8,
-        &.{ initial, handshake },
+        &.{ initial, handshake, application },
     );
     defer allocator.free(coalesced);
     try std.testing.expect(containsHandshakePacket(coalesced));
@@ -2045,6 +2103,11 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
         u8,
         &finished,
         opened.crypto_data,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        application,
+        opened.coalesced_one_rtt.?,
     );
 }
 
