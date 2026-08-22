@@ -208,3 +208,9 @@ run_s2n_client_case reset s2n_reset \
 run_s2n_client_case stop s2n_stop \
   's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=58' \
   'netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=58'
+run_s2n_client_case lossy-reset s2n_reset_loss \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58' \
+  'netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58'
+run_s2n_client_case lossy-stop s2n_stop_loss \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58' \
+  'netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58'

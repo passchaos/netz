@@ -13,6 +13,8 @@ enum Scenario {
     Echo,
     Reset,
     Stop,
+    LossyReset,
+    LossyStop,
     Flow,
     Retry,
 }
@@ -57,7 +59,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry] | client PORT CA [echo|reset|stop]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop]"
         ),
     }
 }
@@ -67,6 +69,8 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "echo" => Ok(Scenario::Echo),
         "reset" => Ok(Scenario::Reset),
         "stop" => Ok(Scenario::Stop),
+        "lossy-reset" => Ok(Scenario::LossyReset),
+        "lossy-stop" => Ok(Scenario::LossyStop),
         "flow" => Ok(Scenario::Flow),
         "retry" => Ok(Scenario::Retry),
         value => bail!("unknown scenario: {value}"),
@@ -85,6 +89,10 @@ async fn run_server(
     private_key: &str,
     scenario: Scenario,
 ) -> Result<()> {
+    ensure!(
+        scenario != Scenario::LossyReset && scenario != Scenario::LossyStop,
+        "lossy cancellation scenarios are client-only"
+    );
     let mut tls_builder = tls::default::Server::builder();
     tls_builder
         .config_mut()
@@ -121,6 +129,7 @@ async fn run_server(
         Scenario::Echo | Scenario::Retry => echo_two_streams(&mut connection).await?,
         Scenario::Reset => serve_reset(&mut connection).await?,
         Scenario::Stop => serve_stop(&mut connection).await?,
+        Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => serve_flow(&mut connection).await?,
     }
     // Let the endpoint transmit both queued responses before application close
@@ -140,6 +149,7 @@ async fn run_server(
         Scenario::Stop => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=57"
         ),
+        Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288 peer_close=57"
         ),
@@ -181,6 +191,8 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::Echo => request_two_echoes(&mut connection).await?,
         Scenario::Reset => request_reset(&mut connection).await?,
         Scenario::Stop => request_stop(&mut connection).await?,
+        Scenario::LossyReset => request_peer_reset(&mut connection).await?,
+        Scenario::LossyStop => request_stop(&mut connection).await?,
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
     }
@@ -207,6 +219,12 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         ),
         Scenario::Stop => println!(
             "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=58"
+        ),
+        Scenario::LossyReset => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58"
+        ),
+        Scenario::LossyStop => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58"
         ),
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
@@ -341,6 +359,45 @@ async fn request_reset(connection: &mut Connection) -> Result<()> {
     target.send(Bytes::from_static(b"reset")).await?;
     target.reset(41u8.into())?;
     request_sibling(connection).await
+}
+
+async fn request_peer_reset(connection: &mut Connection) -> Result<()> {
+    let mut target = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
+    ensure!(target.id() == 0, "unexpected target stream id");
+    target.send(Bytes::from_static(b"reset")).await?;
+
+    let mut sibling = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
+    ensure!(sibling.id() == 4, "unexpected sibling stream id");
+    sibling.send(Bytes::copy_from_slice(PAYLOADS[1])).await?;
+
+    // Keep stream 4 open while the peer's first RESET_STREAM datagram is
+    // deliberately lost. Its FIN acts as an application-level receipt: the
+    // netz server cannot finish the sibling or close the connection until this
+    // client has observed the retransmitted cancellation with the exact code.
+    let reset_result = timeout(TIMEOUT, async {
+        loop {
+            match target.receive().await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!("target finished instead of resetting"),
+                Err(error) => break Ok(error),
+            }
+        }
+    })
+    .await
+    .context("RESET_STREAM timed out after injected loss")??;
+    match reset_result {
+        s2n_quic::stream::Error::StreamReset { error, .. } => {
+            ensure!(u64::from(error) == 41, "unexpected reset code");
+        }
+        other => bail!("unexpected reset result: {other}"),
+    }
+
+    sibling.finish()?;
+    ensure!(
+        receive_all(&mut sibling).await? == PAYLOADS[1],
+        "unexpected sibling echo"
+    );
+    Ok(())
 }
 
 async fn request_stop(connection: &mut Connection) -> Result<()> {

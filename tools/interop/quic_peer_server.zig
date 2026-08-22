@@ -37,6 +37,31 @@ const Mode = enum {
     s2n,
     s2n_reset,
     s2n_stop,
+    s2n_reset_loss,
+    s2n_stop_loss,
+};
+
+const CancellationLoss = struct {
+    armed: std.atomic.Value(bool) = .init(false),
+    dropped: std.atomic.Value(usize) = .init(0),
+
+    fn arm(self: *CancellationLoss) void {
+        self.armed.store(true, .release);
+    }
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *CancellationLoss = @ptrCast(@alignCast(context));
+        if (!self.armed.load(.acquire)) return false;
+        // The fixture arms this immediately before the cancellation API. The
+        // first post-arm datagram therefore contains RESET_STREAM or
+        // STOP_SENDING, while staying independent of encrypted packet layout.
+        return self.dropped.cmpxchgStrong(
+            0,
+            1,
+            .acq_rel,
+            .acquire,
+        ) == null;
+    }
 };
 
 fn receiveExpectedStream(
@@ -52,6 +77,32 @@ fn receiveExpectedStream(
         expected,
         .{},
     );
+}
+
+fn receiveExpectedPrefix(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    expected: []const u8,
+) !void {
+    while (true) {
+        if (connection.availableReceivedStream(stream_id)) |available| {
+            const prefix_len = @min(available.len, expected.len);
+            if (!std.mem.eql(
+                u8,
+                available[0..prefix_len],
+                expected[0..prefix_len],
+            )) return error.UnexpectedRequest;
+            if (available.len >= expected.len) {
+                try connection.releaseReceivedCapacity(
+                    stream_id,
+                    expected.len,
+                );
+                return;
+            }
+        }
+        try receivePacket(connection, allocator);
+    }
 }
 
 const ReceiveExpectedStreamOptions = struct {
@@ -192,11 +243,21 @@ pub fn main(init: std.process.Init) !void {
     );
     const key_pair = try netz.tls.testing.serverKeyPair();
 
+    var cancellation_loss = CancellationLoss{};
+    var endpoint_limits: netz.quic.runtime.Limits = .{
+        .max_datagram_size = 8192,
+    };
+    if (mode == .s2n_reset_loss or mode == .s2n_stop_loss) {
+        endpoint_limits.send_interceptor = .{
+            .context = &cancellation_loss,
+            .should_drop = CancellationLoss.shouldDrop,
+        };
+    }
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(port) },
-        .{ .max_datagram_size = 8192 },
+        endpoint_limits,
     );
     defer endpoint.deinit();
     std.debug.print(
@@ -448,26 +509,34 @@ pub fn main(init: std.process.Init) !void {
             );
             try sendEcho(&established.connection, 4, payloads[1]);
         },
-        .stop, .s2n_stop => {
+        .s2n_reset_loss => {
+            try receiveExpectedPrefix(
+                &established.connection,
+                allocator,
+                0,
+                "reset",
+            );
+            cancellation_loss.arm();
+            try established.connection.resetStream(0, 41);
+            try receiveExpectedStream(
+                &established.connection,
+                allocator,
+                4,
+                payloads[1],
+            );
+            try sendEcho(&established.connection, 4, payloads[1]);
+        },
+        .stop, .s2n_stop, .s2n_stop_loss => {
             // quic-go can append probe bytes immediately after "stop" while
             // waiting for STOP_SENDING. Validate only the stable prefix before
             // cancelling its send side; RESET_STREAM supplies the final size.
-            while (true) {
-                if (established.connection.availableReceivedStream(0)) |available| {
-                    const prefix_len = @min(available.len, "stop".len);
-                    if (!std.mem.eql(u8, available[0..prefix_len], "stop"[0..prefix_len])) {
-                        return error.UnexpectedRequest;
-                    }
-                    if (available.len >= "stop".len) {
-                        try established.connection.releaseReceivedCapacity(
-                            0,
-                            "stop".len,
-                        );
-                        break;
-                    }
-                }
-                try receivePacket(&established.connection, allocator);
-            }
+            try receiveExpectedPrefix(
+                &established.connection,
+                allocator,
+                0,
+                "stop",
+            );
+            if (mode == .s2n_stop_loss) cancellation_loss.arm();
             try established.connection.sendStopSending(0, 42);
             while (established.connection.streamResetReceived(0) == null) {
                 try receivePacket(&established.connection, allocator);
@@ -543,7 +612,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (mode == .peer_close or mode == .s2n or
-        mode == .s2n_reset or mode == .s2n_stop)
+        mode == .s2n_reset or mode == .s2n_stop or
+        mode == .s2n_reset_loss or mode == .s2n_stop_loss)
     {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
@@ -563,6 +633,24 @@ pub fn main(init: std.process.Init) !void {
                 "netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
                 .{},
             ),
+            .s2n_reset_loss => {
+                if (cancellation_loss.dropped.load(.acquire) != 1) {
+                    return error.CancellationDatagramNotDropped;
+                }
+                std.debug.print(
+                    "netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
+                    .{},
+                );
+            },
+            .s2n_stop_loss => {
+                if (cancellation_loss.dropped.load(.acquire) != 1) {
+                    return error.CancellationDatagramNotDropped;
+                }
+                std.debug.print(
+                    "netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
+                    .{},
+                );
+            },
             .peer_close => std.debug.print(
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
@@ -610,6 +698,8 @@ pub fn main(init: std.process.Init) !void {
         .s2n => unreachable,
         .s2n_reset => unreachable,
         .s2n_stop => unreachable,
+        .s2n_reset_loss => unreachable,
+        .s2n_stop_loss => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,
