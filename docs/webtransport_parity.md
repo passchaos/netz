@@ -45,7 +45,10 @@ stream IDs must not be hidden from WebTransport association based only on
 their numeric values.
 Both native endpoint roles now expose the negotiated WebTransport application
 payload limit as `maxDatagramSize`, subtracting QUIC DATAGRAM framing and the
-session-ID prefix. The gate compares this with wtransport's corresponding API
+session-ID prefix. The underlying QUIC query also subtracts the current path
+MTU's short-header, adaptive packet-number, and AEAD overhead rather than
+reporting only the peer's DATAGRAM frame allowance. The gate compares this
+with wtransport's corresponding API
 and requires both implementations to reject an allocation-backed payload one
 byte above their independently reported limit before continuing normally.
 

@@ -1806,6 +1806,30 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
     try one_rtt.testing.validateDatagramFrame(limited, .{ .data = "1234567", .length_present = false });
     try std.testing.expectError(error.InvalidFrame, one_rtt.testing.validateDatagramFrame(limited, .{ .data = "12345678", .length_present = false }));
 
+    var path_limited = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &cid,
+        .peer_connection_id = &cid,
+        .max_datagram_size = 1200,
+        .local_max_datagram_frame_size = 4096,
+        .peer_max_datagram_frame_size = 4096,
+    });
+    defer path_limited.deinit();
+    const path_payload_limit = path_limited.maxDatagramPayloadSize() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(path_payload_limit < 1200);
+    const fitting_payload = try allocator.alloc(u8, path_payload_limit);
+    defer allocator.free(fitting_payload);
+    try path_limited.sendDatagram(fitting_payload);
+    const oversized_payload = try allocator.alloc(u8, path_payload_limit + 1);
+    defer allocator.free(oversized_payload);
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        path_limited.sendDatagram(oversized_payload),
+    );
+
     var limited_rx_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
     defer limited_rx_endpoint.deinit();
     const limited_rx_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };

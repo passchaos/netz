@@ -1572,7 +1572,34 @@ pub const Connection = struct {
 
     pub fn maxDatagramPayloadSize(self: Connection) ?usize {
         const frame_limit = self.config.peer_max_datagram_frame_size orelse return null;
-        return maxDatagramPayloadForFrameSize(@min(frame_limit, self.currentSendDatagramSize()));
+        const datagram_size = self.currentSendDatagramSize();
+        var candidate = maxDatagramPayloadForFrameSize(
+            @min(frame_limit, datagram_size),
+        ) orelse return null;
+        // max_datagram_frame_size limits the DATAGRAM frame itself, whereas
+        // the path MTU limits the complete protected QUIC packet. Account for
+        // the short header, adaptive packet number, and AEAD tag so callers can
+        // rely on this value instead of discovering a smaller bound at send().
+        while (true) : (candidate -= 1) {
+            const frame_size = datagramFrameWireSizeForLength(
+                candidate,
+                true,
+            ) orelse return null;
+            const packet_number_len =
+                quic.protection.packetNumberLenForPayload(
+                    self.next_packet_number,
+                    self.sent.largestAcknowledged(),
+                    frame_size,
+                );
+            const packet_overhead = 1 +
+                self.config.peer_connection_id.len +
+                @as(usize, packet_number_len) +
+                quic.protection.aead_tag_len;
+            if (frame_size <= datagram_size -| packet_overhead) {
+                return candidate;
+            }
+            if (candidate == 0) return null;
+        }
     }
 
     pub fn sendDatagram(self: *Connection, data: []const u8) Error!void {
@@ -7208,10 +7235,23 @@ fn reservedStreamBytes(
 }
 
 fn datagramFrameWireSize(datagram: quic.DatagramFrame) ?usize {
-    const type_len = quic.varint.length(if (datagram.length_present) @intFromEnum(quic.FrameType.datagram_len) else @intFromEnum(quic.FrameType.datagram)) catch return null;
-    var total = std.math.add(usize, type_len, datagram.data.len) catch return null;
-    if (datagram.length_present) {
-        const len_len = quic.varint.length(datagram.data.len) catch return null;
+    return datagramFrameWireSizeForLength(
+        datagram.data.len,
+        datagram.length_present,
+    );
+}
+
+fn datagramFrameWireSizeForLength(
+    data_len: usize,
+    length_present: bool,
+) ?usize {
+    const type_len = quic.varint.length(if (length_present)
+        @intFromEnum(quic.FrameType.datagram_len)
+    else
+        @intFromEnum(quic.FrameType.datagram)) catch return null;
+    var total = std.math.add(usize, type_len, data_len) catch return null;
+    if (length_present) {
+        const len_len = quic.varint.length(data_len) catch return null;
         total = std.math.add(usize, total, len_len) catch return null;
     }
     return total;
