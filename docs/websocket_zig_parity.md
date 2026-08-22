@@ -342,7 +342,14 @@ these counts explain submission shape but are not timing samples.
    (16.2% lower); netz also ended before deferred connection teardown with
    286,592 live bytes versus 363,580 (21.2% lower). Exact growth causes more
    small allocation/remap events across the mixed schedule, so the result is a
-   resident-memory advantage rather than an allocation-count claim.
+   resident-memory advantage rather than an allocation-count claim. Three
+   matched 128-connection mixed runs then produced identical telemetry on every
+   repetition: netz used 1,145,860 peak live bytes and ended with 575,232 live
+   bytes, versus websocket.zig's 1,311,690 peak and 671,932 final live bytes.
+   Netz therefore retained 12.6% less at peak and 14.4% less at report time at
+   twice the earlier concurrency. It made 2,823 allocation calls versus 595,
+   preserving the explicit trade-off: exact growth lowers resident memory but
+   intentionally performs more small allocator operations.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
