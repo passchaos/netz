@@ -361,6 +361,42 @@ test "WebSocket permessage-deflate send scratch reuses output storage" {
     try std.testing.expectEqual(payload_ptr, scratch.payload.allocatedSlice().ptr);
 }
 
+test "WebSocket retained Vort encoder needs no allocator after warmup" {
+    const allocator = std.testing.allocator;
+    const payload = "repeated wire payload repeated wire payload " ** 64;
+    const fragments = [_][]const u8{
+        payload[0..777],
+        payload[777..1555],
+        payload[1555..],
+    };
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const measured_allocator = failing.allocator();
+    var scratch: compression_scratch.SendScratch = .{};
+    defer scratch.deinit(measured_allocator);
+    try scratch.prepare(measured_allocator, payload.len);
+    const first = try websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
+        &scratch.encoder.?,
+        &scratch.payload,
+        &fragments,
+        15,
+    );
+    const expected = try allocator.dupe(u8, first);
+    defer allocator.free(expected);
+
+    // Neither encoded output nor Vort parser workspace may reach the caller's
+    // allocator once both retained stores have seen the workload shape.
+    failing.fail_index = failing.alloc_index;
+    try scratch.prepare(measured_allocator, payload.len);
+    const second = try websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
+        &scratch.encoder.?,
+        &scratch.payload,
+        &fragments,
+        15,
+    );
+    try std.testing.expectEqualSlices(u8, expected, second);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "WebSocket vort sync flush interoperates with std flate decoder" {
     const allocator = std.testing.allocator;
     const payload = "vort websocket sync flush payload " ** 64;

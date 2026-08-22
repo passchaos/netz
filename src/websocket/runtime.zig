@@ -1076,9 +1076,9 @@ pub const Connection = struct {
                     plain_len,
                 );
                 const compressed = try websocket
-                    .compressMessageFragmentsVortIntoWindow(
+                    .compressMessageFragmentsVortIntoWindowWithEncoder(
+                    &self.compression_send.encoder.?,
                     &self.compression_send.payload,
-                    self.allocator,
                     fragments,
                     self.compression_send_max_window_bits,
                 );
@@ -1399,9 +1399,9 @@ pub const Connection = struct {
             self.allocator,
             payload.len,
         );
-        return websocket.compressMessageVortIntoWindow(
+        return websocket.compressMessageVortIntoWindowWithEncoder(
+            &self.compression_send.encoder.?,
             &self.compression_send.payload,
-            self.allocator,
             payload,
             self.compression_send_max_window_bits,
         );
@@ -1766,9 +1766,9 @@ pub const H2Connection = struct {
                     plain_len,
                 );
                 const compressed = try websocket
-                    .compressMessageFragmentsVortIntoWindow(
+                    .compressMessageFragmentsVortIntoWindowWithEncoder(
+                    &self.compression_send.encoder.?,
                     &self.compression_send.payload,
-                    self.allocator,
                     fragments,
                     self.compression_send_max_window_bits,
                 );
@@ -1973,9 +1973,9 @@ pub const H2Connection = struct {
             self.allocator,
             payload.len,
         );
-        return websocket.compressMessageVortIntoWindow(
+        return websocket.compressMessageVortIntoWindowWithEncoder(
+            &self.compression_send.encoder.?,
             &self.compression_send.payload,
-            self.allocator,
             payload,
             self.compression_send_max_window_bits,
         );

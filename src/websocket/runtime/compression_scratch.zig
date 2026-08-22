@@ -1,9 +1,9 @@
 //! Reusable no-context-takeover WebSocket compression storage.
 //!
 //! Zig 0.16's decompressor requires a 64 KiB history window, retained by
-//! `Scratch`. The vort sender owns temporary match state per call but appends
-//! into `SendScratch.payload`, so connection-level wire storage is still
-//! retained independently for concurrent readers and serialized writers.
+//! `Scratch`. The Vort sender retains both encoded output and arena-backed
+//! parser workspace per connection, avoiding steady-state allocation churn
+//! while send serialization guarantees that scratch has one active owner.
 
 const std = @import("std");
 
@@ -49,12 +49,14 @@ pub const Scratch = struct {
 
 pub const SendScratch = struct {
     payload: std.ArrayList(u8) = .empty,
+    encoder: ?@import("vort").RawFixedSyncFlushEncoder = null,
 
     pub fn deinit(
         self: *SendScratch,
         allocator: std.mem.Allocator,
     ) void {
         self.payload.deinit(allocator);
+        if (self.encoder) |*encoder| encoder.deinit();
         self.* = undefined;
     }
 
@@ -71,5 +73,8 @@ pub const SendScratch = struct {
             input_len +| 64,
         );
         self.payload.clearRetainingCapacity();
+        if (self.encoder == null) {
+            self.encoder = .init(allocator);
+        }
     }
 };

@@ -1010,6 +1010,21 @@ pub fn compressMessageVortIntoWindow(
     return removeVortCompressionTail(output);
 }
 
+pub fn compressMessageVortIntoWindowWithEncoder(
+    encoder: *vort.RawFixedSyncFlushEncoder,
+    output: *std.ArrayList(u8),
+    payload: []const u8,
+    max_window_bits: u8,
+) Error![]const u8 {
+    output.clearRetainingCapacity();
+    _ = encoder.encodeAppend(
+        output,
+        payload,
+        try vortWebSocketCompressionOptions(max_window_bits),
+    ) catch |err| return mapVortCompressionError(err);
+    return removeVortCompressionTail(output);
+}
+
 /// Encode discontiguous RFC 7692 input without joining caller plaintext.
 ///
 /// Vort feeds all non-empty slices into one non-final fixed-Huffman block and
@@ -1038,6 +1053,21 @@ pub fn compressMessageFragmentsVortIntoWindow(
     output.clearRetainingCapacity();
     _ = vort.encodeRawFixedSyncFlushChunksAppend(
         allocator,
+        output,
+        fragments,
+        try vortWebSocketCompressionOptions(max_window_bits),
+    ) catch |err| return mapVortCompressionError(err);
+    return removeVortCompressionTail(output);
+}
+
+pub fn compressMessageFragmentsVortIntoWindowWithEncoder(
+    encoder: *vort.RawFixedSyncFlushEncoder,
+    output: *std.ArrayList(u8),
+    fragments: []const []const u8,
+    max_window_bits: u8,
+) Error![]const u8 {
+    output.clearRetainingCapacity();
+    _ = encoder.encodeChunksAppend(
         output,
         fragments,
         try vortWebSocketCompressionOptions(max_window_bits),
