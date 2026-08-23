@@ -1,4 +1,5 @@
 const std = @import("std");
+const websocket = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
@@ -101,6 +102,129 @@ test "WSS server completes verified WebSocket echo" {
         "encrypted websocket",
         echoed.payload,
     );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WSS compression threshold propagates through TLS endpoints" {
+    const allocator = std.testing.allocator;
+    const below = "wss-below-threshold";
+    const at_threshold = "wss-threshold-compressible-" ** 10;
+    const threshold = at_threshold.len;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = 4096,
+                .max_message_bytes = 4096,
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{
+                .enable_permessage_deflate = true,
+                .compression_threshold = std.math.maxInt(usize),
+            });
+            defer connection.close();
+
+            var first = try connection.receiveFrame();
+            defer first.deinit(self.server.allocator);
+            try std.testing.expect(!first.header.rsv1);
+            try std.testing.expectEqualStrings(below, first.payload);
+
+            var second = try connection.receiveFrame();
+            defer second.deinit(self.server.allocator);
+            try std.testing.expect(second.header.rsv1);
+            const decoded = try websocket.decompressMessage(
+                self.server.allocator,
+                second.payload,
+                at_threshold.len,
+            );
+            defer self.server.allocator.free(decoded);
+            try std.testing.expectEqualStrings(at_threshold, decoded);
+
+            try connection.sendText(at_threshold);
+            try std.testing.expect(connection.compression_send.encoder == null);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://localhost:{d}/compression-threshold",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var client = try runtime.Client.connectUriTls(
+        allocator,
+        io,
+        uri,
+        .{
+            .enable_permessage_deflate = true,
+            .compression_threshold = threshold,
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = 4096,
+                .max_message_bytes = 4096,
+            },
+        },
+        .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    );
+    defer client.close();
+
+    try client.sendText(below);
+    try std.testing.expect(client.compression_send.encoder == null);
+    try client.sendText(at_threshold);
+    try std.testing.expect(client.compression_send.encoder != null);
+    var response = try client.receiveFrame();
+    defer response.deinit(allocator);
+    try std.testing.expect(!response.header.rsv1);
+    try std.testing.expectEqualStrings(at_threshold, response.payload);
 
     thread.join();
     joined = true;

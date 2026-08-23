@@ -18,10 +18,10 @@ const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
 
 const net = std.Io.net;
-// Raw DEFLATE framing cannot profitably encode very small messages, and
-// initializing its 64 KiB history would dominate their latency. Larger input
-// is still measured and falls back transactionally when compression expands.
-const compression_min_payload_len: usize = 32;
+/// Default lower bound for attempting permessage-deflate. Raw DEFLATE framing
+/// cannot profitably encode very small messages, and initializing compressor
+/// state would dominate their latency. Callers may tune this per endpoint.
+pub const default_compression_threshold: usize = 32;
 const masked_write_scratch_len: usize = 16 * 1024;
 // A 4 KiB application payload occupies 4104 bytes on the masked wire. The old
 // 4096-byte read scratch therefore forced two socket reads for this common
@@ -469,6 +469,7 @@ fn acceptTransport(
         .limits = limits,
         .selected_protocol = selected_protocol,
         .permessage_deflate = negotiated_extension.permessage_deflate,
+        .compression_threshold = options.compression_threshold,
         .compression_send_max_window_bits = negotiated_extension.server_max_window_bits orelse 15,
     };
 }
@@ -548,6 +549,9 @@ pub const AcceptOptions = struct {
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http1.Header = &.{},
     enable_permessage_deflate: bool = false,
+    /// Minimum complete message size considered for outbound compression.
+    /// Inbound compressed messages remain accepted after negotiation.
+    compression_threshold: usize = default_compression_threshold,
 };
 
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
@@ -872,6 +876,7 @@ pub const Client = struct {
             .limits = options.limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = selected_extension.permessage_deflate,
+            .compression_threshold = options.compression_threshold,
             .compression_send_max_window_bits = selected_extension.client_max_window_bits orelse 15,
             .inbuf = try std.ArrayList(u8).initCapacity(allocator, head.extra.len),
         };
@@ -905,6 +910,9 @@ pub const ConnectOptions = struct {
     /// Optional browser Origin value for the opening request.
     origin: ?[]const u8 = null,
     enable_permessage_deflate: bool = false,
+    /// Minimum complete message size considered for outbound compression.
+    /// Set to zero to attempt every data message or maxInt to receive-only.
+    compression_threshold: usize = default_compression_threshold,
     tcp_nodelay: bool = true,
     limits: Limits = .{},
     /// Configure a TLS 1.3 client identity for WSS. Cleartext connect helpers
@@ -970,6 +978,7 @@ pub const Connection = struct {
     incoming_text_utf8: websocket.Utf8Validator = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_threshold: usize = default_compression_threshold,
     /// Maximum LZ77 distance for messages emitted by this endpoint. The field
     /// follows the role-specific RFC 7692 direction selected at handshake.
     compression_send_max_window_bits: u8 = 15,
@@ -1167,7 +1176,7 @@ pub const Connection = struct {
         defer self.send_mutex.unlock(self.io);
 
         if (self.permessage_deflate and
-            payload.len >= compression_min_payload_len)
+            payload.len >= self.compression_threshold)
         {
             const compressed = try self.compressMessageLocked(payload);
             if (compressed.len < payload.len) {
@@ -1195,7 +1204,7 @@ pub const Connection = struct {
             if (opcode == .text and !fragmentedTextIsValid(fragments)) {
                 return error.InvalidUtf8;
             }
-            if (plain_len >= compression_min_payload_len) {
+            if (plain_len >= self.compression_threshold) {
                 try self.compression_send.prepare(
                     self.allocator,
                     plain_len,
@@ -1768,6 +1777,7 @@ pub const H2Connection = struct {
     incoming_text_utf8: websocket.Utf8Validator = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_threshold: usize = default_compression_threshold,
     compression_send_max_window_bits: u8 = 15,
     send_frame_buffer: std.ArrayList(u8) = .empty,
     message_buffer: std.ArrayList(u8) = .empty,
@@ -1781,6 +1791,7 @@ pub const H2Connection = struct {
         limits: Limits,
         selected_protocol: ?[]u8,
         negotiated_extension: websocket.ExtensionNegotiation,
+        compression_threshold: usize,
     ) H2Connection {
         return .{
             .allocator = allocator,
@@ -1789,6 +1800,7 @@ pub const H2Connection = struct {
             .limits = limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = negotiated_extension.permessage_deflate,
+            .compression_threshold = compression_threshold,
             .compression_send_max_window_bits = switch (role) {
                 .client => negotiated_extension.client_max_window_bits orelse 15,
                 .server => negotiated_extension.server_max_window_bits orelse 15,
@@ -1928,7 +1940,7 @@ pub const H2Connection = struct {
         defer self.send_mutex.unlock(self.tunnel.connection.io);
 
         if (self.permessage_deflate and
-            payload.len >= compression_min_payload_len)
+            payload.len >= self.compression_threshold)
         {
             const compressed = try self.compressMessageLocked(payload);
             if (compressed.len < payload.len) {
@@ -1956,7 +1968,7 @@ pub const H2Connection = struct {
             if (opcode == .text and !fragmentedTextIsValid(fragments)) {
                 return error.InvalidUtf8;
             }
-            if (plain_len >= compression_min_payload_len) {
+            if (plain_len >= self.compression_threshold) {
                 try self.compression_send.prepare(
                     self.allocator,
                     plain_len,
@@ -2402,6 +2414,7 @@ pub const H2Client = struct {
             options.limits,
             selected_protocol,
             selected_extension,
+            options.compression_threshold,
         );
     }
 };
@@ -2444,6 +2457,7 @@ pub const H2Server = struct {
             options.limits,
             selected_protocol,
             negotiated_extension,
+            options.compression_threshold,
         );
     }
 };
@@ -2461,6 +2475,9 @@ pub const H2ConnectOptions = struct {
     origin: ?[]const u8 = null,
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// RFC 8441 outbound compression threshold; receive negotiation is
+    /// independent of this value.
+    compression_threshold: usize = default_compression_threshold,
     limits: Limits = .{},
 };
 
@@ -2470,6 +2487,8 @@ pub const H2AcceptOptions = struct {
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// RFC 8441 outbound compression threshold.
+    compression_threshold: usize = default_compression_threshold,
     limits: Limits = .{},
 };
 
@@ -4960,5 +4979,6 @@ test {
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
+    _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
 }
