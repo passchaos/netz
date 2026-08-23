@@ -25,6 +25,7 @@ const Config = struct {
     deny_subscribe_filter: ?[]const u8 = null,
     deny_unsubscribe_filter: ?[]const u8 = null,
     deny_delivery_topic: ?[]const u8 = null,
+    deny_will_topic: ?[]const u8 = null,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     persistence_path: ?[]const u8 = null,
@@ -93,6 +94,7 @@ pub fn main(init: std.process.Init) !void {
         deny_subscribe_filter: ?[]const u8,
         deny_unsubscribe_filter: ?[]const u8,
         deny_delivery_topic: ?[]const u8,
+        deny_will_topic: ?[]const u8,
 
         fn authorizePublish(
             context: *anyopaque,
@@ -132,23 +134,35 @@ pub fn main(init: std.process.Init) !void {
             const denied = self.deny_delivery_topic orelse return true;
             return !std.mem.eql(u8, delivery.topic, denied);
         }
+
+        fn authorizeWill(
+            context: *anyopaque,
+            publication: netz.mqtt.broker.WillAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const denied = self.deny_will_topic orelse return true;
+            return !std.mem.eql(u8, publication.topic, denied);
+        }
     };
     var access_policy = AccessPolicy{
         .deny_publish_topic = config.deny_publish_topic,
         .deny_subscribe_filter = config.deny_subscribe_filter,
         .deny_unsubscribe_filter = config.deny_unsubscribe_filter,
         .deny_delivery_topic = config.deny_delivery_topic,
+        .deny_will_topic = config.deny_will_topic,
     };
     const access_control: ?netz.mqtt.broker.AccessControlHandler =
         if (config.deny_publish_topic != null or
         config.deny_subscribe_filter != null or
         config.deny_unsubscribe_filter != null or
-        config.deny_delivery_topic != null) .{
+        config.deny_delivery_topic != null or
+        config.deny_will_topic != null) .{
             .context = &access_policy,
             .authorize_publish = AccessPolicy.authorizePublish,
             .authorize_subscribe = AccessPolicy.authorizeSubscribe,
             .authorize_unsubscribe = AccessPolicy.authorizeUnsubscribe,
             .authorize_delivery = AccessPolicy.authorizeDelivery,
+            .authorize_will = AccessPolicy.authorizeWill,
         } else null;
 
     var broker = try netz.mqtt.broker.Broker.listen(
@@ -471,6 +485,17 @@ fn parseArgs(
             }
             try netz.mqtt.validateTopicName(topic);
             config.deny_delivery_topic = topic;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--deny-will-topic=",
+        )) {
+            const topic = arg["--deny-will-topic=".len..];
+            if (topic.len == 0 or config.deny_will_topic != null) {
+                return error.InvalidArgument;
+            }
+            try netz.mqtt.validateTopicName(topic);
+            config.deny_will_topic = topic;
         } else if (std.mem.eql(
             u8,
             arg,

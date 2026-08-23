@@ -727,6 +727,67 @@ def unsubscribe_delivery_access_control(
             publisher.sendall(mqtt_packets.gen_disconnect())
 
 
+def will_access_control(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Mosquitto calls the write ACL again when an ungraceful disconnect makes
+    # a Will publishable. The source CONNECT is accepted, but the denied Will
+    # must neither reach subscribers nor create retained state.
+    topic = "acl/denied-will"
+    with NetzBroker(
+        executable,
+        connections=3,
+        extra_args=(f"--deny-will-topic={topic}",),
+    ) as broker:
+        with (
+            broker.connect() as subscriber,
+            broker.connect() as source,
+            broker.connect() as replay_subscriber,
+        ):
+            connect_v5(subscriber, mqtt_packets, "will-acl-reader")
+            subscriber.sendall(mqtt_packets.gen_subscribe(
+                1, topic, 1, proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 1, proto_ver=5),
+                "MQTT 5 Will ACL SUBACK",
+            )
+            source.sendall(mqtt_packets.gen_connect(
+                "will-acl-source", proto_ver=5, will_topic=topic,
+                will_qos=1, will_retain=True, will_payload=b"secret",
+            ))
+            expect_packet(
+                source, expected_connack(mqtt_packets, mqtt5_props),
+                "MQTT 5 denied Will source CONNACK",
+            )
+            # A TCP close (not MQTT DISCONNECT) makes the Will immediately due.
+            source.close()
+            subscriber.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                subscriber, mqtt_packets.gen_pingresp(),
+                "MQTT 5 denied Will live PINGRESP",
+            )
+
+            connect_v5(
+                replay_subscriber, mqtt_packets, "will-acl-replay-reader"
+            )
+            replay_subscriber.sendall(mqtt_packets.gen_subscribe(
+                1, topic, 1, proto_ver=5
+            ))
+            expect_packet(
+                replay_subscriber,
+                mqtt_packets.gen_suback(1, 1, proto_ver=5),
+                "MQTT 5 denied Will retained SUBACK",
+            )
+            replay_subscriber.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                replay_subscriber, mqtt_packets.gen_pingresp(),
+                "MQTT 5 denied Will retained PINGRESP",
+            )
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            replay_subscriber.sendall(
+                mqtt_packets.gen_disconnect(proto_ver=5)
+            )
+
+
 def duplicate_client_takeover(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -5201,6 +5262,7 @@ def main() -> None:
     unsubscribe_delivery_access_control(
         args.broker, mqtt_packets, mqtt5_props
     )
+    will_access_control(args.broker, mqtt_packets, mqtt5_props)
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -5208,7 +5270,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 123 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 124 scenarios")
 
 
 if __name__ == "__main__":

@@ -98,6 +98,125 @@ test "broker routes immediate Will on ungraceful close" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker write ACL suppresses Will before retained and route mutation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        calls: usize = 0,
+
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Subscription,
+        ) bool {
+            return true;
+        }
+
+        fn authorizeWill(
+            context_ptr: *anyopaque,
+            publication: context.TestContext.WillAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.calls += 1;
+            return !std.mem.eql(u8, publication.topic, "will/denied");
+        }
+    };
+    var policy: Policy = .{};
+    var broker = try context.TestContext.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .access_control = .{
+                .context = &policy,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+                .authorize_will = Policy.authorizeWill,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "denied-will-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "will/#", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    var source = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{
+            .protocol = .v5,
+            .client_id = "denied-will-source",
+            .will = .{
+                .topic = "will/denied",
+                .payload = "secret",
+                .qos = .at_least_once,
+                .retain = true,
+            },
+        },
+    );
+    try source.shutdown();
+    defer source.close();
+
+    // Wait for the independent Will driver under the same state barrier used
+    // for publication. Observing an empty scheduler after the callback proves
+    // the denied Will was consumed, without relying on a guessed sleep.
+    const deadline = std.Io.Clock.awake.now(io).addDuration(
+        .fromSeconds(2),
+    );
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline.nanoseconds) {
+        broker.state_mutex.lockUncancelable(io);
+        const consumed = broker.wills.count() == 0;
+        broker.state_mutex.unlock(io);
+        if (consumed) break;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), policy.calls);
+    // PINGRESP arriving first proves no Will was enqueued to the subscriber.
+    try subscriber.ping();
+    {
+        broker.state_mutex.lockUncancelable(io);
+        defer broker.state_mutex.unlock(io);
+        try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+        try std.testing.expectEqual(@as(usize, 0), broker.retained.count());
+    }
+
+    try subscriber.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker Keep Alive timeout routes Will and closes idle client" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -125,12 +125,28 @@ pub const AccessControlHandler = struct {
         context: *anyopaque,
         delivery: DeliveryAuthorization,
     ) bool = null,
+    authorize_will: ?*const fn (
+        context: *anyopaque,
+        publication: WillAuthorization,
+    ) bool = null,
 };
 
 /// Borrowed recipient and Application Message metadata for an outgoing ACL.
 /// The packet identifier is intentionally absent because this authorization
 /// precedes Session/inflight allocation and applies equally to QoS 0.
 pub const DeliveryAuthorization = struct {
+    client_id: []const u8,
+    topic: []const u8,
+    payload: []const u8,
+    qos: mqtt.QoS,
+    retain: bool,
+    properties: []const mqtt.Property,
+};
+
+/// Borrowed source and Application Message metadata for a Will write ACL.
+/// The callback runs when the Will becomes due, not when CONNECT registers it,
+/// so a policy update during Will Delay can suppress publication.
+pub const WillAuthorization = struct {
     client_id: []const u8,
     topic: []const u8,
     payload: []const u8,
@@ -2674,6 +2690,25 @@ pub const Broker = struct {
             .properties = properties.items,
             .payload = will.payload,
         };
+        if (self.options.access_control) |access| {
+            if (access.authorize_will) |authorize| {
+                if (!authorize(access.context, .{
+                    .client_id = will.client_id,
+                    .topic = publish.topic,
+                    .payload = publish.payload,
+                    .qos = publish.qos,
+                    .retain = publish.retain,
+                    .properties = publish.properties,
+                })) {
+                    // A denied Will is consumed, not postponed. This mirrors
+                    // Mosquitto's publication-time write ACL and prevents a
+                    // later policy change from resurrecting the same Will.
+                    try self.wills.releaseDue(handle);
+                    _ = self.will_publishers.remove(handle);
+                    return;
+                }
+            }
+        }
         const plan = try self.enqueuePublishLocked(
             publisher_id,
             publish,
