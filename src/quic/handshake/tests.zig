@@ -1742,6 +1742,9 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     client_tp.min_ack_delay = 1_000;
 
     var server_tp = quic.practical_transport_parameters;
+    const server_reset_token = [_]u8{0x9a} **
+        quic.stateless_reset.token_len;
+    server_tp.stateless_reset_token = server_reset_token;
     server_tp.max_idle_timeout = 40;
     server_tp.ack_delay_exponent = 7;
     server_tp.max_ack_delay = 45;
@@ -1794,6 +1797,10 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expect(established.connection.config.enable_ack_frequency);
             try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.local_min_ack_delay);
             try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.peer_min_ack_delay);
+            try std.testing.expectEqual(
+                @as(?[quic.stateless_reset.token_len]u8, null),
+                established.connection.config.peer_stateless_reset_token,
+            );
             try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
             try std.testing.expect(established.connection.hystartEnabled());
             try std.testing.expect(!established.connection.pacingEnabled());
@@ -1831,6 +1838,20 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expect(established.connection.config.enable_ack_frequency);
     try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.local_min_ack_delay);
     try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.peer_min_ack_delay);
+    try std.testing.expectEqual(
+        @as(?[quic.stateless_reset.token_len]u8, server_reset_token),
+        established.connection.config.peer_stateless_reset_token,
+    );
+    var reset_datagram = [_]u8{0x40} **
+        quic.stateless_reset.min_datagram_len;
+    @memcpy(
+        reset_datagram[reset_datagram.len - server_reset_token.len ..],
+        &server_reset_token,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        established.connection.detectStatelessReset(&reset_datagram),
+    );
     try std.testing.expectEqual(@as(usize, 1200), established.connection.congestion.max_datagram_size);
     try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
     try std.testing.expect(established.connection.hystartEnabled());

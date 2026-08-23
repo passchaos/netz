@@ -239,6 +239,9 @@ pub const ConnectionConfig = struct {
     local_min_ack_delay: ?u64 = null,
     peer_min_ack_delay: ?u64 = null,
     local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
+    /// Authenticated server transport-parameter token for the peer's Initial
+    /// connection ID. Only clients can receive this parameter.
+    peer_stateless_reset_token: ?[quic.stateless_reset.token_len]u8 = null,
     peer_active_connection_id_limit: usize = quic.default_active_connection_id_limit,
     /// Optional policy cap applied after the negotiated suite's RFC 9001
     /// confidentiality limit. `maxInt(u64)` means “use the suite limit”.
@@ -707,6 +710,11 @@ pub const Connection = struct {
     receive_frame_buffer: std.ArrayList(quic.Frame) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
+        if (config.local_endpoint == .server and
+            config.peer_stateless_reset_token != null)
+        {
+            return error.InvalidTransportParameter;
+        }
         const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
         var connection = Connection{
             .endpoint = endpoint,
@@ -771,6 +779,11 @@ pub const Connection = struct {
         try connection.peer_connection_ids.addInitial(
             config.peer_connection_id,
         );
+        if (config.peer_stateless_reset_token) |token| {
+            try connection.peer_connection_ids.setInitialStatelessResetToken(
+                token,
+            );
+        }
         if (config.tls_handshake_complete) {
             connection.handshake_status.onTlsComplete(switch (config.local_endpoint) {
                 .client => .client,
@@ -2627,6 +2640,34 @@ pub const Connection = struct {
         if (self.receive_authentication_failures < self.aeadIntegrityLimit()) return;
         try self.enterAeadLimitReached("integrity limit", nsToMs(now_ns), true);
         return error.AeadLimitReached;
+    }
+
+    /// Resolve a failed 1-RTT authentication attempt as either a stateless
+    /// reset or an ordinary AEAD integrity failure.
+    ///
+    /// RFC 9000 section 10.3 permits reset-token comparison only after packet
+    /// processing fails. In-place receive paths therefore copy the trailing
+    /// candidate before decryption, but call this helper only from an
+    /// `AuthenticationFailed` catch. A matching reset does not consume the
+    /// peer's AEAD integrity budget and moves directly to draining for three
+    /// current application-data PTOs.
+    fn handleAuthenticationFailureAt(
+        self: *Connection,
+        reset_candidate: ?[quic.stateless_reset.token_len]u8,
+        now_ns: ?u64,
+    ) Error {
+        if (reset_candidate) |candidate| {
+            if (self.peer_connection_ids.detectStatelessResetToken(candidate) != null) {
+                const event_now_ns = now_ns orelse self.monotonicNowNs();
+                self.enterStatelessResetDraining(
+                    nanosToMillisFloor(event_now_ns),
+                    nanosToMillisCeil(self.rtt_stats.pto(true)),
+                ) catch |err| return err;
+                return error.ConnectionClosed;
+            }
+        }
+        self.recordAuthenticationFailureAt(now_ns) catch |err| return err;
+        return error.AuthenticationFailed;
     }
 
     fn enterAeadLimitReached(
@@ -4964,12 +5005,7 @@ pub const Connection = struct {
             bytes,
             self.config.local_connection_id.len,
             self.config.accept_zero_fixed_bit,
-        ) catch |err| {
-            if (err == error.AuthenticationFailed) {
-                try self.recordAuthenticationFailureAt(now_ns);
-            }
-            return err;
-        };
+        ) catch |err| return err;
         if (key_phase == keys.current_key_phase) {
             return self.processReceivedBytesInPlaceVisitingAt(
                 from,
@@ -5024,10 +5060,7 @@ pub const Connection = struct {
                 bytes,
                 self.config.local_connection_id.len,
                 self.config.accept_zero_fixed_bit,
-            ) catch |err| {
-                if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
-                return err;
-            };
+            ) catch |err| return err;
             if (key_phase == keys.current_key_phase) {
                 try self.processReceivedBytesInPlaceAt(
                     datagrams.from,
@@ -5085,6 +5118,10 @@ pub const Connection = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
+        // The current-key fast path decrypts in caller-owned storage. Preserve
+        // the only bytes needed for reset matching before any crypto primitive
+        // is allowed to make failed-decrypt output undefined.
+        const reset_candidate = quic.stateless_reset.tokenCandidate(bytes);
         const packet = quic.protection.openShortPacketInPlaceWithFixedBitPolicy(
             keys,
             bytes,
@@ -5093,7 +5130,10 @@ pub const Connection = struct {
             self.config.accept_zero_fixed_bit,
         ) catch |err| {
             if (err == error.AuthenticationFailed) {
-                try self.recordAuthenticationFailureAt(now_ns);
+                return self.handleAuthenticationFailureAt(
+                    reset_candidate,
+                    now_ns,
+                );
             }
             return err;
         };
@@ -5194,7 +5234,12 @@ pub const Connection = struct {
             self.config.local_connection_id.len,
             now_ns,
         ) catch |err| {
-            if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+            if (err == error.AuthenticationFailed) {
+                return self.handleAuthenticationFailureAt(
+                    quic.stateless_reset.tokenCandidate(bytes),
+                    now_ns,
+                );
+            }
             return err;
         };
         errdefer packet.deinit(self.endpoint.allocator);
@@ -5269,36 +5314,11 @@ pub const Connection = struct {
     }
 
     pub fn receiveRoutedDatagramAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!ReceivedPacket {
-        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var packet = self.openReceivedBytesWithFrameClose(
-            routed.datagram.from,
-            routed.datagram.bytes,
-            routed.destination_connection_id.len,
+        return self.receiveRoutedDatagramWithEcnAt(
+            routed,
             now_ns,
-        ) catch |err| {
-            if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
-            return err;
-        };
-        errdefer packet.deinit(self.endpoint.allocator);
-        var peer_address_update = try self.preparePeerAddressUpdate(
-            routed.datagram.from,
-            routed.datagram.bytes.len,
-            packet.frames,
+            routed.datagram.ecn,
         );
-        defer peer_address_update.deinit();
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id, routed.datagram.from);
-        self.updateSpinBitAfterReceive(packet.packet.spin_bit);
-        if (packet.peer_initiated_key_update) {
-            try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
-        }
-        self.commitPeerAddressUpdate(&peer_address_update);
-        self.observePacketReceived(
-            now_ns,
-            packet.packet.packet_number,
-            routed.datagram.bytes.len,
-            packet.frames,
-        );
-        return packet;
     }
 
     pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!ReceivedPacket {
@@ -5309,7 +5329,14 @@ pub const Connection = struct {
             routed.destination_connection_id.len,
             now_ns,
         ) catch |err| {
-            if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+            if (err == error.AuthenticationFailed) {
+                return self.handleAuthenticationFailureAt(
+                    quic.stateless_reset.tokenCandidate(
+                        routed.datagram.bytes,
+                    ),
+                    now_ns,
+                );
+            }
             return err;
         };
         errdefer packet.deinit(self.endpoint.allocator);

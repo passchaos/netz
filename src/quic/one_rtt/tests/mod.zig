@@ -4,4 +4,5 @@ test {
     _ = @import("handshake_status.zig");
     _ = @import("lifecycle.zig");
     _ = @import("recovery_flow.zig");
+    _ = @import("stateless_reset_receive.zig");
 }

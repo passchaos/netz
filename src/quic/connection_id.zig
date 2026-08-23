@@ -21,6 +21,10 @@ pub const Entry = struct {
     connection_id: [max_connection_id_len]u8 = .{0} ** max_connection_id_len,
     connection_id_len: u8 = 0,
     stateless_reset_token: [16]u8 = .{0} ** 16,
+    /// Initial peer CIDs have no token until a client authenticates the
+    /// server's stateless_reset_token transport parameter. NEW_CONNECTION_ID
+    /// and local CIDs always set this field when they install their token.
+    stateless_reset_token_available: bool = false,
     in_use: bool = false,
     occupied: bool = false,
 
@@ -65,6 +69,27 @@ pub const PeerPool = struct {
         self.in_use_count = 1;
     }
 
+    /// Attach the server's transport-parameter reset token to the peer's
+    /// already-active Initial connection ID. Clients learn this token outside
+    /// NEW_CONNECTION_ID, so it must become matchable without changing CID
+    /// occupancy or use counts.
+    pub fn setInitialStatelessResetToken(
+        self: *PeerPool,
+        token: [quic.stateless_reset.token_len]u8,
+    ) Error!void {
+        const entry = self.find(0) orelse return error.UnknownConnectionId;
+        for (&self.entries) |*other| {
+            if (!other.occupied or other == entry) continue;
+            if (other.stateless_reset_token_available and
+                std.mem.eql(u8, &other.stateless_reset_token, &token))
+            {
+                return error.DuplicateResetToken;
+            }
+        }
+        entry.stateless_reset_token = token;
+        entry.stateless_reset_token_available = true;
+    }
+
     pub fn addWithRetirePriorTo(
         self: *PeerPool,
         sequence_number: u64,
@@ -91,16 +116,21 @@ pub const PeerPool = struct {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
         if (self.find(sequence_number)) |entry| {
             if (!std.mem.eql(u8, entry.slice(), connection_id)) return error.DuplicateConnectionId;
-            if (!std.mem.eql(u8, &entry.stateless_reset_token, &token)) return error.DuplicateResetToken;
+            if (!entry.stateless_reset_token_available or
+                !std.mem.eql(u8, &entry.stateless_reset_token, &token))
+            {
+                return error.DuplicateResetToken;
+            }
             entry.connection_id_len = @intCast(connection_id.len);
             @memcpy(entry.connection_id[0..connection_id.len], connection_id);
             entry.stateless_reset_token = token;
+            entry.stateless_reset_token_available = true;
             entry.occupied = true;
             return;
         }
         const slot = try self.availableAddSlot(connection_id, token, active_limit);
         if (slot) |entry| {
-            entry.* = .{ .sequence_number = sequence_number, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
+            entry.* = .{ .sequence_number = sequence_number, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .stateless_reset_token_available = true, .occupied = true };
             @memcpy(entry.connection_id[0..connection_id.len], connection_id);
             return;
         }
@@ -175,12 +205,26 @@ pub const PeerPool = struct {
     }
 
     pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
+        const candidate = quic.stateless_reset.tokenCandidate(datagram) orelse
+            return null;
+        return self.detectStatelessResetToken(candidate);
+    }
+
+    /// Match a token copied from a datagram before an in-place decrypt.
+    ///
+    /// The receive pipeline does not call this until packet authentication has
+    /// failed, as required by RFC 9000 section 10.3. The separate token form is
+    /// necessary because AEAD plaintext output is undefined on failure; callers
+    /// must not depend on the in-place crypto backend preserving any bytes.
+    pub fn detectStatelessResetToken(
+        self: *const PeerPool,
+        candidate: [quic.stateless_reset.token_len]u8,
+    ) ?u64 {
         if (self.in_use_count == 0) return null;
-        if (datagram.len < quic.stateless_reset.min_datagram_len) return null;
-        const candidate = datagram[datagram.len - quic.stateless_reset.token_len ..];
         for (&self.entries) |*entry| {
-            if (!entry.occupied or !entry.in_use) continue;
-            if (quic.stateless_reset.matchesTokenSlice(
+            if (!entry.occupied or !entry.in_use or
+                !entry.stateless_reset_token_available) continue;
+            if (quic.stateless_reset.matchesToken(
                 candidate,
                 entry.stateless_reset_token,
             )) return entry.sequence_number;
@@ -221,7 +265,9 @@ pub const PeerPool = struct {
             if (std.mem.eql(u8, entry.slice(), connection_id)) {
                 return error.DuplicateConnectionId;
             }
-            if (std.mem.eql(u8, &entry.stateless_reset_token, &token)) {
+            if (entry.stateless_reset_token_available and
+                std.mem.eql(u8, &entry.stateless_reset_token, &token))
+            {
                 duplicate_token = true;
             }
         }
@@ -238,7 +284,7 @@ pub const LocalPool = struct {
 
     pub fn registerInitial(self: *LocalPool, connection_id: []const u8, token: [16]u8) Error!void {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
-        self.entries[0] = .{ .sequence_number = 0, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
+        self.entries[0] = .{ .sequence_number = 0, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .stateless_reset_token_available = true, .occupied = true };
         @memcpy(self.entries[0].connection_id[0..connection_id.len], connection_id);
         self.next_sequence_number = 1;
     }
@@ -271,7 +317,7 @@ pub const LocalPool = struct {
         if (slot) |entry| {
             const seq = self.next_sequence_number;
             self.next_sequence_number += 1;
-            entry.* = .{ .sequence_number = seq, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
+            entry.* = .{ .sequence_number = seq, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .stateless_reset_token_available = true, .occupied = true };
             @memcpy(entry.connection_id[0..connection_id.len], connection_id);
             return .{ .new_connection_id = .{
                 .sequence_number = seq,
@@ -298,7 +344,9 @@ pub const LocalPool = struct {
             if (std.mem.eql(u8, entry.slice(), connection_id)) {
                 return error.DuplicateConnectionId;
             }
-            if (std.mem.eql(u8, &entry.stateless_reset_token, &token)) {
+            if (entry.stateless_reset_token_available and
+                std.mem.eql(u8, &entry.stateless_reset_token, &token))
+            {
                 duplicate_token = true;
             }
         }
@@ -467,6 +515,29 @@ test "QUIC peer CID pool detects stateless reset token" {
     try pool.retirePriorTo(8);
     try std.testing.expectEqual(@as(usize, 0), pool.in_use_count);
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(datagram.items));
+}
+
+test "QUIC peer CID pool enables initial reset token after negotiation" {
+    var pool = PeerPool{};
+    const token = [_]u8{0x45} ** quic.stateless_reset.token_len;
+    try pool.addInitial("initial-peer-cid");
+
+    var datagram = [_]u8{0x40} ** quic.stateless_reset.min_datagram_len;
+    @memcpy(datagram[datagram.len - token.len ..], &token);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        pool.detectStatelessReset(&datagram),
+    );
+
+    try pool.setInitialStatelessResetToken(token);
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        pool.detectStatelessReset(&datagram),
+    );
+    try std.testing.expectError(
+        error.DuplicateResetToken,
+        pool.add(1, "other-cid", token),
+    );
 }
 
 test "QUIC peer CID pool validates duplicate IDs tokens and active limit" {
