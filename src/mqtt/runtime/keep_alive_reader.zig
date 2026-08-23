@@ -20,7 +20,7 @@ pub const Reader = struct {
     io: std.Io,
     stream: net.Stream,
     timeout: ?std.Io.Clock.Duration,
-    deadline: std.Io.Clock.Timestamp,
+    deadline: ?std.Io.Clock.Timestamp,
 
     pub fn init(
         io: std.Io,
@@ -40,7 +40,20 @@ pub const Reader = struct {
             .io = io,
             .stream = stream,
             .timeout = null,
-            .deadline = undefined,
+            .deadline = null,
+        };
+    }
+
+    pub fn initDeadline(
+        io: std.Io,
+        stream: net.Stream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Reader {
+        return .{
+            .io = io,
+            .stream = stream,
+            .timeout = null,
+            .deadline = deadline,
         };
     }
 
@@ -57,7 +70,7 @@ pub const Reader = struct {
             }
         }
         while (offset < buffer.len) {
-            const count = if (self.timeout != null)
+            const count = if (self.deadline != null)
                 try self.readSomeTimeout(buffer[offset..])
             else
                 try self.readSome(buffer[offset..]);
@@ -94,7 +107,7 @@ pub const Reader = struct {
             self.io,
             self.stream,
             buffer,
-            self.deadline,
+            self.deadline.?,
         );
         if (count == 0) return error.ConnectionClosed;
         return count;

@@ -139,6 +139,7 @@ class NetzBroker:
             f"--connections={self.connections}",
             "--max-queued-deliveries=1024",
             "--max-outgoing-inflight=64",
+            "--connect-timeout-ms=5000",
             "--no-restore",
             *self.extra_args,
         ]
@@ -5385,7 +5386,10 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 129 scenarios")
+    print(
+        "Mosquitto-derived MQTT wire vectors passed: 129 scenarios "
+        "with 5000 ms CONNECT deadlines"
+    )
 
 
 if __name__ == "__main__":

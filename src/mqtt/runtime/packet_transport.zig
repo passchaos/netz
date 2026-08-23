@@ -75,6 +75,23 @@ pub const Transport = union(enum) {
         };
     }
 
+    pub fn deadlineFromNow(
+        self: Transport,
+        duration: std.Io.Duration,
+    ) std.Io.Clock.Timestamp {
+        const io = switch (self) {
+            .tcp => |tcp| tcp.io,
+            .tls => |connection| connection.io,
+            .tls_vail => |connection| connection.io,
+            .tls_server => |connection| connection.io,
+            .websocket => |ws| ws.connection.io,
+        };
+        return .fromNow(
+            io,
+            .{ .raw = duration, .clock = .awake },
+        );
+    }
+
     pub fn close(
         self: *Transport,
         allocator: std.mem.Allocator,
@@ -209,6 +226,50 @@ pub const Transport = union(enum) {
             ),
         };
     }
+
+    /// Read one MQTT Control Packet under a single absolute deadline. Unlike
+    /// Keep Alive reads, this never renews for large-packet progress, making it
+    /// suitable for bounding the initial CONNECT/CONNACK exchange.
+    pub fn readPacketWithDeadline(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |tcp| readTcpPacketWithDeadline(
+                allocator,
+                tcp.io,
+                tcp.stream,
+                max_packet_size,
+                deadline,
+            ),
+            .tls => |connection| readStreamPacketWithDeadline(
+                allocator,
+                connection,
+                max_packet_size,
+                deadline,
+            ),
+            .tls_vail => |connection| readStreamPacketWithDeadline(
+                allocator,
+                connection,
+                max_packet_size,
+                deadline,
+            ),
+            .tls_server => |connection| readStreamPacketWithDeadline(
+                allocator,
+                connection,
+                max_packet_size,
+                deadline,
+            ),
+            .websocket => |*ws| readWebSocketPacketWithDeadline(
+                allocator,
+                ws,
+                max_packet_size,
+                deadline,
+            ),
+        };
+    }
 };
 
 fn readStreamPacket(
@@ -325,6 +386,56 @@ fn readStreamPacketWithInactivityTimeout(
     };
 }
 
+fn readStreamPacketWithDeadline(
+    allocator: std.mem.Allocator,
+    connection: anytype,
+    max_packet_size: usize,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedPacket {
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(allocator);
+
+    var first: [1]u8 = undefined;
+    try readExactTlsWithDeadline(connection, &first, deadline);
+    try encoded.append(allocator, first[0]);
+
+    var remaining_bytes: [4]u8 = undefined;
+    var remaining_len_len: usize = 0;
+    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+        try readExactTlsWithDeadline(
+            connection,
+            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            deadline,
+        );
+        try encoded.append(allocator, remaining_bytes[remaining_len_len]);
+        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) break;
+    } else return error.MalformedRemainingLength;
+
+    const decoded = try mqtt.decodeRemainingLength(
+        remaining_bytes[0 .. remaining_len_len + 1],
+    );
+    const payload_start = encoded.items.len;
+    const packet_len = std.math.add(
+        usize,
+        payload_start,
+        decoded.value,
+    ) catch return error.PacketTooLarge;
+    if (packet_len > max_packet_size) return error.PacketTooLarge;
+    try encoded.resize(allocator, packet_len);
+    try readExactTlsWithDeadline(
+        connection,
+        encoded.items[payload_start..],
+        deadline,
+    );
+
+    const bytes = try encoded.toOwnedSlice(allocator);
+    errdefer allocator.free(bytes);
+    return .{
+        .bytes = bytes,
+        .fixed = try mqtt.FixedHeader.parse(bytes),
+    };
+}
+
 pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
@@ -344,13 +455,8 @@ fn readTcpPacket(
     stream: net.Stream,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    return readTcpPacketInternal(
-        allocator,
-        io,
-        stream,
-        max_packet_size,
-        null,
-    );
+    var reader = keep_alive_reader.Reader.init(io, stream, null);
+    return readTcpPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readTcpPacketWithInactivityTimeout(
@@ -361,29 +467,32 @@ fn readTcpPacketWithInactivityTimeout(
     timeout: std.Io.Clock.Duration,
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
-    return readTcpPacketInternal(
-        allocator,
-        io,
-        stream,
-        max_packet_size,
-        timeout,
-    );
+    var reader = keep_alive_reader.Reader.init(io, stream, timeout);
+    return readTcpPacketFromReader(allocator, &reader, max_packet_size);
 }
 
-fn readTcpPacketInternal(
+fn readTcpPacketWithDeadline(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
     max_packet_size: usize,
-    inactivity_timeout: ?std.Io.Clock.Duration,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedPacket {
+    var reader = keep_alive_reader.Reader.initDeadline(
+        io,
+        stream,
+        deadline,
+    );
+    return readTcpPacketFromReader(allocator, &reader, max_packet_size);
+}
+
+fn readTcpPacketFromReader(
+    allocator: std.mem.Allocator,
+    reader: *keep_alive_reader.Reader,
+    max_packet_size: usize,
 ) Error!OwnedPacket {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
-    var reader = keep_alive_reader.Reader.init(
-        io,
-        stream,
-        inactivity_timeout,
-    );
 
     var first: [1]u8 = undefined;
     try reader.readExact(&first, false);
@@ -435,10 +544,11 @@ fn readWebSocketPacket(
     ws: *WebSocketTransport,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    return readWebSocketPacketInternal(
+    return readWebSocketPacketWithPolicy(
         allocator,
         ws,
         max_packet_size,
+        null,
         null,
     );
 }
@@ -450,22 +560,41 @@ fn readWebSocketPacketWithInactivityTimeout(
     timeout: std.Io.Clock.Duration,
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
-    return readWebSocketPacketInternal(
+    return readWebSocketPacketWithPolicy(
         allocator,
         ws,
         max_packet_size,
         timeout,
+        null,
     );
 }
 
-fn readWebSocketPacketInternal(
+fn readWebSocketPacketWithDeadline(
+    allocator: std.mem.Allocator,
+    ws: *WebSocketTransport,
+    max_packet_size: usize,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedPacket {
+    return readWebSocketPacketWithPolicy(
+        allocator,
+        ws,
+        max_packet_size,
+        null,
+        deadline,
+    );
+}
+
+fn readWebSocketPacketWithPolicy(
     allocator: std.mem.Allocator,
     ws: *WebSocketTransport,
     max_packet_size: usize,
     inactivity_timeout: ?std.Io.Clock.Duration,
+    absolute_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedPacket {
     var deadline: std.Io.Clock.Timestamp = if (inactivity_timeout) |timeout|
         .fromNow(ws.connection.io, timeout)
+    else if (absolute_deadline) |value|
+        value
     else
         undefined;
     var large_progress_bytes: usize = 0;
@@ -490,7 +619,8 @@ fn readWebSocketPacketInternal(
             return error.PacketTooLarge;
         }
 
-        var message = if (inactivity_timeout != null)
+        var message = if (inactivity_timeout != null or
+            absolute_deadline != null)
             try ws.connection.receiveMessageWithDeadline(deadline)
         else
             try ws.connection.receiveMessage();

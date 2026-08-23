@@ -2790,6 +2790,7 @@ test {
     _ = @import("runtime/packet_transport.zig");
     _ = @import("runtime/auth.zig");
     _ = @import("runtime/auth_tests.zig");
+    _ = @import("runtime/connect_timeout_tests.zig");
     _ = @import("runtime/information_preferences_tests.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");

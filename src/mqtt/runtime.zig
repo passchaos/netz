@@ -181,6 +181,10 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
+    /// Absolute budget for receiving the first complete CONNECT packet after
+    /// the underlying TCP/TLS/WebSocket transport is established. A null value
+    /// preserves unbounded behavior; zero fails before reading.
+    connect_timeout: ?std.Io.Duration = null,
     session_present: bool = false,
     reason_code: u8 = 0,
     assigned_client_identifier: ?[]const u8 = null,
@@ -454,7 +458,8 @@ pub const Client = struct {
 
     pub fn connectAttempt(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectAttempt {
         const stream = try address.connect(io, .{ .mode = .stream });
-        errdefer stream.close(io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
         if (options.limits.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch
                 return error.SocketOptionFailed;
@@ -471,6 +476,7 @@ pub const Client = struct {
             .peer_maximum_qos = options.peer_maximum_qos,
             .peer_retain_available = options.peer_retain_available,
         };
+        stream_owned = false;
         errdefer connection.close();
 
         return connection.establishClient(options);
@@ -514,6 +520,9 @@ pub const ConnectResult = struct {
 pub const ConnectOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     client_id: []const u8,
+    /// Absolute receive budget from the transmitted CONNECT through the final
+    /// CONNACK. Interim Enhanced Authentication packets do not renew it.
+    connect_timeout: ?std.Io.Duration = null,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
     /// Baseline broker publish capabilities to enforce when MQTT 5 CONNACK
@@ -835,7 +844,10 @@ pub const Connection = struct {
         self: *Connection,
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
-        var connect = try self.readConnect();
+        var connect = if (options.connect_timeout) |timeout|
+            try self.readConnectWithTimeout(timeout)
+        else
+            try self.readConnect();
         errdefer connect.deinit(self.allocator);
         const maximum_qos = options.maximum_qos orelse
             mqtt.QoS.exactly_once;
@@ -956,8 +968,15 @@ pub const Connection = struct {
         try self.writePacket(encoded.items);
         const auth_handler = options.authentication;
         var auth_rounds: usize = 0;
+        const connect_deadline = if (options.connect_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk self.transport.deadlineFromNow(timeout);
+        } else null;
         var connack: OwnedConnAck = while (true) {
-            var packet = try self.readPacket();
+            var packet = if (connect_deadline) |deadline|
+                try self.readPacketWithDeadline(deadline)
+            else
+                try self.readPacket();
             errdefer packet.deinit(allocator);
             switch (packet.fixed.packet_type) {
                 .auth => {
@@ -1046,7 +1065,25 @@ pub const Connection = struct {
     }
 
     pub fn readConnect(self: *Connection) Error!OwnedConnect {
-        var packet = try self.readPacket();
+        const packet = try self.readPacket();
+        return self.finishReadConnect(packet);
+    }
+
+    pub fn readConnectWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedConnect {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = self.transport.deadlineFromNow(timeout);
+        const packet = try self.readPacketWithDeadline(deadline);
+        return self.finishReadConnect(packet);
+    }
+
+    fn finishReadConnect(
+        self: *Connection,
+        packet_value: OwnedPacket,
+    ) Error!OwnedConnect {
+        var packet = packet_value;
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .connect) return error.UnexpectedPacket;
         var connect = try mqtt.Connect.parse(self.allocator, packet.bytes);
@@ -2166,6 +2203,18 @@ pub const Connection = struct {
             self.allocator,
             self.limits.max_packet_size,
             timeout,
+        );
+        return self.finishReadPacket(packet);
+    }
+
+    fn readPacketWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedPacket {
+        const packet = try self.transport.readPacketWithDeadline(
+            self.allocator,
+            self.limits.max_packet_size,
+            deadline,
         );
         return self.finishReadPacket(packet);
     }

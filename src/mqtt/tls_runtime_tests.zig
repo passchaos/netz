@@ -2,6 +2,7 @@ const std = @import("std");
 const mqtt = @import("mod.zig");
 const runtime = @import("runtime.zig");
 const mqtt_tls = @import("tls_runtime.zig");
+const http1_runtime = @import("../http1/mod.zig").runtime;
 const tls_test = @import("testing/tls13_server.zig");
 
 const max_packet_size: usize = 4096;
@@ -164,6 +165,80 @@ test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "MQTT TLS server bounds the post-handshake CONNECT packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{ .max_packet_size = max_packet_size },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{
+                .connect_timeout = .fromMilliseconds(75),
+            }) catch |err| {
+                self.err = err;
+                return;
+            };
+            accepted.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const tls_connection = try http1_runtime.TlsClientConnection.init(
+        allocator,
+        io,
+        stream,
+        "localhost",
+        .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    );
+    stream_owned = false;
+    defer tls_connection.deinit();
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
 test "MQTT TLS server enforces Keep Alive inactivity" {
@@ -776,6 +851,74 @@ test "MQTT TLS client verifies local CA and completes MQTT 5 QoS 1" {
         .{ .qos = .at_least_once },
     );
     try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TLS client bounds the post-handshake CONNACK packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try tls_test.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *tls_test.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var input: [max_packet_size]u8 = undefined;
+            _ = try connection.readApplication(&input);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_tls.Client.connectAddress(
+            allocator,
+            io,
+            server.address(),
+            "localhost",
+            .{
+                .mqtt = .{
+                    .client_id = "silent-tls-server",
+                    .connect_timeout = .fromMilliseconds(75),
+                },
+                .tls = .{ .ca_bundle = .{
+                    .bundle = &ca_bundle,
+                    .lock = &ca_lock,
+                } },
+            },
+        ),
+    );
 
     thread.join();
     joined = true;

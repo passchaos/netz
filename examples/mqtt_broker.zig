@@ -8,6 +8,7 @@ const Config = struct {
     max_session_queued_payload_bytes: usize = 0,
     max_session_inflight_payload_bytes: usize = 0,
     max_outgoing_inflight: u16 = 64,
+    connect_timeout_ms: ?u32 = null,
     max_packet_size: usize = 16 * 1024 * 1024,
     max_payload_size: usize = 0,
     maximum_qos: ?netz.mqtt.QoS = null,
@@ -200,6 +201,10 @@ pub fn main(init: std.process.Init) !void {
                 .runtime = .{ .max_packet_size = config.max_packet_size },
             },
             .accept = .{
+                .connect_timeout = if (config.connect_timeout_ms) |milliseconds|
+                    .fromMilliseconds(milliseconds)
+                else
+                    null,
                 .max_outgoing_inflight = config.max_outgoing_inflight,
                 .maximum_qos = config.maximum_qos,
                 .retain_available = config.retain_available,
@@ -340,6 +345,19 @@ fn parseArgs(
                 10,
             );
             if (config.max_outgoing_inflight == 0) {
+                return error.InvalidArgument;
+            }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--connect-timeout-ms=",
+        )) {
+            config.connect_timeout_ms = try std.fmt.parseInt(
+                u32,
+                arg["--connect-timeout-ms=".len..],
+                10,
+            );
+            if (config.connect_timeout_ms.? == 0) {
                 return error.InvalidArgument;
             }
         } else if (std.mem.startsWith(
