@@ -12,6 +12,7 @@ const net = std.Io.net;
 
 pub const Error = packet_transport.Error || error{
     PacketTooLarge,
+    TooManyPendingPackets,
     UnexpectedPacket,
     ConnectRefused,
     InflightFull,
@@ -29,6 +30,13 @@ pub const Error = packet_transport.Error || error{
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
+    /// Maximum non-PINGRESP Control Packets retained while a synchronous
+    /// client PING waits for its response. MQTT permits the broker to send
+    /// ordinary traffic at any time, so `pingWithTimeout` preserves those
+    /// packets for the next typed reader instead of consuming or rejecting
+    /// them. Reaching the bound fails the probe, with one already-consumed
+    /// overflow packet retained separately so wire order remains recoverable.
+    max_pending_ping_packets: usize = 256,
     /// MQTT exchanges many small PUBLISH/PUBACK packets. Disable Nagle by
     /// default so a publisher window does not repeatedly fall onto the Linux
     /// delayed-ACK cliff; callers can opt back into coalescing for WAN bulk
@@ -688,6 +696,12 @@ pub const Connection = struct {
     assigned_client_id: ?[]u8 = null,
     authentication: auth_runtime.State = .{},
     write_scratch: std.ArrayList(u8) = .empty,
+    pending_ping_packets: std.ArrayList(OwnedPacket) = .empty,
+    pending_ping_packet_head: usize = 0,
+    /// One packet already removed from the wire is retained after a queue-cap
+    /// or allocation failure. The next ordinary reader can recover it before
+    /// another liveness probe is allowed to consume later bytes.
+    pending_ping_overflow: ?OwnedPacket = null,
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -797,6 +811,13 @@ pub const Connection = struct {
         }
         self.authentication.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
+        for (self.pending_ping_packets.items[self.pending_ping_packet_head..]) |*packet| {
+            packet.deinit(self.allocator);
+        }
+        self.pending_ping_packets.deinit(self.allocator);
+        if (self.pending_ping_overflow) |*packet| {
+            packet.deinit(self.allocator);
+        }
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -1600,6 +1621,7 @@ pub const Connection = struct {
     }
 
     pub fn ping(self: *Connection) Error!void {
+        try self.ensurePingQueueAvailable();
         return self.pingInternal(null);
     }
 
@@ -1614,6 +1636,7 @@ pub const Connection = struct {
         timeout: std.Io.Duration,
     ) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.ensurePingQueueAvailable();
         return self.pingInternal(self.transport.deadlineFromNow(timeout));
     }
 
@@ -1625,13 +1648,30 @@ pub const Connection = struct {
         defer encoded.deinit(self.allocator);
         try mqtt.writePing(&encoded, self.allocator, false);
         try self.writePacket(encoded.items);
-        var packet = if (deadline) |absolute|
-            try self.readPacketWithDeadline(absolute)
-        else
-            try self.readPacket();
-        defer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .pingresp) return error.UnexpectedPacket;
-        try mqtt.validatePing(packet.bytes, true);
+        while (true) {
+            // Do not consume the pending queue while waiting: those packets
+            // predate this PING and re-queueing them would loop forever.
+            var packet = if (deadline) |absolute|
+                try self.readTransportPacketWithDeadline(absolute)
+            else
+                try self.readTransportPacket();
+            var packet_owned = true;
+            defer if (packet_owned) packet.deinit(self.allocator);
+            if (packet.fixed.packet_type == .pingresp) {
+                try mqtt.validatePing(packet.bytes, true);
+                return;
+            }
+            self.queuePendingPingPacket(packet) catch |err| {
+                // The packet has already left the transport. Retain it even
+                // when the configured cap or allocator rejects a queue slot,
+                // so the caller can drain the exact wire sequence afterward.
+                std.debug.assert(self.pending_ping_overflow == null);
+                self.pending_ping_overflow = packet;
+                packet_owned = false;
+                return err;
+            };
+            packet_owned = false;
+        }
     }
 
     pub fn readPingReq(self: *Connection) Error!void {
@@ -2212,6 +2252,11 @@ pub const Connection = struct {
     }
 
     fn readPacket(self: *Connection) Error!OwnedPacket {
+        if (self.popPendingPingPacket()) |packet| return packet;
+        return self.readTransportPacket();
+    }
+
+    fn readTransportPacket(self: *Connection) Error!OwnedPacket {
         const packet = try self.transport.readPacket(
             self.allocator,
             self.limits.max_packet_size,
@@ -2223,6 +2268,7 @@ pub const Connection = struct {
         self: *Connection,
         timeout: std.Io.Clock.Duration,
     ) Error!OwnedPacket {
+        if (self.popPendingPingPacket()) |packet| return packet;
         const packet = try self.transport.readPacketWithInactivityTimeout(
             self.allocator,
             self.limits.max_packet_size,
@@ -2235,12 +2281,90 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
+        if (self.popPendingPingPacket()) |packet| return packet;
+        return self.readTransportPacketWithDeadline(deadline);
+    }
+
+    fn readTransportPacketWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedPacket {
         const packet = try self.transport.readPacketWithDeadline(
             self.allocator,
             self.limits.max_packet_size,
             deadline,
         );
         return self.finishReadPacket(packet);
+    }
+
+    fn pendingPingPacketCount(self: *const Connection) usize {
+        return self.pending_ping_packets.items.len -
+            self.pending_ping_packet_head +
+            @intFromBool(self.pending_ping_overflow != null);
+    }
+
+    fn ensurePingQueueAvailable(self: *const Connection) Error!void {
+        if (self.pending_ping_overflow != null or
+            self.limits.max_pending_ping_packets == 0 or
+            self.pendingPingPacketCount() >=
+                self.limits.max_pending_ping_packets)
+        {
+            return error.TooManyPendingPackets;
+        }
+    }
+
+    fn queuePendingPingPacket(
+        self: *Connection,
+        packet: OwnedPacket,
+    ) Error!void {
+        // Check the semantic bound before append. The caller handles either a
+        // full queue or allocator failure by using the emergency slot.
+        if (self.pendingPingPacketCount() >=
+            self.limits.max_pending_ping_packets)
+        {
+            return error.TooManyPendingPackets;
+        }
+        if (self.pending_ping_packet_head != 0 and
+            self.pending_ping_packets.items.len ==
+                self.pending_ping_packets.capacity)
+        {
+            self.compactPendingPingPackets();
+        }
+        try self.pending_ping_packets.append(self.allocator, packet);
+    }
+
+    fn compactPendingPingPackets(self: *Connection) void {
+        if (self.pending_ping_packet_head == 0) return;
+        const remaining = self.pending_ping_packets.items.len -
+            self.pending_ping_packet_head;
+        if (remaining != 0) {
+            @memmove(
+                self.pending_ping_packets.items[0..remaining],
+                self.pending_ping_packets.items[self.pending_ping_packet_head..],
+            );
+        }
+        self.pending_ping_packets.items.len = remaining;
+        self.pending_ping_packet_head = 0;
+    }
+
+    fn popPendingPingPacket(self: *Connection) ?OwnedPacket {
+        if (self.pending_ping_packet_head <
+            self.pending_ping_packets.items.len)
+        {
+            const packet =
+                self.pending_ping_packets.items[self.pending_ping_packet_head];
+            self.pending_ping_packet_head += 1;
+            return packet;
+        }
+        // Clear the consumed prefix only after it is exhausted. The overflow
+        // packet always followed that prefix on the wire and must remain last.
+        self.pending_ping_packets.clearRetainingCapacity();
+        self.pending_ping_packet_head = 0;
+        if (self.pending_ping_overflow) |packet| {
+            self.pending_ping_overflow = null;
+            return packet;
+        }
+        return null;
     }
 
     fn finishReadPacket(

@@ -141,6 +141,227 @@ test "MQTT client PING timeout covers the complete TCP response" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT client PING preserves interleaved packets in wire order" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{});
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.readPingReq();
+            try accepted.connection.publish(
+                "ping/interleaved/first",
+                "one",
+                .{},
+            );
+            try accepted.connection.publish(
+                "ping/interleaved/second",
+                "two",
+                .{},
+            );
+            try accepted.connection.writePingResp();
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .client_id = "ping-interleaved" },
+    );
+    defer client.close();
+
+    try client.pingWithTimeout(.fromSeconds(1));
+    var first = try client.readPublish();
+    defer first.deinit(allocator);
+    var second = try client.readPublish();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "ping/interleaved/first",
+        first.publish.topic,
+    );
+    try std.testing.expectEqualStrings("one", first.publish.payload);
+    try std.testing.expectEqualStrings(
+        "ping/interleaved/second",
+        second.publish.topic,
+    );
+    try std.testing.expectEqualStrings("two", second.publish.payload);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT client PING timeout retains an interleaved packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{});
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.readPingReq();
+            try accepted.connection.publish(
+                "ping/timeout/interleaved",
+                "retained",
+                .{},
+            );
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(200),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .client_id = "ping-timeout-interleaved" },
+    );
+    defer client.close();
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.pingWithTimeout(.fromMilliseconds(75)),
+    );
+    var publish = try client.readPublish();
+    defer publish.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "ping/timeout/interleaved",
+        publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings("retained", publish.publish.payload);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT client PING bounds retained interleaved packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{});
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.readPingReq();
+            try accepted.connection.publish("ping/cap/first", "one", .{});
+            try accepted.connection.publish("ping/cap/second", "two", .{});
+            // Keep the peer alive briefly after the overflowing packet so the
+            // client failure is caused by its queue policy rather than EOF.
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(100),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .client_id = "ping-cap",
+            .limits = .{ .max_pending_ping_packets = 1 },
+        },
+    );
+    defer client.close();
+
+    try std.testing.expectError(
+        error.TooManyPendingPackets,
+        client.pingWithTimeout(.fromSeconds(1)),
+    );
+    var first = try client.readPublish();
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "ping/cap/first",
+        first.publish.topic,
+    );
+    var second = try client.readPublish();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "ping/cap/second",
+        second.publish.topic,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT client PING rejects a zero pending-packet limit before writing" {
+    var connection = runtime.Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .limits = .{ .max_pending_ping_packets = 0 },
+    };
+    try std.testing.expectError(
+        error.TooManyPendingPackets,
+        connection.pingWithTimeout(.fromSeconds(1)),
+    );
+}
+
 test "MQTT client PING timeout permits a timely TCP response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -148,6 +148,16 @@ fn serveOne(
     // independent Mosquitto-derived peer, which answers this server-originated
     // PINGREQ below before continuing the QoS flow.
     try accepted.connection.pingWithTimeout(.fromSeconds(5));
+    var interleaved = try accepted.connection.readPublish();
+    defer interleaved.deinit(server.allocator);
+    try std.testing.expectEqualStrings(
+        "interop/mosquitto/during-ping",
+        interleaved.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "interleaved-publish",
+        interleaved.publish.payload,
+    );
 
     try accepted.connection.publish(
         "interop/netz/to-mosquitto",
