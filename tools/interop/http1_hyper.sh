@@ -132,6 +132,12 @@ grep -Fq \
   'netz HTTP/1 server completed Hyper Expect exchange: transport=cleartext interim=1 body=12 response_body=14' \
   "$work/netz-server.log"
 grep -Fq \
+  'Hyper HTTP/1 client observed netz graceful drain: active_response=true connection_close=true next_request=false' \
+  "$work/hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server gracefully drained Hyper: transport=cleartext active_response=true connection_close=true next_request=false' \
+  "$work/netz-server.log"
+grep -Fq \
   'Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17' \
   "$work/hyper-client.log"
 grep -Fq \
@@ -216,6 +222,12 @@ grep -Fq \
   "$work/tls-netz-server.log"
 grep -Fq \
   'netz HTTP/1 server completed Hyper Expect exchange: transport=tls interim=1 body=12 response_body=14' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client observed netz graceful drain: active_response=true connection_close=true next_request=false' \
+  "$work/tls-hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server gracefully drained Hyper: transport=tls active_response=true connection_close=true next_request=false' \
   "$work/tls-netz-server.log"
 grep -Fq \
   'Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17' \

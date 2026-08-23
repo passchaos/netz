@@ -1798,6 +1798,11 @@ pub const Connection = struct {
     writer_state: body_writer.State = .{},
     tls_server_conn: ?*tls_stream.ServerConnection = null,
     request_head_deadline: ?std.Io.Clock.Timestamp = null,
+    /// Once requested, graceful shutdown permits the active exchange to
+    /// finish but prevents this connection from accepting another request.
+    /// The flag is monotonic because HTTP/1 has no protocol-level mechanism
+    /// for retracting a Connection: close decision already exposed to a peer.
+    graceful_shutdown_requested: bool = false,
 
     fn transport(self: *Connection) RuntimeTransport {
         if (self.tls_server_conn) |connection| {
@@ -1824,6 +1829,15 @@ pub const Connection = struct {
             self.stream.close(self.io);
         }
         self.* = undefined;
+    }
+
+    /// Stop accepting new HTTP/1 exchanges without interrupting one that is
+    /// already being served. `serve` observes this before its next read, while
+    /// a handler that requests shutdown causes its active response to carry
+    /// `Connection: close`. The connection-owning task must call this method;
+    /// it is not an asynchronous cancellation mechanism for a blocked read.
+    pub fn gracefulShutdown(self: *Connection) void {
+        self.graceful_shutdown_requested = true;
     }
 
     pub fn readRequest(self: *Connection, options: http1.ParseOptions) Error!OwnedRequest {
@@ -2130,22 +2144,33 @@ pub const Connection = struct {
     }
 
     pub fn serveOne(self: *Connection, context: anytype, comptime handler: anytype) Error!bool {
+        if (self.graceful_shutdown_requested) return false;
         var request = try self.readRequest(.{});
         defer request.deinit(self.allocator);
         const request_keep_alive = request.request.keepAlive();
         var response = try handler(context, request.request);
-        var adjusted = try adjustResponseForServeLoop(self.allocator, request.request, response);
+        var adjusted = try adjustResponseForServeLoop(
+            self.allocator,
+            request.request,
+            response,
+            self.graceful_shutdown_requested,
+        );
         defer adjusted.deinit(self.allocator);
         response = adjusted.response;
         if (response.request_method == null) response.request_method = request.request.method;
         const response_keep_alive = responseOptionsKeepAlive(response);
         try self.writeResponse(response);
+        if (self.graceful_shutdown_requested) {
+            self.writer_state.phase = .unusable;
+            return false;
+        }
         return request_keep_alive and response_keep_alive;
     }
 
     pub fn serve(self: *Connection, context: anytype, comptime handler: anytype, max_requests: usize) Error!usize {
         var served: usize = 0;
         while (served < max_requests) : (served += 1) {
+            if (self.graceful_shutdown_requested) return served;
             const keep_going = try self.serveOne(context, handler);
             if (!keep_going) return served + 1;
         }
@@ -3171,7 +3196,12 @@ const ServeLoopResponse = struct {
     }
 };
 
-fn adjustResponseForServeLoop(allocator: std.mem.Allocator, request: http1.Request, response: ResponseOptions) Error!ServeLoopResponse {
+fn adjustResponseForServeLoop(
+    allocator: std.mem.Allocator,
+    request: http1.Request,
+    response: ResponseOptions,
+    graceful_shutdown: bool,
+) Error!ServeLoopResponse {
     var out = response;
     const request_keep_alive = request.keepAlive();
     const response_wants_keep_alive = responseOptionsKeepAlive(response);
@@ -3188,9 +3218,23 @@ fn adjustResponseForServeLoop(allocator: std.mem.Allocator, request: http1.Reque
         }
     }
 
-    if (!request_keep_alive and !hasHeader(out.headers, "connection")) {
+    if (graceful_shutdown) {
         if (adjusted.headers_owned) adjusted.deinit(allocator);
-        adjusted = try addConnectionHeaderForServeLoop(allocator, out, "close");
+        adjusted = try replaceConnectionHeaderForServeLoop(
+            allocator,
+            out,
+            "close",
+        );
+        out = adjusted.response;
+    } else if (!request_keep_alive and
+        !hasHeader(out.headers, "connection"))
+    {
+        if (adjusted.headers_owned) adjusted.deinit(allocator);
+        adjusted = try addConnectionHeaderForServeLoop(
+            allocator,
+            out,
+            "close",
+        );
         out = adjusted.response;
     }
 
@@ -3202,6 +3246,28 @@ fn addConnectionHeaderForServeLoop(allocator: std.mem.Allocator, response: Respo
     const headers = try allocator.alloc(http1.Header, response.headers.len + 1);
     @memcpy(headers[0..response.headers.len], response.headers);
     headers[response.headers.len] = .{ .name = "Connection", .value = value };
+    var out = response;
+    out.headers = headers;
+    return .{ .response = out, .headers_owned = true };
+}
+
+fn replaceConnectionHeaderForServeLoop(
+    allocator: std.mem.Allocator,
+    response: ResponseOptions,
+    value: []const u8,
+) Error!ServeLoopResponse {
+    var retained: usize = 0;
+    for (response.headers) |header| {
+        retained += @intFromBool(!header.eqlName("connection"));
+    }
+    const headers = try allocator.alloc(http1.Header, retained + 1);
+    var index: usize = 0;
+    for (response.headers) |header| {
+        if (header.eqlName("connection")) continue;
+        headers[index] = header;
+        index += 1;
+    }
+    headers[index] = .{ .name = "Connection", .value = value };
     var out = response;
     out.headers = headers;
     return .{ .response = out, .headers_owned = true };
@@ -6650,5 +6716,6 @@ test {
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");
+    _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
 }

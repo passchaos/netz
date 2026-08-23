@@ -16,7 +16,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
   persistence, optional absolute per-request-head deadlines across cleartext
   and TLS (without extending the deadline on partial input and without timing
-  the body), optional Host/default-port, CONNECT authority, and absolute-form authority synthesis, `http://`/`https://` URI helpers
+  the body), per-connection graceful shutdown that completes the active
+  response with `Connection: close` and suppresses later requests, optional
+  Host/default-port, CONNECT authority, and absolute-form authority synthesis, `http://`/`https://` URI helpers
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper

@@ -554,6 +554,60 @@ async fn run_client(port: u16, ca_path: Option<String>) {
     assert!(trailers.is_none());
     println!("Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14");
 
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect netz graceful HTTP/1 server");
+    stream
+        .set_nodelay(true)
+        .expect("graceful client TCP_NODELAY");
+    let io = match ca_path.as_ref() {
+        Some(ca) => MaybeTls::Client(
+            TlsConnector::from(tls_client_config(ca))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost")
+                        .expect("valid server name"),
+                    stream,
+                )
+                .await
+                .expect("connect graceful HTTPS"),
+        ),
+        None => MaybeTls::Clear(stream),
+    };
+    let (mut graceful_sender, graceful_connection) = client_http1::Builder::new()
+        .handshake(TokioIo::new(io))
+        .await
+        .expect("Hyper graceful HTTP/1 handshake");
+    tokio::spawn(async move {
+        graceful_connection
+            .await
+            .expect("drive graceful Hyper HTTP/1 connection");
+    });
+    let response = graceful_sender
+        .send_request(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/graceful?from=hyper")
+                .header("host", "localhost")
+                .body(empty_body())
+                .expect("graceful request"),
+        )
+        .await
+        .expect("send graceful request");
+    assert_eq!(
+        response.headers().get("connection"),
+        Some(&HeaderValue::from_static("close")),
+    );
+    let (body, trailers) = collect_body(response.into_body())
+        .await
+        .expect("read graceful response");
+    assert_eq!(body, b"netz-graceful");
+    assert!(trailers.is_none());
+    assert!(
+        !graceful_sender.is_ready(),
+        "Hyper must retire a connection after Connection: close",
+    );
+    println!("Hyper HTTP/1 client observed netz graceful drain: active_response=true connection_close=true next_request=false");
+
     let request = Request::builder()
         .method(Method::CONNECT)
         .uri("tunnel.example:443")

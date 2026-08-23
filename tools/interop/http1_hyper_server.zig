@@ -116,6 +116,45 @@ pub fn main(init: std.process.Init) !void {
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 
+    var graceful_connection = if (tls_enabled)
+        try tls_server.accept()
+    else
+        try clear_server.accept();
+    defer graceful_connection.close();
+    const GracefulContext = struct {
+        connection: *netz.http1.runtime.Connection,
+
+        fn handle(
+            self: *@This(),
+            graceful_request: netz.http1.Request,
+        ) netz.http1.runtime.Error!netz.http1.runtime.ResponseOptions {
+            if (graceful_request.method != .GET or
+                !std.mem.eql(
+                    u8,
+                    graceful_request.target,
+                    "/graceful?from=hyper",
+                ))
+            {
+                return error.InvalidResponse;
+            }
+            self.connection.gracefulShutdown();
+            return .{ .body = "netz-graceful" };
+        }
+    };
+    var graceful_context = GracefulContext{
+        .connection = &graceful_connection,
+    };
+    const graceful_served = try graceful_connection.serve(
+        &graceful_context,
+        GracefulContext.handle,
+        4,
+    );
+    if (graceful_served != 1) return error.InvalidResponse;
+    std.debug.print(
+        "netz HTTP/1 server gracefully drained Hyper: transport={s} active_response=true connection_close=true next_request=false\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
+
     var connect_request = try connection.readRequest(.{});
     defer connect_request.deinit(allocator);
     if (connect_request.request.method != .CONNECT or
