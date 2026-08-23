@@ -856,7 +856,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 121
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 124
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -904,7 +904,10 @@ success-only UNSUBACK while the denied subscription remains installed,
 recipient-specific live delivery suppression, and retained replay suppression
 without deleting the retained Application Message. Durable queued/inflight
 PUBLISH packets are rechecked before reconnect transmission so a policy change
-cannot leak an older message or leave it blocking the Session queue. The ninth
+cannot leak an older message or leave it blocking the Session queue. Will
+publication has a separate source-aware write check at the due instant; a
+denied retained Will is consumed without routing or retained-store mutation.
+The ninth
 scenario ports Mosquitto's MQTT 5
 `04-retain-qos0-repeated.py` lifecycle and its clear boundary: retained replay
 survives UNSUBSCRIBE/resubscribe, UNSUBACK bytes are exact, and a zero-length
