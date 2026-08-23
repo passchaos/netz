@@ -559,6 +559,74 @@ test "HTTP/3 QPACK Required Insert Count wraps per RFC 9204" {
     );
 }
 
+test "HTTP/3 QPACK field section prefix uses prefix integers at boundaries" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        encoded_insert_count: u64,
+        delta_base: u64,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .encoded_insert_count = 0, .delta_base = 0, .expected = &.{ 0x00, 0x00 } },
+        .{ .encoded_insert_count = 63, .delta_base = 0, .expected = &.{ 0x3f, 0x00 } },
+        .{ .encoded_insert_count = 64, .delta_base = 126, .expected = &.{ 0x40, 0x7e } },
+        .{ .encoded_insert_count = 254, .delta_base = 127, .expected = &.{ 0xfe, 0x7f, 0x00 } },
+        .{ .encoded_insert_count = 255, .delta_base = 128, .expected = &.{ 0xff, 0x00, 0x7f, 0x01 } },
+        .{ .encoded_insert_count = 256, .delta_base = 1337, .expected = &.{ 0xff, 0x01, 0x7f, 0xba, 0x09 } },
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (cases) |case| {
+        encoded.clearRetainingCapacity();
+        try Qpack.encodePrefix(
+            &encoded,
+            allocator,
+            case.encoded_insert_count,
+            case.delta_base,
+        );
+        try std.testing.expectEqualSlices(u8, case.expected, encoded.items);
+    }
+}
+
+test "HTTP/3 QPACK dynamic block crosses the 8-bit prefix value 63" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+
+    var value_buffer: [16]u8 = undefined;
+    for (0..62) |index| {
+        const value = try std.fmt.bufPrint(
+            &value_buffer,
+            "filler-{d}",
+            .{index},
+        );
+        _ = try table.insert("x-filler", value);
+    }
+    _ = try table.insert("x-boundary", "target"); // Absolute index 62.
+    _ = try table.insert("x-after", "newest");
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&encoded, allocator, &.{.{
+        .name = "x-boundary",
+        .value = "target",
+    }}, table);
+    // Required Insert Count 63 wraps to 64 and Base 64 has Delta Base 1.
+    // An 8-bit prefix represents 64 directly; a QUIC varint would incorrectly
+    // emit 0x40,0x40 and shift every following field-section byte.
+    try std.testing.expectEqualSlices(u8, &.{ 0x40, 0x01, 0x81 }, encoded.items);
+
+    var decoded = try Qpack.decodeDynamicBlock(allocator, encoded.items, table);
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(@as(u64, 63), decoded.required_insert_count);
+    try std.testing.expectEqual(@as(u64, 64), decoded.base);
+    try std.testing.expectEqual(@as(usize, 1), decoded.fields.len);
+    try std.testing.expectEqualStrings("x-boundary", decoded.fields[0].name);
+    try std.testing.expectEqualStrings("target", decoded.fields[0].value);
+}
+
 test "HTTP/3 QPACK field section prefix detects blocking without allocation" {
     const allocator = std.testing.allocator;
     var encoder_table = Qpack.DynamicTable.init(allocator, 256);

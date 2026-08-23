@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(bytes);
 
     var decoder: qpack.QpackDecoder = .{};
-    decoder.setCapacity(256);
+    decoder.setCapacity(4096);
     if (bytes.len < 4) return error.InvalidInput;
     const instruction_len = std.mem.readInt(u32, bytes[0..4], .big);
     const split = std.math.add(usize, 4, instruction_len) catch

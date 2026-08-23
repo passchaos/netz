@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const wire = @import("../../internal/wire.zig");
-const varint = @import("../../quic/varint.zig");
 const prefixed_integer = @import("integer.zig");
 const encodePrefixedInteger = prefixed_integer.encode;
 const encodePrefixedIntegerAssumeCapacity = prefixed_integer.encodeAssumeCapacity;
@@ -427,15 +426,13 @@ pub fn encodeDynamicBlockWithReferenceLimit(
         required_insert_count,
         table.maxEntries(),
     );
-    try encodePrefixedInteger(list, allocator, 8, 0x00, encoded_insert_count);
     // Base is the insertion count at the start of this single-pass encode.
     // Required Insert Count cannot exceed it because this helper does not
     // mutate the table while encoding.
-    try encodePrefixedInteger(
+    try encodePrefix(
         list,
         allocator,
-        7,
-        0x00,
+        encoded_insert_count,
         base - required_insert_count,
     );
 
@@ -685,25 +682,32 @@ pub fn staticEntry(index: usize) ?HeaderField {
 
 pub const findStaticName = static_table_module.findName;
 
-pub fn encodePrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, required_insert_count: u64, base: u64) !void {
-    if (required_insert_count == 0 and base == 0) {
-        try list.ensureUnusedCapacity(allocator, 2);
-        list.appendAssumeCapacity(0);
-        list.appendAssumeCapacity(0);
-        return;
-    }
-    const required_len = try varint.length(required_insert_count);
-    const base_len = try varint.length(base);
-    try list.ensureUnusedCapacity(
-        allocator,
-        @as(usize, required_len) + base_len,
-    );
-    varint.encodeWithLenAssumeCapacity(
+/// Encode the two non-negative QPACK field-section prefix integers.
+///
+/// `encoded_insert_count` is the wrapped value returned by
+/// `encodeRequiredInsertCount`; `delta_base` is used with a zero Sign bit.
+/// These are RFC 9204 prefix integers, not QUIC variable-length integers:
+/// values from 64 through 254 still occupy one byte in the 8-bit field.
+pub fn encodePrefix(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    encoded_insert_count: u64,
+    delta_base: u64,
+) !void {
+    try encodePrefixedInteger(
         list,
-        required_insert_count,
-        required_len,
+        allocator,
+        8,
+        0x00,
+        encoded_insert_count,
     );
-    varint.encodeWithLenAssumeCapacity(list, base, base_len);
+    try encodePrefixedInteger(
+        list,
+        allocator,
+        7,
+        0x00,
+        delta_base,
+    );
 }
 
 /// Stateless QPACK encoder for deterministic clients. It uses the static
