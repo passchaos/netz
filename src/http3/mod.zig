@@ -24,6 +24,7 @@ pub const Error = wire.Error || error{
     MissingPath,
     MissingStatus,
     InvalidStatus,
+    TooManyInformationalResponses,
     InvalidHeader,
     InvalidPriorityUpdate,
     StreamCreationError,
@@ -41,6 +42,7 @@ pub const Error = wire.Error || error{
 } || std.mem.Allocator.Error;
 
 pub const max_settings_payload_size: usize = 256;
+pub const default_max_informational_responses: usize = 16;
 
 pub const ApplicationErrorCode = struct {
     pub const no_error: u64 = 0x100;
@@ -2096,6 +2098,30 @@ pub const DecodedResponse = struct {
     }
 };
 
+/// Borrowed metadata for one response HEADERS section preceding the final
+/// response. Header storage is valid only for the observer callback.
+pub const InformationalResponseHead = struct {
+    status: u16,
+    headers: []const Qpack.HeaderField,
+};
+
+pub const InformationalObserver = struct {
+    context: *anyopaque,
+    on_response: *const fn (
+        context: *anyopaque,
+        response: InformationalResponseHead,
+    ) void,
+};
+
+/// Local safeguards and callbacks used while decoding a complete response.
+/// The informational limit applies even when no observer is installed so a
+/// legacy aggregate read cannot be kept busy by an unbounded 1xx chain.
+pub const ResponseDecodeOptions = struct {
+    max_informational_responses: usize =
+        default_max_informational_responses,
+    informational: ?InformationalObserver = null,
+};
+
 pub const DecodedRequestHead = struct {
     method: []const u8,
     path: []const u8,
@@ -2242,8 +2268,30 @@ pub fn decodeResponseHeadWithDynamicTable(
     settings: Settings,
     table: Qpack.DynamicTable,
 ) Error!DecodedResponseHead {
+    return decodeResponseHeadWithDynamicTableAndOptions(
+        allocator,
+        bytes,
+        settings,
+        table,
+        .{},
+    );
+}
+
+/// Decode through the final response head while synchronously reporting each
+/// preceding 1xx section. Observer header slices are callback-scoped.
+pub fn decodeResponseHeadWithDynamicTableAndOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+    options: ResponseDecodeOptions,
+) Error!DecodedResponseHead {
+    // Count successful decodes, not attempts. A QPACK-blocked section can be
+    // retried after encoder instructions arrive and must not spend the bound
+    // until it has actually produced one informational response.
     var offset: usize = 0;
     var acknowledgments: usize = 0;
+    var informational_count: usize = 0;
     while (true) {
         const frame = try firstHeadersFrame(bytes[offset..], .response);
         var head = try decodeResponseHeadFieldSectionWithDynamicTable(
@@ -2255,6 +2303,15 @@ pub fn decodeResponseHeadWithDynamicTable(
         acknowledgments += head.qpack_section_acknowledgments;
         offset += frame.consumed;
         if (head.status < 200) {
+            notifyInformationalResponse(
+                options.informational,
+                .{ .status = head.status, .headers = head.headers },
+                &informational_count,
+                options.max_informational_responses,
+            ) catch |err| {
+                head.deinit(allocator);
+                return err;
+            };
             head.deinit(allocator);
             if (offset >= bytes.len) return error.BufferTooShort;
             continue;
@@ -2282,9 +2339,12 @@ pub fn decodeResponseHeadFieldSectionWithDynamicTable(
     const lookup = try responseHeaderLookup(decoded.fields);
     const status = lookup.status orelse return error.MissingStatus;
     const declared_length = lookup.content_length;
-    if (status == 204 and declared_length != null) {
-        return error.InvalidContentLength;
-    }
+    try validateResponseBodyForStatusWithLength(
+        status,
+        declared_length,
+        &.{},
+        &.{},
+    );
     const owned_fields = try ownHeaderFields(allocator, decoded.fields);
     Qpack.freeDecodedFields(allocator, decoded.fields);
     return .{
@@ -2447,11 +2507,46 @@ fn decodeRequestWithOptions(
 }
 
 pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedResponse {
-    return decodeResponseWithSettings(allocator, bytes, .{});
+    return decodeResponseWithOptions(allocator, bytes, .{});
+}
+
+/// Decode a complete response and synchronously report ordered interim heads.
+pub fn decodeResponseWithOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ResponseDecodeOptions,
+) Error!DecodedResponse {
+    return decodeResponseWithSettingsAndOptions(
+        allocator,
+        bytes,
+        .{},
+        options,
+    );
 }
 
 pub fn decodeResponseWithSettings(allocator: std.mem.Allocator, bytes: []const u8, settings: Settings) Error!DecodedResponse {
-    return decodeResponseWithFieldDecoder(allocator, bytes, settings, .literal);
+    return decodeResponseWithSettingsAndOptions(
+        allocator,
+        bytes,
+        settings,
+        .{},
+    );
+}
+
+/// Settings-aware complete response decoder with bounded 1xx observation.
+pub fn decodeResponseWithSettingsAndOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    options: ResponseDecodeOptions,
+) Error!DecodedResponse {
+    return decodeResponseWithFieldDecoder(
+        allocator,
+        bytes,
+        settings,
+        .literal,
+        options,
+    );
 }
 
 pub fn decodeResponseWithDynamicTable(
@@ -2460,11 +2555,29 @@ pub fn decodeResponseWithDynamicTable(
     settings: Settings,
     table: Qpack.DynamicTable,
 ) Error!DecodedResponse {
+    return decodeResponseWithDynamicTableAndOptions(
+        allocator,
+        bytes,
+        settings,
+        table,
+        .{},
+    );
+}
+
+/// Stateful-QPACK response decoder with bounded ordered 1xx observation.
+pub fn decodeResponseWithDynamicTableAndOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+    options: ResponseDecodeOptions,
+) Error!DecodedResponse {
     return decodeResponseWithFieldDecoder(
         allocator,
         bytes,
         settings,
         .{ .dynamic = table },
+        options,
     );
 }
 
@@ -2473,12 +2586,14 @@ fn decodeResponseWithFieldDecoder(
     bytes: []const u8,
     settings: Settings,
     field_decoder: FieldSectionDecoder,
+    options: ResponseDecodeOptions,
 ) Error!DecodedResponse {
     var message = try decodeResponseMessage(
         allocator,
         bytes,
         settings.max_field_section_size,
         field_decoder,
+        options,
     );
     errdefer message.deinit(allocator);
 
@@ -2709,9 +2824,14 @@ fn decodeResponseMessage(
     bytes: []const u8,
     max_field_section_size: u64,
     field_decoder: FieldSectionDecoder,
+    options: ResponseDecodeOptions,
 ) Error!DecodedMessage {
+    // Aggregate decoding owns each field list only until this loop advances.
+    // Invoke the observer before freeing an interim section, and retain only
+    // the cumulative QPACK acknowledgment count needed by the final response.
     var offset: usize = 0;
     var informational_acknowledgments: usize = 0;
+    var informational_count: usize = 0;
     while (true) {
         const frame = try Frame.parse(bytes[offset..]);
         if (frame.frame_type != FrameType.headers) {
@@ -2729,6 +2849,18 @@ fn decodeResponseMessage(
         const lookup = try responseHeaderLookup(decoded.fields);
         const status = lookup.status orelse return error.MissingStatus;
         if (status < 200) {
+            try validateResponseBodyForStatusWithLength(
+                status,
+                lookup.content_length,
+                &.{},
+                &.{},
+            );
+            try notifyInformationalResponse(
+                options.informational,
+                .{ .status = status, .headers = decoded.fields },
+                &informational_count,
+                options.max_informational_responses,
+            );
             informational_acknowledgments += @intFromBool(decoded.requires_acknowledgment);
             Qpack.freeDecodedFields(allocator, decoded.fields);
             decoded_owned = false;
@@ -2750,6 +2882,20 @@ fn decodeResponseMessage(
         message.response_lookup = lookup;
         message.qpack_section_acknowledgments += informational_acknowledgments;
         return message;
+    }
+}
+
+fn notifyInformationalResponse(
+    observer: ?InformationalObserver,
+    response: InformationalResponseHead,
+    count: *usize,
+    limit: usize,
+) Error!void {
+    count.* = std.math.add(usize, count.*, 1) catch
+        return error.TooManyInformationalResponses;
+    if (count.* > limit) return error.TooManyInformationalResponses;
+    if (observer) |value| {
+        value.on_response(value.context, response);
     }
 }
 
@@ -5213,4 +5359,5 @@ test "HTTP/3 response encode decode" {
 test {
     _ = runtime;
     _ = origin_pool;
+    _ = @import("informational_tests.zig");
 }

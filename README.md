@@ -59,7 +59,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   lookups with pseudo-header and common-header fast paths,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs with malformed-payload rejection, indexed per-ID control-state lookups with empty-index skips, identical priority-update skips, and single-probe priority replacement, and advertised MAX_PUSH_ID enforcement for received PUSH_PROMISE frames,
   RFC 9218 Priority field parsing/serialization,
-  request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, bounded ordered interim 1xx response observation and runtime emission before final responses, and forbidden trailer-field rejection,
+  request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, bounded ordered interim 1xx response observation on aggregate and incremental client paths, per-stream bounds for multiplexed and pushed responses, runtime emission before final responses, and forbidden trailer-field rejection,
   HEADERS-only dynamic request/response writers for incremental DATA sending
   with Content-Length generation/verification, parsed length reuse, and
   CONNECT/204/304 body guards,
@@ -561,8 +561,9 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # response at an 8-KiB stream window while a concurrent sibling completes on
 # the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
-# Build the audited quic-go fixture and verify HTTP/3 POST bodies/trailers and
-# streamed responses/trailers over certificate-checked QUIC in both directions,
+# Build the audited quic-go fixture and verify HTTP/3 POST bodies/trailers,
+# ordered 103/102 responses, and streamed responses/trailers over
+# certificate-checked QUIC v1 and v2 in both directions,
 # including H3_REQUEST_CANCELLED followed by same-connection reuse in both
 # directions. The reverse case closes a partially-read quic-go response body
 # and requires netz to observe the exact cancellation before serving stream 4.

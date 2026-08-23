@@ -6,6 +6,9 @@ const response_scheduler = @import("runtime/response_scheduler.zig");
 
 const net = std.Io.net;
 
+pub const InformationalResponseHead = http3.InformationalResponseHead;
+pub const InformationalObserver = http3.InformationalObserver;
+
 pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || net.HostName.ValidateError || net.HostName.LookupError || error{
     MissingStreamFrame,
     UnexpectedStream,
@@ -568,6 +571,12 @@ pub const Limits = struct {
     /// `send_body` path instead of requiring one whole message to fit in a
     /// single UDP frame datagram.
     max_stream_frame_data: usize = 1200,
+    /// Maximum number of 1xx response heads accepted on one request or push
+    /// stream before the final response. The bound applies in aggregate and
+    /// incremental modes even when the application ignores those heads. This
+    /// is configurable rather than quic-go's hard-coded limit of five.
+    max_informational_responses: usize =
+        http3.default_max_informational_responses,
 };
 
 pub const StreamingHead = union(enum) {
@@ -753,6 +762,9 @@ pub const StreamingMessageReader = struct {
     content_length: ?usize = null,
     body_allowed: bool = true,
     final_observed: bool = false,
+    informational_count: usize = 0,
+    max_informational_responses: usize =
+        http3.default_max_informational_responses,
     /// Absolute HTTP/3 stream offset already returned to QUIC flow control.
     credited_offset: usize = 0,
 
@@ -776,12 +788,29 @@ pub const StreamingMessageReader = struct {
         max_buffered: usize,
         settings: http3.Settings,
     ) StreamingMessageReader {
+        return initResponseWithInformationalLimit(
+            allocator,
+            stream_id,
+            max_buffered,
+            settings,
+            http3.default_max_informational_responses,
+        );
+    }
+
+    pub fn initResponseWithInformationalLimit(
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+        max_buffered: usize,
+        settings: http3.Settings,
+        max_informational_responses: usize,
+    ) StreamingMessageReader {
         return .{
             .allocator = allocator,
             .receive = .init(allocator, stream_id, max_buffered),
             .settings = settings,
             .kind = .response,
             .push_promises_allowed = true,
+            .max_informational_responses = max_informational_responses,
         };
     }
 
@@ -871,6 +900,22 @@ pub const StreamingMessageReader = struct {
                                     header.header_length +
                                     header.payload_length;
                                 final_head = head.status >= 200;
+                                if (!final_head) {
+                                    self.informational_count = std.math.add(
+                                        usize,
+                                        self.informational_count,
+                                        1,
+                                    ) catch {
+                                        head.deinit(self.allocator);
+                                        return error.TooManyInformationalResponses;
+                                    };
+                                    if (self.informational_count >
+                                        self.max_informational_responses)
+                                    {
+                                        head.deinit(self.allocator);
+                                        return error.TooManyInformationalResponses;
+                                    }
+                                }
                                 if (final_head) {
                                     self.content_length = head.content_length;
                                     self.body_allowed = head.body_allowed;
@@ -1925,6 +1970,15 @@ pub const Client = struct {
     }
 
     pub fn request(self: *Client, request_options: http3.Request) Error!OwnedResponse {
+        return self.requestWithInformational(request_options, null);
+    }
+
+    /// Send a development-runtime request and report each borrowed 1xx head.
+    pub fn requestWithInformational(
+        self: *Client,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+    ) Error!OwnedResponse {
         const stream_id = self.next_stream_id;
         self.next_stream_id += 4; // client-initiated bidirectional stream ids.
 
@@ -1937,7 +1991,14 @@ pub const Client = struct {
         var assembled = try receiveRuntimeStreamBytes(&self.quic_client.endpoint, stream_id, self.limits.max_stream_buffer);
         errdefer assembled.deinit(self.quic_client.endpoint.allocator);
         try http3.validateResponsePushPromises(.{}, assembled.bytes);
-        var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
+        var response = try http3.decodeResponseWithOptions(
+            self.quic_client.endpoint.allocator,
+            assembled.bytes,
+            .{
+                .max_informational_responses = self.limits.max_informational_responses,
+                .informational = informational,
+            },
+        );
         errdefer response.deinit(self.quic_client.endpoint.allocator);
         const owned_parts = try assembled.intoOwnedParts(self.quic_client.endpoint.allocator);
         return .{
@@ -2147,6 +2208,8 @@ pub const ProtectedConfig = struct {
     /// small-window streaming can seed the peer window explicitly here.
     peer_stream_flow_window: ?usize = null,
     max_stream_frame_data: usize = 1200,
+    max_informational_responses: usize =
+        http3.default_max_informational_responses,
 };
 
 pub const HandshakeSessionOptions = struct {
@@ -2155,6 +2218,8 @@ pub const HandshakeSessionOptions = struct {
     max_stream_buffer: usize = 64 * 1024,
     max_concurrent_request_streams: usize = 128,
     max_stream_frame_data: usize = 1200,
+    max_informational_responses: usize =
+        http3.default_max_informational_responses,
     /// Maximum HTTP/3 DATA bytes one paced helper attempt may hand to QUIC.
     ///
     /// The default remains conservative for callers using the standard 1200B
@@ -3315,17 +3380,19 @@ pub const HandshakeClient = struct {
                 options.session.max_stream_buffer,
                 options.session.max_concurrent_request_streams,
             ),
-            .streaming_responses = .init(
+            .streaming_responses = .initWithInformationalLimit(
                 allocator,
                 options.session.max_concurrent_request_streams,
                 options.session.max_stream_buffer,
+                options.session.max_informational_responses,
                 options.session.local_settings,
                 .response,
             ),
-            .push_streams = .init(
+            .push_streams = .initWithInformationalLimit(
                 allocator,
                 options.session.max_concurrent_request_streams,
                 options.session.max_stream_buffer,
+                options.session.max_informational_responses,
                 options.session.local_settings,
             ),
             .request_lifecycle = .init(
@@ -3578,6 +3645,16 @@ pub const HandshakeClient = struct {
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
+    }
+
+    /// Send a request and observe ordered 1xx heads before the final response.
+    pub fn requestWithInformational(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+    ) Error!OwnedHandshakeResponse {
+        const stream_id = try self.sendRequest(request_options);
+        return self.receiveResponseWithInformational(stream_id, informational);
     }
 
     pub fn sendRequest(
@@ -3843,6 +3920,15 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!OwnedHandshakeResponse {
+        return self.receiveResponseWithInformational(stream_id, null);
+    }
+
+    /// Aggregate a response while observing ordered, callback-scoped 1xx heads.
+    pub fn receiveResponseWithInformational(
+        self: *HandshakeClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+    ) Error!OwnedHandshakeResponse {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -3878,11 +3964,15 @@ pub const HandshakeClient = struct {
             assembled.stream_id,
             assembled.bytes,
         );
-        var response = try http3.decodeResponseWithDynamicTable(
+        var response = try http3.decodeResponseWithDynamicTableAndOptions(
             self.established.connection.endpoint.allocator,
             assembled.bytes,
             self.control.settings.local,
             self.qpack_decode.table,
+            .{
+                .max_informational_responses = self.options.max_informational_responses,
+                .informational = informational,
+            },
         );
         errdefer response.deinit(self.established.connection.endpoint.allocator);
         try self.qpack_decode.acknowledgeSections(
@@ -4241,9 +4331,16 @@ pub const HandshakeClient = struct {
             }
             switch (event.value) {
                 .head => |value| {
-                    if (head != null or value != .response) {
+                    if (value != .response) {
                         return error.UnexpectedFrame;
                     }
+                    if (value.response.status < 200) {
+                        // Aggregate push callers have no observer API; the
+                        // shared reader already enforced the per-stream 1xx
+                        // bound, so discard this owned head and await final.
+                        continue;
+                    }
+                    if (head != null) return error.UnexpectedFrame;
                     head = value.response;
                     event.value = .finished;
                 },
@@ -5456,17 +5553,19 @@ pub const ProtectedClient = struct {
                 config.max_stream_buffer,
                 limits.max_concurrent_request_streams,
             ),
-            .streaming_responses = .init(
+            .streaming_responses = .initWithInformationalLimit(
                 allocator,
                 limits.max_concurrent_request_streams,
                 config.max_stream_buffer,
+                config.max_informational_responses,
                 config.local_settings,
                 .response,
             ),
-            .push_streams = .init(
+            .push_streams = .initWithInformationalLimit(
                 allocator,
                 limits.max_concurrent_request_streams,
                 config.max_stream_buffer,
+                config.max_informational_responses,
                 config.local_settings,
             ),
             .request_lifecycle = .init(
@@ -5498,6 +5597,16 @@ pub const ProtectedClient = struct {
     pub fn request(self: *ProtectedClient, request_options: http3.Request) Error!OwnedProtectedResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
+    }
+
+    /// Send a protected request and observe ordered 1xx heads before final.
+    pub fn requestWithInformational(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+    ) Error!OwnedProtectedResponse {
+        const stream_id = try self.sendRequest(request_options);
+        return self.receiveResponseWithInformational(stream_id, informational);
     }
 
     pub fn sendRequest(
@@ -5729,6 +5838,15 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         stream_id: u62,
     ) Error!OwnedProtectedResponse {
+        return self.receiveResponseWithInformational(stream_id, null);
+    }
+
+    /// Aggregate a protected response with callback-scoped 1xx observation.
+    pub fn receiveResponseWithInformational(
+        self: *ProtectedClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+    ) Error!OwnedProtectedResponse {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -5752,11 +5870,15 @@ pub const ProtectedClient = struct {
             assembled.stream_id,
             assembled.bytes,
         );
-        var response = try http3.decodeResponseWithDynamicTable(
+        var response = try http3.decodeResponseWithDynamicTableAndOptions(
             self.quic_client.endpoint.allocator,
             assembled.bytes,
             self.control.settings.local,
             self.qpack_decode.table,
+            .{
+                .max_informational_responses = self.config.max_informational_responses,
+                .informational = informational,
+            },
         );
         errdefer response.deinit(self.quic_client.endpoint.allocator);
         try self.qpack_decode.acknowledgeSections(
@@ -6457,9 +6579,11 @@ fn receiveProtectedPush(
         }
         switch (event.value) {
             .head => |value| {
-                if (head != null or value != .response) {
+                if (value != .response) {
                     return error.UnexpectedFrame;
                 }
+                if (value.response.status < 200) continue;
+                if (head != null) return error.UnexpectedFrame;
                 head = value.response;
                 event.value = .finished;
             },
@@ -7250,6 +7374,7 @@ const StreamingMessageSet = struct {
     lowest_reset_index: ?usize = null,
     max_streams: usize,
     max_stream_buffer: usize,
+    max_informational_responses: usize,
     settings: http3.Settings,
     kind: Kind,
 
@@ -7260,10 +7385,29 @@ const StreamingMessageSet = struct {
         settings: http3.Settings,
         kind: Kind,
     ) StreamingMessageSet {
+        return initWithInformationalLimit(
+            allocator,
+            max_streams,
+            max_stream_buffer,
+            http3.default_max_informational_responses,
+            settings,
+            kind,
+        );
+    }
+
+    fn initWithInformationalLimit(
+        allocator: std.mem.Allocator,
+        max_streams: usize,
+        max_stream_buffer: usize,
+        max_informational_responses: usize,
+        settings: http3.Settings,
+        kind: Kind,
+    ) StreamingMessageSet {
         return .{
             .allocator = allocator,
             .max_streams = max_streams,
             .max_stream_buffer = max_stream_buffer,
+            .max_informational_responses = max_informational_responses,
             .settings = settings,
             .kind = kind,
         };
@@ -7306,17 +7450,19 @@ const StreamingMessageSet = struct {
                     .settings = self.settings,
                     .kind = .response,
                     .push_promises_allowed = true,
+                    .max_informational_responses = self.max_informational_responses,
                     .credited_offset = owned.receive.read_offset,
                 },
                 .from = owned.from,
             }, slot.value_ptr);
         }
         return self.appendEntryAssumeCapacity(.{
-            .reader = .initResponse(
+            .reader = .initResponseWithInformationalLimit(
                 self.allocator,
                 stream_id,
                 self.max_stream_buffer,
                 self.settings,
+                self.max_informational_responses,
             ),
         }, slot.value_ptr);
     }
@@ -7807,6 +7953,7 @@ const PushStreamSet = struct {
             self: *Entry,
             control: http3.ControlState,
             settings: http3.Settings,
+            max_informational_responses: usize,
         ) Error!PrefixResult {
             if (self.reader != null) return .push;
             const available = self.receive.available();
@@ -7846,6 +7993,7 @@ const PushStreamSet = struct {
                 .receive = receive,
                 .settings = settings,
                 .kind = .response,
+                .max_informational_responses = max_informational_responses,
             };
             self.push_id = push_id;
             return .push;
@@ -7879,6 +8027,7 @@ const PushStreamSet = struct {
     cancelled_stream_head: usize = 0,
     max_streams: usize,
     max_stream_buffer: usize,
+    max_informational_responses: usize,
     settings: http3.Settings,
 
     fn init(
@@ -7887,10 +8036,27 @@ const PushStreamSet = struct {
         max_stream_buffer: usize,
         settings: http3.Settings,
     ) PushStreamSet {
+        return initWithInformationalLimit(
+            allocator,
+            max_streams,
+            max_stream_buffer,
+            http3.default_max_informational_responses,
+            settings,
+        );
+    }
+
+    fn initWithInformationalLimit(
+        allocator: std.mem.Allocator,
+        max_streams: usize,
+        max_stream_buffer: usize,
+        max_informational_responses: usize,
+        settings: http3.Settings,
+    ) PushStreamSet {
         return .{
             .allocator = allocator,
             .max_streams = max_streams,
             .max_stream_buffer = max_stream_buffer,
+            .max_informational_responses = max_informational_responses,
             .settings = settings,
         };
     }
@@ -8015,7 +8181,11 @@ const PushStreamSet = struct {
             }
             const receive = entry.receiveState();
             try receive.insert(frame);
-            switch (try entry.parsePrefix(control, self.settings)) {
+            switch (try entry.parsePrefix(
+                control,
+                self.settings,
+                self.max_informational_responses,
+            )) {
                 .incomplete => {},
                 .push => {
                     try self.validateBinding(entry);
@@ -8063,7 +8233,11 @@ const PushStreamSet = struct {
             removed.deinit();
         }
         try entry.receive.insert(frame);
-        switch (try entry.parsePrefix(control, self.settings)) {
+        switch (try entry.parsePrefix(
+            control,
+            self.settings,
+            self.max_informational_responses,
+        )) {
             .incomplete => {},
             .push => {
                 try self.validateBinding(entry);
@@ -13101,7 +13275,13 @@ test "HTTP/3 push stream set retains response until promise arrives" {
 
 test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
     const allocator = std.testing.allocator;
-    var requests = StreamingRequestSet.init(allocator, 3, 512, .{}, .request);
+    var requests = StreamingRequestSet.init(
+        allocator,
+        3,
+        512,
+        .{},
+        .request,
+    );
     defer requests.deinit();
 
     const from: net.IpAddress = .{ .ip4 = .loopback(443) };
@@ -13154,7 +13334,13 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
 
 test "HTTP/3 streaming message set indexes active readers" {
     const allocator = std.testing.allocator;
-    var responses = StreamingResponseSet.init(allocator, 3, 512, .{}, .response);
+    var responses = StreamingResponseSet.init(
+        allocator,
+        3,
+        512,
+        .{},
+        .response,
+    );
     defer responses.deinit();
     var buffered = ResponseStreamSet.init(allocator, 512, 3);
     defer buffered.deinit();
@@ -15326,11 +15512,16 @@ test "HTTP/3 protected client aggregates promised push response" {
         @intFromEnum(http3.StreamType.push),
     );
     try quic.varint.encode(&push_bytes, allocator, 1);
-    try (http3.Response{
-        .status = 200,
-        .body = "javascript",
-        .trailers = &.{.{ .name = "x-push", .value = "done" }},
-    }).write(&push_bytes, allocator);
+    try http3.writeResponseSequence(
+        &push_bytes,
+        allocator,
+        &.{ .{ .status = 103 }, .{ .status = 102 } },
+        .{
+            .status = 200,
+            .body = "javascript",
+            .trailers = &.{.{ .name = "x-push", .value = "done" }},
+        },
+    );
     const frames = [_]quic.Frame{
         .{ .stream = .{
             .stream_id = request_stream_id,
@@ -20008,5 +20199,6 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 
 test {
     _ = @import("runtime/cancellation_tests.zig");
+    _ = @import("runtime/informational_tests.zig");
     _ = @import("runtime/response_scheduler_tests.zig");
 }

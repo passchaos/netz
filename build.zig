@@ -280,7 +280,7 @@ pub fn build(b: *std.Build) void {
     http3_quic_go.addArtifactArg(http3_quic_go_server);
     const http3_quic_go_step = b.step(
         "interop-http3-quic-go",
-        "Run bidirectional HTTP/3 body, trailer, and cancellation interop with quic-go",
+        "Run bidirectional HTTP/3 body, trailer, cancellation, and informational interop with quic-go",
     );
     http3_quic_go_step.dependOn(&http3_quic_go.step);
 

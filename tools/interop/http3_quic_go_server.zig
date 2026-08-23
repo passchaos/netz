@@ -12,16 +12,24 @@ const cancellation_prefix = "n" ** read_before_cancel;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const version: netz.quic.Version = if (args.len == 3 and
-        std.mem.eql(u8, args[2], "--version=2"))
-        .version_2
-    else if (args.len == 2)
-        .version_1
-    else
-        return error.InvalidArgument;
+    var version: netz.quic.Version = .version_1;
+    var version_set = false;
+    var informational = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--version=2") and !version_set) {
+            version = .version_2;
+            version_set = true;
+        } else if (std.mem.eql(u8, arg, "--informational") and
+            !informational)
+        {
+            informational = true;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -86,6 +94,50 @@ pub fn main(init: std.process.Init) !void {
 
     var session = try server.accept();
     defer session.deinit();
+    if (informational) {
+        var request = try session.receiveRequest();
+        defer request.deinit(allocator);
+        if (!std.mem.eql(
+            u8,
+            request.request.path,
+            "/informational?from=quic-go",
+        )) {
+            return error.InvalidRequest;
+        }
+        try session.sendResponseWithInformational(
+            request.stream_id,
+            &.{
+                .{
+                    .status = 103,
+                    .headers = &.{.{
+                        .name = "link",
+                        .value = "</netz.css>",
+                    }},
+                },
+                .{
+                    .status = 102,
+                    .headers = &.{.{
+                        .name = "x-progress",
+                        .value = "half",
+                    }},
+                },
+            },
+            .{
+                .status = 200,
+                .headers = &.{.{
+                    .name = "x-netz-final",
+                    .value = "yes",
+                }},
+                .body = "final",
+            },
+        );
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        std.debug.print(
+            "netz HTTP/3 server sent informational responses to quic-go: version={d} statuses=103,102 final=200 body=5\n",
+            .{if (version == .version_2) @as(u8, 2) else 1},
+        );
+        return;
+    }
 
     var canceled = try session.receiveRequest();
     defer canceled.deinit(allocator);

@@ -34,18 +34,26 @@ const CancellationLoss = struct {
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 5) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
-    const version: netz.quic.Version = if (args.len == 4 and
-        std.mem.eql(u8, args[3], "--version=2"))
-        .version_2
-    else if (args.len == 3)
-        .version_1
-    else
-        return error.InvalidArgument;
+    var version: netz.quic.Version = .version_1;
+    var version_set = false;
+    var informational = false;
+    for (args[3..]) |arg| {
+        if (std.mem.eql(u8, arg, "--version=2") and !version_set) {
+            version = .version_2;
+            version_set = true;
+        } else if (std.mem.eql(u8, arg, "--informational") and
+            !informational)
+        {
+            informational = true;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -120,6 +128,10 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer client.deinit();
+    if (informational) {
+        try runInformational(allocator, &client, version);
+        return;
+    }
 
     const canceled_stream_id = try client.startRequest(.{
         .method = "GET",
@@ -258,6 +270,64 @@ pub fn main(init: std.process.Init) !void {
             read_before_cancel,
             cancellation_response_size,
         },
+    );
+}
+
+fn runInformational(
+    allocator: std.mem.Allocator,
+    client: *netz.http3.runtime.HandshakeClient,
+    version: netz.quic.Version,
+) !void {
+    const State = struct {
+        statuses: [2]u16 = undefined,
+        headers_valid: bool = true,
+        count: usize = 0,
+
+        fn observe(
+            context_ptr: *anyopaque,
+            head: netz.http3.InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            if (self.count >= self.statuses.len) {
+                self.headers_valid = false;
+                return;
+            }
+            const valid = switch (head.status) {
+                103 => headerEquals(head.headers, "link", "</quic-go.css>"),
+                102 => headerEquals(head.headers, "x-progress", "half"),
+                else => false,
+            };
+            self.headers_valid = self.headers_valid and valid;
+            self.statuses[self.count] = head.status;
+            self.count += 1;
+        }
+    };
+    var state: State = .{};
+    var response = try client.requestWithInformational(.{
+        .method = "GET",
+        .path = "/informational?from=netz",
+        .scheme = "https",
+        .authority = "localhost",
+    }, .{
+        .context = &state,
+        .on_response = State.observe,
+    });
+    defer response.deinit(allocator);
+    if (state.count != 2 or !state.headers_valid or
+        !std.mem.eql(u16, &state.statuses, &.{ 103, 102 }) or
+        response.response.status != 200 or
+        !headerEquals(
+            response.response.headers,
+            "x-quic-go-final",
+            "yes",
+        ) or
+        !std.mem.eql(u8, response.response.body, "final"))
+    {
+        return error.InvalidResponse;
+    }
+    std.debug.print(
+        "netz HTTP/3 client observed quic-go informational responses: version={d} statuses=103,102 final=200 body=5\n",
+        .{if (version == .version_2) @as(u8, 2) else 1},
     );
 }
 

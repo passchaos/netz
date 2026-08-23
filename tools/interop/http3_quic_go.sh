@@ -5,6 +5,7 @@ client=${1:?netz HTTP/3 client executable path}
 server=${2:?netz HTTP/3 server executable path}
 quicz_root=${QUICZ_ROOT:-"$HOME/Work/quicz"}
 fixture_dir="$quicz_root/examples/interop/go_echo_client"
+netz_root=$(cd "$(dirname "$0")/../.." && pwd)
 version=${NETZ_HTTP3_INTEROP_VERSION:-1}
 if [[ "$version" != 1 && "$version" != 2 ]]; then
   echo "invalid HTTP/3 QUIC version: $version" >&2
@@ -38,6 +39,9 @@ trap cleanup EXIT
 
 (cd "$fixture_dir" && go build \
   -o "$work/quic-go-http3-peer" ./http3_peer)
+(cd "$fixture_dir" && go build \
+  -o "$work/quic-go-http3-informational-peer" \
+  "$netz_root/tools/interop/http3_quic_go_informational.go")
 
 free_udp_port() {
   python3 - <<'PY'
@@ -136,6 +140,91 @@ grep -Fq \
   "$work/netz-server.log"
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"
+
+port=$(free_udp_port)
+"$work/quic-go-http3-informational-peer" \
+  -mode server -addr "127.0.0.1:$port" \
+  -ca-out "$work/quic-go-informational-ca.pem" \
+  "${go_version_args[@]}" \
+  >"$work/quic-go-informational-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/quic-go-informational-ca.pem" ]] && \
+      grep -q 'quic-go HTTP/3 informational server listening=' \
+        "$work/quic-go-informational-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/quic-go-informational-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "$work/quic-go-informational-ca.pem" ]] || ! \
+    grep -q 'quic-go HTTP/3 informational server listening=' \
+      "$work/quic-go-informational-server.log"; then
+  echo 'timed out waiting for quic-go HTTP/3 informational server' >&2
+  cat "$work/quic-go-informational-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$client" "$port" \
+  "$work/quic-go-informational-ca.pem" --informational \
+  "${netz_version_args[@]}" \
+  >"$work/netz-informational-client.log" 2>&1; then
+  cat "$work/netz-informational-client.log" >&2
+  cat "$work/quic-go-informational-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  "netz HTTP/3 client observed quic-go informational responses: version=$version statuses=103,102 final=200 body=5" \
+  "$work/netz-informational-client.log"
+grep -Fq \
+  "quic-go HTTP/3 server sent informational responses to netz: version=$version statuses=103,102 final=200 body=5" \
+  "$work/quic-go-informational-server.log"
+cat "$work/netz-informational-client.log"
+cat "$work/quic-go-informational-server.log"
+
+port=$(free_udp_port)
+"$server" "$port" --informational "${netz_version_args[@]}" \
+  >"$work/netz-informational-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if grep -q 'netz HTTP/3 quic-go interop server listening' \
+      "$work/netz-informational-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/netz-informational-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if ! grep -q 'netz HTTP/3 quic-go interop server listening' \
+    "$work/netz-informational-server.log"; then
+  echo 'timed out waiting for netz HTTP/3 informational server' >&2
+  cat "$work/netz-informational-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$work/quic-go-http3-informational-peer" \
+  -mode client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
+  "${go_version_args[@]}" \
+  >"$work/quic-go-informational-client.log" 2>&1; then
+  cat "$work/quic-go-informational-client.log" >&2
+  cat "$work/netz-informational-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  "quic-go HTTP/3 client received netz informational responses: version=$version statuses=103,102 final=200 body=5" \
+  "$work/quic-go-informational-client.log"
+grep -Fq \
+  "netz HTTP/3 server sent informational responses to quic-go: version=$version statuses=103,102 final=200 body=5" \
+  "$work/netz-informational-server.log"
+cat "$work/quic-go-informational-client.log"
+cat "$work/netz-informational-server.log"
 
 if [[ "$version" == 1 ]]; then
   NETZ_HTTP3_INTEROP_VERSION=2 "$0" "$client" "$server"
