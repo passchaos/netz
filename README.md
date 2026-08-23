@@ -74,9 +74,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   DATA-frame aggregation, pure-digit content-length, three-digit `:status`, and status-forbidden response-body validation, stateless QPACK helpers with RFC 9204 static-table references, Huffman string literals, and literal fallback, a cleartext development runtime over the QUIC
   UDP frame endpoint with preallocated frame payload sends, a protected 1-RTT QUIC STREAM runtime with STREAM frame
   splitting/reassembly, SETTINGS exchange, persistent QPACK encoder/decoder
-  instruction streams in both connection directions, peer-capacity
-  negotiation, and automatic non-blocking dynamic request/response compression
-  after decoder feedback, and a handshake-backed protected client/server
+  instruction streams in both connection directions, peer-capacity and
+  blocked-stream-limit negotiation, automatic speculative dynamic references
+  up to the peer's `SETTINGS_QPACK_BLOCKED_STREAMS` budget, and conservative
+  Known Received Count fallback after that budget is exhausted, and a
+  handshake-backed protected client/server
   runtime with `https://` URI endpoint parsing/DNS/literal target resolution
   plus `HandshakeClient.connectUri` / `requestUri` for public H3 client
   tooling; both server paths retain indexed bounded per-request-stream reassembly state
@@ -823,8 +825,10 @@ if (session.maxDatagramPayloadSize()) |limit| {
   multi-packet STREAM sends through UDP GSO or sendmmsg while preserving
   flow/recovery state and consuming every protected packet number on partial
   socket writes.
-  Both runtimes keep outbound encoding non-blocking: newly inserted fields stay
-  literal until acknowledged. On receive they can advertise
+  Both runtimes bound speculative outbound references by the peer-advertised
+  potentially-blocked stream count; Section Acknowledgment, Insert Count
+  Increment, and Stream Cancellation release that budget while referenced
+  entries remain protected from eviction. On receive they can advertise
   non-zero `SETTINGS_QPACK_BLOCKED_STREAMS` up to the bounded concurrent-stream
   limit, retain multiple complete dependent request/response messages, continue
   processing split/reordered encoder instructions, and resume each once its

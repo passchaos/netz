@@ -374,7 +374,13 @@ pub fn encodeDynamicBlockKnownReceived(
     );
 }
 
-fn encodeDynamicBlockWithReferenceLimit(
+/// Encode using dynamic entries below an exclusive absolute-index limit.
+///
+/// Connection encoders pass Known Received Count for a non-blocking section,
+/// or the current insertion count when the peer's blocked-stream budget allows
+/// a speculative reference. The returned reference set lets that connection
+/// retain entries until Section Acknowledgment or Stream Cancellation.
+pub fn encodeDynamicBlockWithReferenceLimit(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     fields: []const HeaderField,

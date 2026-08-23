@@ -1479,10 +1479,15 @@ pub const QpackEncodeState = struct {
     /// the earliest retained section for each stream.
     pending_section_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     reference_counts: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    /// Number of not-yet-decodable field sections on each request/push stream.
+    /// QPACK limits potentially blocked streams, not individual sections, so
+    /// multiple interim/final/trailer sections share one budget slot.
+    blocked_section_counts: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     encoder_instructions: std.ArrayList(u8) = .empty,
     decoder_stream: ?quic.stream_state.RecvState = null,
     decoder_stream_type_received: bool = false,
     peer_max_capacity: ?usize = null,
+    peer_max_blocked_streams: ?u64 = null,
     max_stream_buffer: usize,
 
     pub fn init(
@@ -1494,6 +1499,7 @@ pub const QpackEncodeState = struct {
             .allocator = allocator,
             .table = .init(allocator, peer_max_capacity),
             .peer_max_capacity = peer_max_capacity,
+            .peer_max_blocked_streams = 0,
             .max_stream_buffer = max_stream_buffer,
         };
     }
@@ -1519,6 +1525,7 @@ pub const QpackEncodeState = struct {
         self.pending_sections.deinit(self.allocator);
         self.pending_section_index.deinit(self.allocator);
         self.reference_counts.deinit(self.allocator);
+        self.blocked_section_counts.deinit(self.allocator);
         self.encoder_instructions.deinit(self.allocator);
         self.table.deinit();
         self.* = undefined;
@@ -1543,8 +1550,30 @@ pub const QpackEncodeState = struct {
         self: *QpackEncodeState,
         capacity: usize,
     ) http3.Error!void {
-        if (self.peer_max_capacity) |configured| {
-            if (configured != capacity) return error.QpackEncoderStreamError;
+        return self.configurePeerLimits(capacity, 0);
+    }
+
+    /// Bind the encoder once to the peer's immutable QPACK SETTINGS.
+    ///
+    /// Before SETTINGS arrives the encoder uses literals. Afterwards it may
+    /// reference unacknowledged inserts only while doing so keeps the number of
+    /// potentially blocked streams within the peer-advertised limit.
+    pub fn configurePeerLimits(
+        self: *QpackEncodeState,
+        capacity: usize,
+        max_blocked_streams: u64,
+    ) http3.Error!void {
+        if (max_blocked_streams >
+            http3.Settings.max_supported_qpack_blocked_streams)
+        {
+            return error.QpackEncoderStreamError;
+        }
+        if (self.peer_max_capacity) |configured_capacity| {
+            if (configured_capacity != capacity or
+                self.peer_max_blocked_streams.? != max_blocked_streams)
+            {
+                return error.QpackEncoderStreamError;
+            }
             return;
         }
         if (self.table.insert_count != 0 or self.table.entryCount() != 0) {
@@ -1555,6 +1584,7 @@ pub const QpackEncodeState = struct {
         self.table.max_capacity = capacity;
         if (capacity != 0) try self.setCapacity(capacity);
         self.peer_max_capacity = capacity;
+        self.peer_max_blocked_streams = max_blocked_streams;
     }
 
     pub fn insertField(
@@ -1608,12 +1638,16 @@ pub const QpackEncodeState = struct {
         errdefer list.shrinkRetainingCapacity(original_len);
         var references: std.ArrayList(u64) = .empty;
         errdefer references.deinit(self.allocator);
-        try http3.Qpack.encodeDynamicBlockKnownReceived(
+        const reference_limit = if (self.mayRiskBlockedStream(stream_id))
+            self.table.insert_count
+        else
+            self.known_received_count;
+        try http3.Qpack.encodeDynamicBlockWithReferenceLimit(
             list,
             self.allocator,
             fields,
             self.table,
-            self.known_received_count,
+            reference_limit,
             &references,
         );
         if (references.items.len == 0) {
@@ -1623,6 +1657,9 @@ pub const QpackEncodeState = struct {
 
         const owned = try references.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned);
+        const required_insert_count = maxReferencedInsertCount(owned);
+        const potentially_blocked =
+            required_insert_count > self.known_received_count;
         try self.pending_sections.ensureUnusedCapacity(self.allocator, 1);
         const pending_slot = try self.pending_section_index.getOrPut(
             self.allocator,
@@ -1640,6 +1677,16 @@ pub const QpackEncodeState = struct {
             std.math.cast(u32, owned.len) orelse
                 return error.OutOfMemory,
         );
+        if (potentially_blocked and
+            !self.blocked_section_counts.contains(stream_id))
+        {
+            // At most one new map slot is needed for a new blocked stream,
+            // even when several sections on that stream reference inserts.
+            try self.blocked_section_counts.ensureUnusedCapacity(
+                self.allocator,
+                1,
+            );
+        }
         for (owned) |absolute_index| {
             const entry = self.reference_counts.getOrPutAssumeCapacity(
                 absolute_index,
@@ -1650,11 +1697,17 @@ pub const QpackEncodeState = struct {
         const pending_index = self.pending_sections.items.len;
         self.pending_sections.appendAssumeCapacity(.{
             .stream_id = stream_id,
-            .required_insert_count = maxReferencedInsertCount(owned),
+            .required_insert_count = required_insert_count,
             .references = owned,
         });
         if (!pending_slot.found_existing) {
             pending_slot.value_ptr.* = pending_index;
+        }
+        if (potentially_blocked) {
+            const blocked = self.blocked_section_counts
+                .getOrPutAssumeCapacity(stream_id);
+            if (!blocked.found_existing) blocked.value_ptr.* = 0;
+            blocked.value_ptr.* += 1;
         }
     }
 
@@ -1736,6 +1789,7 @@ pub const QpackEncodeState = struct {
                 ) catch return error.QpackDecoderStreamError;
                 if (next > self.table.insert_count) return error.QpackDecoderStreamError;
                 self.known_received_count = next;
+                self.rebuildBlockedSectionCounts();
             },
             .section_acknowledgment => |stream_id| {
                 const index = self.findPendingSection(stream_id) orelse
@@ -1748,6 +1802,7 @@ pub const QpackEncodeState = struct {
                     self.known_received_count,
                     required_insert_count,
                 );
+                self.rebuildBlockedSectionCounts();
             },
             .stream_cancellation => |stream_id| {
                 if (self.releaseSectionsForStream(stream_id) == 0) {
@@ -1783,6 +1838,14 @@ pub const QpackEncodeState = struct {
         self: *QpackEncodeState,
         section: *PendingSection,
     ) void {
+        if (section.required_insert_count > self.known_received_count) {
+            const blocked = self.blocked_section_counts
+                .getPtr(section.stream_id).?;
+            blocked.* -= 1;
+            if (blocked.* == 0) {
+                _ = self.blocked_section_counts.remove(section.stream_id);
+            }
+        }
         for (section.references) |absolute_index| {
             const count = self.reference_counts.getPtr(absolute_index).?;
             count.* -= 1;
@@ -1889,6 +1952,30 @@ pub const QpackEncodeState = struct {
         if (absolute_index >= self.known_received_count) return false;
         return self.reference_counts.count() == 0 or
             !self.reference_counts.contains(absolute_index);
+    }
+
+    fn mayRiskBlockedStream(
+        self: QpackEncodeState,
+        stream_id: u64,
+    ) bool {
+        if (self.known_received_count >= self.table.insert_count) return false;
+        const limit = self.peer_max_blocked_streams orelse return false;
+        if (limit == 0) return false;
+        if (self.blocked_section_counts.contains(stream_id)) return true;
+        return self.blocked_section_counts.count() < limit;
+    }
+
+    fn rebuildBlockedSectionCounts(self: *QpackEncodeState) void {
+        self.blocked_section_counts.clearRetainingCapacity();
+        for (self.pending_sections.items) |section| {
+            if (section.required_insert_count <= self.known_received_count) {
+                continue;
+            }
+            const blocked = self.blocked_section_counts
+                .getOrPutAssumeCapacity(section.stream_id);
+            if (!blocked.found_existing) blocked.value_ptr.* = 0;
+            blocked.value_ptr.* += 1;
+        }
     }
 
     fn maxReferencedInsertCount(references: []const u64) u64 {
@@ -11415,7 +11502,10 @@ fn configureQpackEncoderFromPeerSettings(
         usize,
         control.settings.peer.qpack_max_table_capacity,
     ) orelse return error.InvalidSetting;
-    try qpack.configurePeerCapacity(capacity);
+    try qpack.configurePeerLimits(
+        capacity,
+        control.settings.peer.qpack_blocked_streams,
+    );
 }
 
 fn isPeerQpackStreamFrame(
@@ -12424,8 +12514,9 @@ test "HTTP/3 QPACK encoder binds once to peer SETTINGS capacity" {
 
     try std.testing.expect(encoder.peer_max_capacity == null);
     try std.testing.expectEqual(@as(usize, 0), encoder.table.capacity);
-    try encoder.configurePeerCapacity(256);
+    try encoder.configurePeerLimits(256, 2);
     try std.testing.expectEqual(@as(?usize, 256), encoder.peer_max_capacity);
+    try std.testing.expectEqual(@as(?u64, 2), encoder.peer_max_blocked_streams);
     try std.testing.expectEqual(@as(usize, 256), encoder.table.max_capacity);
     try std.testing.expectEqual(@as(usize, 256), encoder.table.capacity);
     const instruction_len = encoder.pendingEncoderInstructions().len;
@@ -12433,14 +12524,341 @@ test "HTTP/3 QPACK encoder binds once to peer SETTINGS capacity" {
 
     // Reprocessing retransmitted control bytes is idempotent, while a changed
     // value would violate HTTP/3's one-SETTINGS-frame connection contract.
-    try encoder.configurePeerCapacity(256);
+    try encoder.configurePeerLimits(256, 2);
     try std.testing.expectEqual(
         instruction_len,
         encoder.pendingEncoderInstructions().len,
     );
     try std.testing.expectError(
         error.QpackEncoderStreamError,
-        encoder.configurePeerCapacity(128),
+        encoder.configurePeerLimits(128, 2),
+    );
+    try std.testing.expectError(
+        error.QpackEncoderStreamError,
+        encoder.configurePeerLimits(256, 1),
+    );
+    var excessive = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        4096,
+    );
+    defer excessive.deinit();
+    try std.testing.expectError(
+        error.QpackEncoderStreamError,
+        excessive.configurePeerLimits(
+            256,
+            http3.Settings.max_supported_qpack_blocked_streams + 1,
+        ),
+    );
+}
+
+test "HTTP/3 QPACK encoder spends the peer blocked-stream budget" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+    try encoder.configurePeerLimits(512, 1);
+    _ = try encoder.insertField("x-speculative", "repeated-value");
+
+    const fields = [_]http3.Qpack.HeaderField{.{
+        .name = "x-speculative",
+        .value = "repeated-value",
+    }};
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try encoder.encodeFieldSection(&first, 0, &fields);
+    const first_prefix = try http3.Qpack.decodeFieldSectionPrefix(
+        first.items,
+        encoder.table,
+    );
+    try std.testing.expectEqual(@as(u64, 1), first_prefix.required_insert_count);
+    try std.testing.expectEqual(@as(usize, 1), encoder.blocked_section_counts.count());
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        encoder.blocked_section_counts.get(0),
+    );
+
+    // More sections on the same ordered request stream consume no additional
+    // SETTINGS_QPACK_BLOCKED_STREAMS credit. A different stream must remain
+    // literal until decoder feedback releases the sole slot.
+    var same_stream: std.ArrayList(u8) = .empty;
+    defer same_stream.deinit(allocator);
+    try encoder.encodeFieldSection(&same_stream, 0, &fields);
+    const same_prefix = try http3.Qpack.decodeFieldSectionPrefix(
+        same_stream.items,
+        encoder.table,
+    );
+    try std.testing.expectEqual(@as(u64, 1), same_prefix.required_insert_count);
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        encoder.blocked_section_counts.get(0),
+    );
+
+    var gated: std.ArrayList(u8) = .empty;
+    defer gated.deinit(allocator);
+    try encoder.encodeFieldSection(&gated, 4, &fields);
+    const gated_prefix = try http3.Qpack.decodeFieldSectionPrefix(
+        gated.items,
+        encoder.table,
+    );
+    try std.testing.expectEqual(@as(u64, 0), gated_prefix.required_insert_count);
+    try std.testing.expect(!encoder.hasPendingSections(4));
+
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &feedback,
+        allocator,
+        .{ .insert_count_increment = 1 },
+    );
+    var control = http3.ControlState{};
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = feedback.items,
+    });
+    try std.testing.expectEqual(@as(u64, 1), encoder.known_received_count);
+    try std.testing.expectEqual(@as(usize, 0), encoder.blocked_section_counts.count());
+
+    var released: std.ArrayList(u8) = .empty;
+    defer released.deinit(allocator);
+    try encoder.encodeFieldSection(&released, 4, &fields);
+    const released_prefix = try http3.Qpack.decodeFieldSectionPrefix(
+        released.items,
+        encoder.table,
+    );
+    try std.testing.expectEqual(@as(u64, 1), released_prefix.required_insert_count);
+    try std.testing.expect(encoder.hasPendingSections(4));
+}
+
+test "HTTP/3 QPACK Section Ack releases speculative blocked streams" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+    try encoder.configurePeerLimits(512, 2);
+    _ = try encoder.insertField("x-speculative", "ack-value");
+
+    const fields = [_]http3.Qpack.HeaderField{.{
+        .name = "x-speculative",
+        .value = "ack-value",
+    }};
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try encoder.encodeFieldSection(&first, 0, &fields);
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try encoder.encodeFieldSection(&second, 4, &fields);
+    try std.testing.expectEqual(@as(usize, 2), encoder.blocked_section_counts.count());
+
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &feedback,
+        allocator,
+        .{ .section_acknowledgment = 0 },
+    );
+    var control = http3.ControlState{};
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = feedback.items,
+    });
+
+    // Section Ack advances Known Received Count to the section's RIC. That
+    // makes every other section depending only on the same insert unblocked.
+    try std.testing.expectEqual(@as(u64, 1), encoder.known_received_count);
+    try std.testing.expectEqual(@as(usize, 0), encoder.blocked_section_counts.count());
+    try std.testing.expect(!encoder.hasPendingSections(0));
+    try std.testing.expect(encoder.hasPendingSections(4));
+}
+
+test "HTTP/3 QPACK Stream Cancellation releases blocked-stream credit" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+    try encoder.configurePeerLimits(512, 1);
+    _ = try encoder.insertField("x-speculative", "cancel-value");
+    const fields = [_]http3.Qpack.HeaderField{.{
+        .name = "x-speculative",
+        .value = "cancel-value",
+    }};
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try encoder.encodeFieldSection(&first, 0, &fields);
+    var gated: std.ArrayList(u8) = .empty;
+    defer gated.deinit(allocator);
+    try encoder.encodeFieldSection(&gated, 4, &fields);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        (try http3.Qpack.decodeFieldSectionPrefix(
+            gated.items,
+            encoder.table,
+        )).required_insert_count,
+    );
+
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &feedback,
+        allocator,
+        .{ .stream_cancellation = 0 },
+    );
+    var control = http3.ControlState{};
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = feedback.items,
+    });
+    try std.testing.expectEqual(@as(usize, 0), encoder.blocked_section_counts.count());
+
+    var released: std.ArrayList(u8) = .empty;
+    defer released.deinit(allocator);
+    try encoder.encodeFieldSection(&released, 4, &fields);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        (try http3.Qpack.decodeFieldSectionPrefix(
+            released.items,
+            encoder.table,
+        )).required_insert_count,
+    );
+}
+
+test "HTTP/3 protected runtime sends a speculative QPACK request" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xb1, 0x71, 0x72, 0x73 };
+    const server_cid = [_]u8{ 0xb2, 0x71, 0x72, 0x73 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb4} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .local_settings = .{
+                .qpack_max_table_capacity = 256,
+                .qpack_blocked_streams = 1,
+            },
+            .max_stream_frame_data = 1024,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_settings = .{
+                .qpack_max_table_capacity = 256,
+                .qpack_blocked_streams = 1,
+            },
+            .max_stream_frame_data = 1024,
+        },
+    );
+    defer client.deinit();
+
+    // Exchange SETTINGS before sending the application request so the client
+    // can consume the peer's blocked-stream allowance immediately.
+    try sendProtectedSettings(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config,
+        &client.control,
+        &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
+        &client.qpack_decoder_send,
+        &client.qpack_decoder_prefix_sent,
+        &client.next_packet_number,
+        &client.protected_send,
+        client_control_stream_id,
+    );
+    try sendProtectedSettings(
+        &server.quic_server.endpoint,
+        client.quic_client.endpoint.address(),
+        server.config,
+        &server.control,
+        &server.control_send,
+        &server.qpack_encoder_send,
+        &server.qpack_encoder_prefix_sent,
+        &server.qpack_decoder_send,
+        &server.qpack_decoder_prefix_sent,
+        &server.next_packet_number,
+        &server.protected_send,
+        server_control_stream_id,
+    );
+    while (!client.control.settings.received) {
+        try client.receiveResponsePacket();
+    }
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        client.qpack_encode.peer_max_blocked_streams,
+    );
+
+    _ = try client.qpack_encode.insertField(
+        "x-speculative-runtime",
+        "sent-before-feedback",
+    );
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/speculative-qpack",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = "x-speculative-runtime",
+            .value = "sent-before-feedback",
+        }},
+    });
+    try std.testing.expectEqual(@as(u62, 0), stream_id);
+    try std.testing.expectEqual(@as(u64, 0), client.qpack_encode.known_received_count);
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        client.qpack_encode.blocked_section_counts.get(stream_id),
+    );
+
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    try std.testing.expectEqualStrings("/speculative-qpack", request.request.path);
+    var value: ?[]const u8 = null;
+    for (request.request.headers) |header| {
+        if (std.mem.eql(u8, header.name, "x-speculative-runtime")) {
+            value = header.value;
+        }
+    }
+    try std.testing.expectEqualStrings(
+        "sent-before-feedback",
+        value orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        request.request.qpack_section_acknowledgments,
     );
 }
 
@@ -12717,6 +13135,33 @@ test "HTTP/3 QPACK encoder state is transactional under allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkQpackEncoderStateAllocationFailure,
+        .{},
+    );
+}
+
+fn checkQpackSpeculativeEncodeAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+    try encoder.configurePeerLimits(256, 1);
+    _ = try encoder.insertField("x-speculative", "repeated-value");
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeFieldSection(&block, 0, &.{.{
+        .name = "x-speculative",
+        .value = "repeated-value",
+    }});
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        encoder.blocked_section_counts.get(0),
+    );
+}
+
+test "HTTP/3 speculative QPACK encoding is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkQpackSpeculativeEncodeAllocationFailure,
         .{},
     );
 }

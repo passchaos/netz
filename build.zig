@@ -317,6 +317,29 @@ pub fn build(b: *std.Build) void {
     );
     http3_tquic_step.dependOn(&http3_tquic.step);
 
+    const http3_qpack_peer = b.addExecutable(.{
+        .name = "netz-http3-qpack-peer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_qpack_peer.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_qpack_quic_zig = b.addSystemCommand(
+        &.{"tools/interop/http3_qpack_quic_zig.sh"},
+    );
+    http3_qpack_quic_zig.addArtifactArg(http3_qpack_peer);
+    const http3_qpack_quic_zig_step = b.step(
+        "interop-http3-qpack-quic-zig",
+        "Decode speculative netz QPACK with quic-zig",
+    );
+    http3_qpack_quic_zig_step.dependOn(
+        &http3_qpack_quic_zig.step,
+    );
+
     const websocket_hyper_h2_client = b.addExecutable(.{
         .name = "netz-websocket-hyper-h2-client",
         .root_module = b.createModule(.{
