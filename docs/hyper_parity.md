@@ -421,7 +421,11 @@ Reusable implementation changes behind these H2 results:
   one frame because control returns to the caller immediately, paralleling
   Hyper's independently driven response future/body pipe;
 - `requestBatchInto` opens bodyless streams together, accepts response frames in
-  any stream order, and returns owned responses in request order;
+  any stream order, and returns owned responses in request order.
+  `requestBatchWithInformationalInto` adds borrowed, ordered 1xx callbacks
+  correlated by request index and stream ID; the body-bearing and streaming
+  batch variants expose the same observer contract, and each stream keeps an
+  independent bounded informational-response count;
 - `requestBodyBatchInto` extends that boundary to DATA when the complete batch
   fits currently available connection and per-stream flow-control credit. It
   transactionally stages every HPACK block, then sends application-sized DATA
@@ -668,7 +672,10 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
    200 response in both directions. Netz exposes borrowed informational-head
    callbacks on aggregate and streaming request APIs, caps each chain with
    `Limits.max_informational_responses`, and applies that bound even to legacy
-   skip-only and pushed-response paths. The h2 client explicitly polls its
+   skip-only and pushed-response paths. Multiplexed aggregate, body-bearing and
+   streaming batches additionally report request index and stream ID, with
+   interleaved local tests proving correlation and per-stream bounds. The h2
+   client explicitly polls its
    informational queue and checks both statuses; netz checks both statuses and
    their distinct headers.
 4. **Completed:** combine the bidirectional process-boundary cancellation

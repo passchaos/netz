@@ -1536,6 +1536,22 @@ pub const Connection = struct {
         requests: []const RequestOptions,
         responses: []OwnedResponse,
     ) Error!void {
+        return self.requestBatchWithInformationalInto(
+            requests,
+            responses,
+            null,
+        );
+    }
+
+    /// Aggregate a bodyless response batch while observing each ordered 1xx
+    /// head. The callback identifies both the request-array index and HTTP/2
+    /// stream, and its header slices remain valid only for that callback.
+    pub fn requestBatchWithInformationalInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+    ) Error!void {
         if (self.role != .client) return error.UnexpectedFrame;
         if (requests.len != responses.len) return error.InvalidResponse;
         if (requests.len == 0) return;
@@ -1596,7 +1612,7 @@ pub const Connection = struct {
         self.hpack_encoder = staged_encoder;
         staged_encoder_owned = false;
 
-        try self.readResponseBatch(states);
+        try self.readResponseBatch(states, informational);
         for (states, responses) |*state, *response| {
             response.* = .{
                 .headers = state.headers.?,
@@ -1624,6 +1640,26 @@ pub const Connection = struct {
         self: *Connection,
         requests: []const RequestOptions,
         responses: []StreamingResponse,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        return self.requestBatchStreamingWithInformationalInto(
+            requests,
+            responses,
+            null,
+            context,
+            consume,
+        );
+    }
+
+    /// Stream a bodyless response batch while observing its correlated 1xx
+    /// heads. Informational callbacks run in wire order before the final head
+    /// and DATA callbacks for their respective streams.
+    pub fn requestBatchStreamingWithInformationalInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
         context: anytype,
         comptime consume: anytype,
     ) !void {
@@ -1702,6 +1738,7 @@ pub const Connection = struct {
 
         try self.readResponseBatchStreaming(
             states,
+            informational,
             context,
             consume,
         );
@@ -1733,6 +1770,24 @@ pub const Connection = struct {
         requests: []const RequestOptions,
         body_chunk_size: usize,
         responses: []OwnedResponse,
+    ) Error!void {
+        return self.requestBodyBatchWithInformationalInto(
+            requests,
+            body_chunk_size,
+            responses,
+            null,
+        );
+    }
+
+    /// Send a bounded body batch and observe correlated interim responses.
+    /// Each stream has its own `max_informational_responses` allowance; one
+    /// busy stream therefore cannot consume another stream's limit.
+    pub fn requestBodyBatchWithInformationalInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
     ) Error!void {
         if (self.role != .client) return error.UnexpectedFrame;
         if (requests.len != responses.len) return error.InvalidResponse;
@@ -1879,7 +1934,7 @@ pub const Connection = struct {
         body_write_succeeded = true;
         reserved_connection_bytes = 0;
 
-        try self.readResponseBatch(states);
+        try self.readResponseBatch(states, informational);
         for (states, responses) |*state, *response| {
             response.* = .{
                 .headers = state.headers.?,
@@ -2312,6 +2367,7 @@ pub const Connection = struct {
     fn readResponseBatch(
         self: *Connection,
         states: []BatchResponseState,
+        informational: ?BatchInformationalObserver,
     ) Error!void {
         var remaining = states.len;
         while (remaining != 0) {
@@ -2329,10 +2385,11 @@ pub const Connection = struct {
                 continue;
             }
 
-            const state = findBatchResponseState(
+            const state_index = findBatchResponseStateIndex(
                 states,
                 frame.frame.header.stream_id,
             ) orelse return error.UnexpectedFrame;
+            const state = &states[state_index];
             if (state.done) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
                 .push_promise => {
@@ -2386,8 +2443,10 @@ pub const Connection = struct {
                         {
                             return error.InvalidContentLength;
                         }
-                        try notifyInformationalResponse(
-                            null,
+                        try notifyBatchInformationalResponse(
+                            informational,
+                            state_index,
+                            state.stream_id,
                             .{ .headers = headers, .status = status },
                             &state.informational_count,
                             self.limits.max_informational_responses,
@@ -2472,6 +2531,7 @@ pub const Connection = struct {
     fn readResponseBatchStreaming(
         self: *Connection,
         states: []BatchResponseState,
+        informational: ?BatchInformationalObserver,
         context: anytype,
         comptime consume: anytype,
     ) !void {
@@ -2555,8 +2615,10 @@ pub const Connection = struct {
                         {
                             return error.InvalidContentLength;
                         }
-                        try notifyInformationalResponse(
-                            null,
+                        try notifyBatchInformationalResponse(
+                            informational,
+                            state_index,
+                            state.stream_id,
                             .{ .headers = headers, .status = status },
                             &state.informational_count,
                             self.limits.max_informational_responses,
@@ -2689,17 +2751,6 @@ pub const Connection = struct {
                 self.forgetStreamWindows(state.stream_id);
             }
         }
-    }
-
-    fn findBatchResponseState(
-        states: []BatchResponseState,
-        stream_id: u31,
-    ) ?*BatchResponseState {
-        const index = findBatchResponseStateIndex(
-            states,
-            stream_id,
-        ) orelse return null;
-        return &states[index];
     }
 
     fn findBatchResponseStateIndex(
@@ -7139,17 +7190,57 @@ pub const InformationalObserver = struct {
     ) void,
 };
 
-fn notifyInformationalResponse(
-    observer: ?InformationalObserver,
-    response: StreamingResponseHead,
+/// Observes an informational response from a multiplexed request batch.
+/// `response.headers` borrow connection decoder storage and are valid only for
+/// the callback. The request index is stable even when peer frames are ordered
+/// differently from the input array; `stream_id` provides wire-level identity.
+pub const BatchInformationalObserver = struct {
+    context: *anyopaque,
+    on_response: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+        stream_id: u31,
+        response: StreamingResponseHead,
+    ) void,
+};
+
+fn countInformationalResponse(
     count: *usize,
     limit: usize,
 ) Error!void {
     count.* = std.math.add(usize, count.*, 1) catch
         return error.TooManyInformationalResponses;
     if (count.* > limit) return error.TooManyInformationalResponses;
+}
+
+fn notifyInformationalResponse(
+    observer: ?InformationalObserver,
+    response: StreamingResponseHead,
+    count: *usize,
+    limit: usize,
+) Error!void {
+    try countInformationalResponse(count, limit);
     if (observer) |value| {
         value.on_response(value.context, response);
+    }
+}
+
+fn notifyBatchInformationalResponse(
+    observer: ?BatchInformationalObserver,
+    request_index: usize,
+    stream_id: u31,
+    response: StreamingResponseHead,
+    count: *usize,
+    limit: usize,
+) Error!void {
+    try countInformationalResponse(count, limit);
+    if (observer) |value| {
+        value.on_response(
+            value.context,
+            request_index,
+            stream_id,
+            response,
+        );
     }
 }
 
@@ -16229,6 +16320,7 @@ test {
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
     _ = @import("runtime/response_batch_tests.zig");
+    _ = @import("runtime/informational_batch_tests.zig");
     _ = @import("runtime/response_writer_tests.zig");
     _ = @import("runtime/request_writer_tests.zig");
 }
