@@ -16,6 +16,10 @@ name = "netz-hyper-http2-interop-client"
 path = "src/bin/interop_client.rs"
 
 [[bin]]
+name = "netz-h2-push-peer"
+path = "src/bin/push_peer.rs"
+
+[[bin]]
 name = "netz-hyper-http2-websocket-server"
 path = "src/bin/websocket_server.rs"
 
@@ -24,8 +28,10 @@ bytes = "1.2"
 futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { path = "../../../../Work/hyper", features = ["client", "http2", "server"] }
+h2 = "0.4.15"
+http = "1"
 pin-project-lite = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 rustls-pemfile = "2"
-tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }

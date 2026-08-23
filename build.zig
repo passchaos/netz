@@ -218,6 +218,39 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const http2_h2_push_client = b.addExecutable(.{
+        .name = "netz-http2-h2-push-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_h2_push_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http2_h2_push_server = b.addExecutable(.{
+        .name = "netz-http2-h2-push-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_h2_push_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http2_h2_push = b.addSystemCommand(
+        &.{"tools/interop/http2_h2_push.sh"},
+    );
+    http2_h2_push.addArtifactArg(http2_h2_push_client);
+    http2_h2_push.addArtifactArg(http2_h2_push_server);
+    const http2_h2_push_step = b.step(
+        "interop-http2-h2-push",
+        "Run HTTP/2 server-push and push opt-out interop with audited h2",
+    );
+    http2_h2_push_step.dependOn(&http2_h2_push.step);
+
     const http3_quic_go_client = b.addExecutable(.{
         .name = "netz-http3-quic-go-client",
         .root_module = b.createModule(.{
