@@ -3841,13 +3841,34 @@ pub const Connection = struct {
         return period;
     }
 
+    /// Effective idle timeout in milliseconds after applying RFC 9000 §10.1.
+    ///
+    /// The transport parameters select the smaller non-zero advertised value,
+    /// but that value is only a preference: endpoints MUST raise it to at least
+    /// three times the current base PTO. Established application-data PTO
+    /// includes the peer's max_ack_delay but excludes exponential backoff,
+    /// matching tquic and s2n-quic's negotiated idle-timer calculation.
     pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
         const local = self.config.local_max_idle_timeout_ms;
         const peer = self.config.peer_max_idle_timeout_ms;
         if (local == 0 and peer == 0) return null;
-        if (local == 0) return peer;
-        if (peer == 0) return local;
-        return @min(local, peer);
+        const negotiated = if (local == 0)
+            peer
+        else if (peer == 0)
+            local
+        else
+            @min(local, peer);
+        const minimum_ns = std.math.mul(
+            u64,
+            self.rtt_stats.pto(true),
+            3,
+        ) catch std.math.maxInt(u64);
+        const minimum_ms = std.math.divCeil(
+            u64,
+            minimum_ns,
+            std.time.ns_per_ms,
+        ) catch std.math.maxInt(u64);
+        return @max(negotiated, minimum_ms);
     }
 
     pub fn markActivity(self: *Connection, now_ms: u64) void {

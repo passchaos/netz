@@ -1783,7 +1783,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expectEqual(@as(u64, 40), established.connection.recv_flow.limit);
             try std.testing.expectEqual(@as(?u64, 11), established.connection.config.initial_send_max_stream_data_bidi_local);
             try std.testing.expectEqual(@as(?u64, 21), established.connection.config.initial_receive_max_stream_data_bidi_local);
-            try std.testing.expectEqual(@as(?u64, 40), established.connection.effectiveIdleTimeoutMillis());
+            try std.testing.expectEqual(@as(?u64, 600), established.connection.effectiveIdleTimeoutMillis());
             try std.testing.expectEqual(@as(u64, 7), established.connection.config.local_ack_delay_exponent);
             try std.testing.expectEqual(@as(u64, 5), established.connection.config.peer_ack_delay_exponent);
             try std.testing.expectEqual(@as(u64, 35), established.connection.config.peer_max_ack_delay_ms);
@@ -1820,7 +1820,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expectEqual(@as(u64, 30), established.connection.recv_flow.limit);
     try std.testing.expectEqual(@as(?u64, 22), established.connection.config.initial_send_max_stream_data_bidi_remote);
     try std.testing.expectEqual(@as(?u64, 11), established.connection.config.initial_receive_max_stream_data_bidi_local);
-    try std.testing.expectEqual(@as(?u64, 40), established.connection.effectiveIdleTimeoutMillis());
+    try std.testing.expectEqual(@as(?u64, 600), established.connection.effectiveIdleTimeoutMillis());
     try std.testing.expectEqual(@as(u64, 5), established.connection.config.local_ack_delay_exponent);
     try std.testing.expectEqual(@as(u64, 7), established.connection.config.peer_ack_delay_exponent);
     try std.testing.expectEqual(@as(u64, 45), established.connection.config.peer_max_ack_delay_ms);

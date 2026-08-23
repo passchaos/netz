@@ -1927,18 +1927,18 @@ test "QUIC 1-RTT connection models idle timeout deadlines" {
         .send_keys = keys,
         .local_connection_id = "local",
         .peer_connection_id = "peer",
-        .local_max_idle_timeout_ms = 100,
-        .peer_max_idle_timeout_ms = 250,
+        .local_max_idle_timeout_ms = 1000,
+        .peer_max_idle_timeout_ms = 2500,
     });
     defer connection.deinit();
 
-    try std.testing.expectEqual(@as(?u64, 100), connection.effectiveIdleTimeoutMillis());
+    try std.testing.expectEqual(@as(?u64, 1000), connection.effectiveIdleTimeoutMillis());
     try std.testing.expectEqual(@as(?u64, null), connection.idleTimeoutDeadlineMillis());
     connection.markActivity(10);
-    try std.testing.expectEqual(@as(?u64, 110), connection.idleTimeoutDeadlineMillis());
-    try std.testing.expect(!connection.checkIdleTimeout(109));
+    try std.testing.expectEqual(@as(?u64, 1010), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expect(!connection.checkIdleTimeout(1009));
     try std.testing.expect(!connection.closed());
-    try std.testing.expect(connection.checkIdleTimeout(110));
+    try std.testing.expect(connection.checkIdleTimeout(1010));
     try std.testing.expect(connection.closed());
     try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
 }
@@ -1960,27 +1960,180 @@ test "QUIC 1-RTT idle timeout restarts only on first ack-eliciting send" {
         .send_keys = keys,
         .local_connection_id = "local",
         .peer_connection_id = "peer",
-        .local_max_idle_timeout_ms = 100,
-        .peer_max_idle_timeout_ms = 250,
+        .local_max_idle_timeout_ms = 1000,
+        .peer_max_idle_timeout_ms = 2500,
         .enable_pacing = false,
     });
     defer connection.deinit();
 
     connection.markPeerActivity(0);
-    try std.testing.expectEqual(@as(?u64, 100), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(@as(?u64, 1000), connection.idleTimeoutDeadlineMillis());
 
     try connection.sendAt(&.{.{ .padding = .{ .len = 1 } }}, 10_000_000);
-    try std.testing.expectEqual(@as(?u64, 100), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(@as(?u64, 1000), connection.idleTimeoutDeadlineMillis());
 
     try connection.sendAt(&.{.{ .ping = {} }}, 20_000_000);
-    try std.testing.expectEqual(@as(?u64, 120), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(@as(?u64, 1020), connection.idleTimeoutDeadlineMillis());
 
     try connection.sendAt(&.{.{ .ping = {} }}, 30_000_000);
-    try std.testing.expectEqual(@as(?u64, 120), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(@as(?u64, 1020), connection.idleTimeoutDeadlineMillis());
 
     connection.markPeerActivity(40);
     try connection.sendAt(&.{.{ .ping = {} }}, 50_000_000);
-    try std.testing.expectEqual(@as(?u64, 150), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(@as(?u64, 1050), connection.idleTimeoutDeadlineMillis());
+}
+
+test "QUIC 1-RTT idle timeout is raised to three application PTOs" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x75} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "idle-local",
+        .peer_connection_id = "idle-peer",
+        .local_max_idle_timeout_ms = 1,
+        .peer_max_idle_timeout_ms = 2,
+    });
+    defer connection.deinit();
+
+    // With no RTT sample the 1-RTT PTO is 200 ms. RFC 9000 requires a 600 ms
+    // lower bound rather than expiring at the negotiated 1 ms preference.
+    try std.testing.expectEqual(@as(u64, 200_000_000), connection.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 600), connection.effectiveIdleTimeoutMillis());
+    connection.markActivity(10);
+    try std.testing.expectEqual(@as(?u64, 610), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expect(!connection.checkIdleTimeout(609));
+    try std.testing.expect(connection.checkIdleTimeout(610));
+}
+
+test "QUIC 1-RTT idle negotiation ignores a disabled peer value" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x79} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "idle-single-local",
+        .peer_connection_id = "idle-single-peer",
+        .local_max_idle_timeout_ms = 0,
+        .peer_max_idle_timeout_ms = 1500,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(@as(?u64, 1500), connection.effectiveIdleTimeoutMillis());
+    connection.config.peer_max_idle_timeout_ms = 0;
+    try std.testing.expectEqual(@as(?u64, null), connection.effectiveIdleTimeoutMillis());
+}
+
+test "QUIC 1-RTT idle floor follows current RTT base PTO" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x76} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "idle-rtt-local",
+        .peer_connection_id = "idle-rtt-peer",
+        .local_max_idle_timeout_ms = 100,
+        .peer_max_idle_timeout_ms = 200,
+        .peer_max_ack_delay_ms = 50,
+    });
+    defer connection.deinit();
+
+    connection.rtt_stats.update(100_000_000, 0, false);
+    // smoothed RTT 100 ms + 4*variance 200 ms + peer ACK delay 50 ms.
+    try std.testing.expectEqual(@as(u64, 350_000_000), connection.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 1050), connection.effectiveIdleTimeoutMillis());
+
+    // PTO backoff protects retransmission scheduling but does not permanently
+    // inflate the negotiated connection idle timeout.
+    connection.pto_count = 1;
+    try std.testing.expectEqual(@as(u64, 700_000_000), connection.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 1050), connection.effectiveIdleTimeoutMillis());
+}
+
+test "QUIC 1-RTT idle floor converts nanoseconds with ceiling" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x78} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "idle-ceil-local",
+        .peer_connection_id = "idle-ceil-peer",
+        .local_max_idle_timeout_ms = 1,
+        .peer_max_ack_delay_ms = 0,
+    });
+    defer connection.deinit();
+
+    connection.rtt_stats.has_measurement = true;
+    connection.rtt_stats.smoothed_rtt = 1_000_001;
+    connection.rtt_stats.rtt_var = 0;
+    // PTO is 2,000,001 ns; 3*PTO must round upward to 7 ms so the millisecond
+    // deadline cannot expire before the RFC-required nanosecond duration.
+    try std.testing.expectEqual(@as(u64, 2_000_001), connection.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 7), connection.effectiveIdleTimeoutMillis());
 }
 
 test "QUIC 1-RTT keep-alive sends one PING after peer silence" {
