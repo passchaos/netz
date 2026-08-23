@@ -44,15 +44,38 @@ def packet(first: int, body: bytes) -> bytes:
     return bytes((first,)) + encode_remaining_length(len(body)) + body
 
 
-def connect_packet(client_id: str, *, clean_start: bool) -> bytes:
+def connect_packet(
+    client_id: str,
+    *,
+    clean_start: bool,
+    will_topic: str | None = None,
+    will_payload: bytes = b"",
+    will_delay: int = 0,
+) -> bytes:
     properties = bytes((0x11,)) + (60).to_bytes(4, "big")
+    connect_flags = 0x02 if clean_start else 0x00
+    payload = mqtt_string(client_id)
+    if will_topic is not None:
+        # Exercise durable routing state as well as delayed scheduling: this
+        # fixture's Will is QoS 1 and retained (bits 3 and 5 respectively).
+        connect_flags |= 0x04 | 0x08 | 0x20
+        will_properties = (
+            bytes((0x18,)) + will_delay.to_bytes(4, "big")
+        )
+        payload += (
+            encode_remaining_length(len(will_properties))
+            + will_properties
+            + mqtt_string(will_topic)
+            + len(will_payload).to_bytes(2, "big")
+            + will_payload
+        )
     body = (
         mqtt_string("MQTT")
-        + bytes((5, 0x02 if clean_start else 0x00))
+        + bytes((5, connect_flags))
         + (60).to_bytes(2, "big")
         + encode_remaining_length(len(properties))
         + properties
-        + mqtt_string(client_id)
+        + payload
     )
     return packet(0x10, body)
 
@@ -107,11 +130,24 @@ def read_packet(sock: socket.socket) -> tuple[int, bytes]:
 
 
 def connect_client(
-    port: int, client_id: str, *, clean_start: bool, session_present: bool
+    port: int,
+    client_id: str,
+    *,
+    clean_start: bool,
+    session_present: bool,
+    will_topic: str | None = None,
+    will_payload: bytes = b"",
+    will_delay: int = 0,
 ) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
-    sock.sendall(connect_packet(client_id, clean_start=clean_start))
+    sock.sendall(connect_packet(
+        client_id,
+        clean_start=clean_start,
+        will_topic=will_topic,
+        will_payload=will_payload,
+        will_delay=will_delay,
+    ))
     first, body = read_packet(sock)
     if (
         first != 0x20
@@ -167,7 +203,9 @@ def checkpoint_identity(path: Path) -> tuple[int, int]:
 def wait_for_checkpoint(
     path: Path, previous: tuple[int, int] | None
 ) -> tuple[int, int]:
-    deadline = time.monotonic() + 10
+    # Atomic snapshot fsync can be delayed substantially on a loaded CI host.
+    # This is only a harness watchdog; protocol timeouts remain five seconds.
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if path.exists():
             identity = checkpoint_identity(path)
@@ -189,8 +227,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="netz-mqtt-autosave-") as raw_tmp:
         database = Path(raw_tmp) / "broker.db"
         port = free_port()
-        source = start_broker(args.broker, port, database, 2, autosave=True)
+        source = start_broker(args.broker, port, database, 3, autosave=True)
         subscriber: socket.socket | None = None
+        will_source: socket.socket | None = None
         publisher: socket.socket | None = None
         try:
             baseline = wait_for_checkpoint(database, None)
@@ -202,6 +241,20 @@ def main() -> None:
             if suback[-1:] != b"\x01":
                 raise AssertionError(f"unexpected SUBACK: {suback.hex()}")
             wait_for_checkpoint(database, baseline)
+            # Keep a second durable client connected with a delayed retained
+            # Will. Killing the broker after the checkpoint must recover that
+            # Will with crash semantics and publish it after restart.
+            will_source = connect_client(
+                port,
+                "autosave-will-source",
+                clean_start=False,
+                session_present=False,
+                will_topic="autosave/will",
+                will_payload=b"survives-crash",
+                will_delay=1,
+            )
+            will_baseline = checkpoint_identity(database)
+            wait_for_checkpoint(database, will_baseline)
             subscriber.sendall(b"\xc0\x00")
             if read_packet(subscriber) != (0xD0, b""):
                 raise AssertionError("live client failed after autosave")
@@ -232,11 +285,15 @@ def main() -> None:
         finally:
             if subscriber is not None:
                 subscriber.close()
+            if will_source is not None:
+                will_source.close()
             if publisher is not None:
                 publisher.close()
             if source.poll() is None:
+                # SIGKILL models a crash and cannot be delayed by a task stuck
+                # in broker teardown or synchronous persistence I/O.
                 source.kill()
-                source.wait(timeout=5)
+                source.wait()
 
         restored_port = free_port()
         restored = start_broker(
@@ -250,24 +307,56 @@ def main() -> None:
                 clean_start=False,
                 session_present=True,
             )
-            qos0_first, qos0_delivery = read_packet(subscriber)
-            if qos0_first != 0x30:
-                raise AssertionError(
-                    f"expected restored QoS 0 PUBLISH, got {qos0_first:#x}"
-                )
-            qos0_topic_len = int.from_bytes(qos0_delivery[0:2], "big")
-            qos0_topic_end = 2 + qos0_topic_len
-            if qos0_delivery[2:qos0_topic_end] != b"autosave/qos0":
-                raise AssertionError(
-                    f"unexpected restored QoS 0 topic: {qos0_delivery.hex()}"
-                )
-            # MQTT 5 QoS 0 has no Packet Identifier; its property-length byte
-            # follows the Topic Name directly. Exact remainder comparison also
-            # proves the Application Message survived the crash byte-for-byte.
-            if qos0_delivery[qos0_topic_end:] != b"\x00survives-crash":
-                raise AssertionError(
-                    f"unexpected restored QoS 0 payload: {qos0_delivery.hex()}"
-                )
+            # The offline QoS 0 delivery is immediately available, while the
+            # restored Will keeps whatever remains of its one-second delay.
+            # Accept either order and verify both exact application messages.
+            seen: set[bytes] = set()
+            for _ in range(2):
+                first, delivery = read_packet(subscriber)
+                if first >> 4 != 3:
+                    raise AssertionError(
+                        f"expected restored PUBLISH, got {first:#x}"
+                    )
+                topic_len = int.from_bytes(delivery[0:2], "big")
+                topic_end = 2 + topic_len
+                topic = delivery[2:topic_end]
+                qos = (first >> 1) & 0x03
+                payload_offset = topic_end
+                if qos == 1:
+                    packet_id = delivery[topic_end : topic_end + 2]
+                    payload_offset += 2
+                    subscriber.sendall(
+                        b"\x40\x04" + packet_id + b"\x00\x00"
+                    )
+                elif qos != 0:
+                    raise AssertionError(
+                        f"unexpected restored PUBLISH QoS: {first:#x}"
+                    )
+                # Both fixtures use an empty MQTT 5 property set.
+                if delivery[payload_offset : payload_offset + 1] != b"\x00":
+                    raise AssertionError(
+                        f"unexpected restored properties: {delivery.hex()}"
+                    )
+                payload = delivery[payload_offset + 1 :]
+                if topic == b"autosave/will":
+                    if qos != 1 or payload != b"survives-crash":
+                        raise AssertionError(
+                            f"unexpected restored Will: {delivery.hex()}"
+                        )
+                elif topic == b"autosave/qos0":
+                    if qos != 0 or payload != b"survives-crash":
+                        raise AssertionError(
+                            f"unexpected restored QoS 0: {delivery.hex()}"
+                        )
+                else:
+                    raise AssertionError(
+                        f"unexpected restored topic: {delivery.hex()}"
+                    )
+                if topic in seen:
+                    raise AssertionError(f"duplicate restored topic: {topic!r}")
+                seen.add(topic)
+            if seen != {b"autosave/will", b"autosave/qos0"}:
+                raise AssertionError(f"missing restored messages: {seen!r}")
             subscriber.sendall(b"\xc0\x00")
             if read_packet(subscriber) != (0xD0, b""):
                 raise AssertionError(
@@ -297,9 +386,20 @@ def main() -> None:
             # Finish the new transient publisher first. The restored durable
             # Session owns the second slot until its DISCONNECT is processed.
             publisher.sendall(b"\xe0\x00")
+            publisher.close()
+            publisher = None
             time.sleep(0.05)
             subscriber.sendall(b"\xe0\x00")
-            restored.wait(timeout=5)
+            subscriber.close()
+            subscriber = None
+            try:
+                restored.wait(timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                assert restored.stdout is not None
+                raise RuntimeError(
+                    "restored broker did not finish two client tasks: "
+                    + restored.stdout.read()
+                ) from exc
             if restored.returncode != 0:
                 assert restored.stdout is not None
                 raise RuntimeError(
@@ -313,9 +413,11 @@ def main() -> None:
                 publisher.close()
             if restored.poll() is None:
                 restored.kill()
-                restored.wait(timeout=5)
+                restored.wait()
 
-    print("MQTT live autosave Session and queued QoS0 crash recovery passed")
+    print(
+        "MQTT live autosave Session, delayed Will, and queued QoS0 crash recovery passed"
+    )
 
 
 if __name__ == "__main__":

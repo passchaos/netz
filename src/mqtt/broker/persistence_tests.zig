@@ -383,8 +383,8 @@ test "MQTT live snapshot checkpoints connected durable state" {
 
     var restored = try createBroker(allocator, io);
     defer restored.deinit();
+    const restore_started = std.Io.Clock.awake.now(io);
     try restored.restoreSnapshot(tmp.dir, "broker.db");
-    const restored_now = std.Io.Clock.awake.now(io);
 
     const restored_handle = restored.sessions.find(
         "live-checkpoint",
@@ -421,11 +421,114 @@ test "MQTT live snapshot checkpoints connected durable state" {
         restored.will_publishers.get(restored_will).?,
     );
     const deadline = restored.wills.nextDeadline().?;
-    // The live checkpoint starts the restored crash Will's ten-second delay.
-    // Compare against the restore timestamp captured immediately beforehand;
-    // asking the wall clock again after all assertions makes this test flaky
-    // under a heavily loaded or instrumented test runner.
-    try std.testing.expect(deadline.nanoseconds > restored_now.nanoseconds);
+    // A slow or instrumented test runner can spend the entire ten-second Will
+    // Delay between the checkpoint and restore. In that valid case downtime
+    // deduction makes the Will immediately due rather than manufacturing a
+    // fresh delay. Compare with a clock sample taken before restore: the
+    // implementation's internal restore timestamp is necessarily at or after
+    // it, while a sample taken after the file read could race an immediate
+    // deadline and recreate the original flaky assertion.
+    try std.testing.expect(deadline.nanoseconds >= restore_started.nanoseconds);
+}
+
+test "MQTT live snapshot Will delay deducts deterministic downtime" {
+    const allocator = std.testing.allocator;
+    var retained = mqtt.retained.Store.init(allocator, .{});
+    defer retained.deinit();
+    var sessions = mqtt.session.Store.init(allocator, .{});
+    defer sessions.deinit();
+    var wills = mqtt.will_scheduler.Scheduler.init(allocator, .{});
+    defer wills.deinit();
+    var publishers: mqtt.will_scheduler.PublisherMap = .empty;
+    defer publishers.deinit(allocator);
+    var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
+    defer pending_qos2.deinit();
+    const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
+        100 * std.time.ns_per_s,
+    );
+    const saved_realtime = std.Io.Timestamp.fromNanoseconds(
+        1_000 * std.time.ns_per_s,
+    );
+    const handle = try wills.set(
+        "live-will-source",
+        delayedWill(10, true),
+        60,
+    );
+    try publishers.put(allocator, handle, 91);
+
+    const encoded = try mqtt.persistence.encodeLive(
+        allocator,
+        .{
+            .retained = &retained,
+            .sessions = &sessions,
+            .wills = &wills,
+            .will_publishers = &publishers,
+            .pending_qos2 = &pending_qos2,
+        },
+        saved_monotonic,
+        saved_realtime,
+    );
+    defer allocator.free(encoded);
+    const restored_now = std.Io.Timestamp.fromNanoseconds(
+        50 * std.time.ns_per_s,
+    );
+
+    var before_due = try mqtt.persistence.decode(
+        allocator,
+        encoded,
+        .{},
+        .{},
+        .{},
+        16,
+        restored_now,
+        std.Io.Timestamp.fromNanoseconds(
+            1_004 * std.time.ns_per_s,
+        ),
+    );
+    defer before_due.retained.deinit();
+    defer before_due.sessions.deinit();
+    defer before_due.wills.deinit();
+    defer before_due.will_publishers.deinit(allocator);
+    defer before_due.pending_qos2.deinit();
+    try std.testing.expectEqual(
+        @as(i96, restored_now.nanoseconds + 6 * std.time.ns_per_s),
+        before_due.wills.nextDeadline().?.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 91),
+        before_due.will_publishers.get(
+            before_due.wills.handleForClient("live-will-source").?,
+        ).?,
+    );
+
+    var overdue = try mqtt.persistence.decode(
+        allocator,
+        encoded,
+        .{},
+        .{},
+        .{},
+        16,
+        restored_now,
+        std.Io.Timestamp.fromNanoseconds(
+            1_011 * std.time.ns_per_s,
+        ),
+    );
+    defer overdue.retained.deinit();
+    defer overdue.sessions.deinit();
+    defer overdue.wills.deinit();
+    defer overdue.will_publishers.deinit(allocator);
+    defer overdue.pending_qos2.deinit();
+    try std.testing.expectEqual(
+        restored_now.nanoseconds,
+        overdue.wills.nextDeadline().?.nanoseconds,
+    );
+    var due_storage: [1]mqtt.will_scheduler.Handle = undefined;
+    const due = try overdue.wills.pollDue(restored_now, &due_storage);
+    try std.testing.expectEqual(@as(usize, 1), due.len);
+    try std.testing.expectEqual(
+        @as(?u64, 91),
+        overdue.will_publishers.get(due[0]).?,
+    );
 }
 
 test "MQTT live snapshot omits transient inbound QoS 2" {
