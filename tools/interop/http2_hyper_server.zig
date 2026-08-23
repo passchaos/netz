@@ -111,6 +111,23 @@ pub fn main(init: std.process.Init) !void {
         .{ if (tls_enabled) "tls" else "h2c", if (tls_enabled) "h2" else "n/a" },
     );
 
+    var after_keep_alive = try connection.readRequest();
+    defer after_keep_alive.deinit(allocator);
+    if (!std.mem.eql(
+        u8,
+        after_keep_alive.path,
+        "/after-keep-alive?from=hyper",
+    )) return error.InvalidRequest;
+    try connection.writeResponse(after_keep_alive.stream_id, .{
+        .status = 200,
+        .body = "netz-still-alive",
+        .request_method = after_keep_alive.method,
+    });
+    std.debug.print(
+        "netz HTTP/2 server remained usable after Hyper keep-alive: transport={s} next_request=true\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
+
     // Hyper sends both requests before it consumes either response. Accept
     // both heads first so the test has two simultaneously active streams even
     // if the client's executor assigns their stream IDs in either order.
@@ -181,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
 
     var graceful_request = try connection.readRequest();
     defer graceful_request.deinit(allocator);
-    if (graceful_request.stream_id != 7 or
+    if (graceful_request.stream_id != 9 or
         !std.mem.eql(
             u8,
             graceful_request.path,
@@ -190,8 +207,8 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidRequest;
     }
-    // Stream 7 is already accepted, so the narrowed GOAWAY boundary permits
-    // its response to drain while preventing Hyper from opening stream 9.
+    // Stream 9 is already accepted, so the narrowed GOAWAY boundary permits
+    // its response to drain while preventing Hyper from opening stream 11.
     try connection.sendGoAway(
         graceful_request.stream_id,
         .no_error,
@@ -203,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
         .request_method = graceful_request.method,
     });
     std.debug.print(
-        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=7 new_request_refused=true\n",
+        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=9 new_request_refused=true\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

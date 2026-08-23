@@ -21,7 +21,7 @@ use tokio::net::TcpStream;
 
 #[path = "../tokiort.rs"]
 mod tokiort;
-use tokiort::{MaybeTls, TokioExecutor, TokioIo};
+use tokiort::{MaybeTls, TokioExecutor, TokioIo, TokioTimer};
 
 const CONSTRAINED_STREAM_WINDOW: u32 = 8 * 1024;
 const CONSTRAINED_CONNECTION_WINDOW: u32 = 65_535;
@@ -76,8 +76,12 @@ fn main() {
         };
         let mut builder = client_http2::Builder::new(TokioExecutor);
         builder
+            .timer(TokioTimer)
             .initial_stream_window_size(CONSTRAINED_STREAM_WINDOW)
-            .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW);
+            .initial_connection_window_size(CONSTRAINED_CONNECTION_WINDOW)
+            .keep_alive_interval(Some(std::time::Duration::from_millis(25)))
+            .keep_alive_timeout(std::time::Duration::from_secs(1))
+            .keep_alive_while_idle(true);
         let (mut sender, connection) = builder
             .handshake(TokioIo::new(io))
             .await
@@ -145,6 +149,36 @@ fn main() {
             Some(&HeaderValue::from_static("response-trailer")),
         );
         println!("Hyper HTTP/2 client interoperated with netz: status=201 body=13 trailers=1");
+
+        // Leave the connection idle for several configured intervals. Hyper's
+        // background driver must exchange a keep-alive PING with netz before
+        // this next request can prove the connection remains usable.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(
+                Uri::builder()
+                    .scheme("http")
+                    .authority("localhost")
+                    .path_and_query("/after-keep-alive?from=hyper")
+                    .build()
+                    .expect("keep-alive request URI"),
+            )
+            .body(empty_body())
+            .expect("keep-alive request");
+        let response = sender
+            .send_request(request)
+            .await
+            .expect("request after Hyper keep-alive");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response after Hyper keep-alive")
+            .to_bytes();
+        assert_eq!(body, b"netz-still-alive".as_slice());
+        println!("Hyper HTTP/2 keep-alive interoperated with netz: ack=true next_request=true");
 
         let cancel_request = Request::builder()
             .method(Method::GET)
@@ -256,7 +290,7 @@ fn main() {
         assert_eq!(graceful_body, b"netz-drained".as_slice());
 
         // Awaiting readiness drives receipt of the peer GOAWAY before the
-        // attempted stream 9 request, proving rejection occurs at the HTTP/2
+        // attempted stream 11 request, proving rejection occurs at the HTTP/2
         // connection layer rather than from a coincidental TCP close.
         let refusal = graceful_sender
             .ready()
@@ -267,7 +301,7 @@ fn main() {
             "unexpected post-GOAWAY readiness error: {refusal}"
         );
         println!(
-            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=7 new_request_refused=true"
+            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=9 new_request_refused=true"
         );
     });
 }

@@ -99,6 +99,37 @@ pub fn main(init: std.process.Init) !void {
         .{ if (tls_enabled) "tls" else "h2c", if (tls_enabled) "h2" else "n/a" },
     );
 
+    // Hyper's connection driver owns the PING/PONG path independently of a
+    // request body. Waiting through an idle interval proves the public netz
+    // keep-alive scheduler interoperates with that implementation; the
+    // following request proves the same connection remains application-usable.
+    var keep_alive = try netz.http2.runtime.KeepAlive.init(.{
+        .interval = .fromMilliseconds(25),
+        .timeout = .fromSeconds(1),
+        .while_idle = true,
+    });
+    if (try keep_alive.run(&connection) != .acknowledged or
+        keep_alive.next_payload != 1)
+    {
+        return error.InvalidResponse;
+    }
+    var after_keep_alive = try connection.request(.{
+        .method = "GET",
+        .path = "/after-keep-alive?from=netz",
+        .scheme = "http",
+        .authority = "localhost",
+    });
+    defer after_keep_alive.deinit(allocator);
+    if (after_keep_alive.status != 200 or
+        !std.mem.eql(u8, after_keep_alive.body, "hyper-still-alive"))
+    {
+        return error.InvalidResponse;
+    }
+    std.debug.print(
+        "netz HTTP/2 keep-alive interoperated with Hyper: transport={s} ack=true next_request=true\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
+
     // Open both requests before reading either response. Hyper deliberately
     // withholds the sibling until it observes cancellation of the large body,
     // so completing it proves that only the target stream was retired.
@@ -156,9 +187,9 @@ pub fn main(init: std.process.Init) !void {
         .{ if (tls_enabled) "tls" else "h2c", constrained_stream_window, cancellation.body_bytes, sibling.body.len },
     );
 
-    // Hyper begins graceful shutdown while stream 7 is active. Netz processes
+    // Hyper begins graceful shutdown while stream 9 is active. Netz processes
     // the initial GOAWAY/PING synchronization and narrower final GOAWAY while
-    // still completing that accepted stream, then rejects stream 9 locally.
+    // still completing that accepted stream, then rejects stream 11 locally.
     var graceful = try connection.startRequest(.{
         .method = "GET",
         .path = "/graceful?from=netz",
@@ -185,7 +216,7 @@ pub fn main(init: std.process.Init) !void {
         }),
     );
     std.debug.print(
-        "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=7 new_request_refused=true\n",
+        "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=9 new_request_refused=true\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

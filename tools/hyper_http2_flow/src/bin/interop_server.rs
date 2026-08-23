@@ -106,7 +106,7 @@ fn main() {
             .await
             .expect("gracefully drain netz HTTP/2 client");
         println!(
-            "Hyper HTTP/2 server gracefully drained netz client: active_stream=7 new_request_refused=true"
+            "Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true"
         );
     });
 }
@@ -175,6 +175,17 @@ async fn handle(
         return Ok(Response::new(
             StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
                 Bytes::from_static(b"hyper-drained"),
+            ))]))
+            .boxed(),
+        ));
+    }
+    if request.uri().path_and_query().map(|value| value.as_str())
+        == Some("/after-keep-alive?from=netz")
+    {
+        ensure_request(&request, Method::GET, "/after-keep-alive?from=netz")?;
+        return Ok(Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"hyper-still-alive"),
             ))]))
             .boxed(),
         ));

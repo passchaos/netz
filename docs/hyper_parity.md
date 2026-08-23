@@ -572,6 +572,13 @@ cap preservation; native TLS tests cover both direct PING and scheduled idle
 keep-alive. Unlike Hyper's continuously polled background connection driver,
 the blocking netz driver deliberately runs one cycle at a time and must be the
 sole frame reader; applications repeat it from their owning event loop.
+The bidirectional Hyper process gate now exercises that boundary directly over
+h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
+PING ACK, and completes another request on the same connection. In the reverse
+direction Hyper enables its actual 25 ms background keep-alive with idle probes
+using the harness's Tokio-backed implementation of Hyper's timer interface,
+waits 100 ms, and then completes another request through the netz server. This
+proves netz services external PINGs rather than relying only on local peers.
 
 ## Remaining evidence
 

@@ -96,10 +96,13 @@ grep -Fq \
   'netz HTTP/2 client canceled flow-blocked Hyper stream and completed concurrent sibling: transport=h2c rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/netz-client.log"
 grep -Fq \
-  'netz HTTP/2 client drained Hyper GOAWAY: transport=h2c active_stream=7 new_request_refused=true' \
+  'netz HTTP/2 keep-alive interoperated with Hyper: transport=h2c ack=true next_request=true' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server gracefully drained netz client: active_stream=7 new_request_refused=true' \
+  'netz HTTP/2 client drained Hyper GOAWAY: transport=h2c active_stream=9 new_request_refused=true' \
+  "$work/netz-client.log"
+grep -Fq \
+  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true' \
   "$work/server.log"
 echo 'Hyper HTTP/2 server -> netz client interop passed'
 
@@ -138,10 +141,13 @@ grep -Fq \
   'Hyper HTTP/2 client interoperated with netz: status=201 body=13 trailers=1' \
   "$work/hyper-client.log"
 grep -Fq \
+  'Hyper HTTP/2 keep-alive interoperated with netz: ack=true next_request=true' \
+  "$work/hyper-client.log"
+grep -Fq \
   'Hyper HTTP/2 client canceled flow-blocked netz stream and completed concurrent sibling: rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/hyper-client.log"
 grep -Fq \
-  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=7 new_request_refused=true' \
+  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=9 new_request_refused=true' \
   "$work/hyper-client.log"
 grep -Fq \
   'transport=h2c alpn=n/a method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
@@ -150,7 +156,10 @@ grep -Fq \
   'netz HTTP/2 server observed flow-blocked Hyper cancellation and completed concurrent sibling: transport=h2c rst=CANCEL window=8192 offered=131072 sibling=16384' \
   "$work/netz-server.log"
 grep -Fq \
-  'netz HTTP/2 server gracefully drained Hyper client: transport=h2c last_stream=7 new_request_refused=true' \
+  'netz HTTP/2 server remained usable after Hyper keep-alive: transport=h2c next_request=true' \
+  "$work/netz-server.log"
+grep -Fq \
+  'netz HTTP/2 server gracefully drained Hyper client: transport=h2c last_stream=9 new_request_refused=true' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/2 client -> netz server interop passed'
 
@@ -174,10 +183,13 @@ grep -Fq \
   'transport=tls rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'netz HTTP/2 client drained Hyper GOAWAY: transport=tls active_stream=7 new_request_refused=true' \
+  'netz HTTP/2 keep-alive interoperated with Hyper: transport=tls ack=true next_request=true' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server gracefully drained netz client: active_stream=7 new_request_refused=true' \
+  'netz HTTP/2 client drained Hyper GOAWAY: transport=tls active_stream=9 new_request_refused=true' \
+  "$work/tls-netz-client.log"
+grep -Fq \
+  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true' \
   "$work/tls-hyper-server.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper TLS HTTP/2 server -> netz client interop passed'
@@ -202,10 +214,16 @@ grep -Fq \
   'transport=tls rst=CANCEL window=8192 offered=131072 sibling=16384' \
   "$work/tls-netz-server.log"
 grep -Fq \
-  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=7 new_request_refused=true' \
+  'Hyper HTTP/2 keep-alive interoperated with netz: ack=true next_request=true' \
   "$work/tls-hyper-client.log"
 grep -Fq \
-  'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=7 new_request_refused=true' \
+  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=9 new_request_refused=true' \
+  "$work/tls-hyper-client.log"
+grep -Fq \
+  'netz HTTP/2 server remained usable after Hyper keep-alive: transport=tls next_request=true' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=9 new_request_refused=true' \
   "$work/tls-netz-server.log"
 cat "$work/tls-hyper-client.log"
 cat "$work/tls-netz-server.log"

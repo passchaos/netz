@@ -1,10 +1,13 @@
 //! Minimal Tokio executor and I/O adapters used by the Hyper reference harness.
 use std::{
+    future::Future,
     io,
     pin::Pin,
     task::{Context, Poll},
+    time::{Duration, Instant},
 };
 
+use hyper::rt::{Sleep, Timer};
 use pin_project_lite::pin_project;
 
 #[derive(Clone)]
@@ -18,6 +21,59 @@ where
 {
     fn execute(&self, fut: F) {
         tokio::task::spawn(fut);
+    }
+}
+
+/// Tokio-backed timer required by Hyper's HTTP/2 keep-alive machinery.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct TokioTimer;
+
+impl Timer for TokioTimer {
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Sleep>> {
+        Box::pin(TokioSleep {
+            inner: tokio::time::sleep(duration),
+        })
+    }
+
+    fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn Sleep>> {
+        Box::pin(TokioSleep {
+            inner: tokio::time::sleep_until(deadline.into()),
+        })
+    }
+
+    fn now(&self) -> Instant {
+        tokio::time::Instant::now().into()
+    }
+
+    fn reset(&self, sleep: &mut Pin<Box<dyn Sleep>>, deadline: Instant) {
+        if let Some(sleep) = sleep.as_mut().downcast_mut_pin::<TokioSleep>() {
+            sleep.reset(deadline);
+        }
+    }
+}
+
+pin_project! {
+    struct TokioSleep {
+        #[pin]
+        inner: tokio::time::Sleep,
+    }
+}
+
+impl Future for TokioSleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.project().inner.poll(cx)
+    }
+}
+
+impl Sleep for TokioSleep {}
+
+impl TokioSleep {
+    #[allow(dead_code)]
+    fn reset(self: Pin<&mut Self>, deadline: Instant) {
+        self.project().inner.as_mut().reset(deadline.into());
     }
 }
 
