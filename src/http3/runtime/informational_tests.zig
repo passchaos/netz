@@ -35,6 +35,57 @@ const Observation = struct {
     }
 };
 
+const MultiplexedObservation = struct {
+    const Entry = struct { stream_id: u62, status: u16 };
+
+    entries: [4]Entry = undefined,
+    count: usize = 0,
+
+    fn observe(
+        context_ptr: *anyopaque,
+        stream_id: u62,
+        response: http3.InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        if (self.count >= self.entries.len) return;
+        self.entries[self.count] = .{
+            .stream_id = stream_id,
+            .status = response.status,
+        };
+        self.count += 1;
+    }
+};
+
+const PushObservation = struct {
+    const Entry = struct {
+        push_id: u64,
+        request_stream_id: u62,
+        stream_id: u62,
+        status: u16,
+    };
+
+    entries: [2]Entry = undefined,
+    count: usize = 0,
+
+    fn observe(
+        context_ptr: *anyopaque,
+        push_id: u64,
+        request_stream_id: u62,
+        stream_id: u62,
+        response: http3.InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        if (self.count >= self.entries.len) return;
+        self.entries[self.count] = .{
+            .push_id = push_id,
+            .request_stream_id = request_stream_id,
+            .stream_id = stream_id,
+            .status = response.status,
+        };
+        self.count += 1;
+    }
+};
+
 fn findHeader(
     headers: []const http3.Qpack.HeaderField,
     name: []const u8,
@@ -207,4 +258,204 @@ test "HTTP/3 protected client observes and bounds informational responses" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 protected receive-next correlates informational responses" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd1} ** quic.protection.secret_len,
+    );
+    var server = try runtime.ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try runtime.ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const first_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/first",
+        .authority = "localhost",
+    });
+    const second_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/second",
+        .authority = "localhost",
+    });
+    var first_request = try server.receiveRequest();
+    defer first_request.deinit(allocator);
+    var second_request = try server.receiveRequest();
+    defer second_request.deinit(allocator);
+    try std.testing.expectEqual(first_id, first_request.stream_id);
+    try std.testing.expectEqual(second_id, second_request.stream_id);
+
+    // Finish stream 4 first to prove callbacks follow readiness rather than
+    // request creation order, while preserving order within each response.
+    try server.sendResponseWithInformational(
+        second_request.from,
+        second_id,
+        &.{ .{ .status = 103 }, .{ .status = 102 } },
+        .{ .status = 200, .body = "second" },
+    );
+    try server.sendResponseWithInformational(
+        first_request.from,
+        first_id,
+        &.{ .{ .status = 103 }, .{ .status = 102 } },
+        .{ .status = 200, .body = "first" },
+    );
+
+    var observation: MultiplexedObservation = .{};
+    const observer: runtime.MultiplexedInformationalObserver = .{
+        .context = &observation,
+        .on_response = MultiplexedObservation.observe,
+    };
+    var second_response =
+        try client.receiveNextResponseWithInformational(observer);
+    defer second_response.deinit(allocator);
+    try std.testing.expectEqual(second_id, second_response.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "second",
+        second_response.response.value.response.body,
+    );
+    var first_response =
+        try client.receiveNextResponseWithInformational(observer);
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(first_id, first_response.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "first",
+        first_response.response.value.response.body,
+    );
+    try std.testing.expectEqual(@as(usize, 4), observation.count);
+    for (observation.entries, 0..) |entry, index| {
+        try std.testing.expectEqual(
+            if (index < 2) second_id else first_id,
+            entry.stream_id,
+        );
+        try std.testing.expectEqual(
+            if (index % 2 == 0) @as(u16, 103) else 102,
+            entry.status,
+        );
+    }
+}
+
+test "HTTP/3 protected aggregate push correlates informational responses" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const server_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x31} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x41} ** quic.protection.secret_len,
+    );
+    var server = try runtime.ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try runtime.ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    try client.sendMaxPushId(7);
+    const request_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/",
+        .authority = "localhost",
+    });
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    const push_stream_id = try server.sendResponseWithPush(
+        request.from,
+        request.stream_id,
+        .{ .status = 204 },
+        .{
+            .push_id = 7,
+            .request = .{
+                .method = "GET",
+                .path = "/asset.css",
+                .authority = "localhost",
+            },
+            .informational = &.{
+                .{ .status = 103 },
+                .{ .status = 102 },
+            },
+            .response = .{ .status = 200, .body = "asset" },
+        },
+    );
+    var parent = try client.receiveResponse(request_stream_id);
+    defer parent.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), parent.response.status);
+
+    var observation: PushObservation = .{};
+    var pushed = try client.receivePushWithInformational(.{
+        .context = &observation,
+        .on_response = PushObservation.observe,
+    });
+    defer pushed.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 7), pushed.push_id);
+    try std.testing.expectEqual(request_stream_id, pushed.request_stream_id);
+    try std.testing.expectEqual(push_stream_id, pushed.stream_id);
+    try std.testing.expectEqualStrings("asset", pushed.response.body);
+    try std.testing.expectEqual(@as(usize, 2), observation.count);
+    for (observation.entries, 0..) |entry, index| {
+        try std.testing.expectEqual(@as(u64, 7), entry.push_id);
+        try std.testing.expectEqual(request_stream_id, entry.request_stream_id);
+        try std.testing.expectEqual(push_stream_id, entry.stream_id);
+        try std.testing.expectEqual(
+            if (index == 0) @as(u16, 103) else 102,
+            entry.status,
+        );
+    }
 }

@@ -9,6 +9,48 @@ const net = std.Io.net;
 pub const InformationalResponseHead = http3.InformationalResponseHead;
 pub const InformationalObserver = http3.InformationalObserver;
 
+/// Reports a callback-scoped informational response together with the request
+/// stream selected by `receiveNextResponseWithInformational`. The header
+/// fields borrow decoder storage and must not be retained after the callback.
+pub const MultiplexedInformationalObserver = struct {
+    context: *anyopaque,
+    on_response: *const fn (
+        context: *anyopaque,
+        stream_id: u62,
+        response: InformationalResponseHead,
+    ) void,
+};
+
+/// Reports a callback-scoped pushed informational response with every identity
+/// needed to correlate it to both the PUSH_PROMISE and its QUIC stream.
+pub const PushInformationalObserver = struct {
+    context: *anyopaque,
+    on_response: *const fn (
+        context: *anyopaque,
+        push_id: u64,
+        request_stream_id: u62,
+        stream_id: u62,
+        response: InformationalResponseHead,
+    ) void,
+};
+
+const MultiplexedInformationalContext = struct {
+    observer: MultiplexedInformationalObserver,
+    stream_id: u62,
+
+    fn notify(
+        context: *anyopaque,
+        response: InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.observer.on_response(
+            self.observer.context,
+            self.stream_id,
+            response,
+        );
+    }
+};
+
 pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || net.HostName.ValidateError || net.HostName.LookupError || error{
     MissingStreamFrame,
     UnexpectedStream,
@@ -737,6 +779,7 @@ pub const PushedResponse = struct {
 pub const ServerPush = struct {
     push_id: u64,
     request: http3.Request,
+    informational: []const http3.InformationalResponse = &.{},
     response: http3.Response,
 };
 
@@ -3988,6 +4031,15 @@ pub const HandshakeClient = struct {
     pub fn receiveNextResponse(
         self: *HandshakeClient,
     ) Error!OwnedHandshakeResponseEvent {
+        return self.receiveNextResponseWithInformational(null);
+    }
+
+    /// Aggregate whichever outstanding response becomes ready first and
+    /// correlate every callback-scoped 1xx head with its request stream.
+    pub fn receiveNextResponseWithInformational(
+        self: *HandshakeClient,
+        informational: ?MultiplexedInformationalObserver,
+    ) Error!OwnedHandshakeResponseEvent {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -4011,6 +4063,24 @@ pub const HandshakeClient = struct {
             )) |stream_id| {
                 if (!self.request_lifecycle.contains(stream_id)) {
                     return error.UnexpectedStream;
+                }
+                if (informational) |observer| {
+                    // Aggregate decoding is synchronous, so this stack adapter
+                    // remains alive for every callback and cannot escape.
+                    var adapter = MultiplexedInformationalContext{
+                        .observer = observer,
+                        .stream_id = stream_id,
+                    };
+                    return .{ .response = .{
+                        .stream_id = stream_id,
+                        .value = try self.receiveResponseWithInformational(
+                            stream_id,
+                            .{
+                                .context = &adapter,
+                                .on_response = MultiplexedInformationalContext.notify,
+                            },
+                        ),
+                    } };
                 }
                 return .{ .response = .{
                     .stream_id = stream_id,
@@ -4310,6 +4380,14 @@ pub const HandshakeClient = struct {
     pub fn receivePush(
         self: *HandshakeClient,
     ) Error!PushedResponse {
+        return self.receivePushWithInformational(null);
+    }
+
+    /// Aggregate one promised response while reporting its ordered 1xx heads.
+    pub fn receivePushWithInformational(
+        self: *HandshakeClient,
+        informational: ?PushInformationalObserver,
+    ) Error!PushedResponse {
         var head: ?http3.DecodedResponseHead = null;
         errdefer if (head) |*value| value.deinit(self.allocator);
         var trailers: ?http3.DecodedTrailers = null;
@@ -4335,9 +4413,21 @@ pub const HandshakeClient = struct {
                         return error.UnexpectedFrame;
                     }
                     if (value.response.status < 200) {
-                        // Aggregate push callers have no observer API; the
-                        // shared reader already enforced the per-stream 1xx
-                        // bound, so discard this owned head and await final.
+                        if (informational) |observer| {
+                            observer.on_response(
+                                observer.context,
+                                event.push_id,
+                                event.request_stream_id,
+                                event.stream_id,
+                                .{
+                                    .status = value.response.status,
+                                    .headers = value.response.headers,
+                                },
+                            );
+                        }
+                        // The shared reader already enforced the per-stream
+                        // bound; the owned event is released after this
+                        // callback while aggregation awaits the final head.
                         continue;
                     }
                     if (head != null) return error.UnexpectedFrame;
@@ -5894,6 +5984,15 @@ pub const ProtectedClient = struct {
     pub fn receiveNextResponse(
         self: *ProtectedClient,
     ) Error!OwnedProtectedResponseEvent {
+        return self.receiveNextResponseWithInformational(null);
+    }
+
+    /// Aggregate whichever outstanding response becomes ready first and
+    /// correlate every callback-scoped 1xx head with its request stream.
+    pub fn receiveNextResponseWithInformational(
+        self: *ProtectedClient,
+        informational: ?MultiplexedInformationalObserver,
+    ) Error!OwnedProtectedResponseEvent {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -5916,6 +6015,24 @@ pub const ProtectedClient = struct {
             )) |stream_id| {
                 if (!self.request_lifecycle.contains(stream_id)) {
                     return error.UnexpectedStream;
+                }
+                if (informational) |observer| {
+                    // Aggregate decoding is synchronous, so this stack adapter
+                    // remains alive for every callback and cannot escape.
+                    var adapter = MultiplexedInformationalContext{
+                        .observer = observer,
+                        .stream_id = stream_id,
+                    };
+                    return .{ .response = .{
+                        .stream_id = stream_id,
+                        .value = try self.receiveResponseWithInformational(
+                            stream_id,
+                            .{
+                                .context = &adapter,
+                                .on_response = MultiplexedInformationalContext.notify,
+                            },
+                        ),
+                    } };
                 }
                 return .{ .response = .{
                     .stream_id = stream_id,
@@ -6122,7 +6239,15 @@ pub const ProtectedClient = struct {
     pub fn receivePush(
         self: *ProtectedClient,
     ) Error!PushedResponse {
-        return receiveProtectedPush(self);
+        return self.receivePushWithInformational(null);
+    }
+
+    /// Aggregate one promised response while reporting its ordered 1xx heads.
+    pub fn receivePushWithInformational(
+        self: *ProtectedClient,
+        informational: ?PushInformationalObserver,
+    ) Error!PushedResponse {
+        return receiveProtectedPush(self, informational);
     }
 
     pub fn sendGoAway(self: *ProtectedClient, stream_id: u64) Error!void {
@@ -6556,6 +6681,7 @@ fn streamingRequestSectionAcknowledgments(
 
 fn receiveProtectedPush(
     client: *ProtectedClient,
+    informational: ?PushInformationalObserver,
 ) Error!PushedResponse {
     const allocator = client.quic_client.endpoint.allocator;
     var head: ?http3.DecodedResponseHead = null;
@@ -6582,7 +6708,21 @@ fn receiveProtectedPush(
                 if (value != .response) {
                     return error.UnexpectedFrame;
                 }
-                if (value.response.status < 200) continue;
+                if (value.response.status < 200) {
+                    if (informational) |observer| {
+                        observer.on_response(
+                            observer.context,
+                            event.push_id,
+                            event.request_stream_id,
+                            event.stream_id,
+                            .{
+                                .status = value.response.status,
+                                .headers = value.response.headers,
+                            },
+                        );
+                    }
+                    continue;
+                }
                 if (head != null) return error.UnexpectedFrame;
                 head = value.response;
                 event.value = .finished;
@@ -9213,9 +9353,11 @@ fn encodePushMessages(
         push.push_id,
         push_id_len,
     );
-    try push.response.writeDynamic(
+    try http3.writeResponseSequenceDynamic(
         pushed,
         allocator,
+        push.informational,
+        push.response,
         peer_settings,
         push_stream_id,
         qpack,
@@ -18156,6 +18298,29 @@ test "HTTP/3 handshake client streams promised push response" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const Observation = struct {
+        push_ids: [2]u64 = undefined,
+        request_stream_ids: [2]u62 = undefined,
+        stream_ids: [2]u62 = undefined,
+        statuses: [2]u16 = undefined,
+        count: usize = 0,
+
+        fn observe(
+            context: *anyopaque,
+            push_id: u64,
+            request_stream_id: u62,
+            stream_id: u62,
+            response: InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.count >= self.statuses.len) return;
+            self.push_ids[self.count] = push_id;
+            self.request_stream_ids[self.count] = request_stream_id;
+            self.stream_ids[self.count] = stream_id;
+            self.statuses[self.count] = response.status;
+            self.count += 1;
+        }
+    };
     const original_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8 };
     const client_cid = [_]u8{ 0xe9, 0xea, 0xeb, 0xec };
     const server_cid = [_]u8{ 0xed, 0xee, 0xef, 0xf0 };
@@ -18234,10 +18399,12 @@ test "HTTP/3 handshake client streams promised push response" {
                 @intFromEnum(http3.StreamType.push),
             );
             try quic.varint.encode(&push_bytes, session_allocator, 1);
-            try (http3.Response{
-                .status = 200,
-                .body = "handshake-asset",
-            }).write(&push_bytes, session_allocator);
+            try http3.writeResponseSequence(
+                &push_bytes,
+                session_allocator,
+                &.{ .{ .status = 103 }, .{ .status = 102 } },
+                .{ .status = 200, .body = "handshake-asset" },
+            );
             const frames = [_]quic.Frame{
                 .{ .stream = .{
                     .stream_id = request.stream_id,
@@ -18291,13 +18458,32 @@ test "HTTP/3 handshake client streams promised push response" {
     };
     defer promise.deinit(allocator);
     try std.testing.expect(promise == .push_promise);
-    var pushed = try client.receivePush();
+    var observation: Observation = .{};
+    var pushed = try client.receivePushWithInformational(.{
+        .context = &observation,
+        .on_response = Observation.observe,
+    });
     defer pushed.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), pushed.push_id);
+    try std.testing.expectEqual(request_stream_id, pushed.request_stream_id);
+    try std.testing.expectEqual(@as(u62, 15), pushed.stream_id);
     try std.testing.expectEqualStrings(
         "handshake-asset",
         pushed.response.body,
     );
+    try std.testing.expectEqual(@as(usize, 2), observation.count);
+    for (observation.statuses, 0..) |status, index| {
+        try std.testing.expectEqual(@as(u64, 1), observation.push_ids[index]);
+        try std.testing.expectEqual(
+            request_stream_id,
+            observation.request_stream_ids[index],
+        );
+        try std.testing.expectEqual(@as(u62, 15), observation.stream_ids[index]);
+        try std.testing.expectEqual(
+            if (index == 0) @as(u16, 103) else 102,
+            status,
+        );
+    }
     thread.join();
     thread_joined = true;
     if (shared.err) |err| return err;
@@ -18385,6 +18571,23 @@ test "HTTP/3 handshake client retains interleaved responses" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const Observation = struct {
+        stream_ids: [4]u62 = undefined,
+        statuses: [4]u16 = undefined,
+        count: usize = 0,
+
+        fn observe(
+            context: *anyopaque,
+            stream_id: u62,
+            response: InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.count >= self.statuses.len) return;
+            self.stream_ids[self.count] = stream_id;
+            self.statuses[self.count] = response.status;
+            self.count += 1;
+        }
+    };
 
     const original_dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 };
     const client_cid = [_]u8{ 0xa9, 0xaa, 0xab, 0xac };
@@ -18428,14 +18631,16 @@ test "HTTP/3 handshake client retains interleaved responses" {
             defer second.deinit(
                 session.established.connection.endpoint.allocator,
             );
-            try session.sendResponse(second.stream_id, .{
-                .status = 200,
-                .body = "second-response",
-            });
-            try session.sendResponse(first.stream_id, .{
-                .status = 200,
-                .body = "first-response",
-            });
+            try session.sendResponseWithInformational(
+                second.stream_id,
+                &.{ .{ .status = 103 }, .{ .status = 102 } },
+                .{ .status = 200, .body = "second-response" },
+            );
+            try session.sendResponseWithInformational(
+                first.stream_id,
+                &.{ .{ .status = 103 }, .{ .status = 102 } },
+                .{ .status = 200, .body = "first-response" },
+            );
         }
     };
 
@@ -18472,7 +18677,12 @@ test "HTTP/3 handshake client retains interleaved responses" {
         .path = "/second",
         .authority = "localhost",
     });
-    var first_event = try client.receiveNextResponse();
+    var observation: Observation = .{};
+    const observer: MultiplexedInformationalObserver = .{
+        .context = &observation,
+        .on_response = Observation.observe,
+    };
+    var first_event = try client.receiveNextResponseWithInformational(observer);
     defer first_event.deinit(allocator);
     try std.testing.expect(first_event == .response);
     try std.testing.expectEqual(
@@ -18487,7 +18697,7 @@ test "HTTP/3 handshake client retains interleaved responses" {
         @as(usize, 1),
         client.request_lifecycle.outstanding.items.len,
     );
-    var second_event = try client.receiveNextResponse();
+    var second_event = try client.receiveNextResponseWithInformational(observer);
     defer second_event.deinit(allocator);
     thread.join();
     if (shared.err) |err| return err;
@@ -18504,6 +18714,17 @@ test "HTTP/3 handshake client retains interleaved responses" {
         @as(usize, 0),
         client.request_lifecycle.outstanding.items.len,
     );
+    try std.testing.expectEqual(@as(usize, 4), observation.count);
+    for (observation.statuses, 0..) |status, index| {
+        try std.testing.expectEqual(
+            if (index < 2) second_id else first_id,
+            observation.stream_ids[index],
+        );
+        try std.testing.expectEqual(
+            if (index % 2 == 0) @as(u16, 103) else 102,
+            status,
+        );
+    }
 }
 
 test "HTTP/3 handshake client drains GRO response batch one packet at a time" {

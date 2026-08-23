@@ -59,7 +59,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   lookups with pseudo-header and common-header fast paths,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs with malformed-payload rejection, indexed per-ID control-state lookups with empty-index skips, identical priority-update skips, and single-probe priority replacement, and advertised MAX_PUSH_ID enforcement for received PUSH_PROMISE frames,
   RFC 9218 Priority field parsing/serialization,
-  request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, bounded ordered interim 1xx response observation on aggregate and incremental client paths, per-stream bounds for multiplexed and pushed responses, runtime emission before final responses, and forbidden trailer-field rejection,
+  request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, bounded ordered interim 1xx response observation on aggregate and incremental client paths, request-stream correlation for aggregate multiplexed reads, push-ID/parent-request/push-stream correlation for aggregate pushed responses, per-stream bounds for multiplexed and pushed responses, runtime emission before final and pushed responses, and forbidden trailer-field rejection,
   HEADERS-only dynamic request/response writers for incremental DATA sending
   with Content-Length generation/verification, parsed length reuse, and
   CONNECT/204/304 body guards,
@@ -90,8 +90,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
   indexed bounded per-stream request/response reassembly with single-probe buffered stream creation,
   indexed buffered-presence checks with empty-reset, empty-remove, and empty-ready skips, short-circuit ready polling, and targeted ready-stream lookup, preserving interleaved responses and
-  resets instead of discarding non-target streams. `receiveNextResponse`
-  provides an indexed cursor-backed FIFO event-style response/reset queue with
+  resets instead of discarding non-target streams. `receiveNextResponse` and
+  `receiveNextResponseWithInformational`
+  provide an indexed cursor-backed FIFO event-style response/reset queue with
   empty-reset insert/take fast paths, tail-targeted reset removals, single-probe reset recording, and explicit stream IDs, while
   outstanding request tracking uses single-probe client opens/server activation, empty-index lookup/finish skips on both roles, and rejects unknown or duplicate completion and
   enforces the configured concurrency bound. Protected clients and servers also
@@ -135,8 +136,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   the current reference runtimes. Push promise registration uses single-probe
   indexes, push stream insertion/binding reuse one map probe, empty-index targeted push lookups/removals, and protected and handshake runtimes also bind
   reordered server-initiated push streams to indexed promises, expose indexed targeted
-  streaming and owned aggregate pushed-response APIs, and can emit
-  PUSH_PROMISE plus the corresponding unidirectional pushed response with
+  streaming and owned aggregate pushed-response APIs, including
+  `receivePushWithInformational` callbacks correlated by push, parent request,
+  and push-stream IDs, and can emit PUSH_PROMISE plus the corresponding
+  unidirectional pushed response (with optional informational heads) with
   shared dynamic QPACK state, plus a
   `std.Io.async` request receive helper for the development runtime
 - gRPC over HTTP/2 with bounded 5-byte length-prefixed message framing,
