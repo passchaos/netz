@@ -205,6 +205,11 @@ pub const Limits = struct {
     /// opened yet. This remains effective even when MAX_CONCURRENT_STREAMS is
     /// not advertised, preventing unbounded state from speculative IDs.
     max_idle_priority_updates: usize = 256,
+    /// Maximum application frames retained while an explicit PING round trip
+    /// waits for its matching ACK. Each retained frame is independently
+    /// bounded by the inbound frame-size limits. Reaching this cap fails the
+    /// probe without discarding any frame already removed from the transport.
+    max_pending_ping_frames: usize = 256,
     /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
     /// default because peers may start tunnelling arbitrary bytes on streams
     /// once extended CONNECT is accepted.
@@ -1106,10 +1111,20 @@ pub const Connection = struct {
     ) = .empty,
     batch_data_parts: std.ArrayList([]const u8) = .empty,
     frame_reader: frame_io.Reader = .{},
-    /// One application frame encountered while a RequestWriter is blocked on
-    /// send credit. Returning to the caller immediately keeps this naturally
-    /// bounded while preserving HPACK/wire order for the response reader.
-    pending_client_frame: ?OwnedFrame = null,
+    /// Application frames temporarily consumed by a connection-level wait.
+    /// The cursor avoids shifting on every pop, while compaction reuses storage
+    /// after a burst. Frames stay in exact wire order so HPACK CONTINUATION and
+    /// DATA semantics remain owned by the eventual request/response reader.
+    pending_application_frames: std.ArrayList(OwnedFrame) = .empty,
+    pending_application_frame_head: usize = 0,
+    /// Scratch readers expose borrowed slices. When their next frame comes
+    /// from the owning pending queue, retain that allocation until the next
+    /// connection read invalidates the borrow.
+    borrowed_pending_frame: ?OwnedFrame = null,
+    /// Emergency ownership slot used when queue growth or its configured cap
+    /// makes a PING wait fail after consuming one more frame from the wire. It
+    /// follows the queued prefix and keeps the next application read lossless.
+    pending_application_overflow: ?OwnedFrame = null,
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -1173,7 +1188,12 @@ pub const Connection = struct {
         self.write_batch.deinit(self.allocator);
         self.batch_data_headers.deinit(self.allocator);
         self.batch_data_parts.deinit(self.allocator);
-        if (self.pending_client_frame) |*frame| {
+        if (self.borrowed_pending_frame) |*frame| {
+            frame.deinit(self.allocator);
+        }
+        for (self.pending_application_frames.items[self.pending_application_frame_head..]) |*frame| frame.deinit(self.allocator);
+        self.pending_application_frames.deinit(self.allocator);
+        if (self.pending_application_overflow) |*frame| {
             frame.deinit(self.allocator);
         }
         self.frame_reader.deinit(self.allocator);
@@ -3791,6 +3811,27 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!frame_io.BorrowedFrame {
+        // A scratch borrow lasts until the next read. Release the owning frame
+        // retained for the previous borrow before replacing its storage.
+        if (self.borrowed_pending_frame) |*previous| {
+            previous.deinit(self.allocator);
+            self.borrowed_pending_frame = null;
+        }
+        if (self.popQueuedApplicationFrame()) |frame| {
+            self.borrowed_pending_frame = frame;
+            const pending = &self.borrowed_pending_frame.?;
+            return .{
+                .bytes = pending.bytes,
+                .frame = pending.frame,
+            };
+        }
+        return self.readTransportFrameWithDeadline(deadline);
+    }
+
+    fn readTransportFrameWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!frame_io.BorrowedFrame {
         const borrowed = try self.frame_reader.readTransportWithDeadline(
             self.allocator,
             self.transportForIo(),
@@ -3812,17 +3853,93 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
-        if (self.pending_client_frame) |frame| {
-            self.pending_client_frame = null;
-            return frame;
+        if (self.borrowed_pending_frame) |*previous| {
+            previous.deinit(self.allocator);
+            self.borrowed_pending_frame = null;
         }
-        const borrowed = try self.readBufferedFrameWithDeadline(deadline);
+        if (self.popQueuedApplicationFrame()) |frame| return frame;
+        const borrowed = try self.readTransportFrameWithDeadline(deadline);
         const bytes = try self.allocator.dupe(u8, borrowed.bytes);
         errdefer self.allocator.free(bytes);
         return .{
             .bytes = bytes,
             .frame = try http2.Frame.parse(bytes),
         };
+    }
+
+    fn popQueuedApplicationFrame(self: *Connection) ?OwnedFrame {
+        if (self.pending_application_frame_head <
+            self.pending_application_frames.items.len)
+        {
+            const pending = self.pending_application_frames.items[
+                self.pending_application_frame_head
+            ];
+            self.pending_application_frame_head += 1;
+            self.compactPendingApplicationFramesIfSparse();
+            return pending;
+        }
+        if (self.pending_application_overflow) |frame| {
+            self.pending_application_overflow = null;
+            return frame;
+        }
+        return null;
+    }
+
+    fn compactPendingApplicationFramesIfSparse(self: *Connection) void {
+        if (self.pending_application_frame_head == 0) return;
+        if (self.pending_application_frame_head ==
+            self.pending_application_frames.items.len or
+            self.pending_application_frame_head >=
+                self.pending_application_frames.items.len / 2)
+        {
+            self.compactPendingApplicationFrames();
+        }
+    }
+
+    fn compactPendingApplicationFrames(self: *Connection) void {
+        if (self.pending_application_frame_head == 0) return;
+        const remaining = self.pending_application_frames.items.len -
+            self.pending_application_frame_head;
+        if (remaining != 0) {
+            @memmove(
+                self.pending_application_frames.items[0..remaining],
+                self.pending_application_frames.items[self.pending_application_frame_head..],
+            );
+        }
+        self.pending_application_frames.items.len = remaining;
+        self.pending_application_frame_head = 0;
+    }
+
+    fn pendingApplicationFrameCount(self: *const Connection) usize {
+        return self.pending_application_frames.items.len -
+            self.pending_application_frame_head +
+            @intFromBool(self.pending_application_overflow != null);
+    }
+
+    fn queuePendingApplicationFrame(
+        self: *Connection,
+        frame: OwnedFrame,
+    ) Error!void {
+        if (self.pendingApplicationFrameCount() >=
+            self.limits.max_pending_ping_frames)
+        {
+            return error.MessageTooLarge;
+        }
+        if (self.pending_application_frame_head != 0 and
+            self.pending_application_frames.items.len ==
+                self.pending_application_frames.capacity)
+        {
+            self.compactPendingApplicationFrames();
+        }
+        try self.pending_application_frames.append(self.allocator, frame);
+    }
+
+    fn recoverPendingApplicationFrameAfterQueueFailure(
+        self: *Connection,
+        frame: OwnedFrame,
+    ) void {
+        std.debug.assert(self.pending_application_overflow == null);
+        self.pending_application_overflow = frame;
     }
 
     fn popPendingRequest(self: *Connection) ?OwnedRequest {
@@ -4878,27 +4995,91 @@ pub const Connection = struct {
         try self.writeHeaders(stream_id, fields.items, false);
     }
 
+    /// Send a PING and wait indefinitely for the ACK carrying the same opaque
+    /// payload. Use `pingWithTimeout` for liveness probes against peers that
+    /// may remain connected without ever answering.
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
+        return self.pingUntil(data, null);
+    }
+
+    /// Send a PING and wait at most `timeout` for its matching ACK.
+    ///
+    /// The timeout becomes one absolute deadline before the PING is written,
+    /// so stale ACKs and interleaved frames cannot renew the health-check
+    /// budget. Connection-control frames are handled immediately. Application
+    /// frames are retained in wire order for the next request/response reader,
+    /// up to `Limits.max_pending_ping_frames`; they are never silently dropped.
+    pub fn pingWithTimeout(
+        self: *Connection,
+        data: [8]u8,
+        timeout: std.Io.Duration,
+    ) Error![8]u8 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        return self.pingUntil(data, deadline);
+    }
+
+    fn pingUntil(
+        self: *Connection,
+        data: [8]u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error![8]u8 {
+        // An earlier bounded wait could retain one frame beyond the configured
+        // queue cap. Require the application to drain it before another probe
+        // can consume later wire data out of order.
+        if (self.pending_application_overflow != null) {
+            return error.MessageTooLarge;
+        }
         try writeFrameTransport(self.allocator, self.transportForIo(), .ping, 0, 0, &data);
         while (true) {
-            var frame = try self.readOwnedFrame();
-            defer frame.deinit(self.allocator);
-            if (frame.frame.header.frame_type != .ping) {
-                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
-                return error.UnexpectedFrame;
+            // Do not consume the pending queue here: those frames predate this
+            // PING and waiting on them would cycle them back into that queue.
+            const borrowed = try self.readTransportFrameWithDeadline(deadline);
+            if (borrowed.frame.header.frame_type == .ping) {
+                if ((borrowed.frame.header.flags & flag_ack) == 0) {
+                    const ping_payload = try http2.PingPayload.parse(
+                        borrowed.frame,
+                    );
+                    try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+                    continue;
+                }
+                const ack_payload =
+                    (try http2.PingPayload.parse(borrowed.frame)).data;
+                // Rust h2 keeps outstanding user/shutdown PING payloads and
+                // only completes the operation when the ACK echoes that exact
+                // opaque value. Unknown ACKs are legal on the wire, but
+                // treating one as completion lets a stale peer ACK satisfy a
+                // newer health check.
+                if (!std.mem.eql(u8, &ack_payload, &data)) continue;
+                return ack_payload;
             }
-            if ((frame.frame.header.flags & flag_ack) == 0) {
-                const ping_payload = try http2.PingPayload.parse(frame.frame);
-                try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+            if (try self.handleConnectionOrGoAwayFrame(borrowed.frame)) {
                 continue;
             }
-            const ack_payload = (try http2.PingPayload.parse(frame.frame)).data;
-            // Rust h2 keeps outstanding user/shutdown PING payloads and only
-            // completes the operation when the ACK echoes that exact opaque
-            // value.  Unknown ACKs are legal on the wire, but treating them as
-            // completion lets a stale peer ACK satisfy a newer health check.
-            if (!std.mem.eql(u8, &ack_payload, &data)) continue;
-            return ack_payload;
+
+            const bytes = try self.allocator.dupe(u8, borrowed.bytes);
+            var frame = OwnedFrame{
+                .bytes = bytes,
+                // `borrowed` already passed frame parsing and envelope
+                // validation. Reparse only to redirect payload slices into the
+                // owned allocation that may outlive frame-reader scratch.
+                .frame = http2.Frame.parse(bytes) catch unreachable,
+            };
+            var frame_owned = true;
+            defer if (frame_owned) frame.deinit(self.allocator);
+            self.queuePendingApplicationFrame(frame) catch |err| {
+                // The current frame was removed from the wire as well, so
+                // retain it even when allocating the queue slot fails. A
+                // subsequent protocol read can still recover it instead of
+                // observing a silent gap in HPACK or stream ordering.
+                self.recoverPendingApplicationFrameAfterQueueFailure(frame);
+                frame_owned = false;
+                return err;
+            };
+            frame_owned = false;
         }
     }
 
@@ -5683,7 +5864,7 @@ pub const Connection = struct {
             defer if (pending_owned) |*owned| {
                 owned.deinit(self.allocator);
             };
-            const frame = if (self.pending_client_frame != null) blk: {
+            const frame = if (self.pendingApplicationFrameCount() != 0) blk: {
                 pending_owned = try self.readOwnedFrame();
                 break :blk pending_owned.?.frame;
             } else try self.readFrameScratch();
@@ -6576,7 +6757,9 @@ pub const Connection = struct {
         written: *usize,
     ) Error!void {
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
-        if (self.role == .client and self.pending_client_frame != null) {
+        if (self.role == .client and
+            self.pendingApplicationFrameCount() != 0)
+        {
             return error.ResponseAvailable;
         }
         written.* = 0;
@@ -6713,13 +6896,10 @@ pub const Connection = struct {
                         return error.UnexpectedFrame;
                     }
                     // Transfer the owning frame to the eventual response
-                    // reader. Only one can be pending because this method
-                    // returns immediately, so peer input cannot grow an
-                    // unbounded side queue while the application is uploading.
-                    if (self.pending_client_frame != null) {
-                        return error.UnexpectedFrame;
-                    }
-                    self.pending_client_frame = frame;
+                    // reader. This method returns immediately, so its own
+                    // contribution stays one frame even though the shared
+                    // queue can also retain a bounded PING interleaving burst.
+                    try self.queuePendingApplicationFrame(frame);
                     frame_owned = false;
                     return error.ResponseAvailable;
                 },
@@ -8076,6 +8256,7 @@ fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.max_frame_size < default_max_frame_size or limits.max_frame_size > max_max_frame_size) return error.InvalidSetting;
     if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
     if (limits.max_idle_priority_updates == 0) return error.InvalidSetting;
+    if (limits.max_pending_ping_frames == 0) return error.InvalidSetting;
 }
 
 fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
@@ -8934,6 +9115,37 @@ pub const testing = struct {
         connection: *Connection,
     ) Error!OwnedFrame {
         return connection.readOwnedFrame();
+    }
+
+    pub fn queuePendingApplicationFrame(
+        connection: *Connection,
+        frame: OwnedFrame,
+    ) Error!void {
+        return connection.queuePendingApplicationFrame(frame);
+    }
+
+    pub fn recoverPendingApplicationFrameAfterQueueFailure(
+        connection: *Connection,
+        frame: OwnedFrame,
+    ) void {
+        connection.recoverPendingApplicationFrameAfterQueueFailure(frame);
+    }
+
+    pub fn deinitPendingApplicationFrames(
+        connection: *Connection,
+    ) void {
+        if (connection.borrowed_pending_frame) |*frame| {
+            frame.deinit(connection.allocator);
+            connection.borrowed_pending_frame = null;
+        }
+        for (connection.pending_application_frames.items[connection.pending_application_frame_head..]) |*frame| frame.deinit(connection.allocator);
+        connection.pending_application_frames.deinit(connection.allocator);
+        connection.pending_application_frames = .empty;
+        connection.pending_application_frame_head = 0;
+        if (connection.pending_application_overflow) |*frame| {
+            frame.deinit(connection.allocator);
+            connection.pending_application_overflow = null;
+        }
     }
 
     pub fn handleConnectionFrame(
@@ -15983,6 +16195,9 @@ test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
     try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
         .max_idle_priority_updates = 0,
     }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .max_pending_ping_frames = 0,
+    }));
     try validateLocalLimits(.{
         .initial_window_size = std.math.maxInt(i31),
         .initial_connection_window_size = std.math.maxInt(i31),
@@ -16323,4 +16538,5 @@ test {
     _ = @import("runtime/informational_batch_tests.zig");
     _ = @import("runtime/response_writer_tests.zig");
     _ = @import("runtime/request_writer_tests.zig");
+    _ = @import("runtime/ping_timeout_tests.zig");
 }

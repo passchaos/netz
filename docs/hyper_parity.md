@@ -537,7 +537,7 @@ connection credit while a more urgent stream has no stream credit.
 | --- | --- | --- |
 | HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, absolute per-request-head deadlines over TCP/TLS, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling; its server header-read timeout has equivalent absolute per-head semantics |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue, ordered 1xx observation and bounded interim chains | Mature RFC behavior and broad production use |
-| HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, bounded ordered informational callbacks, push, priorities, flow control, graceful GOAWAY draining, tunnels/RFC 8441; certificate-verified TLS interop with Hyper/h2 is exercised in both endpoint roles, including 1xx, push, and push opt-out | Tokio h2 integration and production client/server |
+| HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, bounded ordered informational callbacks, push, priorities, flow control, graceful GOAWAY draining, tunnels/RFC 8441, and explicit absolute-deadline PING round trips; certificate-verified TLS interop with Hyper/h2 is exercised in both endpoint roles, including 1xx, push, and push opt-out | Tokio h2 integration and production client/server, including configurable background keep-alive interval/timeout/idle policy |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
 | HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |
 | HTTP/1 chunked 1-MiB duplex | 284.04-286.06 us/op pinned | 414.64-417.45 us/op pinned |
@@ -554,6 +554,19 @@ non-incremental stream in one candidate scan rather than two. The priority-aware
 10-stream/1-MiB/8-KiB-window benchmark measured 7.79–7.96 ms/batch and
 1.26–1.28 GiB/s across three CPU-0 runs; the immediately preceding two-scan
 sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
+
+Netz now exposes `Connection.pingWithTimeout(data, timeout)` for a bounded
+HTTP/2 liveness round trip. It establishes one awake-clock deadline before
+writing PING, matches the exact opaque ACK, handles interleaved SETTINGS, PING,
+WINDOW_UPDATE, PRIORITY, GOAWAY, and extension control traffic without renewing
+that deadline, and retains interleaved application frames in wire order for the
+next request/response reader. `Limits.max_pending_ping_frames` bounds that queue;
+the frame that reaches the cap remains recoverable even though the probe returns
+`MessageTooLarge`. Local cleartext tests cover silent-peer timeout, stale-ACK and
+control-frame deadline pressure, response HEADERS/DATA preservation, and queue-
+cap preservation, while a native TLS test covers the encrypted ACK path. This is
+an explicit probe primitive, not yet Hyper's background `keep_alive_interval`,
+`keep_alive_timeout`, and `keep_alive_while_idle` scheduler.
 
 ## Remaining evidence
 
