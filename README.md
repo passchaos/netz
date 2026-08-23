@@ -427,8 +427,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Store with full subscription restoration, Session Expiry, offline QoS 1/2
   queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
   out-of-order ACKs and incoming QoS 2 deduplication, integrated into one live
-  TCP broker listener that auto-detects MQTT 3.1.1/5 per connection, exposes a
-  pre-registration CONNECT authorization hook, and
+  TCP broker listener that auto-detects MQTT 3.1.1/5 per connection, exposes
+  pre-registration CONNECT authorization plus pre-mutation PUBLISH/SUBSCRIBE
+  access-control hooks, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, plus an indexed Will

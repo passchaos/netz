@@ -495,6 +495,96 @@ def username_password_authorization(
                 ))
 
 
+def publish_subscribe_access_control(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Wire-level subset of Mosquitto 09-plugin-auth-acl-sub-denied.py and the
+    # MQTT 5 publish denial from 09-plugin-auth-acl-pub-prop.py. A denial must
+    # return the version-correct acknowledgement without closing the client.
+    denied_publish = "acl/deny-publish"
+    denied_subscribe = "acl/deny-subscribe"
+    with NetzBroker(
+        executable,
+        extra_args=(
+            f"--deny-publish-topic={denied_publish}",
+            f"--deny-subscribe-filter={denied_subscribe}",
+        ),
+    ) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "acl-v5")
+            denied_subscribe_packet = mqtt_packets.gen_subscribe(
+                1, denied_subscribe, 1, proto_ver=5
+            )
+            allowed_subscription = mqtt_packets.gen_subscribe(
+                1, "acl/allowed/sub", 1, proto_ver=5
+            )
+            # Reuse the first packet's fixed/variable prefix and append one
+            # subscription payload, then repair the one-byte Remaining Length.
+            mixed_subscribe = bytearray(denied_subscribe_packet)
+            mixed_subscribe.extend(allowed_subscription[5:])
+            mixed_subscribe[1] += len(allowed_subscription) - 5
+            sock.sendall(mixed_subscribe)
+            expect_packet(
+                sock, b"\x90\x05\x00\x01\x00\x87\x01",
+                "MQTT 5 mixed denied/allowed SUBSCRIBE",
+            )
+            sock.sendall(mqtt_packets.gen_publish(
+                denied_publish, qos=2, mid=2, payload="denied",
+                proto_ver=5,
+            ))
+            expect_packet(
+                sock, mqtt_packets.gen_pubrec(
+                    2, proto_ver=5, reason_code=0x87
+                ), "MQTT 5 denied QoS 2 PUBLISH",
+            )
+            sock.sendall(mqtt_packets.gen_publish(
+                "acl/allowed", qos=1, mid=3, payload="allowed",
+                proto_ver=5,
+            ))
+            expect_packet(
+                sock, mqtt_packets.gen_puback(
+                    3, proto_ver=5, reason_code=0x10
+                ), "MQTT 5 allowed PUBLISH after denials",
+            )
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(),
+                "MQTT 5 ACL PINGRESP",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+    with NetzBroker(
+        executable,
+        extra_args=(
+            f"--deny-publish-topic={denied_publish}",
+            f"--deny-subscribe-filter={denied_subscribe}",
+        ),
+    ) as broker:
+        with broker.connect() as sock:
+            connect_client(sock, mqtt_packets, "acl-v311", 4)
+            sock.sendall(mqtt_packets.gen_subscribe(
+                1, denied_subscribe, 1, proto_ver=4
+            ))
+            expect_packet(
+                sock, mqtt_packets.gen_suback(1, 0x80, proto_ver=4),
+                "MQTT 3.1.1 denied SUBSCRIBE",
+            )
+            sock.sendall(mqtt_packets.gen_publish(
+                denied_publish, qos=1, mid=2, payload="denied",
+                proto_ver=4,
+            ))
+            expect_packet(
+                sock, mqtt_packets.gen_puback(2, proto_ver=4),
+                "MQTT 3.1.1 denied PUBLISH",
+            )
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(),
+                "MQTT 3.1.1 ACL PINGRESP",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
+
+
 def duplicate_client_takeover(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -4963,6 +5053,9 @@ def main() -> None:
     username_password_authorization(
         args.broker, mqtt_packets, mqtt5_props
     )
+    publish_subscribe_access_control(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -4970,7 +5063,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 119 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 121 scenarios")
 
 
 if __name__ == "__main__":

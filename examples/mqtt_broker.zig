@@ -21,6 +21,8 @@ const Config = struct {
     allow_zero_length_client_id: bool = true,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
+    deny_publish_topic: ?[]const u8 = null,
+    deny_subscribe_filter: ?[]const u8 = null,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     persistence_path: ?[]const u8 = null,
@@ -84,6 +86,41 @@ pub fn main(init: std.process.Init) !void {
             },
             .authorize = Credentials.authorize,
         } else null;
+    const AccessPolicy = struct {
+        deny_publish_topic: ?[]const u8,
+        deny_subscribe_filter: ?[]const u8,
+
+        fn authorizePublish(
+            context: *anyopaque,
+            _: netz.mqtt.Connect,
+            publish: netz.mqtt.Publish,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const denied = self.deny_publish_topic orelse return true;
+            return !std.mem.eql(u8, publish.topic, denied);
+        }
+
+        fn authorizeSubscribe(
+            context: *anyopaque,
+            _: netz.mqtt.Connect,
+            subscription: netz.mqtt.Subscription,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const denied = self.deny_subscribe_filter orelse return true;
+            return !std.mem.eql(u8, subscription.topic_filter, denied);
+        }
+    };
+    var access_policy = AccessPolicy{
+        .deny_publish_topic = config.deny_publish_topic,
+        .deny_subscribe_filter = config.deny_subscribe_filter,
+    };
+    const access_control: ?netz.mqtt.broker.AccessControlHandler =
+        if (config.deny_publish_topic != null or
+        config.deny_subscribe_filter != null) .{
+            .context = &access_policy,
+            .authorize_publish = AccessPolicy.authorizePublish,
+            .authorize_subscribe = AccessPolicy.authorizeSubscribe,
+        } else null;
 
     var broker = try netz.mqtt.broker.Broker.listen(
         allocator,
@@ -111,6 +148,7 @@ pub fn main(init: std.process.Init) !void {
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
             .connect_authorization = authorization,
+            .access_control = access_control,
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
                 .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
@@ -360,6 +398,28 @@ fn parseArgs(
                 return error.InvalidArgument;
             }
             config.password = password;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--deny-publish-topic=",
+        )) {
+            const topic = arg["--deny-publish-topic=".len..];
+            if (topic.len == 0 or config.deny_publish_topic != null) {
+                return error.InvalidArgument;
+            }
+            try netz.mqtt.validateTopicName(topic);
+            config.deny_publish_topic = topic;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--deny-subscribe-filter=",
+        )) {
+            const filter = arg["--deny-subscribe-filter=".len..];
+            if (filter.len == 0 or config.deny_subscribe_filter != null) {
+                return error.InvalidArgument;
+            }
+            try netz.mqtt.validateTopicFilter(filter);
+            config.deny_subscribe_filter = filter;
         } else if (std.mem.eql(
             u8,
             arg,

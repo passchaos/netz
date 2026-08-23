@@ -148,6 +148,104 @@ test "broker authorizes CONNECT before creating Session state" {
     try std.testing.expectEqual(@as(usize, 4), policy.calls);
 }
 
+test "broker access control denies before durable state mutation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        fn publish(
+            _: *anyopaque,
+            connect: mqtt.Connect,
+            message: mqtt.Publish,
+        ) bool {
+            return std.mem.eql(u8, connect.client_id, "acl-client") and
+                !std.mem.eql(u8, message.topic, "acl/denied");
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            connect: mqtt.Connect,
+            subscription: mqtt.Subscription,
+        ) bool {
+            return std.mem.eql(u8, connect.client_id, "acl-client") and
+                !std.mem.eql(
+                    u8,
+                    subscription.topic_filter,
+                    "acl/denied",
+                );
+        }
+    };
+    var policy_context: u8 = 0;
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .access_control = .{
+                .context = &policy_context,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 1 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "acl-client" },
+    );
+    defer client.close();
+    var denied_suback = try client.subscribe(
+        &.{
+            .{ .topic_filter = "acl/denied", .qos = .at_least_once },
+            .{ .topic_filter = "acl/allowed/sub", .qos = .at_least_once },
+        },
+        .{},
+    );
+    defer denied_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x87, 0x01 },
+        denied_suback.suback.reason_codes,
+    );
+    try std.testing.expectEqual(@as(usize, 1), broker.router.subscriptionCount());
+
+    try std.testing.expectError(
+        error.PublishRefused,
+        client.publish(
+            "acl/denied",
+            "not-retained",
+            .{ .qos = .exactly_once, .retain = true },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), broker.retained.count());
+    try std.testing.expectEqual(@as(usize, 0), broker.pending_qos2.count());
+
+    try client.publish(
+        "acl/allowed",
+        "accepted",
+        .{ .qos = .at_least_once },
+    );
+    try client.ping();
+    try client.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker caps MQTT 5 subscriptions and live delivery at Maximum QoS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
