@@ -19,6 +19,8 @@ const Config = struct {
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
     allow_zero_length_client_id: bool = true,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     persistence_path: ?[]const u8 = null,
@@ -40,6 +42,48 @@ pub fn main(init: std.process.Init) !void {
     });
     defer threaded.deinit();
     const io = threaded.io();
+
+    const Credentials = struct {
+        username: []const u8,
+        password: []const u8,
+
+        fn authorize(
+            context: *anyopaque,
+            connect: netz.mqtt.Connect,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const username = connect.username orelse return false;
+            const password = connect.password orelse return false;
+            // Length is public MQTT framing metadata; compare equal-length
+            // credential bytes without leaking which field first differed.
+            if (username.len != self.username.len or
+                password.len != self.password.len)
+            {
+                return false;
+            }
+            const username_matches = timingSafeEqlBytes(
+                username,
+                self.username,
+            );
+            const password_matches = timingSafeEqlBytes(
+                password,
+                self.password,
+            );
+            return username_matches and password_matches;
+        }
+    };
+    var credentials: Credentials = undefined;
+    const authorization: ?netz.mqtt.broker.ConnectAuthorizationHandler =
+        if (config.username) |username| .{
+            .context = blk: {
+                credentials = .{
+                    .username = username,
+                    .password = config.password.?,
+                };
+                break :blk &credentials;
+            },
+            .authorize = Credentials.authorize,
+        } else null;
 
     var broker = try netz.mqtt.broker.Broker.listen(
         allocator,
@@ -66,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
+            .connect_authorization = authorization,
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
                 .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
@@ -303,6 +348,18 @@ fn parseArgs(
             "--no-zero-length-client-id",
         )) {
             config.allow_zero_length_client_id = false;
+        } else if (std.mem.startsWith(u8, arg, "--username=")) {
+            const username = arg["--username=".len..];
+            if (username.len == 0 or config.username != null) {
+                return error.InvalidArgument;
+            }
+            config.username = username;
+        } else if (std.mem.startsWith(u8, arg, "--password=")) {
+            const password = arg["--password=".len..];
+            if (password.len == 0 or config.password != null) {
+                return error.InvalidArgument;
+            }
+            config.password = password;
         } else if (std.mem.eql(
             u8,
             arg,
@@ -349,7 +406,17 @@ fn parseArgs(
     {
         return error.InvalidArgument;
     }
+    if ((config.username == null) != (config.password == null)) {
+        return error.InvalidArgument;
+    }
     return config;
+}
+
+fn timingSafeEqlBytes(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var difference: u8 = 0;
+    for (a, b) |lhs, rhs| difference |= lhs ^ rhs;
+    return difference == 0;
 }
 
 fn serveBroker(

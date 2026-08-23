@@ -27,6 +27,127 @@ fn connectV311(
     );
 }
 
+test "broker authorizes CONNECT before creating Session state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        calls: usize = 0,
+
+        fn authorize(
+            context_ptr: *anyopaque,
+            connect: mqtt.Connect,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.calls += 1;
+            return connect.username != null and
+                connect.password != null and
+                std.mem.eql(u8, connect.username.?, "user") and
+                std.mem.eql(u8, connect.password.?, "password");
+        }
+    };
+
+    var policy: Policy = .{};
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 4,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .connect_authorization = .{
+                .context = &policy,
+                .authorize = Policy.authorize,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 4 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+        var attempt = try context.runtime_mod.Client.connectAttempt(
+            allocator,
+            io,
+            broker.address(),
+            .{
+                .protocol = protocol,
+                .client_id = if (protocol == .v3_1_1)
+                    "denied-v311"
+                else
+                    "denied-v5",
+                .username = "user",
+                .password = "wrong",
+                .properties = if (protocol == .v5) &.{.{
+                    .four_byte = .{
+                        .id = .session_expiry_interval,
+                        .value = 300,
+                    },
+                }} else &.{},
+            },
+        );
+        defer attempt.deinit(allocator);
+        try std.testing.expect(!attempt.accepted());
+        try std.testing.expectEqual(
+            @as(u8, if (protocol == .v3_1_1) 0x05 else 0x87),
+            attempt.connack.connack.reason_code,
+        );
+        try std.testing.expect(!attempt.connack.connack.session_present);
+    }
+    var anonymous = try context.runtime_mod.Client.connectAttempt(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "denied-anonymous-v5",
+            .properties = &.{.{
+                .four_byte = .{
+                    .id = .session_expiry_interval,
+                    .value = 300,
+                },
+            }},
+        },
+    );
+    defer anonymous.deinit(allocator);
+    try std.testing.expect(!anonymous.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x87),
+        anonymous.connack.connack.reason_code,
+    );
+    try std.testing.expectEqual(@as(usize, 0), broker.sessions.count());
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+    try std.testing.expectEqual(@as(usize, 0), broker.router.subscriptionCount());
+
+    var accepted = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "authorized",
+            .username = "user",
+            .password = "password",
+        },
+    );
+    defer accepted.close();
+    try accepted.ping();
+    try accepted.disconnect(0);
+
+    try joinServer(thread, &joined, &serve);
+    try std.testing.expectEqual(@as(usize, 4), policy.calls);
+}
+
 test "broker caps MQTT 5 subscriptions and live delivery at Maximum QoS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

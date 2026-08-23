@@ -81,6 +81,19 @@ pub const Options = struct {
     /// Optional policy for MQTT 5 re-authentication AUTH packets received by
     /// the live broker event loop.
     authentication: ?AuthenticationHandler = null,
+    /// Optional CONNECT authorization evaluated before Session, Will, or
+    /// routing state is created. This covers MQTT 3.1.1/5 username/password
+    /// policy; Enhanced Authentication remains owned by `authentication`.
+    connect_authorization: ?ConnectAuthorizationHandler = null,
+};
+
+pub const ConnectAuthorizationHandler = struct {
+    context: *anyopaque,
+    /// `connect` and all of its slices are borrowed for this call only.
+    authorize: *const fn (
+        context: *anyopaque,
+        connect: mqtt.Connect,
+    ) bool,
 };
 
 pub const AuthenticationHandler = struct {
@@ -728,6 +741,25 @@ pub const Broker = struct {
                 );
                 if (!pending.authentication_authorized) {
                     return error.AuthenticationInProgress;
+                }
+            }
+            if (self.options.connect_authorization) |authorization| {
+                if (!authorization.authorize(
+                    authorization.context,
+                    pending.connect.connect,
+                )) {
+                    // Match Mosquitto's version-specific refusal codes. This
+                    // happens before registration so rejected credentials
+                    // cannot create, resume, replace, or erase durable state.
+                    var refused = try pending.finish(.{
+                        .reason_code = switch (pending.connect.connect.protocol) {
+                            .v3_1_1 => 0x05,
+                            .v5 => 0x87,
+                        },
+                    });
+                    refused.deinit(self.allocator);
+                    clients_started += 1;
+                    continue;
                 }
             }
             const registration = try self.register(

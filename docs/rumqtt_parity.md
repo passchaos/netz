@@ -21,7 +21,7 @@ and equal-wire broker results are kept separate.
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
-| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid` and `queue_qos0_messages` |
+| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, pre-registration CONNECT authorization, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid`, password files and `queue_qos0_messages` |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
@@ -856,7 +856,7 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 111
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 119
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -884,7 +884,12 @@ bits. The eighth scenario directly ports Mosquitto's
 `02-subpub-qos0-topic-alias.py`: a publisher establishes alias 3, then reuses
 it with an empty Topic Name; the subscriber receives the resolved full Topic
 Name with the connection-scoped alias removed. The gate builds a finite netz
-broker. The ninth scenario ports Mosquitto's MQTT 5
+broker. Eight additional credential cases port Mosquitto's anonymous,
+username-without-password, and wrong-password refusals for MQTT 3.1.1 and 5,
+then prove valid username/password connections remain usable in both versions. The broker
+evaluates this policy before Session/Will/router registration and the finite
+example exposes `--username` plus `--password` for static credentials. The
+ninth scenario ports Mosquitto's MQTT 5
 `04-retain-qos0-repeated.py` lifecycle and its clear boundary: retained replay
 survives UNSUBSCRIBE/resubscribe, UNSUBACK bytes are exact, and a zero-length
 retained PUBLISH removes the value so a later subscription receives nothing.
@@ -1152,7 +1157,7 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all 111 scenarios pass. This is deliberately described as a selected
+packets; all 119 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1179,5 +1184,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 102 passing packet-vector scenarios do not cover
+   persistence semantics. The 119 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

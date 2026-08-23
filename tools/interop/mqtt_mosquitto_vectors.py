@@ -432,6 +432,69 @@ def zero_length_client_id_policy(
             named.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def username_password_authorization(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 01-connect-uname-no-password-denied.py and
+    # 01-connect-uname-password-denied.py, plus the success branch. All three
+    # connections use one listener so refusals also prove no Session slot is
+    # leaked or registered before authorization.
+    denied_cases = (
+        (4, None, None, 5),
+        (5, None, None, 0x87),
+        (4, "user", None, 5),
+        (5, "user", None, 0x87),
+        (4, "user", "wrong", 5),
+        (5, "user", "wrong", 0x87),
+    )
+    with NetzBroker(
+        executable,
+        connections=len(denied_cases) + 2,
+        extra_args=("--username=user", "--password=password"),
+    ) as broker:
+        for proto_ver, username, password, reason_code in denied_cases:
+            with broker.connect() as sock:
+                sock.sendall(mqtt_packets.gen_connect(
+                    f"credential-denied-v{proto_ver}-{password or 'missing'}",
+                    proto_ver=proto_ver,
+                    username=username,
+                    password=password,
+                ))
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_connack(
+                        rc=reason_code,
+                        proto_ver=proto_ver,
+                        properties=None,
+                    ),
+                    f"credential refusal v{proto_ver} {password or 'missing'}",
+                )
+
+        for proto_ver in (4, 5):
+            with broker.connect() as accepted:
+                accepted.sendall(mqtt_packets.gen_connect(
+                    f"credential-accepted-v{proto_ver}",
+                    proto_ver=proto_ver,
+                    username="user",
+                    password="password",
+                ))
+                expect_packet(
+                    accepted,
+                    expected_connack(mqtt_packets, mqtt5_props)
+                    if proto_ver == 5
+                    else mqtt_packets.gen_connack(rc=0, proto_ver=4),
+                    f"credential success CONNACK v{proto_ver}",
+                )
+                accepted.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    accepted, mqtt_packets.gen_pingresp(),
+                    f"credential success PINGRESP v{proto_ver}",
+                )
+                accepted.sendall(mqtt_packets.gen_disconnect(
+                    proto_ver=proto_ver
+                ))
+
+
 def duplicate_client_takeover(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -4897,6 +4960,9 @@ def main() -> None:
     server_keep_alive(args.broker, mqtt_packets, mqtt5_props)
     maximum_keep_alive(args.broker, mqtt_packets, mqtt5_props)
     zero_length_client_id_policy(args.broker, mqtt_packets, mqtt5_props)
+    username_password_authorization(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -4904,7 +4970,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 111 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 119 scenarios")
 
 
 if __name__ == "__main__":
