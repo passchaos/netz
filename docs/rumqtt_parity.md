@@ -891,11 +891,13 @@ evaluates this policy before Session/Will/router registration and the finite
 example exposes `--username` plus `--password` for static credentials. The
 same gate ports Mosquitto's denied-subscription and denied-publish plugin
 behavior for MQTT 3.1.1 and 5: denied filters return SUBACK 0x80/0x87, denied
-QoS 1 publications return the version-appropriate PUBACK without retained or
-routing mutation, and PING plus a later allowed publish prove the connection
-remains usable. The example exposes exact deny-topic/filter options solely as
-a deterministic policy fixture; library applications provide their own
-callbacks. The ninth scenario ports Mosquitto's MQTT 5
+QoS 1/2 publications return the version-appropriate PUBACK/PUBREC without
+retained or routing mutation, and PING plus a later allowed publish prove the
+connection remains usable. The QoS 2 case immediately reuses the denied
+Packet Identifier for that allowed QoS 1 publish, directly covering
+Mosquitto's stale inbound-state regression. The example exposes exact
+deny-topic/filter options solely as a deterministic policy fixture; library
+applications provide their own callbacks. The ninth scenario ports Mosquitto's MQTT 5
 `04-retain-qos0-repeated.py` lifecycle and its clear boundary: retained replay
 survives UNSUBSCRIBE/resubscribe, UNSUBACK bytes are exact, and a zero-length
 retained PUBLISH removes the value so a later subscription receives nothing.

@@ -538,12 +538,15 @@ def publish_subscribe_access_control(
                 ), "MQTT 5 denied QoS 2 PUBLISH",
             )
             sock.sendall(mqtt_packets.gen_publish(
-                "acl/allowed", qos=1, mid=3, payload="allowed",
+                # Reuse the Packet Identifier immediately. A denied QoS 2
+                # PUBLISH is terminal at its negative PUBREC and must not leave
+                # stale receive state that rejects this legal QoS 1 message.
+                "acl/allowed", qos=1, mid=2, payload="allowed",
                 proto_ver=5,
             ))
             expect_packet(
                 sock, mqtt_packets.gen_puback(
-                    3, proto_ver=5, reason_code=0x10
+                    2, proto_ver=5, reason_code=0x10
                 ), "MQTT 5 allowed PUBLISH after denials",
             )
             sock.sendall(mqtt_packets.gen_pingreq())
