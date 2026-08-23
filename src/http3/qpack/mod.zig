@@ -17,6 +17,7 @@ pub const Error = wire.Error || error{
     QpackDecoderStreamError,
     QpackDecompressionFailed,
     QpackBlocked,
+    ExcessiveLoad,
 } || std.mem.Allocator.Error;
 
 pub const HeaderField = struct {
@@ -566,6 +567,22 @@ pub fn decodeDynamicBlock(
     block: []const u8,
     table: DynamicTable,
 ) !DynamicBlockDecode {
+    return decodeDynamicBlockWithLimit(
+        allocator,
+        block,
+        table,
+        std.math.maxInt(u64),
+    );
+}
+
+/// Decode a dynamic field section while enforcing RFC 9114's uncompressed
+/// field-section size before materializing Huffman or table-backed strings.
+pub fn decodeDynamicBlockWithLimit(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    table: DynamicTable,
+    max_field_section_size: u64,
+) !DynamicBlockDecode {
     const prefix = try decodeFieldSectionPrefix(block, table);
     var cursor = wire.Cursor.init(block);
     cursor.pos = prefix.consumed;
@@ -573,6 +590,7 @@ pub fn decodeDynamicBlock(
     const base = prefix.base;
     if (required_insert_count > table.insert_count) return error.QpackBlocked;
     var actual_required_insert_count: u64 = 0;
+    var budget = FieldSectionBudget{ .max = max_field_section_size };
 
     var fields: std.ArrayList(HeaderField) = .empty;
     errdefer {
@@ -587,6 +605,7 @@ pub fn decodeDynamicBlock(
             const index = try decodePrefixedInteger(&cursor, 6, first);
             if (static) {
                 field = staticEntry(index) orelse return error.QpackDecompressionFailed;
+                try budget.charge(field.name.len, field.value.len);
             } else {
                 const entry = table.fieldRelativeToBase(base, index) orelse
                     return error.QpackDecompressionFailed;
@@ -595,6 +614,7 @@ pub fn decodeDynamicBlock(
                     required_insert_count,
                     entry,
                 );
+                try budget.charge(entry.name.len, entry.value.len);
                 field = try ownedDynamicField(allocator, entry, entry.value, false);
             }
         } else if ((first & 0xf0) == 0x10) {
@@ -606,15 +626,18 @@ pub fn decodeDynamicBlock(
                 required_insert_count,
                 entry,
             );
+            try budget.charge(entry.name.len, entry.value.len);
             field = try ownedDynamicField(allocator, entry, entry.value, false);
         } else if ((first & 0xc0) == 0x40) {
             const never_indexed = (first & 0x20) != 0;
             const static = (first & 0x10) != 0;
             const index = try decodePrefixedInteger(&cursor, 4, first);
-            var value = try decodeString(allocator, &cursor);
-            errdefer if (value.storage) |storage| allocator.free(storage);
             if (static) {
                 const entry = staticEntry(index) orelse return error.QpackDecompressionFailed;
+                const value_plan = try scanString(&cursor);
+                try budget.charge(entry.name.len, value_plan.decoded_len);
+                var value = try value_plan.decode(allocator);
+                errdefer if (value.storage) |storage| allocator.free(storage);
                 field = .{
                     .name = entry.name,
                     .value = value.value,
@@ -630,6 +653,10 @@ pub fn decodeDynamicBlock(
                     required_insert_count,
                     entry,
                 );
+                const value_plan = try scanString(&cursor);
+                try budget.charge(entry.name.len, value_plan.decoded_len);
+                var value = try value_plan.decode(allocator);
+                errdefer if (value.storage) |storage| allocator.free(storage);
                 field = try ownedDynamicField(allocator, entry, value.value, never_indexed);
                 if (value.storage) |storage| allocator.free(storage);
                 value.storage = null;
@@ -644,19 +671,23 @@ pub fn decodeDynamicBlock(
                 required_insert_count,
                 entry,
             );
-            const value = try decodeString(allocator, &cursor);
+            const value_plan = try scanString(&cursor);
+            try budget.charge(entry.name.len, value_plan.decoded_len);
+            const value = try value_plan.decode(allocator);
             defer if (value.storage) |storage| allocator.free(storage);
             field = try ownedDynamicField(allocator, entry, value.value, never_indexed);
         } else if ((first & 0xe0) == 0x20) {
             const never_indexed = (first & 0x10) != 0;
             const name_len = try decodePrefixedInteger(&cursor, 3, first);
-            var name = try decodeMaybeHuffman(
-                allocator,
+            const name_plan = try scanMaybeHuffman(
                 try cursor.readSlice(name_len),
                 (first & 0x08) != 0,
             );
+            const value_plan = try scanString(&cursor);
+            try budget.charge(name_plan.decoded_len, value_plan.decoded_len);
+            var name = try name_plan.decode(allocator);
             errdefer if (name.storage) |storage| allocator.free(storage);
-            var value = try decodeString(allocator, &cursor);
+            var value = try value_plan.decode(allocator);
             errdefer if (value.storage) |storage| allocator.free(storage);
             field = .{
                 .name = name.value,
@@ -816,10 +847,23 @@ fn normalizedFieldName(allocator: std.mem.Allocator, name: []const u8, storage: 
 }
 
 pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
+    return decodeLiteralBlockWithLimit(
+        allocator,
+        block,
+        std.math.maxInt(u64),
+    );
+}
+
+pub fn decodeLiteralBlockWithLimit(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    max_field_section_size: u64,
+) ![]HeaderField {
     var cursor = wire.Cursor.init(block);
     const required_insert_count = try decodePrefixedInteger(&cursor, 8, try cursor.readByte());
     const base = try decodePrefixedInteger(&cursor, 7, try cursor.readByte());
     if (required_insert_count != 0 or base != 0) return error.QpackDynamicTableUnsupported;
+    var budget = FieldSectionBudget{ .max = max_field_section_size };
 
     var fields: std.ArrayList(HeaderField) = .empty;
     errdefer {
@@ -831,21 +875,30 @@ pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]He
         if ((first & 0xc0) == 0xc0) {
             const index = try decodePrefixedInteger(&cursor, 6, first);
             const entry = staticEntry(index) orelse return error.InvalidFrame;
+            try budget.charge(entry.name.len, entry.value.len);
             try fields.append(allocator, entry);
         } else if ((first & 0xc0) == 0x40) {
             const is_static = (first & 0x10) != 0;
             const index = try decodePrefixedInteger(&cursor, 4, first);
-            var value = try decodeString(allocator, &cursor);
-            errdefer if (value.storage) |storage| allocator.free(storage);
             if (!is_static) return error.QpackDynamicTableUnsupported;
             const entry = staticEntry(index) orelse return error.InvalidFrame;
+            const value_plan = try scanString(&cursor);
+            try budget.charge(entry.name.len, value_plan.decoded_len);
+            var value = try value_plan.decode(allocator);
+            errdefer if (value.storage) |storage| allocator.free(storage);
             try fields.append(allocator, .{ .name = entry.name, .value = value.value, .value_storage = value.storage });
             value.storage = null;
         } else if ((first & 0xe0) == 0x20) {
             const name_len = try decodePrefixedInteger(&cursor, 3, first);
-            var name = try decodeMaybeHuffman(allocator, try cursor.readSlice(name_len), (first & 0x08) != 0);
+            const name_plan = try scanMaybeHuffman(
+                try cursor.readSlice(name_len),
+                (first & 0x08) != 0,
+            );
+            const value_plan = try scanString(&cursor);
+            try budget.charge(name_plan.decoded_len, value_plan.decoded_len);
+            var name = try name_plan.decode(allocator);
             errdefer if (name.storage) |storage| allocator.free(storage);
-            var value = try decodeString(allocator, &cursor);
+            var value = try value_plan.decode(allocator);
             errdefer if (value.storage) |storage| allocator.free(storage);
             try fields.append(allocator, .{
                 .name = name.value,
@@ -903,11 +956,65 @@ const DecodedString = struct {
     storage: ?[]u8 = null,
 };
 
+const FieldSectionBudget = struct {
+    max: u64,
+    used: u64 = 0,
+
+    fn charge(
+        self: *FieldSectionBudget,
+        name_len: usize,
+        value_len: usize,
+    ) Error!void {
+        const field_size = std.math.add(
+            u64,
+            std.math.add(
+                u64,
+                std.math.cast(u64, name_len) orelse
+                    return error.ExcessiveLoad,
+                std.math.cast(u64, value_len) orelse
+                    return error.ExcessiveLoad,
+            ) catch return error.ExcessiveLoad,
+            dynamic_entry_overhead,
+        ) catch return error.ExcessiveLoad;
+        self.used = std.math.add(u64, self.used, field_size) catch
+            return error.ExcessiveLoad;
+        if (self.used > self.max) return error.ExcessiveLoad;
+    }
+};
+
+const EncodedString = struct {
+    raw: []const u8,
+    huffman: bool,
+    decoded_len: usize,
+
+    fn decode(
+        self: EncodedString,
+        allocator: std.mem.Allocator,
+    ) !DecodedString {
+        if (!self.huffman) return .{ .value = self.raw };
+        if (self.decoded_len == 0) return .{ .value = &.{} };
+        const decoded = try allocator.alloc(u8, self.decoded_len);
+        errdefer allocator.free(decoded);
+        try huffman_codec.decodeHuffmanInto(decoded, self.raw);
+        return .{ .value = decoded, .storage = decoded };
+    }
+};
+
 fn decodeString(allocator: std.mem.Allocator, cursor: *wire.Cursor) !DecodedString {
     const first = try cursor.readByte();
     const len = try decodePrefixedInteger(cursor, 7, first);
     const raw = try cursor.readSlice(len);
     return decodeMaybeHuffman(allocator, raw, (first & 0x80) != 0);
+}
+
+fn scanString(cursor: *wire.Cursor) !EncodedString {
+    const first = try cursor.readByte();
+    const len = try decodePrefixedInteger(cursor, 7, first);
+    const raw = try cursor.readSlice(len);
+    return scanMaybeHuffman(
+        raw,
+        (first & 0x80) != 0,
+    );
 }
 
 fn decodeMaybeHuffman(allocator: std.mem.Allocator, raw: []const u8, huffman: bool) !DecodedString {
@@ -916,9 +1023,21 @@ fn decodeMaybeHuffman(allocator: std.mem.Allocator, raw: []const u8, huffman: bo
     return .{ .value = decoded, .storage = decoded };
 }
 
+fn scanMaybeHuffman(
+    raw: []const u8,
+    huffman: bool,
+) !EncodedString {
+    return .{
+        .raw = raw,
+        .huffman = huffman,
+        .decoded_len = if (huffman) try huffmanDecodedLen(raw) else raw.len,
+    };
+}
+
 const huffman_codec = @import("huffman.zig");
 pub const encodeHuffman = huffman_codec.encodeHuffman;
 pub const decodeHuffman = huffman_codec.decodeHuffman;
+pub const decodeHuffmanInto = huffman_codec.decodeHuffmanInto;
 pub const huffmanEncodedLen = huffman_codec.encodedLen;
 pub const huffmanDecodedLen = huffman_codec.decodedLen;
 const appendHuffmanAssumeCapacity = huffman_codec.appendHuffmanAssumeCapacity;

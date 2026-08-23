@@ -13,6 +13,14 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     const decoded_huffman = try Qpack.decodeHuffman(allocator, huffman);
     defer allocator.free(decoded_huffman);
     try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
+    var exact_output: [15]u8 = undefined;
+    try Qpack.decodeHuffmanInto(&exact_output, huffman);
+    try std.testing.expectEqualStrings("www.example.com", &exact_output);
+    var short_output: [14]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        Qpack.decodeHuffmanInto(&short_output, huffman),
+    );
     try std.testing.expectEqual(decoded_huffman.len, try Qpack.huffmanDecodedLen(huffman));
     var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
     const no_alloc_allocator = no_alloc.allocator();
@@ -835,6 +843,74 @@ test "HTTP/3 QPACK exact dynamic field decodes with one string allocation" {
         storage.ptr + field.name.len,
         field.value.ptr,
     );
+}
+
+test "HTTP/3 QPACK bounded decode rejects before field allocation" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-dynamic", "dynamic-value");
+
+    const Case = struct {
+        fields: []const Qpack.HeaderField,
+        dynamic: bool,
+    };
+    const cases = [_]Case{
+        .{ .fields = &.{.{ .name = ":status", .value = "200" }}, .dynamic = false },
+        .{ .fields = &.{.{ .name = "x", .value = "v" }}, .dynamic = false },
+        .{ .fields = &.{.{
+            .name = "x-compressible-header",
+            .value = "compressible-compressible-value",
+        }}, .dynamic = false },
+        .{ .fields = &.{.{
+            .name = "x-dynamic",
+            .value = "dynamic-value",
+        }}, .dynamic = true },
+    };
+
+    for (cases) |case| {
+        var block: std.ArrayList(u8) = .empty;
+        defer block.deinit(allocator);
+        if (case.dynamic) {
+            try Qpack.encodeDynamicBlock(
+                &block,
+                allocator,
+                case.fields,
+                table,
+            );
+        } else {
+            try Qpack.encodeLiteralBlock(&block, allocator, case.fields);
+        }
+
+        var no_alloc = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        const field_size = case.fields[0].name.len +
+            case.fields[0].value.len + Qpack.dynamic_entry_overhead;
+        if (case.dynamic) {
+            try std.testing.expectError(
+                error.ExcessiveLoad,
+                Qpack.decodeDynamicBlockWithLimit(
+                    no_alloc.allocator(),
+                    block.items,
+                    table,
+                    field_size - 1,
+                ),
+            );
+        } else {
+            try std.testing.expectError(
+                error.ExcessiveLoad,
+                Qpack.decodeLiteralBlockWithLimit(
+                    no_alloc.allocator(),
+                    block.items,
+                    field_size - 1,
+                ),
+            );
+        }
+        try std.testing.expect(!no_alloc.has_induced_failure);
+    }
 }
 
 test "HTTP/3 QPACK dynamic block distinguishes blocked and evicted references" {

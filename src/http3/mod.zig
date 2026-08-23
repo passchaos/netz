@@ -2179,7 +2179,11 @@ pub fn decodeTrailersWithDynamicTable(
     table: Qpack.DynamicTable,
 ) Error!DecodedTrailers {
     const field_decoder = FieldSectionDecoder{ .dynamic = table };
-    const decoded = try field_decoder.decode(allocator, payload);
+    const decoded = try field_decoder.decode(
+        allocator,
+        payload,
+        settings.max_field_section_size,
+    );
     errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
     try validateHeaderBlock(decoded.fields, .trailers);
     try validateFieldSectionSize(
@@ -2217,7 +2221,11 @@ pub fn decodeRequestHeadFieldSectionWithDynamicTable(
     table: Qpack.DynamicTable,
 ) Error!DecodedRequestHead {
     const field_decoder = FieldSectionDecoder{ .dynamic = table };
-    const decoded = try field_decoder.decode(allocator, field_section);
+    const decoded = try field_decoder.decode(
+        allocator,
+        field_section,
+        settings.max_field_section_size,
+    );
     errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
     try validateHeaderBlock(decoded.fields, .request);
     try validateFieldSectionSize(
@@ -2327,7 +2335,11 @@ pub fn decodeResponseHeadFieldSectionWithDynamicTable(
     table: Qpack.DynamicTable,
 ) Error!DecodedResponseHead {
     const field_decoder = FieldSectionDecoder{ .dynamic = table };
-    const decoded = try field_decoder.decode(allocator, field_section);
+    const decoded = try field_decoder.decode(
+        allocator,
+        field_section,
+        settings.max_field_section_size,
+    );
     errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
     try validateHeaderBlock(decoded.fields, .response);
     try validateFieldSectionSize(
@@ -2675,11 +2687,21 @@ const FieldSectionDecoder = union(enum) {
         self: FieldSectionDecoder,
         allocator: std.mem.Allocator,
         payload: []const u8,
+        max_field_section_size: u64,
     ) Error!DecodedFieldSection {
         return switch (self) {
-            .literal => .{ .fields = try Qpack.decodeLiteralBlock(allocator, payload) },
+            .literal => .{ .fields = try Qpack.decodeLiteralBlockWithLimit(
+                allocator,
+                payload,
+                max_field_section_size,
+            ) },
             .dynamic => |table| blk: {
-                const decoded = try Qpack.decodeDynamicBlock(allocator, payload, table);
+                const decoded = try Qpack.decodeDynamicBlockWithLimit(
+                    allocator,
+                    payload,
+                    table,
+                    max_field_section_size,
+                );
                 break :blk .{
                     .fields = decoded.fields,
                     .requires_acknowledgment = decoded.required_insert_count != 0,
@@ -2855,7 +2877,11 @@ fn decodeResponseMessage(
             if (offset >= bytes.len) return error.MissingStatus;
             continue;
         }
-        const decoded = try field_decoder.decode(allocator, frame.payload);
+        const decoded = try field_decoder.decode(
+            allocator,
+            frame.payload,
+            max_field_section_size,
+        );
         var decoded_owned = true;
         defer if (decoded_owned) Qpack.freeDecodedFields(allocator, decoded.fields);
         try validateHeaderBlock(decoded.fields, .response);
@@ -2938,7 +2964,11 @@ fn decodeMessage(
         offset += frame.consumed;
         if (offset >= bytes.len) return error.ExpectedHeadersFrame;
     };
-    const decoded_headers = try field_decoder.decode(allocator, headers_frame.payload);
+    const decoded_headers = try field_decoder.decode(
+        allocator,
+        headers_frame.payload,
+        max_field_section_size,
+    );
     var headers_owned = true;
     errdefer if (headers_owned) Qpack.freeDecodedFields(allocator, decoded_headers.fields);
     try validateFieldSectionSize(decoded_headers.fields, max_field_section_size);
@@ -3008,7 +3038,11 @@ fn decodeMessageAfterHeaders(
             },
             FrameType.headers => {
                 if (saw_trailers) return error.UnexpectedFrame;
-                const decoded_trailers = try field_decoder.decode(allocator, frame.payload);
+                const decoded_trailers = try field_decoder.decode(
+                    allocator,
+                    frame.payload,
+                    max_field_section_size,
+                );
                 errdefer Qpack.freeDecodedFields(allocator, decoded_trailers.fields);
                 try validateFieldSectionSize(decoded_trailers.fields, max_field_section_size);
                 trailers = decoded_trailers.fields;
@@ -4279,6 +4313,19 @@ test "HTTP/3 enforces SETTINGS_MAX_FIELD_SECTION_SIZE" {
     try std.testing.expectError(error.ExcessiveLoad, decodeRequestWithSettings(allocator, request_bytes.items, .{
         .max_field_section_size = 1,
     }));
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        decodeRequestWithSettings(
+            no_alloc.allocator(),
+            request_bytes.items,
+            .{ .max_field_section_size = 1 },
+        ),
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
     var rejected_request_write: std.ArrayList(u8) = .empty;
     defer rejected_request_write.deinit(allocator);
     try std.testing.expectError(error.ExcessiveLoad, (Request{

@@ -69,6 +69,14 @@ pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     const decoded_len = try decodedLen(encoded);
     const out = try allocator.alloc(u8, decoded_len);
     errdefer allocator.free(out);
+    try decodeHuffmanInto(out, encoded);
+    return out;
+}
+
+/// Decode into exactly sized caller storage. The bounds checks keep this safe
+/// for public callers while allowing QPACK to scan a Huffman string, enforce
+/// its uncompressed field budget, and then decode without another allocation.
+pub fn decodeHuffmanInto(out: []u8, encoded: []const u8) !void {
     var out_index: usize = 0;
 
     var node: u16 = huffman_root_node;
@@ -86,6 +94,7 @@ pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
             node = next;
             if (huffman_decode_trie[node].symbol) |symbol| {
                 if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
+                if (out_index >= out.len) return error.InvalidEncoding;
                 out[out_index] = @intCast(symbol);
                 out_index += 1;
                 node = huffman_root_node;
@@ -104,8 +113,7 @@ pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
         if (pending_code != padding) return error.InvalidEncoding;
     }
 
-    std.debug.assert(out_index == out.len);
-    return out;
+    if (out_index != out.len) return error.InvalidEncoding;
 }
 
 pub fn decodedLen(encoded: []const u8) !usize {
