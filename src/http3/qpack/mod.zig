@@ -572,6 +572,7 @@ pub fn decodeDynamicBlock(
     const required_insert_count = prefix.required_insert_count;
     const base = prefix.base;
     if (required_insert_count > table.insert_count) return error.QpackBlocked;
+    var actual_required_insert_count: u64 = 0;
 
     var fields: std.ArrayList(HeaderField) = .empty;
     errdefer {
@@ -589,12 +590,22 @@ pub fn decodeDynamicBlock(
             } else {
                 const entry = table.fieldRelativeToBase(base, index) orelse
                     return error.QpackDecompressionFailed;
+                try noteDynamicReference(
+                    &actual_required_insert_count,
+                    required_insert_count,
+                    entry,
+                );
                 field = try ownedDynamicField(allocator, entry, entry.value, false);
             }
         } else if ((first & 0xf0) == 0x10) {
             const index = try decodePrefixedInteger(&cursor, 4, first);
             const entry = table.fieldPostBase(base, index) orelse
                 return error.QpackDecompressionFailed;
+            try noteDynamicReference(
+                &actual_required_insert_count,
+                required_insert_count,
+                entry,
+            );
             field = try ownedDynamicField(allocator, entry, entry.value, false);
         } else if ((first & 0xc0) == 0x40) {
             const never_indexed = (first & 0x20) != 0;
@@ -614,6 +625,11 @@ pub fn decodeDynamicBlock(
             } else {
                 const entry = table.fieldRelativeToBase(base, index) orelse
                     return error.QpackDecompressionFailed;
+                try noteDynamicReference(
+                    &actual_required_insert_count,
+                    required_insert_count,
+                    entry,
+                );
                 field = try ownedDynamicField(allocator, entry, value.value, never_indexed);
                 if (value.storage) |storage| allocator.free(storage);
                 value.storage = null;
@@ -623,6 +639,11 @@ pub fn decodeDynamicBlock(
             const index = try decodePrefixedInteger(&cursor, 3, first);
             const entry = table.fieldPostBase(base, index) orelse
                 return error.QpackDecompressionFailed;
+            try noteDynamicReference(
+                &actual_required_insert_count,
+                required_insert_count,
+                entry,
+            );
             const value = try decodeString(allocator, &cursor);
             defer if (value.storage) |storage| allocator.free(storage);
             field = try ownedDynamicField(allocator, entry, value.value, never_indexed);
@@ -657,11 +678,39 @@ pub fn decodeDynamicBlock(
         try fields.append(allocator, field);
         appended = true;
     }
+    // RFC 9204 section 2.2 requires the smallest Insert Count that makes the
+    // section decodable. Rejecting overstatement as well as the mandatory
+    // under-reported case prevents phantom blocking and acknowledgments for
+    // entries that the field lines never referenced.
+    if (actual_required_insert_count != required_insert_count) {
+        return error.QpackDecompressionFailed;
+    }
     return .{
         .fields = try fields.toOwnedSlice(allocator),
         .required_insert_count = required_insert_count,
         .base = base,
     };
+}
+
+fn noteDynamicReference(
+    actual_required_insert_count: *u64,
+    declared_required_insert_count: u64,
+    entry: DynamicEntry,
+) Error!void {
+    const referenced_insert_count = std.math.add(
+        u64,
+        entry.absolute_index,
+        1,
+    ) catch return error.QpackDecompressionFailed;
+    // RFC 9204 section 2.2.3 makes references at or beyond the declared RIC a
+    // connection error even if that entry happens to be present locally.
+    if (referenced_insert_count > declared_required_insert_count) {
+        return error.QpackDecompressionFailed;
+    }
+    actual_required_insert_count.* = @max(
+        actual_required_insert_count.*,
+        referenced_insert_count,
+    );
 }
 
 pub fn freeDynamicBlock(allocator: std.mem.Allocator, decoded: *DynamicBlockDecode) void {

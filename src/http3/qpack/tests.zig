@@ -819,6 +819,54 @@ test "HTTP/3 QPACK dynamic block distinguishes blocked and evicted references" {
     );
 }
 
+test "HTTP/3 QPACK rejects dynamic references beyond declared insert count" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-zero", "zero");
+    _ = try table.insert("x-one", "one");
+
+    // Each field line addresses absolute index 1 while declaring RIC=1, which
+    // permits references only through absolute index 0. Cover indexed and
+    // literal-name forms in both relative and post-Base address spaces.
+    const invalid_blocks = [_][]const u8{
+        &.{ 0x02, 0x01, 0x80 },
+        &.{ 0x02, 0x01, 0x40, 0x00 },
+        &.{ 0x02, 0x00, 0x10 },
+        &.{ 0x02, 0x00, 0x00, 0x00 },
+    };
+    for (invalid_blocks) |block| {
+        try std.testing.expectError(
+            error.QpackDecompressionFailed,
+            Qpack.decodeDynamicBlock(allocator, block, table),
+        );
+    }
+}
+
+test "HTTP/3 QPACK rejects non-minimal required insert count" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-zero", "zero");
+    _ = try table.insert("x-one", "one");
+
+    // RIC=2/Base=1, but the only dynamic field references absolute index 0,
+    // whose minimum Required Insert Count is 1. A static-only section with the
+    // same advertised RIC is likewise not allowed to create a phantom Ack.
+    const overreported = [_][]const u8{
+        &.{ 0x03, 0x80, 0x80 },
+        &.{ 0x03, 0x00, 0xc1 },
+    };
+    for (overreported) |block| {
+        try std.testing.expectError(
+            error.QpackDecompressionFailed,
+            Qpack.decodeDynamicBlock(allocator, block, table),
+        );
+    }
+}
+
 test "HTTP/3 QPACK decoder instructions round trip and reject zero increment" {
     const allocator = std.testing.allocator;
     const instructions = [_]Qpack.DecoderInstruction{
