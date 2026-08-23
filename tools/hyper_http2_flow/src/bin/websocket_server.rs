@@ -94,7 +94,7 @@ async fn handle(
         assert_eq!(close.payload, [0x03, 0xE8, b'd', b'o', b'n', b'e']);
         write_frame(&mut stream, 0x8, &close.payload).await;
         stream.shutdown().await.expect("finish RFC 8441 stream");
-        println!("Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong close");
+        println!("Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close");
     });
 
     let mut response = Response::new(Empty::new());

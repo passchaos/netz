@@ -60,10 +60,13 @@ pub fn main(init: std.process.Init) !void {
         return error.UnexpectedPong;
     }
 
-    try websocket.sendClose(.normal_closure, "done");
-    var close = (try websocket.receiveCloseFrame()) orelse
+    var close_event = try websocket.closeWithTimeout(
+        .{ .code = .normal_closure, .reason = "done" },
+        .fromSeconds(1),
+    );
+    defer close_event.deinit(allocator);
+    const close = close_event.closed orelse
         return error.MissingClosePayload;
-    defer close.deinit(allocator);
     if (close.code != .normal_closure or
         !std.mem.eql(u8, close.reason, "done"))
     {
@@ -71,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz RFC 8441 client interoperated with Hyper: fragmented-text ping pong close\n",
+        "netz RFC 8441 client interoperated with Hyper: fragmented-text ping pong bounded-close\n",
         .{},
     );
 }
