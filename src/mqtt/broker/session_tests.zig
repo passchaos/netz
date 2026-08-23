@@ -675,6 +675,86 @@ test "broker duplicate ClientID takeover has one subscription owner" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker ignores displaced normal DISCONNECT after Will takeover" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var old_will = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .will_delay_interval,
+        .value = 30,
+    } }};
+    const stale_handle = try broker.wills.set(
+        "takeover-disconnect-will",
+        .{
+            .topic = "takeover/disconnect",
+            .payload = "stale",
+            .properties = &old_will,
+        },
+        30,
+    );
+    try broker.will_publishers.put(allocator, stale_handle, 7);
+    var replacement_properties = [_]mqtt.Property{session_expiry[0]};
+    const replacement = mqtt.Connect{
+        .protocol = .v5,
+        .clean_start = false,
+        .keep_alive_seconds = 60,
+        .client_id = "takeover-disconnect-will",
+        .properties = &replacement_properties,
+        .will = null,
+        .username = null,
+        .password = null,
+    };
+    const accepted = try broker.wills.acceptConnect(
+        replacement,
+        .zero,
+    );
+    try std.testing.expectEqual(
+        mqtt.will_scheduler.CloseResult.canceled,
+        accepted.previous,
+    );
+    _ = broker.will_publishers.remove(stale_handle);
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+
+    var displaced_slot = &broker.slots[0];
+    displaced_slot.will_handle = stale_handle;
+    displaced_slot.session_handle = null;
+    broker.state_mutex.lockUncancelable(io);
+    defer broker.state_mutex.unlock(io);
+    try broker.closeWillForDisconnectLocked(
+        displaced_slot,
+        .{},
+        .zero,
+    );
+    try std.testing.expect(displaced_slot.will_handle == null);
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+
+    // Missing Will state is not generally ignorable. Retaining a Session
+    // handle means this slot was not detached by takeover, so the same stale
+    // handle remains an invariant violation visible to the broker.
+    const live_session = try broker.sessions.open(
+        "not-displaced",
+        false,
+        30,
+        .zero,
+    );
+    displaced_slot.session_handle = live_session.handle;
+    displaced_slot.will_handle = stale_handle;
+    try std.testing.expectError(
+        error.WillNotFound,
+        broker.closeWillForDisconnectLocked(
+            displaced_slot,
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "broker queues offline QoS 1 and drains on resume" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

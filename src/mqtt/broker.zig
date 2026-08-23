@@ -1135,6 +1135,36 @@ pub const Broker = struct {
         connection.shutdown() catch {};
     }
 
+    /// Apply a peer DISCONNECT to a Will still owned by this connection slot.
+    /// A takeover clears `session_handle` under the same state mutex before it
+    /// cancels or detaches the old Will, so `WillNotFound` is expected only for
+    /// that displaced generation and must not fail the whole broker.
+    pub fn closeWillForDisconnectLocked(
+        self: *Broker,
+        slot: *ClientSlot,
+        disconnect: mqtt.Disconnect,
+        now: std.Io.Timestamp,
+    ) Error!void {
+        const handle = slot.will_handle orelse return;
+        const result = self.wills.closeDisconnect(
+            handle,
+            disconnect,
+            now,
+        ) catch |err| {
+            if (err == error.WillNotFound and
+                slot.session_handle == null)
+            {
+                slot.will_handle = null;
+                return;
+            }
+            return err;
+        };
+        if (result == .canceled) {
+            _ = self.will_publishers.remove(handle);
+            slot.will_handle = null;
+        }
+    }
+
     fn attachConnection(
         self: *Broker,
         slot_index: usize,
@@ -1345,20 +1375,14 @@ pub const Broker = struct {
         disconnect: mqtt.Disconnect,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
-        if (slot.will_handle) |handle| {
-            const result = self.wills.closeDisconnect(
-                handle,
-                disconnect,
-                std.Io.Clock.awake.now(self.io),
-            ) catch |err| {
-                self.state_mutex.unlock(self.io);
-                return err;
-            };
-            if (result == .canceled) {
-                _ = self.will_publishers.remove(handle);
-                slot.will_handle = null;
-            }
-        }
+        self.closeWillForDisconnectLocked(
+            slot,
+            disconnect,
+            std.Io.Clock.awake.now(self.io),
+        ) catch |err| {
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
         if (slot.session_handle) |handle| {
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {

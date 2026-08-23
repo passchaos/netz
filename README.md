@@ -444,7 +444,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   publication-time Will access-control hooks, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
-  and reconnect reuse, plus an indexed Will
+  and reconnect reuse, generation-safe duplicate-ClientID takeover that
+  tolerates stale displaced-connection DISCONNECT completion, plus an indexed Will
   Delay scheduler with Session-end deadlines, reconnect cancellation, Clean
   Start takeover and DISCONNECT 0x00/0x04 handling, plus exact broker-side
   Keep Alive enforcement with 1.5x inbound inactivity deadlines, zero-disable
