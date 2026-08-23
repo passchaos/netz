@@ -423,6 +423,36 @@ pub fn receiveMaximum(properties: []const Property) ?u16 {
     return null;
 }
 
+/// Return the explicit CONNECT Request Problem Information preference. A null
+/// result means the MQTT 5 default of enabled applies.
+pub fn requestProblemInformation(
+    properties: []const Property,
+) ?bool {
+    for (properties) |property| {
+        if (property == .byte and
+            property.byte.id == .request_problem_information)
+        {
+            return property.byte.value != 0;
+        }
+    }
+    return null;
+}
+
+/// Return the explicit CONNECT Request Response Information preference. A null
+/// result means the MQTT 5 default of disabled applies.
+pub fn requestResponseInformation(
+    properties: []const Property,
+) ?bool {
+    for (properties) |property| {
+        if (property == .byte and
+            property.byte.id == .request_response_information)
+        {
+            return property.byte.value != 0;
+        }
+    }
+    return null;
+}
+
 pub fn maximumPacketSize(properties: []const Property) ?u32 {
     for (properties) |property| {
         if (property == .four_byte and property.four_byte.id == .maximum_packet_size) return property.four_byte.value;
@@ -436,6 +466,20 @@ pub fn assignedClientIdentifier(
     for (properties) |property| {
         if (property == .utf8 and
             property.utf8.id == .assigned_client_identifier)
+        {
+            return property.utf8.value;
+        }
+    }
+    return null;
+}
+
+/// Return the server-provided CONNACK Response Information value, if present.
+pub fn responseInformation(
+    properties: []const Property,
+) ?[]const u8 {
+    for (properties) |property| {
+        if (property == .utf8 and
+            property.utf8.id == .response_information)
         {
             return property.utf8.value;
         }
@@ -2709,6 +2753,31 @@ test "MQTT v5 AUTH control" {
     }));
 }
 
+test "MQTT CONNECT information preference helpers use protocol defaults" {
+    try std.testing.expectEqual(
+        @as(?bool, null),
+        requestProblemInformation(&.{}),
+    );
+    try std.testing.expectEqual(
+        @as(?bool, null),
+        requestResponseInformation(&.{}),
+    );
+    try std.testing.expectEqual(
+        @as(?bool, false),
+        requestProblemInformation(&.{.{ .byte = .{
+            .id = .request_problem_information,
+            .value = 0,
+        } }}),
+    );
+    try std.testing.expectEqual(
+        @as(?bool, true),
+        requestResponseInformation(&.{.{ .byte = .{
+            .id = .request_response_information,
+            .value = 1,
+        } }}),
+    );
+}
+
 test {
     _ = runtime;
     _ = broker;
@@ -2721,6 +2790,7 @@ test {
     _ = @import("runtime/packet_transport.zig");
     _ = @import("runtime/auth.zig");
     _ = @import("runtime/auth_tests.zig");
+    _ = @import("runtime/information_preferences_tests.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");
     _ = @import("websocket_keep_alive_tests.zig");

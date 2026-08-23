@@ -184,6 +184,10 @@ pub const AcceptOptions = struct {
     session_present: bool = false,
     reason_code: u8 = 0,
     assigned_client_identifier: ?[]const u8 = null,
+    /// Optional response-prefix hint returned only when an MQTT 5 client asks
+    /// for Response Information in CONNECT. The string is borrowed through
+    /// synchronous CONNACK encoding and must be valid MQTT UTF-8.
+    response_information: ?[]const u8 = null,
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
@@ -228,7 +232,7 @@ pub const PendingAcceptedClient = struct {
         options: AcceptOptions,
     ) Error!AcceptedClient {
         const resolved = try self.resolvedOptions(options);
-        var properties: [3]mqtt.Property = undefined;
+        var properties: [4]mqtt.Property = undefined;
         var property_count: usize = 0;
         if (self.connection.protocol == .v5 and
             resolved.assigned_client_identifier != null)
@@ -236,6 +240,19 @@ pub const PendingAcceptedClient = struct {
             properties[property_count] = .{ .utf8 = .{
                 .id = .assigned_client_identifier,
                 .value = resolved.assigned_client_identifier.?,
+            } };
+            property_count += 1;
+        }
+        if (self.connection.protocol == .v5 and
+            resolved.reason_code == 0 and
+            resolved.response_information != null and
+            mqtt.requestResponseInformation(
+                self.connect.connect.properties,
+            ) == true)
+        {
+            properties[property_count] = .{ .utf8 = .{
+                .id = .response_information,
+                .value = resolved.response_information.?,
             } };
             property_count += 1;
         }
@@ -306,6 +323,7 @@ pub const PendingAcceptedClient = struct {
             // bit or capability setting from producing an invalid CONNACK.
             resolved.session_present = false;
             resolved.assigned_client_identifier = null;
+            resolved.response_information = null;
             resolved.server_keep_alive_seconds = null;
             return resolved;
         }
@@ -319,6 +337,7 @@ pub const PendingAcceptedClient = struct {
             };
             resolved.session_present = false;
             resolved.assigned_client_identifier = null;
+            resolved.response_information = null;
             resolved.server_keep_alive_seconds = null;
             return resolved;
         }
@@ -337,6 +356,7 @@ pub const PendingAcceptedClient = struct {
                         resolved.reason_code = 0x02;
                         resolved.session_present = false;
                         resolved.assigned_client_identifier = null;
+                        resolved.response_information = null;
                         resolved.server_keep_alive_seconds = null;
                     },
                     .v5 => resolved.server_keep_alive_seconds = if (resolved.server_keep_alive_seconds) |explicit|
@@ -612,6 +632,14 @@ fn appendTopicAliasMaximumSetting(
     }
 }
 
+fn problemInformationProperty(property: mqtt.Property) bool {
+    return switch (property) {
+        .utf8 => |value| value.id == .reason_string,
+        .utf8_pair => |value| value.id == .user_property,
+        else => false,
+    };
+}
+
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     transport: PacketTransport,
@@ -633,6 +661,11 @@ pub const Connection = struct {
     peer_wildcard_subscription_available: bool = true,
     peer_subscription_identifier_available: bool = true,
     peer_shared_subscription_available: bool = true,
+    /// CONNECT defaults Request Problem Information to one. A server endpoint
+    /// stores an explicit zero here so later ACK/AUTH writers can suppress
+    /// diagnostic Reason String and User Property fields without every broker
+    /// call site reinterpreting CONNECT.
+    peer_requested_problem_information: bool = true,
     local_wildcard_subscription_available: bool = true,
     local_subscription_identifier_available: bool = true,
     local_shared_subscription_available: bool = true,
@@ -836,6 +869,10 @@ pub const Connection = struct {
             self.allocator,
             connect.connect.properties,
         );
+        self.peer_requested_problem_information =
+            mqtt.requestProblemInformation(
+                connect.connect.properties,
+            ) orelse true;
         const owned_connection = self.*;
         self.* = undefined;
         return .{
@@ -1398,7 +1435,22 @@ pub const Connection = struct {
     fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.AckPacket.write(&encoded, self.allocator, self.protocol, packet_type, packet_id, reason_code, properties);
+        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer filtered_properties.deinit(self.allocator);
+        const outgoing_properties = try self.outgoingProblemProperties(
+            &filtered_properties,
+            packet_type,
+            properties,
+        );
+        try mqtt.AckPacket.write(
+            &encoded,
+            self.allocator,
+            self.protocol,
+            packet_type,
+            packet_id,
+            reason_code,
+            outgoing_properties,
+        );
         try self.writePacket(encoded.items);
     }
 
@@ -1431,7 +1483,21 @@ pub const Connection = struct {
     pub fn writeSubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.SubAck.write(&encoded, self.allocator, self.protocol, packet_id, properties, reason_codes);
+        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer filtered_properties.deinit(self.allocator);
+        const outgoing_properties = try self.outgoingProblemProperties(
+            &filtered_properties,
+            .suback,
+            properties,
+        );
+        try mqtt.SubAck.write(
+            &encoded,
+            self.allocator,
+            self.protocol,
+            packet_id,
+            outgoing_properties,
+            reason_codes,
+        );
         try self.writePacket(encoded.items);
     }
 
@@ -1469,7 +1535,21 @@ pub const Connection = struct {
     pub fn writeUnsubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.UnsubAck.write(&encoded, self.allocator, self.protocol, packet_id, properties, reason_codes);
+        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer filtered_properties.deinit(self.allocator);
+        const outgoing_properties = try self.outgoingProblemProperties(
+            &filtered_properties,
+            .unsuback,
+            properties,
+        );
+        try mqtt.UnsubAck.write(
+            &encoded,
+            self.allocator,
+            self.protocol,
+            packet_id,
+            outgoing_properties,
+            reason_codes,
+        );
         try self.writePacket(encoded.items);
     }
 
@@ -1540,8 +1620,59 @@ pub const Connection = struct {
     pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.Auth.write(&encoded, self.allocator, self.protocol, reason_code, properties);
+        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer filtered_properties.deinit(self.allocator);
+        const outgoing_properties = try self.outgoingProblemProperties(
+            &filtered_properties,
+            .auth,
+            properties,
+        );
+        try mqtt.Auth.write(
+            &encoded,
+            self.allocator,
+            self.protocol,
+            reason_code,
+            outgoing_properties,
+        );
         try self.writePacket(encoded.items);
+    }
+
+    /// Apply the CONNECT Request Problem Information preference to outbound
+    /// server packets. MQTT explicitly exempts PUBLISH, CONNACK and
+    /// DISCONNECT; other packet types retain functional properties such as
+    /// Authentication Method/Data while omitting diagnostic fields.
+    fn outgoingProblemProperties(
+        self: Connection,
+        filtered: *std.ArrayList(mqtt.Property),
+        packet_type: mqtt.PacketType,
+        properties: []const mqtt.Property,
+    ) Error![]const mqtt.Property {
+        if (self.protocol != .v5 or
+            self.peer_requested_problem_information or
+            packet_type == .publish or
+            packet_type == .connack or
+            packet_type == .disconnect)
+        {
+            return properties;
+        }
+        var retained_count: usize = 0;
+        for (properties) |property| {
+            retained_count += @intFromBool(
+                !problemInformationProperty(property),
+            );
+        }
+        if (retained_count == properties.len) return properties;
+        if (retained_count == 0) return &.{};
+        try filtered.ensureTotalCapacity(
+            self.allocator,
+            retained_count,
+        );
+        for (properties) |property| {
+            if (!problemInformationProperty(property)) {
+                filtered.appendAssumeCapacity(property);
+            }
+        }
+        return filtered.items;
     }
 
     /// Start MQTT 5 re-authentication with the CONNECT-negotiated method.

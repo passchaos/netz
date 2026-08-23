@@ -19,6 +19,9 @@ const Config = struct {
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
     allow_zero_length_client_id: bool = true,
+    response_information: ?[]const u8 = null,
+    problem_reason_string: ?[]const u8 = null,
+    problem_user_property: ?[]const u8 = null,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     deny_publish_topic: ?[]const u8 = null,
@@ -165,6 +168,26 @@ pub fn main(init: std.process.Init) !void {
             .authorize_will = AccessPolicy.authorizeWill,
         } else null;
 
+    var problem_information: [2]netz.mqtt.Property = undefined;
+    var problem_information_count: usize = 0;
+    if (config.problem_reason_string) |reason| {
+        problem_information[problem_information_count] = .{ .utf8 = .{
+            .id = .reason_string,
+            .value = reason,
+        } };
+        problem_information_count += 1;
+    }
+    if (config.problem_user_property) |value| {
+        problem_information[problem_information_count] = .{
+            .utf8_pair = .{
+                .id = .user_property,
+                .key = "diagnostic",
+                .value = value,
+            },
+        };
+        problem_information_count += 1;
+    }
+
     var broker = try netz.mqtt.broker.Broker.listen(
         allocator,
         io,
@@ -184,6 +207,7 @@ pub fn main(init: std.process.Init) !void {
                 .server_keep_alive_seconds = config.server_keep_alive_seconds,
                 .maximum_keep_alive_seconds = config.maximum_keep_alive_seconds,
                 .allow_zero_length_client_id = config.allow_zero_length_client_id,
+                .response_information = config.response_information,
                 .wildcard_subscription_available = config.wildcard_subscription_available,
                 .subscription_identifier_available = config.subscription_identifier_available,
                 .shared_subscription_available = config.shared_subscription_available,
@@ -192,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
             .queue_qos0_messages = config.queue_qos0_messages,
             .connect_authorization = authorization,
             .access_control = access_control,
+            .problem_information = problem_information[0..problem_information_count],
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
                 .max_inflight_payload_bytes_per_session = config.max_session_inflight_payload_bytes,
@@ -429,6 +454,36 @@ fn parseArgs(
             "--no-zero-length-client-id",
         )) {
             config.allow_zero_length_client_id = false;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--response-information=",
+        )) {
+            const value = arg["--response-information=".len..];
+            if (value.len == 0 or config.response_information != null) {
+                return error.InvalidArgument;
+            }
+            config.response_information = value;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--problem-reason-string=",
+        )) {
+            const value = arg["--problem-reason-string=".len..];
+            if (value.len == 0 or config.problem_reason_string != null) {
+                return error.InvalidArgument;
+            }
+            config.problem_reason_string = value;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--problem-user-property=",
+        )) {
+            const value = arg["--problem-user-property=".len..];
+            if (value.len == 0 or config.problem_user_property != null) {
+                return error.InvalidArgument;
+            }
+            config.problem_user_property = value;
         } else if (std.mem.startsWith(u8, arg, "--username=")) {
             const username = arg["--username=".len..];
             if (username.len == 0 or config.username != null) {

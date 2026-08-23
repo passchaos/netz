@@ -91,13 +91,15 @@ def expected_connack(
     session_present: bool = False,
     maximum_packet_size: int = 16 * 1024 * 1024,
     topic_alias_maximum: int = 16,
+    leading_properties: bytes = b"",
     extra_properties: bytes = b"",
 ) -> bytes:
     # Keep this in the exact property order emitted by runtime.writeConnAck.
     # Centralizing it makes each negative vector state only the capability it
     # changes while retaining a byte-for-byte CONNACK assertion.
     properties = (
-        mqtt5_props.gen_uint16_prop(mqtt5_props.RECEIVE_MAXIMUM, 64)
+        leading_properties
+        + mqtt5_props.gen_uint16_prop(mqtt5_props.RECEIVE_MAXIMUM, 64)
         + mqtt5_props.gen_uint32_prop(
             mqtt5_props.MAXIMUM_PACKET_SIZE, maximum_packet_size
         )
@@ -3571,6 +3573,116 @@ def request_response_properties(
             requester.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def connect_information_preferences(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Mosquitto documents both CONNECT properties as parsed but unused. Netz
+    # additionally applies their MQTT 5 wire semantics: Response Information
+    # is conditional, and Request Problem Information=0 suppresses diagnostics
+    # on ACK packets while retaining the reason code itself.
+    response_value = "response/root"
+    response_property = mqtt5_props.gen_string_prop(
+        mqtt5_props.RESPONSE_INFO, response_value
+    )
+    problem_properties = (
+        mqtt5_props.gen_string_prop(
+            mqtt5_props.REASON_STRING, "suppressed"
+        )
+        + mqtt5_props.gen_string_pair_prop(
+            mqtt5_props.USER_PROPERTY, "diagnostic", "suppressed"
+        )
+    )
+
+    with NetzBroker(
+        executable,
+        connections=4,
+        extra_args=(
+            f"--response-information={response_value}",
+            "--deny-publish-topic=denied/problem",
+            "--problem-reason-string=suppressed",
+            "--problem-user-property=suppressed",
+        ),
+    ) as broker:
+        for requested, client_id in (
+            (None, "response-info-default"),
+            (False, "response-info-disabled"),
+            (True, "response-info-requested"),
+        ):
+            with broker.connect() as sock:
+                properties = (
+                    b"" if requested is None
+                    else mqtt5_props.gen_byte_prop(
+                        mqtt5_props.REQUEST_RESPONSE_INFO, int(requested)
+                    )
+                )
+                sock.sendall(mqtt_packets.gen_connect(
+                    client_id, proto_ver=5, properties=properties
+                ))
+                expect_packet(
+                    sock,
+                    expected_connack(
+                        mqtt_packets,
+                        mqtt5_props,
+                        leading_properties=(
+                            response_property if requested is True else b""
+                        ),
+                    ),
+                    f"Response Information requested={requested}",
+                )
+                if requested is True:
+                    # Request Problem Information defaults to one, so the
+                    # configured diagnostics accompany a negative ACK.
+                    sock.sendall(mqtt_packets.gen_publish(
+                        "denied/problem", qos=1, mid=1,
+                        payload="payload", proto_ver=5,
+                    ))
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_puback(
+                            1, proto_ver=5, reason_code=0x87,
+                            properties=problem_properties,
+                        ),
+                        "default Request Problem Information diagnostics",
+                    )
+                sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        with broker.connect() as sock:
+            properties = (
+                mqtt5_props.gen_byte_prop(
+                    mqtt5_props.REQUEST_PROBLEM_INFO, 0
+                )
+                + mqtt5_props.gen_byte_prop(
+                    mqtt5_props.REQUEST_RESPONSE_INFO, 1
+                )
+            )
+            sock.sendall(mqtt_packets.gen_connect(
+                "problem-info-disabled", proto_ver=5, properties=properties
+            ))
+            expect_packet(
+                sock,
+                expected_connack(
+                    mqtt_packets, mqtt5_props,
+                    leading_properties=response_property,
+                ),
+                "Response Information with problem details disabled",
+            )
+            sock.sendall(mqtt_packets.gen_publish(
+                "denied/problem", qos=1, mid=1, payload="payload",
+                proto_ver=5,
+            ))
+            # The fixture's access policy returns Not Authorized. An
+            # application-supplied Reason String/User Property is deliberately
+            # configured below and must not appear in this non-exempt PUBACK.
+            expect_packet(
+                sock,
+                mqtt_packets.gen_puback(
+                    1, proto_ver=5, reason_code=0x87
+                ),
+                "Request Problem Information suppressed PUBACK details",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def disconnect_with_will_properties(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -5216,6 +5328,9 @@ def main() -> None:
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     request_response_properties(args.broker, mqtt_packets, mqtt5_props)
+    connect_information_preferences(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     disconnect_with_will_properties(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -5270,7 +5385,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 124 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 129 scenarios")
 
 
 if __name__ == "__main__":

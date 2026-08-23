@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const mqtt = @import("mod.zig");
+const owned_properties = @import("owned_properties.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const client_id_mod = @import("broker/client_id.zig");
@@ -93,6 +94,11 @@ pub const Options = struct {
     /// Incoming denials precede retained, Session, and router mutation;
     /// outgoing denials precede the destination's queue mutation.
     access_control: ?AccessControlHandler = null,
+    /// Optional diagnostics attached to broker-generated negative PUBLISH,
+    /// SUBSCRIBE, and UNSUBSCRIBE acknowledgements. The runtime filters them
+    /// when CONNECT requested no Problem Information. `Broker.listen`
+    /// deep-copies the property array and all referenced strings.
+    problem_information: []const mqtt.Property = &.{},
 };
 
 pub const ConnectAuthorizationHandler = struct {
@@ -423,13 +429,42 @@ pub const Broker = struct {
             return error.InvalidProperty;
         }
         try mqtt.validateUtf8String(options.auto_client_id_prefix);
+        if (options.accept.response_information) |value| {
+            if (value.len > std.math.maxInt(u16)) {
+                return error.InvalidProperty;
+            }
+            try mqtt.validateUtf8String(value);
+        }
+        try validateProblemInformationProperties(
+            options.problem_information,
+        );
         const auto_client_id_prefix = try allocator.dupe(
             u8,
             options.auto_client_id_prefix,
         );
         errdefer allocator.free(auto_client_id_prefix);
+        const response_information = if (options.accept.response_information) |value|
+            try allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (response_information) |value| allocator.free(value);
         var owned_options = options;
         owned_options.auto_client_id_prefix = auto_client_id_prefix;
+        owned_options.accept.response_information = response_information;
+        const problem_information = owned_properties.clone(
+            allocator,
+            options.problem_information,
+            owned_properties.keepAll,
+        ) catch |err| switch (err) {
+            error.OwnedPropertyLimitExceeded => return error.InvalidProperty,
+            else => |other| return other,
+        };
+        errdefer owned_properties.deinit(
+            allocator,
+            problem_information.properties,
+        );
+        owned_options.problem_information =
+            problem_information.properties;
         const slots = try allocator.alloc(
             ClientSlot,
             options.limits.max_connections,
@@ -505,6 +540,13 @@ pub const Broker = struct {
         }
         self.allocator.free(self.slots);
         self.allocator.free(self.options.auto_client_id_prefix);
+        if (self.options.accept.response_information) |value| {
+            self.allocator.free(value);
+        }
+        owned_properties.deinit(
+            self.allocator,
+            @constCast(self.options.problem_information),
+        );
         self.session_owners.deinit(self.allocator);
         self.will_publishers.deinit(self.allocator);
         self.wills.deinit();
@@ -1512,7 +1554,10 @@ pub const Broker = struct {
         try connection.writeSubAck(
             subscribe.packet_id,
             reasons,
-            &.{},
+            self.problemInformationForReasons(
+                connection.protocol,
+                reasons,
+            ),
         );
         // Retained replay is deliberately queued before SUBACK but flushed
         // only afterwards. This preserves protocol ordering while using the
@@ -1673,7 +1718,10 @@ pub const Broker = struct {
         try connection.writeUnsubAck(
             unsubscribe.packet_id,
             if (connection.protocol == .v5) reasons else &.{},
-            &.{},
+            self.problemInformationForReasons(
+                connection.protocol,
+                reasons,
+            ),
         );
     }
 
@@ -1748,13 +1796,21 @@ pub const Broker = struct {
         defer slot.writer_mutex.unlock(self.io);
         switch (publish.qos) {
             .at_most_once => unreachable,
-            .at_least_once => try publisher.writePubAck(
+            .at_least_once => try publisher.writePubAckWithProperties(
                 packet_id,
                 protocolReason(publisher.protocol, reason_code),
+                self.problemInformationForReason(
+                    publisher.protocol,
+                    reason_code,
+                ),
             ),
-            .exactly_once => try publisher.writePubRec(
+            .exactly_once => try publisher.writePubRecWithProperties(
                 packet_id,
                 protocolReason(publisher.protocol, reason_code),
+                self.problemInformationForReason(
+                    publisher.protocol,
+                    reason_code,
+                ),
             ),
         }
     }
@@ -1788,9 +1844,13 @@ pub const Broker = struct {
             // control packet but its wire helper omits the negative reason,
             // completing the QoS handshake without routing the rejected
             // Application Message.
-            try publisher.writePubRec(
+            try publisher.writePubRecWithProperties(
                 publish.packet_id.?,
                 protocolReason(publisher.protocol, 0x97),
+                self.problemInformationForReason(
+                    publisher.protocol,
+                    0x97,
+                ),
             );
             return;
         };
@@ -2336,6 +2396,29 @@ pub const Broker = struct {
         // still applies its listener-wide cap to subscription grants and
         // forwarded deliveries.
         return self.options.accept.maximum_qos orelse .exactly_once;
+    }
+
+    fn problemInformationForReason(
+        self: Broker,
+        protocol: mqtt.ProtocolVersion,
+        reason_code: u8,
+    ) []const mqtt.Property {
+        if (protocol != .v5 or reason_code < 0x80) return &.{};
+        return self.options.problem_information;
+    }
+
+    fn problemInformationForReasons(
+        self: Broker,
+        protocol: mqtt.ProtocolVersion,
+        reason_codes: []const u8,
+    ) []const mqtt.Property {
+        if (protocol != .v5) return &.{};
+        for (reason_codes) |reason_code| {
+            if (reason_code >= 0x80) {
+                return self.options.problem_information;
+            }
+        }
+        return &.{};
     }
 
     fn deliveryAuthorized(
@@ -3095,6 +3178,39 @@ fn unsubscribeDeniedReason(protocol: mqtt.ProtocolVersion) u8 {
     // MQTT 3.1.1 UNSUBACK has no per-filter result. The subscription stays in
     // place while the only representable acknowledgement remains Success.
     return if (protocol == .v5) 0x87 else 0x00;
+}
+
+fn validateProblemInformationProperties(
+    properties: []const mqtt.Property,
+) Error!void {
+    var has_reason_string = false;
+    for (properties) |property| {
+        switch (property) {
+            .utf8 => |value| {
+                if (value.id != .reason_string or has_reason_string) {
+                    return error.InvalidProperty;
+                }
+                if (value.value.len > std.math.maxInt(u16)) {
+                    return error.InvalidProperty;
+                }
+                try mqtt.validateUtf8String(value.value);
+                has_reason_string = true;
+            },
+            .utf8_pair => |value| {
+                if (value.id != .user_property) {
+                    return error.InvalidProperty;
+                }
+                if (value.key.len > std.math.maxInt(u16) or
+                    value.value.len > std.math.maxInt(u16))
+                {
+                    return error.InvalidProperty;
+                }
+                try mqtt.validateUtf8String(value.key);
+                try mqtt.validateUtf8String(value.value);
+            },
+            else => return error.InvalidProperty,
+        }
+    }
 }
 
 test {

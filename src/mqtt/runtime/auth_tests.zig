@@ -194,6 +194,129 @@ test "MQTT enhanced authentication connects and reauthenticates" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT Request Problem Information preserves AUTH protocol fields" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const method = "mirror";
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.acceptPending(.{});
+            var pending_owned = true;
+            defer if (pending_owned) {
+                pending.deinit(self.server.allocator);
+            };
+            try pending.connection.writeAuth(0x18, &.{
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = method,
+                } },
+                .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = "server-step",
+                } },
+                .{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "must be omitted",
+                } },
+                .{ .utf8_pair = .{
+                    .id = .user_property,
+                    .key = "trace",
+                    .value = "must be omitted",
+                } },
+            });
+            var response = try pending.receiveAuthentication();
+            defer response.deinit(self.server.allocator);
+            try pending.authorizeAuthentication();
+            var accepted = try pending.finish(.{});
+            pending_owned = false;
+            defer accepted.deinit(self.server.allocator);
+        }
+    };
+    const Handler = struct {
+        fn respond(
+            _: *anyopaque,
+            challenge: mqtt.Auth,
+        ) Error![]const mqtt.Property {
+            if (challenge.properties.len != 2) {
+                return error.InvalidAuthenticationState;
+            }
+            if (!std.mem.eql(
+                u8,
+                method,
+                mqtt.authenticationMethod(challenge.properties) orelse
+                    return error.InvalidAuthenticationState,
+            )) return error.InvalidAuthenticationState;
+            if (!std.mem.eql(
+                u8,
+                "server-step",
+                mqtt.authenticationData(challenge.properties) orelse
+                    return error.InvalidAuthenticationState,
+            )) return error.InvalidAuthenticationState;
+            return &.{
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = method,
+                } },
+                .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = "client-step",
+                } },
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var dummy: u8 = 0;
+    var result = try Client.connectWithConnAck(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "auth-without-problem-information",
+            .properties = &.{
+                .{ .byte = .{
+                    .id = .request_problem_information,
+                    .value = 0,
+                } },
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = method,
+                } },
+            },
+            .authentication = .{
+                .context = &dummy,
+                .respond = Handler.respond,
+            },
+        },
+    );
+    defer result.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reauthentication method mismatch sends protocol error" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

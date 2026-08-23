@@ -25,6 +25,7 @@ and equal-wire broker results are kept separate.
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation, retained Will, and publication-time write authorization | Both production brokers integrate Will publication; Mosquitto rechecks its write ACL when the Will becomes due |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
+| MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
@@ -1176,7 +1177,10 @@ PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
-packets; all 124 scenarios pass. This is deliberately described as a selected
+packets. Four additional wire cases verify absent/zero/one Request Response
+Information plus both the default-enabled diagnostic path and Request Problem
+Information suppression while preserving an exact negative PUBACK reason; all
+129 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1203,5 +1207,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 124 passing packet-vector scenarios do not cover
+   persistence semantics. The 129 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
