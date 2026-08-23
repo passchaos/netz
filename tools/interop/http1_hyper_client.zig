@@ -29,7 +29,14 @@ pub fn main(init: std.process.Init) !void {
             args[2],
         );
     }
-    const limits: netz.http1.runtime.Limits = .{ .max_body_bytes = 4096 };
+    // Exercise the production response deadline against Hyper on every
+    // aggregate, streaming, informational, Expect and tunnel handshake below.
+    // The generous value is a liveness guard, not a latency assertion.
+    const limits: netz.http1.runtime.Limits = .{
+        .max_body_bytes = 4096,
+        .response_head_timeout = .fromSeconds(5),
+    };
+    std.debug.print("response_head_timeout=5000ms\n", .{});
     var client = try connect(
         allocator,
         io,

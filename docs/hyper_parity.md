@@ -62,6 +62,13 @@ benchmark response:
   request (and each unbuffered member of a pipeline batch), and stops before
   body reads; unsupported raw io_uring use fails explicitly rather than
   silently dropping the policy;
+- client `Limits.response_head_timeout` applies one absolute deadline from the
+  first required response byte through the final response head. Partial bytes
+  and informational 1xx heads do not renew it, while body reads remain outside
+  the budget. The same policy covers aggregate and streaming responses,
+  Expect/100-continue, CONNECT and generic Upgrade over cleartext and TLS; the
+  raw io_uring helper rejects its unsupported timed-read configuration before
+  opening a socket;
 - non-chunked bodies are borrowed and sent with header+body vectored TCP I/O
   (or one TLS flush) instead of copied into a temporary whole-message buffer;
 - `Connection.writeResponses` validates and flushes a response pipeline in one

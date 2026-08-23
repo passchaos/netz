@@ -86,6 +86,9 @@ grep -Fq \
   'netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=cleartext buffered_server_bytes=19 client_bytes=18 reply_bytes=19' \
   "$work/netz-client.log"
 grep -Fq \
+  'response_head_timeout=5000ms' \
+  "$work/netz-client.log"
+grep -Fq \
   'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
   "$work/hyper-server.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
@@ -188,6 +191,9 @@ grep -Fq \
   "$work/tls-netz-client.log"
 grep -Fq \
   'netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=tls buffered_server_bytes=19 client_bytes=18 reply_bytes=19' \
+  "$work/tls-netz-client.log"
+grep -Fq \
+  'response_head_timeout=5000ms' \
   "$work/tls-netz-client.log"
 grep -Fq \
   'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \

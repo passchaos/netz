@@ -45,8 +45,13 @@ pub const Limits = struct {
     /// Optional absolute budget for each request head. The deadline begins
     /// when a server read first needs transport bytes and is not extended by
     /// partial progress, preventing Slowloris-style trickle attacks. Message
-    /// bodies and response reads are intentionally outside this deadline.
+    /// bodies and response reads use independent policies.
     request_head_timeout: ?std.Io.Duration = null,
+    /// Optional absolute budget for a client-side response-head sequence. The
+    /// deadline is not renewed by partial bytes or interim 1xx responses and
+    /// stops once the final response head is complete; body reads are outside
+    /// this budget.
+    response_head_timeout: ?std.Io.Duration = null,
     /// Maximum interim responses accepted before one final response. This
     /// bounds callback work even when a peer emits an endless 1xx sequence.
     max_informational_responses: usize = 16,
@@ -1262,6 +1267,8 @@ pub const Client = struct {
     writer_state: body_writer.State = .{},
     default_host: ?[]u8 = null,
     tls_conn: ?*TlsClientConnection = null,
+    response_head_deadline: ?std.Io.Clock.Timestamp = null,
+    response_head_sequence_active: bool = false,
 
     fn transport(self: *Client) RuntimeTransport {
         if (self.tls_conn) |conn| return .{ .tls_client = conn };
@@ -1366,6 +1373,8 @@ pub const Client = struct {
             options,
             &self.write_scratch,
         );
+        self.beginResponseHeadSequence();
+        defer self.endResponseHeadSequence();
         const response = readResponseFromTransportBufferedForRequestObserved(
             self.allocator,
             self.transport(),
@@ -1610,6 +1619,12 @@ pub const Client = struct {
         limits: Limits,
     ) Error!OwnedResponse {
         if (comptime builtin.os.tag != .linux) return error.UnsupportedIoBackend;
+        if (limits.response_head_timeout != null) {
+            // The raw adapter has no linked timeout operation. Fail before
+            // creating or writing a socket rather than silently weakening a
+            // caller-specified response policy.
+            return error.TimedReadUnsupported;
+        }
 
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
@@ -1655,7 +1670,19 @@ pub const Client = struct {
             .host = target,
             .headers = headers,
         });
-        var response = try readResponseFromTransportBufferedForRequest(self.allocator, self.transport(), self.limits, .{}, &self.inbuf, .CONNECT);
+        self.beginResponseHeadSequence();
+        defer self.endResponseHeadSequence();
+        var response = readResponseFromTransportBufferedForRequest(
+            self.allocator,
+            self.transport(),
+            self.limits,
+            .{},
+            &self.inbuf,
+            .CONNECT,
+        ) catch |err| {
+            self.writer_state.phase = .unusable;
+            return err;
+        };
         errdefer response.deinit(self.allocator);
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidResponse;
         if (response.response.body.len != 0 or response.response.trailers.len != 0) return error.InvalidResponse;
@@ -1717,14 +1744,19 @@ pub const Client = struct {
     ) Error!Tunnel {
         try self.writer_state.ensureAvailable();
         try validateUpgradeProtocol(protocol);
-        var response = try readResponseFromTransportBufferedForRequest(
+        self.beginResponseHeadSequence();
+        defer self.endResponseHeadSequence();
+        var response = readResponseFromTransportBufferedForRequest(
             self.allocator,
             self.transport(),
             self.limits,
             .{},
             &self.inbuf,
             .GET,
-        );
+        ) catch |err| {
+            self.writer_state.phase = .unusable;
+            return err;
+        };
         errdefer response.deinit(self.allocator);
         const selected = response.response.upgradeProtocol() orelse
             return error.InvalidResponse;
@@ -1754,10 +1786,13 @@ pub const Client = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        self.beginResponseHeadSequence();
+        defer self.endResponseHeadSequence();
         var reader = StreamingBodyReader{
             .allocator = self.allocator,
             .context = self,
             .read_some = clientReadSome,
+            .read_head_some = clientReadHeadSome,
             .inbuf = &self.inbuf,
             .limits = .{
                 .max_head_bytes = self.limits.max_head_bytes,
@@ -1785,6 +1820,29 @@ pub const Client = struct {
             return err;
         };
         return streamingResponseFromReader(result);
+    }
+
+    fn beginResponseHeadSequence(self: *Client) void {
+        std.debug.assert(!self.response_head_sequence_active);
+        std.debug.assert(self.response_head_deadline == null);
+        self.response_head_sequence_active = true;
+    }
+
+    fn ensureResponseHeadDeadline(
+        self: *Client,
+    ) Error!?std.Io.Clock.Timestamp {
+        try ensureResponseHeadDeadlineForBuffer(
+            self.transport(),
+            self.limits,
+            self.inbuf.items,
+            &self.response_head_deadline,
+        );
+        return self.response_head_deadline;
+    }
+
+    fn endResponseHeadSequence(self: *Client) void {
+        self.response_head_deadline = null;
+        self.response_head_sequence_active = false;
     }
 };
 
@@ -1918,7 +1976,7 @@ pub const Connection = struct {
             self.limits.max_head_bytes,
         ) != null) return;
         const timeout = self.limits.request_head_timeout orelse return;
-        self.request_head_deadline = try requestHeadDeadline(
+        self.request_head_deadline = try headReadDeadline(
             self.transport(),
             timeout,
         );
@@ -1985,7 +2043,7 @@ pub const Connection = struct {
                             timed_head_index != index)
                         {
                             self.request_head_deadline =
-                                try requestHeadDeadline(
+                                try headReadDeadline(
                                     self.transport(),
                                     self.limits.request_head_timeout.?,
                                 );
@@ -2410,7 +2468,11 @@ pub const RequestWriter = struct {
             return error.InvalidWriterState;
         }
 
+        self.client.beginResponseHeadSequence();
+        defer self.client.endResponseHeadSequence();
         while (true) {
+            const response_head_deadline =
+                try self.client.ensureResponseHeadDeadline();
             var response = readOneResponseFromTransportBufferedForRequest(
                 self.client.allocator,
                 self.client.transport(),
@@ -2418,6 +2480,7 @@ pub const RequestWriter = struct {
                 .{},
                 &self.client.inbuf,
                 self.method,
+                response_head_deadline,
             ) catch |err| {
                 self.body.fail();
                 return err;
@@ -2611,6 +2674,26 @@ fn clientReadSome(
     return client.transport().read(buffer);
 }
 
+fn clientReadHeadSome(
+    context: ?*anyopaque,
+    buffer: []u8,
+) Error!usize {
+    const client: *Client = @ptrCast(@alignCast(context.?));
+    std.debug.assert(client.response_head_sequence_active);
+    if (client.response_head_deadline == null) {
+        const timeout = client.limits.response_head_timeout orelse
+            return client.transport().read(buffer);
+        client.response_head_deadline = try headReadDeadline(
+            client.transport(),
+            timeout,
+        );
+    }
+    return client.transport().readWithDeadline(
+        buffer,
+        client.response_head_deadline.?,
+    );
+}
+
 fn connectionReadSome(
     context: ?*anyopaque,
     buffer: []u8,
@@ -2629,12 +2712,30 @@ fn connectionReadHeadSome(
     return connection.transport().readWithDeadline(buffer, deadline);
 }
 
-fn requestHeadDeadline(
+fn headReadDeadline(
     transport: RuntimeTransport,
     timeout: std.Io.Duration,
 ) Error!std.Io.Clock.Timestamp {
     if (timeout.nanoseconds <= 0) return error.Timeout;
     return transport.deadlineFromNow(timeout);
+}
+
+fn ensureResponseHeadDeadlineForBuffer(
+    transport: RuntimeTransport,
+    limits: Limits,
+    buffered: []const u8,
+    deadline: *?std.Io.Clock.Timestamp,
+) Error!void {
+    if (deadline.* != null or
+        try findHttpHeadEndWithinLimit(
+            buffered,
+            limits.max_head_bytes,
+        ) != null)
+    {
+        return;
+    }
+    const timeout = limits.response_head_timeout orelse return;
+    deadline.* = try headReadDeadline(transport, timeout);
 }
 
 fn connectionMaybeWriteContinue(
@@ -2777,9 +2878,27 @@ pub fn readResponseFromStreamObserved(
     options: http1.ParseOptions,
     informational: ?InformationalObserver,
 ) Error!OwnedResponse {
+    const transport = RuntimeTransport{
+        .tcp = .{ .io = io, .stream = stream },
+    };
     var informational_count: usize = 0;
+    var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        const bytes = try readMessageBytes(allocator, io, stream, limits);
+        try ensureResponseHeadDeadlineForBuffer(
+            transport,
+            limits,
+            &.{},
+            &response_head_deadline,
+        );
+        const bytes = try readMessageBytesWithContext(
+            allocator,
+            transport,
+            limits,
+            null,
+            false,
+            true,
+            response_head_deadline,
+        );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
@@ -2827,9 +2946,27 @@ pub fn readResponseFromStreamForRequestObserved(
     request_method: http1.Method,
     informational: ?InformationalObserver,
 ) Error!OwnedResponse {
+    const transport = RuntimeTransport{
+        .tcp = .{ .io = io, .stream = stream },
+    };
     var informational_count: usize = 0;
+    var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        const bytes = try readMessageBytesForResponse(allocator, io, stream, limits, request_method);
+        try ensureResponseHeadDeadlineForBuffer(
+            transport,
+            limits,
+            &.{},
+            &response_head_deadline,
+        );
+        const bytes = try readMessageBytesWithContext(
+            allocator,
+            transport,
+            limits,
+            request_method,
+            false,
+            true,
+            response_head_deadline,
+        );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
@@ -2877,9 +3014,29 @@ pub fn readResponseFromStreamBufferedObserved(
     inbuf: *std.ArrayList(u8),
     informational: ?InformationalObserver,
 ) Error!OwnedResponse {
+    const transport = RuntimeTransport{
+        .tcp = .{ .io = io, .stream = stream },
+    };
     var informational_count: usize = 0;
+    var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, options, inbuf);
+        try ensureResponseHeadDeadlineForBuffer(
+            transport,
+            limits,
+            inbuf.items,
+            &response_head_deadline,
+        );
+        const bytes = try readMessageBytesBufferedWithContext(
+            allocator,
+            transport,
+            limits,
+            options,
+            inbuf,
+            null,
+            false,
+            true,
+            response_head_deadline,
+        );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
@@ -2930,9 +3087,29 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
     request_method: http1.Method,
     informational: ?InformationalObserver,
 ) Error!OwnedResponse {
+    const transport = RuntimeTransport{
+        .tcp = .{ .io = io, .stream = stream },
+    };
     var informational_count: usize = 0;
+    var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        const bytes = try readMessageBytesBufferedForResponse(allocator, io, stream, limits, options, inbuf, request_method);
+        try ensureResponseHeadDeadlineForBuffer(
+            transport,
+            limits,
+            inbuf.items,
+            &response_head_deadline,
+        );
+        const bytes = try readMessageBytesBufferedWithContext(
+            allocator,
+            transport,
+            limits,
+            options,
+            inbuf,
+            request_method,
+            false,
+            true,
+            response_head_deadline,
+        );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
@@ -3298,14 +3475,6 @@ fn requestOptionsKeepAlive(request: RequestOptions) bool {
     return request.version == .http_1_1;
 }
 
-fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, null, false, true, null);
-}
-
-fn readMessageBytesForResponse(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, request_method: http1.Method) Error![]u8 {
-    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, request_method, false, true, null);
-}
-
 fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
     const transport = RuntimeTransport{ .tcp = .{ .io = io, .stream = stream } };
     return readMessageBytesWithContext(
@@ -3316,7 +3485,7 @@ fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net
         true,
         false,
         if (limits.request_head_timeout) |timeout|
-            try requestHeadDeadline(transport, timeout)
+            try headReadDeadline(transport, timeout)
         else
             null,
     );
@@ -3396,29 +3565,6 @@ fn readMessageBytesWithContext(
     return bytes.toOwnedSlice(allocator);
 }
 
-fn readMessageBytesBuffered(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
-    limits: Limits,
-    options: http1.ParseOptions,
-    inbuf: *std.ArrayList(u8),
-) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, null, false, true, null);
-}
-
-fn readMessageBytesBufferedForResponse(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
-    limits: Limits,
-    options: http1.ParseOptions,
-    inbuf: *std.ArrayList(u8),
-    request_method: http1.Method,
-) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, request_method, false, true, null);
-}
-
 fn readRequestMessageBytesBuffered(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -3438,7 +3584,7 @@ fn readRequestMessageBytesBuffered(
         true,
         false,
         if (limits.request_head_timeout) |timeout|
-            try requestHeadDeadline(transport, timeout)
+            try headReadDeadline(transport, timeout)
         else
             null,
     );
@@ -3477,7 +3623,14 @@ fn readResponseFromTransportBufferedForRequestObserved(
     var local_informational_count: usize = 0;
     const informational_count = prior_informational_count orelse
         &local_informational_count;
+    var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
+        try ensureResponseHeadDeadlineForBuffer(
+            transport,
+            limits,
+            inbuf.items,
+            &response_head_deadline,
+        );
         var response = try readOneResponseFromTransportBufferedForRequest(
             allocator,
             transport,
@@ -3485,6 +3638,7 @@ fn readResponseFromTransportBufferedForRequestObserved(
             options,
             inbuf,
             request_method,
+            response_head_deadline,
         );
         if (informationalResponseToSkip(response.response.status)) {
             validateAndCountInformationalResponse(
@@ -3548,6 +3702,7 @@ fn readOneResponseFromTransportBufferedForRequest(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
+    head_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
     const bytes = try readMessageBytesBufferedWithContext(
         allocator,
@@ -3558,7 +3713,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         request_method,
         false,
         true,
-        null,
+        head_deadline,
     );
     errdefer allocator.free(bytes);
     var response = try parseResponseForRuntime(
@@ -6716,6 +6871,7 @@ test {
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");
+    _ = @import("runtime/response_timeout_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
 }

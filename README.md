@@ -14,9 +14,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence, optional absolute per-request-head deadlines across cleartext
-  and TLS (without extending the deadline on partial input and without timing
-  the body), per-connection graceful shutdown that completes the active
+  persistence, independent optional absolute request- and response-head
+  deadlines across cleartext and TLS (without extending either deadline on
+  partial input, with the response budget spanning interim 1xx heads, and
+  without timing message bodies), per-connection graceful shutdown that completes the active
   response with `Connection: close` and suppresses later requests, optional
   Host/default-port, CONNECT authority, and absolute-form authority synthesis, `http://`/`https://` URI helpers
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
