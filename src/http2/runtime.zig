@@ -227,6 +227,50 @@ pub const Limits = struct {
     tcp_nodelay: bool = true,
 };
 
+/// Scheduling policy for one blocking HTTP/2 keep-alive cycle.
+///
+/// Unlike an async background driver, `Connection.keepAlive` temporarily owns
+/// inbound frame pumping. Call it only when no other reader is active.
+pub const KeepAliveOptions = struct {
+    /// Send the probe after this much peer receive inactivity.
+    interval: std.Io.Duration,
+    /// Fail when the matching ACK does not arrive within this budget.
+    timeout: std.Io.Duration = .fromSeconds(20),
+    /// Permit a probe when no locally or remotely initiated streams are live.
+    /// Hyper clients default this to false; Hyper servers effectively use true.
+    while_idle: bool = false,
+};
+
+pub const KeepAliveResult = enum {
+    skipped_idle,
+    acknowledged,
+};
+
+pub const KeepAlive = struct {
+    options: KeepAliveOptions,
+    next_payload: u64 = 0,
+
+    pub fn init(options: KeepAliveOptions) Error!KeepAlive {
+        if (options.interval.nanoseconds <= 0 or
+            options.timeout.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        return .{ .options = options };
+    }
+
+    /// Run one cycle and advance the opaque payload only after its ACK. This
+    /// gives long-lived drivers deterministic, non-repeating probes without
+    /// requiring an allocator or random source.
+    pub fn run(self: *KeepAlive, connection: *Connection) Error!KeepAliveResult {
+        var payload: [8]u8 = undefined;
+        std.mem.writeInt(u64, &payload, self.next_payload, .big);
+        const result = try connection.keepAlive(payload, self.options);
+        if (result == .acknowledged) self.next_payload +%= 1;
+        return result;
+    }
+};
+
 pub const Server = struct {
     io: std.Io,
     listener: net.Server,
@@ -349,6 +393,7 @@ pub const Server = struct {
             .transport = tcpTransport(self.io, stream),
             .role = .server,
             .limits = self.limits,
+            .last_peer_frame_at = std.Io.Clock.awake.now(self.io),
             .awaiting_settings_ack = false,
             .last_peer_client_stream_id = 1,
         };
@@ -459,6 +504,7 @@ fn acceptConnectionTransport(
         .transport = transport,
         .role = .server,
         .limits = limits,
+        .last_peer_frame_at = std.Io.Clock.awake.now(io),
         .awaiting_settings_ack = true,
     };
     errdefer connection.close();
@@ -786,6 +832,7 @@ pub const Client = struct {
             .transport = tcpTransport(io, stream),
             .role = .client,
             .limits = limits,
+            .last_peer_frame_at = std.Io.Clock.awake.now(io),
             .awaiting_settings_ack = true,
             .next_client_stream_id = 3,
             .default_scheme = "http",
@@ -886,6 +933,7 @@ pub const Client = struct {
             .transport = transport,
             .role = .client,
             .limits = limits,
+            .last_peer_frame_at = std.Io.Clock.awake.now(io),
             .awaiting_settings_ack = true,
         };
         connection.applyLocalLimits();
@@ -1125,6 +1173,10 @@ pub const Connection = struct {
     /// makes a PING wait fail after consuming one more frame from the wire. It
     /// follows the queued prefix and keeps the next application read lossless.
     pending_application_overflow: ?OwnedFrame = null,
+    /// Awake-clock timestamp of the last frame removed from transport. Queued
+    /// application frames were already accounted for at ingress and therefore
+    /// do not make an idle connection look newly active when later consumed.
+    last_peer_frame_at: ?std.Io.Timestamp = null,
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -3842,6 +3894,9 @@ pub const Connection = struct {
             deadline,
         );
         try validateFrameEnvelope(borrowed.frame);
+        if (self.last_peer_frame_at != null) {
+            self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
+        }
         return borrowed;
     }
 
@@ -5020,6 +5075,85 @@ pub const Connection = struct {
             .{ .raw = timeout, .clock = .awake },
         );
         return self.pingUntil(data, deadline);
+    }
+
+    /// Run one inactivity-triggered keep-alive cycle on this blocking
+    /// connection. This method must be the sole frame reader for its duration.
+    ///
+    /// Frames received before `interval` expires count as activity and are
+    /// handled or retained normally, moving the interval forward. Once the
+    /// connection has been quiet for the full interval, a PING is sent and its
+    /// exact ACK must arrive within `timeout`. The timeout is not refreshed by
+    /// unrelated traffic. Callers can repeat this method to drive periodic
+    /// keep-alive without introducing a second concurrent transport reader.
+    pub fn keepAlive(
+        self: *Connection,
+        data: [8]u8,
+        options: KeepAliveOptions,
+    ) Error!KeepAliveResult {
+        if (options.interval.nanoseconds <= 0 or
+            options.timeout.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        if (!options.while_idle and !self.hasActiveStreams()) {
+            return .skipped_idle;
+        }
+        if (self.pending_application_overflow != null) {
+            return error.MessageTooLarge;
+        }
+        if (self.last_peer_frame_at == null) {
+            // Directly initialized Connections appear in low-level adapters
+            // and tests. Treat their first keep-alive call as the activity
+            // anchor rather than immediately probing from Timestamp.zero.
+            self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
+        }
+
+        while (true) {
+            const interval_deadline = std.Io.Clock.Timestamp{
+                .raw = self.last_peer_frame_at.?.addDuration(options.interval),
+                .clock = .awake,
+            };
+            const borrowed = self.readTransportFrameWithDeadline(
+                interval_deadline,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    _ = try self.pingWithTimeout(data, options.timeout);
+                    return .acknowledged;
+                },
+                else => return err,
+            };
+            try self.handleOrQueueKeepAliveFrame(borrowed);
+            if (!options.while_idle and !self.hasActiveStreams()) {
+                return .skipped_idle;
+            }
+        }
+    }
+
+    fn hasActiveStreams(self: *const Connection) bool {
+        return self.active_local_streams.items.len != 0 or
+            self.active_peer_streams.items.len != 0;
+    }
+
+    fn handleOrQueueKeepAliveFrame(
+        self: *Connection,
+        borrowed: frame_io.BorrowedFrame,
+    ) Error!void {
+        if (try self.handleConnectionOrGoAwayFrame(borrowed.frame)) return;
+
+        const bytes = try self.allocator.dupe(u8, borrowed.bytes);
+        var frame = OwnedFrame{
+            .bytes = bytes,
+            .frame = http2.Frame.parse(bytes) catch unreachable,
+        };
+        var frame_owned = true;
+        defer if (frame_owned) frame.deinit(self.allocator);
+        self.queuePendingApplicationFrame(frame) catch |err| {
+            self.recoverPendingApplicationFrameAfterQueueFailure(frame);
+            frame_owned = false;
+            return err;
+        };
+        frame_owned = false;
     }
 
     fn pingUntil(

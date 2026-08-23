@@ -365,6 +365,291 @@ test "HTTP/2 bounded PING preserves interleaved request frames" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 keep-alive skips an idle client unless opted in" {
+    var connection = runtime.Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    try std.testing.expectEqual(
+        runtime.KeepAliveResult.skipped_idle,
+        try connection.keepAlive(.{0} ** 8, .{
+            .interval = .fromMilliseconds(1),
+        }),
+    );
+}
+
+test "HTTP/2 keep-alive waits for receive inactivity before probing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const payload = [8]u8{ 8, 6, 7, 5, 3, 0, 9, 0 };
+    const Shared = struct {
+        server: *runtime.Server,
+        expected: [8]u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(50),
+                .awake,
+            );
+            try connection.sendWindowUpdate(0, 29);
+            const observed = try connection.readPing();
+            try std.testing.expectEqualSlices(u8, &self.expected, &observed);
+        }
+    };
+    var shared = Shared{ .server = &server, .expected = payload };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectEqual(
+        runtime.KeepAliveResult.acknowledged,
+        try client.keepAlive(payload, .{
+            .interval = .fromMilliseconds(100),
+            .timeout = .fromSeconds(1),
+            .while_idle = true,
+        }),
+    );
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    try std.testing.expect(elapsed.nanoseconds >=
+        std.Io.Duration.fromMilliseconds(130).nanoseconds);
+    try std.testing.expectEqual(
+        @as(i64, 65_535 + 29),
+        client.send_connection_window.value,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 keep-alive timeout preserves active response frames" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(request.stream_id, .{
+                .body = "alive-before-timeout",
+            });
+            // Do not pump the keep-alive PING. The server remains open beyond
+            // the client's interval plus ACK timeout.
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(250),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .method = "GET",
+        .path = "/keep-alive",
+        .body_length = 0,
+    });
+    defer writer.deinit();
+    try writer.finish();
+    try std.testing.expectError(
+        error.Timeout,
+        client.keepAlive(.{ 1, 1, 2, 3, 5, 8, 13, 21 }, .{
+            .interval = .fromMilliseconds(50),
+            .timeout = .fromMilliseconds(75),
+        }),
+    );
+    var response = try writer.readResponse();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("alive-before-timeout", response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 keep-alive rejects non-positive timing budgets" {
+    var connection = runtime.Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connection.keepAlive(.{0} ** 8, .{
+            .interval = .zero,
+            .while_idle = true,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.keepAlive(.{0} ** 8, .{
+            .interval = .fromSeconds(1),
+            .timeout = .zero,
+            .while_idle = true,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.KeepAlive.init(.{ .interval = .zero }),
+    );
+}
+
+test "HTTP/2 keep-alive driver advances payload only after ACK" {
+    var driver = try runtime.KeepAlive.init(.{
+        .interval = .fromSeconds(1),
+    });
+    var connection = runtime.Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    try std.testing.expectEqual(
+        runtime.KeepAliveResult.skipped_idle,
+        try driver.run(&connection),
+    );
+    try std.testing.expectEqual(@as(u64, 0), driver.next_payload);
+}
+
+test "HTTP/2 idle keep-alive succeeds over TLS when enabled" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+        },
+    );
+    defer server.deinit();
+
+    const payload = [_]u8{0} ** 8;
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        expected: [8]u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            const observed = connection.readPing() catch |err| {
+                self.err = err;
+                return;
+            };
+            if (!std.mem.eql(u8, &observed, &self.expected)) {
+                self.err = error.TestUnexpectedResult;
+            }
+        }
+    };
+    var shared = Shared{ .server = &server, .expected = payload };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{},
+        .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } },
+    );
+    defer client.close();
+    var keep_alive = try runtime.KeepAlive.init(.{
+        .interval = .fromMilliseconds(25),
+        .timeout = .fromSeconds(1),
+        .while_idle = true,
+    });
+    try std.testing.expectEqual(
+        runtime.KeepAliveResult.acknowledged,
+        try keep_alive.run(&client),
+    );
+    try std.testing.expectEqual(@as(u64, 1), keep_alive.next_payload);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 bounded PING rejects non-positive durations before writing" {
     var connection = runtime.Connection{
         .io = undefined,
