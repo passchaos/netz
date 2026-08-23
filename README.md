@@ -400,7 +400,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unsupported extension parameters/window sizes, framed 101 upgrade responses,
   compressed fragmented sends that stream discontiguous plaintext directly
   into DEFLATE with constant-space cross-fragment UTF-8 validation, serialized connection writes, a blocking TCP
-  client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
+  client/server runtime over HTTP/1 Upgrade with optional absolute WS/WSS
+  opening-handshake deadlines and a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
   Host/port synthesis, shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with

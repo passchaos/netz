@@ -46,6 +46,10 @@ pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     max_frame_bytes: usize = 16 * 1024 * 1024,
     max_message_bytes: usize = 16 * 1024 * 1024,
+    /// Optional absolute budget for the HTTP/1 Upgrade request/response head.
+    /// Partial bytes do not renew it. TLS handshake time and HTTP/2 Extended
+    /// CONNECT are intentionally governed by their own transport policies.
+    http1_handshake_timeout: ?std.Io.Duration = null,
     /// Disable Nagle for latency-sensitive frame boundaries. WebSocket
     /// messages are already application-framed and control replies should not
     /// wait behind delayed ACK merely because a peer uses split writes.
@@ -375,10 +379,15 @@ fn acceptTransport(
     limits: Limits,
     options: AcceptOptions,
 ) Error!Connection {
+    const deadline = if (limits.http1_handshake_timeout) |timeout|
+        try handshakeDeadline(transport, timeout)
+    else
+        null;
     var head = try readHttpHeadFromTransport(
         allocator,
         transport,
         limits.max_head_bytes,
+        deadline,
     );
     defer head.deinit(allocator);
 
@@ -829,7 +838,16 @@ pub const Client = struct {
             .headers = headers.items,
         });
 
-        var head = try readHttpHeadFromTransport(allocator, transport, options.limits.max_head_bytes);
+        const deadline = if (options.limits.http1_handshake_timeout) |timeout|
+            try handshakeDeadline(transport, timeout)
+        else
+            null;
+        var head = try readHttpHeadFromTransport(
+            allocator,
+            transport,
+            options.limits.max_head_bytes,
+            deadline,
+        );
         defer head.deinit(allocator);
         var response = try http1.parseResponse(allocator, head.head, .{});
         defer response.deinit(allocator);
@@ -2531,10 +2549,20 @@ fn writeHttpUpgradeRequest(allocator: std.mem.Allocator, transport: RuntimeTrans
 }
 
 fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, max_head_bytes: usize) Error!HttpHead {
-    return readHttpHeadFromTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, max_head_bytes);
+    return readHttpHeadFromTransport(
+        allocator,
+        .{ .tcp = .{ .io = io, .stream = stream } },
+        max_head_bytes,
+        null,
+    );
 }
 
-fn readHttpHeadFromTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, max_head_bytes: usize) Error!HttpHead {
+fn readHttpHeadFromTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    max_head_bytes: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!HttpHead {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(allocator);
     var scratch: [4096]u8 = undefined;
@@ -2549,10 +2577,28 @@ fn readHttpHeadFromTransport(allocator: std.mem.Allocator, transport: RuntimeTra
             };
         }
         const read_buf = scratch[0..@min(scratch.len, max_head_bytes - bytes.items.len)];
-        const n = try transport.read(read_buf);
+        const n = if (deadline) |absolute|
+            try transport.readWithDeadline(read_buf, absolute)
+        else
+            try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
     }
+}
+
+fn handshakeDeadline(
+    transport: RuntimeTransport,
+    timeout: std.Io.Duration,
+) Error!std.Io.Clock.Timestamp {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    const io = switch (transport) {
+        .tcp => |tcp| tcp.io,
+        .tls => |connection| connection.io,
+        .tls_vail => |connection| connection.io,
+        .tls_server => |connection| connection.io,
+        .linux_io_uring => return error.TimedReadUnsupported,
+    };
+    return .fromNow(io, .{ .raw = timeout, .clock = .awake });
 }
 
 fn findHttpHeadEndWithinLimit(bytes: []const u8, max_head_bytes: usize) Error!?usize {
@@ -4733,6 +4779,7 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 
 test {
     _ = @import("runtime/error_close_tests.zig");
+    _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/wss_tests.zig");
 }
