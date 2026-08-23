@@ -1600,11 +1600,35 @@ pub const Connection = struct {
     }
 
     pub fn ping(self: *Connection) Error!void {
+        return self.pingInternal(null);
+    }
+
+    /// Send PINGREQ and require the complete PINGRESP within one absolute
+    /// budget. The deadline is not renewed by partial MQTT bytes, WebSocket
+    /// message boundaries, or transport-level Ping/Pong frames. This exposes
+    /// the liveness failure that asynchronous clients such as rumqttc report
+    /// when a previous PINGREQ remains unacknowledged, while keeping `ping` as
+    /// the compatibility API for callers that intentionally block forever.
+    pub fn pingWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.pingInternal(self.transport.deadlineFromNow(timeout));
+    }
+
+    fn pingInternal(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.writePing(&encoded, self.allocator, false);
         try self.writePacket(encoded.items);
-        var packet = try self.readPacket();
+        var packet = if (deadline) |absolute|
+            try self.readPacketWithDeadline(absolute)
+        else
+            try self.readPacket();
         defer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .pingresp) return error.UnexpectedPacket;
         try mqtt.validatePing(packet.bytes, true);

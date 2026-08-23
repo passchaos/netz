@@ -144,6 +144,10 @@ fn serveOne(
     // messages. Reading it here proves both byte-stream boundary directions.
     try accepted.connection.readPingReq();
     try accepted.connection.writePingResp();
+    // Exercise netz's client-shaped bounded liveness path against the
+    // independent Mosquitto-derived peer, which answers this server-originated
+    // PINGREQ below before continuing the QoS flow.
+    try accepted.connection.pingWithTimeout(.fromSeconds(5));
 
     try accepted.connection.publish(
         "interop/netz/to-mosquitto",

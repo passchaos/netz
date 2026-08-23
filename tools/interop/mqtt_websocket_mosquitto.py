@@ -144,6 +144,13 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
                 f"{transport}/{protocol_name} PINGRESP: {pingresp.hex()}"
             )
 
+        pingreq = recv_binary_message(peer)
+        if pingreq != mqtt_packets.gen_pingreq():
+            raise AssertionError(
+                f"{transport}/{protocol_name} PINGREQ: {pingreq.hex()}"
+            )
+        do_send(peer, mqtt_packets.gen_pingresp())
+
         outgoing = recv_binary_message(peer)
         expected_publish = mqtt_packets.gen_publish(
             "interop/netz/to-mosquitto",
@@ -175,7 +182,7 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
     print(
         f"Mosquitto-derived MQTT {transport.upper()} {protocol_name} "
         f"interop passed: {len(PAYLOAD)}-byte split PUBLISH, coalesced "
-        "PING, bidirectional QoS 1"
+        "PING, bounded netz PING round trip, bidirectional QoS 1"
     )
 
 
