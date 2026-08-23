@@ -339,6 +339,17 @@ list empty preserves native-client behavior. The MQTT adapter exposes the same
 policy for WS and WSS, and its Mosquitto-derived process gate ports the raw
 allowed/denied request shape from `13-websocket-bad-origin.py`.
 
+Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
+reads plus `closeWithTimeout`. A close step sends Close at most once, consumes
+interleaved Ping/Pong frames under one non-renewing deadline, and returns either
+the owned peer Close details or an owned text/binary/continuation frame that was
+already in flight. Applications can process returned data and call another
+bounded step without duplicating Close. Tests cover silent peers, control-frame
+trickling, successful close details, in-flight data, WSS, and HTTP/2 extended
+CONNECT. This is stricter shutdown liveness than the audited websocket.zig
+close helper, which writes Close and closes the socket without waiting for a
+peer response.
+
 ## Remaining evidence before a broad completion claim
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark

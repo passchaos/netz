@@ -918,6 +918,31 @@ pub const OwnedMessage = struct {
     }
 };
 
+/// One observable step while completing a locally initiated close handshake.
+/// Application frames may already be in flight when Close is sent, so they are
+/// returned with ownership rather than discarded by the shutdown helper.
+pub const CloseHandshakeEvent = union(enum) {
+    closed: ?websocket.OwnedCloseFrame,
+    application: websocket.Frame,
+
+    pub fn deinit(
+        self: *CloseHandshakeEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .closed => |maybe_close| if (maybe_close) |value| {
+                var close_frame = value;
+                close_frame.deinit(allocator);
+            },
+            .application => |value| {
+                var frame = value;
+                frame.deinit(allocator);
+            },
+        }
+        self.* = undefined;
+    }
+};
+
 pub const Message = struct {
     opcode: websocket.Opcode,
     payload: []u8,
@@ -1041,6 +1066,84 @@ pub const Connection = struct {
         defer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
         return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+    }
+
+    /// Receive one frame under a caller-owned absolute deadline. The same
+    /// deadline covers partial headers, payload bytes, and TLS records.
+    pub fn receiveFrameWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
+        return self.receiveFrameInternal(deadline);
+    }
+
+    /// Send Close once and wait up to `timeout` for peer-close progress.
+    ///
+    /// Ping/Pong frames are consumed under one absolute deadline. An in-flight
+    /// application frame is returned to the caller, who can process it and
+    /// call this method again with a new bounded wait; it is never hidden or
+    /// discarded.
+    pub fn closeWithTimeout(
+        self: *Connection,
+        close_frame: ?websocket.CloseFrame,
+        timeout: std.Io.Duration,
+    ) Error!CloseHandshakeEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        return self.closeWithDeadline(close_frame, deadline);
+    }
+
+    /// Send Close once and advance the handshake under an absolute deadline.
+    /// Reuse this entry point after `.application` to retain one total budget.
+    pub fn closeWithDeadline(
+        self: *Connection,
+        close_frame: ?websocket.CloseFrame,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!CloseHandshakeEvent {
+        if (!self.close_sent) try self.sendCloseFrame(close_frame);
+        return self.readCloseHandshakeEvent(deadline);
+    }
+
+    /// Continue a previously started close handshake under the caller's
+    /// original deadline after handling an `.application` event.
+    pub fn continueCloseWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!CloseHandshakeEvent {
+        if (!self.close_sent) return error.InvalidFrame;
+        return self.readCloseHandshakeEvent(deadline);
+    }
+
+    fn readCloseHandshakeEvent(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!CloseHandshakeEvent {
+        while (true) {
+            var frame = try self.receiveFrameAutoInternal(deadline);
+            switch (frame.header.opcode) {
+                .ping, .pong => {
+                    frame.deinit(self.allocator);
+                    continue;
+                },
+                .close => {
+                    defer frame.deinit(self.allocator);
+                    return .{ .closed = try websocket.parseClosePayloadOwned(
+                        self.allocator,
+                        frame.payload,
+                    ) };
+                },
+                .text, .binary, .continuation => {
+                    return .{ .application = frame };
+                },
+                else => {
+                    frame.deinit(self.allocator);
+                    return error.InvalidFrame;
+                },
+            }
+        }
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
@@ -1731,6 +1834,77 @@ pub const H2Connection = struct {
         defer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
         return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+    }
+
+    /// RFC 8441 counterpart to `Connection.receiveFrameWithDeadline`.
+    pub fn receiveFrameWithDeadline(
+        self: *H2Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
+        return self.receiveFrameInternal(deadline);
+    }
+
+    /// Send Close on the extended CONNECT stream and wait under one absolute
+    /// deadline. In-flight application frames are returned rather than lost.
+    pub fn closeWithTimeout(
+        self: *H2Connection,
+        close_frame: ?websocket.CloseFrame,
+        timeout: std.Io.Duration,
+    ) Error!CloseHandshakeEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        return self.closeWithDeadline(close_frame, deadline);
+    }
+
+    /// RFC 8441 close progress under a caller-owned absolute deadline.
+    pub fn closeWithDeadline(
+        self: *H2Connection,
+        close_frame: ?websocket.CloseFrame,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!CloseHandshakeEvent {
+        if (!self.close_sent) try self.sendCloseFrame(close_frame);
+        return self.readCloseHandshakeEvent(deadline);
+    }
+
+    /// RFC 8441 close progress under the original caller-owned deadline.
+    pub fn continueCloseWithDeadline(
+        self: *H2Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!CloseHandshakeEvent {
+        if (!self.close_sent) return error.InvalidFrame;
+        return self.readCloseHandshakeEvent(deadline);
+    }
+
+    fn readCloseHandshakeEvent(
+        self: *H2Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!CloseHandshakeEvent {
+        while (true) {
+            var frame = try self.receiveFrameAutoInternal(deadline);
+            switch (frame.header.opcode) {
+                .ping, .pong => {
+                    frame.deinit(self.allocator);
+                    continue;
+                },
+                .close => {
+                    defer frame.deinit(self.allocator);
+                    return .{ .closed = try websocket.parseClosePayloadOwned(
+                        self.allocator,
+                        frame.payload,
+                    ) };
+                },
+                .text, .binary, .continuation => {
+                    return .{ .application = frame };
+                },
+                else => {
+                    frame.deinit(self.allocator);
+                    return error.InvalidFrame;
+                },
+            }
+        }
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
@@ -4779,6 +4953,7 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 
 test {
     _ = @import("runtime/error_close_tests.zig");
+    _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/wss_tests.zig");

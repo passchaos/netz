@@ -386,7 +386,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   `std.Io.async` concurrent receive helper
 - WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
   validation including control/continuation RSV rejection, typed close-frame parse/write helpers and close payload checks, fragmented message assembly with aggregate
-  message-size limits, automatic active-state PING→PONG and close echo/completed-close short-circuit handling plus tungstenite-style data-send/read suppression after receiving Close,
+  message-size limits, automatic active-state PING→PONG and close echo/completed-close short-circuit handling plus tungstenite-style data-send/read suppression after receiving Close, deadline-aware frame reads and bounded graceful-close waits that surface peer close details without discarding in-flight application frames,
   caller-buffer frame/message receive for allocation-free uncompressed
   persistent echo loops plus compressed-message output directly into caller
   storage with reusable per-connection wire/history scratch across HTTP/1 and
