@@ -247,7 +247,7 @@ pub fn build(b: *std.Build) void {
     http2_h2_push.addArtifactArg(http2_h2_push_server);
     const http2_h2_push_step = b.step(
         "interop-http2-h2-push",
-        "Run HTTP/2 server-push and push opt-out interop with audited h2",
+        "Run HTTP/2 push and informational interop with audited h2",
     );
     http2_h2_push_step.dependOn(&http2_h2_push.step);
 

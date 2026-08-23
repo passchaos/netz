@@ -35,7 +35,7 @@ fn main() {
         .expect("valid port");
     assert_ne!(port, 0);
     let tls_paths = args.next().map(|first| {
-        if mode == "server" {
+        if mode.ends_with("server") {
             (first, args.next().expect("TLS private key argument"))
         } else {
             (first, String::new())
@@ -50,8 +50,143 @@ fn main() {
     match mode.as_str() {
         "server" => runtime.block_on(run_push_server(port, tls_paths)),
         "client" => runtime.block_on(run_push_disabled_client(port, tls_paths)),
+        "informational-server" => runtime.block_on(run_informational_server(port, tls_paths)),
+        "informational-client" => runtime.block_on(run_informational_client(port, tls_paths)),
         _ => panic!("unknown mode: {mode}"),
     }
+}
+
+async fn run_informational_server(port: u16, tls_paths: Option<(String, String)>) {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("bind h2 informational server");
+    println!("h2 informational interop server listening on 127.0.0.1:{port}");
+    io::stdout().flush().expect("flush readiness line");
+    let (stream, _) = listener.accept().await.expect("accept netz client");
+    stream.set_nodelay(true).expect("server TCP_NODELAY");
+    let io = match tls_paths {
+        Some((cert, key)) => {
+            let tls = TlsAcceptor::from(tls_server_config(&cert, &key))
+                .accept(stream)
+                .await
+                .expect("accept TLS with h2 ALPN");
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            MaybeTls::Server(tls)
+        }
+        None => MaybeTls::Clear(stream),
+    };
+    let mut connection = server::handshake::<_>(io)
+        .await
+        .expect("h2 server handshake");
+    let (request, mut respond) = connection
+        .accept()
+        .await
+        .expect("connection closed before request")
+        .expect("valid request");
+    assert_eq!(request.uri().path(), "/informational");
+    respond
+        .send_informational(
+            Response::builder()
+                .status(StatusCode::EARLY_HINTS)
+                .header("link", "</style.css>; rel=preload")
+                .body(())
+                .expect("103 response"),
+        )
+        .expect("send 103");
+    respond
+        .send_informational(
+            Response::builder()
+                .status(StatusCode::PROCESSING)
+                .header("x-progress", "half")
+                .body(())
+                .expect("102 response"),
+        )
+        .expect("send 102");
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-h2-final", "yes")
+        .body(())
+        .expect("final response");
+    let mut body = respond
+        .send_response(response, false)
+        .expect("send final response");
+    body.send_data(Bytes::from_static(b"final"), true)
+        .expect("send final body");
+    while connection.accept().await.is_some() {}
+    println!("h2 server sent informational responses to netz: statuses=103,102 final=200 body=5");
+}
+
+async fn run_informational_client(port: u16, ca_path: Option<(String, String)>) {
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect netz informational server");
+    stream.set_nodelay(true).expect("client TCP_NODELAY");
+    let io = match ca_path {
+        Some((ca, _)) => {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add_parsable_certificates(
+                rustls_pemfile::certs(&mut BufReader::new(
+                    File::open(Path::new(&ca)).expect("open CA certificate"),
+                ))
+                .map(|result| result.expect("parse CA certificate")),
+            );
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            let tls = TlsConnector::from(Arc::new(config))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost")
+                        .expect("valid server name"),
+                    stream,
+                )
+                .await
+                .expect("connect TLS with h2 ALPN");
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            MaybeTls::Client(tls)
+        }
+        None => MaybeTls::Clear(stream),
+    };
+    let (mut sender, connection) = client::handshake(io).await.expect("h2 client handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("http://localhost/informational")
+        .body(())
+        .expect("informational request");
+    let (mut response, _) = sender
+        .send_request(request, true)
+        .expect("send informational request");
+    let first = futures_util::future::poll_fn(|cx| response.poll_informational(cx))
+        .await
+        .expect("first informational response")
+        .expect("valid first informational response");
+    let second = futures_util::future::poll_fn(|cx| response.poll_informational(cx))
+        .await
+        .expect("second informational response")
+        .expect("valid second informational response");
+    let statuses = [first.status().as_u16(), second.status().as_u16()];
+    assert_eq!(statuses, [103, 102]);
+    let response = response.await.expect("receive final response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-netz-final"),
+        Some(&http::HeaderValue::from_static("yes")),
+    );
+    let mut body = response.into_body();
+    let payload = body
+        .data()
+        .await
+        .expect("final response body")
+        .expect("valid final response body");
+    assert_eq!(payload, b"final".as_slice());
+    assert!(
+        body.data().await.is_none(),
+        "unexpected extra response DATA"
+    );
+    println!("h2 client received netz informational responses: statuses=103,102 final=200 body=5");
 }
 
 async fn run_push_server(port: u16, tls_paths: Option<(String, String)>) {

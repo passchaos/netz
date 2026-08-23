@@ -5,13 +5,23 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const tls_enabled = args.len == 3;
-    if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
-        return error.InvalidArgument;
+    var certificate_path: ?[]const u8 = null;
+    var informational = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--informational") and !informational) {
+            informational = true;
+        } else if (certificate_path == null and
+            std.Io.Dir.path.isAbsolute(arg))
+        {
+            certificate_path = arg;
+        } else {
+            return error.InvalidArgument;
+        }
     }
+    const tls_enabled = certificate_path != null;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -30,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             std.Io.Clock.real.now(io),
-            args[2],
+            certificate_path.?,
         );
     }
     var connection = if (tls_enabled)
@@ -50,6 +60,10 @@ pub fn main(init: std.process.Init) !void {
             limits,
         );
     defer connection.close();
+    if (informational) {
+        try runInformational(&connection, tls_enabled);
+        return;
+    }
 
     var parent = try connection.request(.{
         .method = "GET",
@@ -86,6 +100,69 @@ pub fn main(init: std.process.Init) !void {
     );
 }
 
+const InformationalState = struct {
+    statuses: [2]u16 = undefined,
+    headers_valid: bool = true,
+    count: usize = 0,
+
+    fn observe(
+        context: *anyopaque,
+        head: netz.http2.runtime.StreamingResponseHead,
+    ) void {
+        const self: *InformationalState = @ptrCast(@alignCast(context));
+        if (self.count >= self.statuses.len) {
+            self.headers_valid = false;
+            return;
+        }
+        self.statuses[self.count] = head.status;
+        const expected_name = if (head.status == 103)
+            "link"
+        else
+            "x-progress";
+        const expected_value = if (head.status == 103)
+            "</style.css>; rel=preload"
+        else
+            "half";
+        self.headers_valid = self.headers_valid and
+            hasHeader(head.headers, expected_name, expected_value);
+        self.count += 1;
+    }
+};
+
+fn runInformational(
+    connection: *netz.http2.runtime.Connection,
+    tls_enabled: bool,
+) !void {
+    var observer = InformationalState{};
+    var response = try connection.requestWithInformational(.{
+        .method = "GET",
+        .path = "/informational",
+        .scheme = "http",
+        .authority = "localhost",
+    }, .{
+        .context = &observer,
+        .on_response = InformationalState.observe,
+    });
+    defer response.deinit(connection.allocator);
+    try std.testing.expectEqualSlices(
+        u16,
+        &.{ 103, 102 },
+        observer.statuses[0..observer.count],
+    );
+    try std.testing.expect(observer.headers_valid);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("final", response.body);
+    try std.testing.expect(hasHeader(
+        response.headers,
+        "x-h2-final",
+        "yes",
+    ));
+    std.debug.print(
+        "netz HTTP/2 client observed h2 informational responses: transport={s} statuses=103,102 final=200 body=5\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
+}
+
 fn expectHeader(
     headers: []const netz.http2.Hpack.HeaderField,
     name: []const u8,
@@ -96,4 +173,16 @@ fn expectHeader(
             std.mem.eql(u8, header.value, value)) return;
     }
     return error.MissingHeader;
+}
+
+fn hasHeader(
+    headers: []const netz.http2.Hpack.HeaderField,
+    name: []const u8,
+    value: []const u8,
+) bool {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, name) and
+            std.mem.eql(u8, header.value, value)) return true;
+    }
+    return false;
 }

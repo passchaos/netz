@@ -5,12 +5,22 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const tls_enabled = args.len == 3 and
-        std.mem.eql(u8, args[2], "--tls");
-    if (args.len == 3 and !tls_enabled) return error.InvalidArgument;
+    var tls_enabled = false;
+    var informational = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--tls") and !tls_enabled) {
+            tls_enabled = true;
+        } else if (std.mem.eql(u8, arg, "--informational") and
+            !informational)
+        {
+            informational = true;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -37,8 +47,8 @@ pub fn main(init: std.process.Init) !void {
     }
     defer if (tls_enabled) tls_server.deinit() else clear_server.deinit();
     std.debug.print(
-        "netz HTTP/2 push interop server listening transport={s}\n",
-        .{if (tls_enabled) "tls" else "h2c"},
+        "netz HTTP/2 {s} interop server listening transport={s}\n",
+        .{ if (informational) "informational" else "push", if (tls_enabled) "tls" else "h2c" },
     );
 
     var connection = if (tls_enabled)
@@ -48,6 +58,26 @@ pub fn main(init: std.process.Init) !void {
     defer connection.close();
     var request = try connection.readRequest();
     defer request.deinit(allocator);
+    if (informational) {
+        try std.testing.expectEqualStrings("/informational", request.path);
+        try connection.writeInformationalResponse(request.stream_id, 103, &.{
+            .{ .name = "link", .value = "</style.css>; rel=preload" },
+        });
+        try connection.writeInformationalResponse(request.stream_id, 102, &.{
+            .{ .name = "x-progress", .value = "half" },
+        });
+        try connection.writeResponse(request.stream_id, .{
+            .status = 200,
+            .headers = &.{.{ .name = "x-netz-final", .value = "yes" }},
+            .body = "final",
+            .request_method = request.method,
+        });
+        std.debug.print(
+            "netz HTTP/2 server sent informational responses to h2: transport={s} statuses=103,102 final=200 body=5\n",
+            .{if (tls_enabled) "tls" else "h2c"},
+        );
+        return;
+    }
     try std.testing.expectEqualStrings("/push-disabled", request.path);
     try std.testing.expectError(
         error.UnexpectedFrame,

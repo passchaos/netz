@@ -31,6 +31,7 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || erro
     StreamReset,
     ResponseAvailable,
     ConnectionGoAway,
+    TooManyInformationalResponses,
     UnsupportedScheme,
     PriorityCapacityExceeded,
     InvalidAlpn,
@@ -181,6 +182,9 @@ pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
+    /// Maximum interim response heads accepted before a final response. This
+    /// bounds both HPACK work and observer callbacks from an endless 1xx chain.
+    max_informational_responses: usize = 16,
     /// Bounds HEADERS/PUSH_PROMISE continuation chains independently from byte
     /// limits.  Rust h2 derives this from SETTINGS_MAX_HEADER_LIST_SIZE and the
     /// receive frame size to prevent peers from sending endless empty
@@ -714,7 +718,12 @@ pub const Client = struct {
         var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, request_options);
         stream_owned = false;
         defer upgraded.deinit(allocator);
-        return upgraded.connection.readResponse(1, request_options.method, request_options.protocol != null);
+        return upgraded.connection.readResponse(
+            1,
+            request_options.method,
+            request_options.protocol != null,
+            null,
+        );
     }
 
     pub fn requestUriUpgrade(
@@ -742,7 +751,12 @@ pub const Client = struct {
         var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, options);
         stream_owned = false;
         defer upgraded.deinit(allocator);
-        return upgraded.connection.readResponse(1, options.method, options.protocol != null);
+        return upgraded.connection.readResponse(
+            1,
+            options.method,
+            options.protocol != null,
+            null,
+        );
     }
 
     /// Upgrade an existing cleartext HTTP/1.1 stream to HTTP/2 and return the
@@ -1185,11 +1199,23 @@ pub const Connection = struct {
     }
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
+        return self.requestWithInformational(options, null);
+    }
+
+    /// Send a complete request and observe each ordered interim response before
+    /// returning the final response. Header slices borrow decoder storage only
+    /// for the callback duration. Status 101 remains final HTTP semantics.
+    pub fn requestWithInformational(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+    ) Error!OwnedResponse {
         const pending = try self.sendCompleteRequest(options);
         return self.readResponse(
             pending.stream_id,
             pending.request_method,
             pending.extended_connect,
+            informational,
         );
     }
 
@@ -1214,6 +1240,23 @@ pub const Connection = struct {
         );
     }
 
+    /// Stream response DATA while observing ordered interim response heads.
+    pub fn requestStreamingWithInformational(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.requestStreamingWithInformationalAndHead(
+            options,
+            informational,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
     /// Send a request and report final response HEADERS before any DATA.
     ///
     /// Protocol adapters such as gRPC need the selected content/message
@@ -1229,6 +1272,27 @@ pub const Connection = struct {
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreamingWithHead(
             pending,
+            null,
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Streaming response receive with ordered observation of preceding 1xx
+    /// heads. Informational callbacks run before the final-head callback.
+    pub fn requestStreamingWithInformationalAndHead(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        const pending = try self.sendCompleteRequest(options);
+        return self.readResponseStreamingWithHead(
+            pending,
+            informational,
             context,
             begin,
             consume,
@@ -2228,6 +2292,7 @@ pub const Connection = struct {
         forbids_body: bool = false,
         done: bool = false,
         body_bytes: usize = 0,
+        informational_count: usize = 0,
 
         fn deinit(
             self: *BatchResponseState,
@@ -2321,6 +2386,12 @@ pub const Connection = struct {
                         {
                             return error.InvalidContentLength;
                         }
+                        try notifyInformationalResponse(
+                            null,
+                            .{ .headers = headers, .status = status },
+                            &state.informational_count,
+                            self.limits.max_informational_responses,
+                        );
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
@@ -2484,6 +2555,12 @@ pub const Connection = struct {
                         {
                             return error.InvalidContentLength;
                         }
+                        try notifyInformationalResponse(
+                            null,
+                            .{ .headers = headers, .status = status },
+                            &state.informational_count,
+                            self.limits.max_informational_responses,
+                        );
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
@@ -5398,7 +5475,13 @@ pub const Connection = struct {
         }
     }
 
-    fn readResponse(self: *Connection, stream_id: u31, request_method: []const u8, extended_connect: bool) Error!OwnedResponse {
+    fn readResponse(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+    ) Error!OwnedResponse {
         defer self.releaseLocalStream(stream_id);
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
@@ -5408,6 +5491,7 @@ pub const Connection = struct {
         errdefer body.deinit(self.allocator);
         var response_status: ?u16 = null;
         var response_content_length: ?usize = null;
+        var informational_count: usize = 0;
 
         while (true) {
             var frame = try self.readOwnedFrame();
@@ -5449,6 +5533,12 @@ pub const Connection = struct {
                         if (informationalResponseToSkip(status)) {
                             if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
                             if (lookup.content_length != null) return error.InvalidContentLength;
+                            try notifyInformationalResponse(
+                                informational,
+                                .{ .headers = headers.?, .status = status },
+                                &informational_count,
+                                self.limits.max_informational_responses,
+                            );
                             freeHeaders(self.allocator, headers.?);
                             headers = null;
                             response_status = null;
@@ -5509,6 +5599,7 @@ pub const Connection = struct {
     ) !StreamingResponse {
         return self.readResponseStreamingWithHead(
             pending,
+            null,
             context,
             ignoreStreamingResponseHead,
             consume,
@@ -5518,6 +5609,7 @@ pub const Connection = struct {
     fn readResponseStreamingWithHead(
         self: *Connection,
         pending: PendingResponse,
+        informational: ?InformationalObserver,
         context: anytype,
         comptime begin: anytype,
         comptime consume: anytype,
@@ -5533,6 +5625,7 @@ pub const Connection = struct {
         var status_value: ?u16 = null;
         var expected_body_len: ?usize = null;
         var body_bytes: usize = 0;
+        var informational_count: usize = 0;
 
         while (true) {
             var pending_owned: ?OwnedFrame = null;
@@ -5600,6 +5693,12 @@ pub const Connection = struct {
                         if (lookup.content_length != null) {
                             return error.InvalidContentLength;
                         }
+                        try notifyInformationalResponse(
+                            informational,
+                            .{ .headers = decoded, .status = status },
+                            &informational_count,
+                            self.limits.max_informational_responses,
+                        );
                         freeHeaders(self.allocator, decoded);
                         decoded_owned = false;
                         continue;
@@ -5732,6 +5831,7 @@ pub const Connection = struct {
         errdefer body.deinit(self.allocator);
         var response_status: ?u16 = null;
         var response_content_length: ?usize = null;
+        var informational_count: usize = 0;
         while (true) {
             var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
@@ -5759,6 +5859,27 @@ pub const Connection = struct {
                     response_status = std.fmt.parseInt(u16, status_text, 10) catch
                         return error.InvalidStatus;
                     response_content_length = lookup.content_length;
+                    if (informationalResponseToSkip(response_status.?)) {
+                        if ((frame.frame.header.flags & flag_end_stream) != 0 or
+                            response_content_length != null)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        try notifyInformationalResponse(
+                            null,
+                            .{
+                                .headers = headers.?,
+                                .status = response_status.?,
+                            },
+                            &informational_count,
+                            self.limits.max_informational_responses,
+                        );
+                        freeHeaders(self.allocator, headers.?);
+                        headers = null;
+                        response_status = null;
+                        response_content_length = null;
+                        continue;
+                    }
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         break;
                     }
@@ -5802,6 +5923,7 @@ pub const Connection = struct {
     }
 
     fn readExtendedConnectResponse(self: *Connection, stream_id: u31) Error!ExtendedConnectResponse {
+        var informational_count: usize = 0;
         while (true) {
             var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
@@ -5823,6 +5945,12 @@ pub const Connection = struct {
                     if (informationalResponseToSkip(status)) {
                         if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
                         if (lookup.content_length != null) return error.InvalidContentLength;
+                        try notifyInformationalResponse(
+                            null,
+                            .{ .headers = headers, .status = status },
+                            &informational_count,
+                            self.limits.max_informational_responses,
+                        );
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
@@ -7003,6 +7131,28 @@ pub const StreamingResponseHead = struct {
     status: u16,
 };
 
+pub const InformationalObserver = struct {
+    context: *anyopaque,
+    on_response: *const fn (
+        context: *anyopaque,
+        response: StreamingResponseHead,
+    ) void,
+};
+
+fn notifyInformationalResponse(
+    observer: ?InformationalObserver,
+    response: StreamingResponseHead,
+    count: *usize,
+    limit: usize,
+) Error!void {
+    count.* = std.math.add(usize, count.*, 1) catch
+        return error.TooManyInformationalResponses;
+    if (count.* > limit) return error.TooManyInformationalResponses;
+    if (observer) |value| {
+        value.on_response(value.context, response);
+    }
+}
+
 fn ignoreStreamingRequestHead(
     context: anytype,
     head: StreamingRequestHead,
@@ -7134,6 +7284,14 @@ pub const RequestWriter = struct {
     pub fn readResponse(
         self: *RequestWriter,
     ) Error!OwnedResponse {
+        return self.readResponseWithInformational(null);
+    }
+
+    /// Finish a streaming request while observing ordered interim responses.
+    pub fn readResponseWithInformational(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+    ) Error!OwnedResponse {
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
         }
@@ -7144,6 +7302,7 @@ pub const RequestWriter = struct {
             stream_id,
             request_method,
             false,
+            informational,
         ) catch |err| {
             // readResponse releases the stream on every exit path.
             self.completed = true;
@@ -7165,8 +7324,38 @@ pub const RequestWriter = struct {
         );
     }
 
+    pub fn readResponseStreamingWithInformational(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndHead(
+            informational,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
     pub fn readResponseStreamingWithHead(
         self: *RequestWriter,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndHead(
+            null,
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Stream the final response while observing every preceding 1xx head.
+    pub fn readResponseStreamingWithInformationalAndHead(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
         context: anytype,
         comptime begin: anytype,
         comptime consume: anytype,
@@ -7182,6 +7371,7 @@ pub const RequestWriter = struct {
         };
         const response = connection.readResponseStreamingWithHead(
             pending,
+            informational,
             context,
             begin,
             consume,
@@ -10530,7 +10720,7 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
     try client.addActiveLocalStream(1);
     try client.writeData(1, "hello", true);
 
-    var response = try client.readResponse(1, "POST", false);
+    var response = try client.readResponse(1, "POST", false, null);
     defer response.deinit(allocator);
 
     thread.join();
@@ -10673,7 +10863,7 @@ test "HTTP/2 runtime answers PING while reading request body" {
     try std.testing.expectEqualSlices(u8, &ping_payload, ping_ack.frame.payload);
 
     try client.writeData(1, "llo", true);
-    var response = try client.readResponse(1, "POST", false);
+    var response = try client.readResponse(1, "POST", false, null);
     defer response.deinit(allocator);
 
     thread.join();
@@ -10744,7 +10934,7 @@ test "HTTP/2 runtime ignores PRIORITY while reading request body" {
     try writeAll(io, client.stream, priority_bytes.items);
     try client.writeData(1, "llo", true);
 
-    var response = try client.readResponse(1, "POST", false);
+    var response = try client.readResponse(1, "POST", false, null);
     defer response.deinit(allocator);
 
     thread.join();
@@ -10998,6 +11188,171 @@ test "HTTP/2 client skips informational responses before final response" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("final", response.body);
+}
+
+test "HTTP/2 client observes bounded informational responses in order" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            for (0..4) |index| {
+                var request = try connection.readRequest();
+                defer request.deinit(server_ptr.allocator);
+                try connection.writeInformationalResponse(
+                    request.stream_id,
+                    103,
+                    &.{.{ .name = "link", .value = "</style.css>" }},
+                );
+                try connection.writeInformationalResponse(
+                    request.stream_id,
+                    102,
+                    &.{.{ .name = "x-progress", .value = "half" }},
+                );
+                if (index == 3) {
+                    try connection.writeInformationalResponse(
+                        request.stream_id,
+                        103,
+                        &.{.{ .name = "link", .value = "</late.css>" }},
+                    );
+                }
+                try connection.writeResponse(request.stream_id, .{
+                    .body = "final",
+                    .request_method = request.method,
+                });
+            }
+        }
+    };
+
+    const Observer = struct {
+        statuses: [4]u16 = undefined,
+        count: usize = 0,
+        valid_headers: bool = true,
+
+        fn observe(context_ptr: *anyopaque, head: StreamingResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.statuses[self.count] = head.status;
+            const expected_name = if (head.status == 103)
+                "link"
+            else
+                "x-progress";
+            const expected_value = if (head.status == 103)
+                "</style.css>"
+            else
+                "half";
+            self.valid_headers = self.valid_headers and
+                std.mem.eql(
+                    u8,
+                    findHeader(head.headers, expected_name) orelse "",
+                    expected_value,
+                );
+            self.count += 1;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_informational_responses = 2,
+    });
+    defer client.close();
+
+    var aggregate_observer = Observer{};
+    var aggregate = try client.requestWithInformational(.{
+        .path = "/informational-aggregate",
+        .authority = "localhost",
+    }, .{
+        .context = &aggregate_observer,
+        .on_response = Observer.observe,
+    });
+    defer aggregate.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u16,
+        &.{ 103, 102 },
+        aggregate_observer.statuses[0..aggregate_observer.count],
+    );
+    try std.testing.expect(aggregate_observer.valid_headers);
+    try std.testing.expectEqualStrings("final", aggregate.body);
+
+    var streaming_observer = Observer{};
+    var body_bytes: usize = 0;
+    var streaming = try client.requestStreamingWithInformational(.{
+        .path = "/informational-streaming",
+        .authority = "localhost",
+    }, .{
+        .context = &streaming_observer,
+        .on_response = Observer.observe,
+    }, &body_bytes, struct {
+        fn consume(count: *usize, data: []const u8) !void {
+            count.* += data.len;
+        }
+    }.consume);
+    defer streaming.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u16,
+        &.{ 103, 102 },
+        streaming_observer.statuses[0..streaming_observer.count],
+    );
+    try std.testing.expect(streaming_observer.valid_headers);
+    try std.testing.expectEqual(@as(usize, 5), body_bytes);
+
+    var writer = try client.startRequest(.{
+        .path = "/informational-writer",
+        .authority = "localhost",
+        .body_length = 0,
+    });
+    defer writer.deinit();
+    try writer.finish();
+    var writer_observer = Observer{};
+    var writer_response = try writer.readResponseWithInformational(.{
+        .context = &writer_observer,
+        .on_response = Observer.observe,
+    });
+    defer writer_response.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u16,
+        &.{ 103, 102 },
+        writer_observer.statuses[0..writer_observer.count],
+    );
+    try std.testing.expect(writer_observer.valid_headers);
+    try std.testing.expectEqualStrings("final", writer_response.body);
+
+    try std.testing.expectError(
+        error.TooManyInformationalResponses,
+        client.request(.{
+            .path = "/informational-over-limit",
+            .authority = "localhost",
+        }),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 client rejects 101 switching protocols response" {
@@ -14914,6 +15269,7 @@ test "HTTP/2 client ignores in-flight frames after local reset" {
         second.stream_id,
         second.request_method,
         second.extended_connect,
+        null,
     );
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.status);
@@ -15002,7 +15358,7 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
     }
     connection.rememberLocallyResetStream(1);
 
-    var response = try connection.readResponse(3, "GET", false);
+    var response = try connection.readResponse(3, "GET", false, null);
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), writer.writes);
     try std.testing.expectEqualStrings("ok", response.body);

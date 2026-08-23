@@ -110,7 +110,65 @@ run_h2_client_case() {
   cat "$work/netz-server-$transport.log"
 }
 
+run_netz_informational_client_case() {
+  local transport=$1
+  local port
+  port=$(free_tcp_port)
+  local peer_args=(informational-server "$port")
+  local client_args=("$port")
+  if [[ "$transport" == tls ]]; then
+    peer_args+=("$work/cert.pem" "$work/key.pem")
+    client_args+=("$work/cert.pem")
+  fi
+  "$peer" "${peer_args[@]}" \
+    >"$work/h2-informational-server-$transport.log" 2>&1 &
+  server_pid=$!
+  wait_for_server "$work/h2-informational-server-$transport.log" \
+    "h2 informational interop server listening"
+  timeout 10s "$netz_client" "${client_args[@]}" --informational \
+    >"$work/netz-informational-client-$transport.log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "netz HTTP/2 client observed h2 informational responses: transport=$transport statuses=103,102 final=200 body=5" \
+    "$work/netz-informational-client-$transport.log"
+  grep -Fq "h2 server sent informational responses to netz: statuses=103,102 final=200 body=5" \
+    "$work/h2-informational-server-$transport.log"
+  cat "$work/netz-informational-client-$transport.log"
+  cat "$work/h2-informational-server-$transport.log"
+}
+
+run_h2_informational_client_case() {
+  local transport=$1
+  local port
+  port=$(free_tcp_port)
+  local server_args=("$port" --informational)
+  local client_args=(informational-client "$port")
+  if [[ "$transport" == tls ]]; then
+    server_args+=(--tls)
+    client_args+=("$work/cert.pem")
+  fi
+  "$netz_server" "${server_args[@]}" \
+    >"$work/netz-informational-server-$transport.log" 2>&1 &
+  server_pid=$!
+  wait_for_server "$work/netz-informational-server-$transport.log" \
+    "netz HTTP/2 informational interop server listening"
+  timeout 10s "$peer" "${client_args[@]}" \
+    >"$work/h2-informational-client-$transport.log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "h2 client received netz informational responses: statuses=103,102 final=200 body=5" \
+    "$work/h2-informational-client-$transport.log"
+  grep -Fq "netz HTTP/2 server sent informational responses to h2: transport=$transport statuses=103,102 final=200 body=5" \
+    "$work/netz-informational-server-$transport.log"
+  cat "$work/h2-informational-client-$transport.log"
+  cat "$work/netz-informational-server-$transport.log"
+}
+
 run_netz_client_case h2c
 run_netz_client_case tls
 run_h2_client_case h2c
 run_h2_client_case tls
+run_netz_informational_client_case h2c
+run_netz_informational_client_case tls
+run_h2_informational_client_case h2c
+run_h2_informational_client_case tls
