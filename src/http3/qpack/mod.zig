@@ -404,7 +404,6 @@ pub fn encodeDynamicBlockWithReferenceLimit(
         allocator.free(dynamic_matches);
     };
 
-    const base = table.insert_count;
     var required_insert_count: u64 = 0;
     if (dynamic_references_possible) {
         for (fields, dynamic_matches) |field, *dynamic_match| {
@@ -426,14 +425,16 @@ pub fn encodeDynamicBlockWithReferenceLimit(
         required_insert_count,
         table.maxEntries(),
     );
-    // Base is the insertion count at the start of this single-pass encode.
-    // Required Insert Count cannot exceed it because this helper does not
-    // mutate the table while encoding.
+    // Every selected reference is below Required Insert Count, so choosing it
+    // as Base makes Delta Base zero and minimizes every relative index. This
+    // also keeps literal-only sections at the canonical zero/zero prefix even
+    // after a long-lived connection has accumulated many unreferenced inserts.
+    const base = required_insert_count;
     try encodePrefix(
         list,
         allocator,
         encoded_insert_count,
-        base - required_insert_count,
+        0,
     );
 
     for (fields, 0..) |field, index| {

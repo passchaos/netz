@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     // encoded value 64 is the first boundary where QUIC varints and QPACK
     // prefix integers differ. Keep that regression at this process boundary.
     if (block.items.len < 2 or block.items[0] != 0x40 or
-        block.items[1] != 0x01)
+        block.items[1] != 0x00)
     {
         return error.InvalidFieldSectionPrefix;
     }

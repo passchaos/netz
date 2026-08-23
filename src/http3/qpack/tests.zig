@@ -613,18 +613,51 @@ test "HTTP/3 QPACK dynamic block crosses the 8-bit prefix value 63" {
         .name = "x-boundary",
         .value = "target",
     }}, table);
-    // Required Insert Count 63 wraps to 64 and Base 64 has Delta Base 1.
+    // Required Insert Count 63 wraps to 64 and the minimal Base 63 has
+    // Delta Base zero.
     // An 8-bit prefix represents 64 directly; a QUIC varint would incorrectly
     // emit 0x40,0x40 and shift every following field-section byte.
-    try std.testing.expectEqualSlices(u8, &.{ 0x40, 0x01, 0x81 }, encoded.items);
+    try std.testing.expectEqualSlices(u8, &.{ 0x40, 0x00, 0x80 }, encoded.items);
 
     var decoded = try Qpack.decodeDynamicBlock(allocator, encoded.items, table);
     defer Qpack.freeDynamicBlock(allocator, &decoded);
     try std.testing.expectEqual(@as(u64, 63), decoded.required_insert_count);
-    try std.testing.expectEqual(@as(u64, 64), decoded.base);
+    try std.testing.expectEqual(@as(u64, 63), decoded.base);
     try std.testing.expectEqual(@as(usize, 1), decoded.fields.len);
     try std.testing.expectEqualStrings("x-boundary", decoded.fields[0].name);
     try std.testing.expectEqualStrings("target", decoded.fields[0].value);
+}
+
+test "HTTP/3 QPACK literal-only dynamic block keeps a zero Base" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+
+    var value_buffer: [16]u8 = undefined;
+    for (0..64) |index| {
+        const value = try std.fmt.bufPrint(
+            &value_buffer,
+            "value-{d}",
+            .{index},
+        );
+        _ = try table.insert("x-existing", value);
+    }
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var references: std.ArrayList(u64) = .empty;
+    defer references.deinit(allocator);
+    try Qpack.encodeDynamicBlockKnownReceived(
+        &encoded,
+        allocator,
+        &.{.{ .name = "x-new", .value = "literal" }},
+        table,
+        0,
+        &references,
+    );
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00 }, encoded.items[0..2]);
+    try std.testing.expectEqual(@as(usize, 0), references.items.len);
 }
 
 test "HTTP/3 QPACK field section prefix detects blocking without allocation" {
