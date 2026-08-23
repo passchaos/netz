@@ -2187,7 +2187,6 @@ pub fn decodeTrailersWithDynamicTable(
         settings.max_field_section_size,
     );
     const owned = try ownHeaderFields(allocator, decoded.fields);
-    Qpack.freeDecodedFields(allocator, decoded.fields);
     return .{
         .fields = owned,
         .qpack_section_acknowledgments = @intFromBool(decoded.requires_acknowledgment),
@@ -2246,7 +2245,6 @@ pub fn decodeRequestHeadFieldSectionWithDynamicTable(
     _ = lookup.scheme(decoded.fields) orelse
         if (plain_connect) "" else return error.InvalidHeader;
     const owned_fields = try ownHeaderFields(allocator, decoded.fields);
-    Qpack.freeDecodedFields(allocator, decoded.fields);
     return .{
         .method = lookup.method(owned_fields).?,
         .path = lookup.path(owned_fields) orelse
@@ -2346,7 +2344,6 @@ pub fn decodeResponseHeadFieldSectionWithDynamicTable(
         &.{},
     );
     const owned_fields = try ownHeaderFields(allocator, decoded.fields);
-    Qpack.freeDecodedFields(allocator, decoded.fields);
     return .{
         .status = status,
         .headers = owned_fields,
@@ -2387,31 +2384,48 @@ fn firstHeadersFrame(
 
 fn ownHeaderFields(
     allocator: std.mem.Allocator,
-    fields: []const Qpack.HeaderField,
+    fields: []Qpack.HeaderField,
 ) std.mem.Allocator.Error![]Qpack.HeaderField {
-    const owned = try allocator.alloc(Qpack.HeaderField, fields.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (owned[0..initialized]) |field| {
-            if (field.name_storage) |storage| allocator.free(storage);
-            if (field.value_storage) |storage| allocator.free(storage);
-        }
-        allocator.free(owned);
-    }
-    for (fields, owned) |field, *destination| {
-        const name = try allocator.dupe(u8, field.name);
-        errdefer allocator.free(name);
-        const value = try allocator.dupe(u8, field.value);
-        destination.* = .{
-            .name = name,
-            .value = value,
-            .never_indexed = field.never_indexed,
-            .name_storage = name,
-            .value_storage = value,
+    for (fields) |*field| {
+        // Dynamic references are already decoded into this representation.
+        // All other combinations are normalized here so every final field has
+        // one allocation rather than separate name and value allocations.
+        if (fieldStoredContiguously(field.*)) continue;
+        const storage_len = std.math.add(
+            usize,
+            field.name.len,
+            field.value.len,
+        ) catch return error.OutOfMemory;
+        const storage = try allocator.alloc(u8, storage_len);
+        @memcpy(storage[0..field.name.len], field.name);
+        @memcpy(storage[field.name.len..], field.value);
+        if (field.name_storage) |old| allocator.free(old);
+        if (field.value_storage) |old| allocator.free(old);
+        const name_len = field.name.len;
+        const never_indexed = field.never_indexed;
+        field.* = .{
+            .name = storage[0..name_len],
+            .value = storage[name_len..],
+            .never_indexed = never_indexed,
+            .name_storage = storage,
         };
-        initialized += 1;
     }
-    return owned;
+    return fields;
+}
+
+fn fieldStoredContiguously(field: Qpack.HeaderField) bool {
+    // This is the canonical one-allocation representation used here and by
+    // QPACK dynamic references. Other decoder-owned combinations are safely
+    // copied before their old independent storage is released.
+    const owner = field.name_storage orelse return false;
+    if (field.value_storage != null) return false;
+    const owner_start = @intFromPtr(owner.ptr);
+    const name_start = @intFromPtr(field.name.ptr);
+    const value_start = @intFromPtr(field.value.ptr);
+    return name_start == owner_start and
+        field.name.len <= owner.len and
+        value_start == owner_start + field.name.len and
+        field.value.len == owner.len - field.name.len;
 }
 
 fn ownedFieldValue(
@@ -4581,6 +4595,20 @@ test "HTTP/3 dynamic heads decode before DATA and own fields" {
         "dynamic-value",
         ownedFieldValue(request_head.headers, "x-owned").?,
     );
+    for (request_head.headers) |field| {
+        const storage = field.name_storage orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(field.value_storage == null);
+        try std.testing.expectEqual(storage.ptr, field.name.ptr);
+        try std.testing.expectEqual(
+            storage.ptr + field.name.len,
+            field.value.ptr,
+        );
+        try std.testing.expectEqual(
+            storage.len,
+            field.name.len + field.value.len,
+        );
+    }
 
     var response_bytes: std.ArrayList(u8) = .empty;
     defer response_bytes.deinit(allocator);
@@ -4621,6 +4649,54 @@ test "HTTP/3 dynamic heads decode before DATA and own fields" {
         @as(usize, 2),
         response_head.qpack_section_acknowledgments,
     );
+}
+
+test "HTTP/3 owned header fields use one allocation per materialized field" {
+    const allocator = std.testing.allocator;
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    const fields = try tracked.alloc(Qpack.HeaderField, 3);
+    var transferred = false;
+    defer if (!transferred) tracked.free(fields);
+
+    fields[0] = .{ .name = ":status", .value = "200" };
+    const dynamic_storage = try tracked.dupe(u8, "x-dynamicvalue");
+    fields[1] = .{
+        .name = dynamic_storage[0..9],
+        .value = dynamic_storage[9..],
+        .name_storage = dynamic_storage,
+    };
+    const decoded_value = try tracked.dupe(u8, "decoded-value");
+    fields[2] = .{
+        .name = "content-type",
+        .value = decoded_value,
+        .value_storage = decoded_value,
+    };
+
+    const before = tracking.allocations;
+    const owned = try ownHeaderFields(tracked, fields);
+    transferred = true;
+    defer Qpack.freeDecodedFields(tracked, owned);
+
+    try std.testing.expectEqual(fields.ptr, owned.ptr);
+    // The already-contiguous dynamic field transfers without allocation. The
+    // fully borrowed and partially owned fields each need exactly one new
+    // backing block, rather than one allocation per string.
+    try std.testing.expectEqual(before + 2, tracking.allocations);
+    for (owned) |field| {
+        const storage = field.name_storage orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(field.value_storage == null);
+        try std.testing.expectEqual(storage.ptr, field.name.ptr);
+        try std.testing.expectEqual(
+            storage.ptr + field.name.len,
+            field.value.ptr,
+        );
+        try std.testing.expectEqual(
+            storage.len,
+            field.name.len + field.value.len,
+        );
+    }
 }
 
 fn checkDynamicQpackHeadAllocationFailure(

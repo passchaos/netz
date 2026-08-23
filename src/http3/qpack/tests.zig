@@ -787,6 +787,54 @@ test "HTTP/3 QPACK dynamic block round trips and reduces wire size" {
         try std.testing.expectEqualStrings(expected.value, actual.value);
         try std.testing.expectEqual(expected.never_indexed, actual.never_indexed);
     }
+    for (decoded.fields[1..3]) |field| {
+        const storage = field.name_storage orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(field.value_storage == null);
+        try std.testing.expectEqual(storage.ptr, field.name.ptr);
+        try std.testing.expectEqual(
+            storage.ptr + field.name.len,
+            field.value.ptr,
+        );
+    }
+}
+
+test "HTTP/3 QPACK exact dynamic field decodes with one string allocation" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-owned", "dynamic-value");
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&encoded, allocator, &.{.{
+        .name = "x-owned",
+        .value = "dynamic-value",
+    }}, table);
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    var decoded = try Qpack.decodeDynamicBlock(
+        tracking.allocator(),
+        encoded.items,
+        table,
+    );
+    defer Qpack.freeDynamicBlock(tracking.allocator(), &decoded);
+    // Two allocations remain live: the field array and one contiguous block
+    // for both strings. ArrayList finalization performs one transient backing
+    // allocation on this allocator; the old representation additionally kept
+    // independent name and value blocks alive.
+    try std.testing.expectEqual(@as(usize, 3), tracking.allocations);
+    try std.testing.expectEqual(@as(usize, 1), tracking.deallocations);
+    const field = decoded.fields[0];
+    const storage = field.name_storage orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(field.value_storage == null);
+    try std.testing.expectEqual(storage.ptr, field.name.ptr);
+    try std.testing.expectEqual(
+        storage.ptr + field.name.len,
+        field.value.ptr,
+    );
 }
 
 test "HTTP/3 QPACK dynamic block distinguishes blocked and evicted references" {

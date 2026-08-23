@@ -23,10 +23,10 @@ pub const HeaderField = struct {
     name: []const u8,
     value: []const u8,
     never_indexed: bool = false,
-    /// Set when a decoded Huffman string had to be materialized.  Call
-    /// `Qpack.freeDecodedFields` for decoder output so these allocations
-    /// are released while non-Huffman strings can continue borrowing from
-    /// the encoded field section.
+    /// Backing allocations owned by this decoded field. A storage slice may
+    /// cover both name and value when they were materialized contiguously.
+    /// Call `Qpack.freeDecodedFields` for decoder output; null storage means
+    /// that component borrows static-table or encoded field-section bytes.
     name_storage: ?[]u8 = null,
     value_storage: ?[]u8 = null,
 };
@@ -724,15 +724,16 @@ fn ownedDynamicField(
     value: []const u8,
     never_indexed: bool,
 ) !HeaderField {
-    const name_copy = try allocator.dupe(u8, entry.name);
-    errdefer allocator.free(name_copy);
-    const value_copy = try allocator.dupe(u8, value);
+    const storage_len = std.math.add(usize, entry.name.len, value.len) catch
+        return error.QpackDecompressionFailed;
+    const storage = try allocator.alloc(u8, storage_len);
+    @memcpy(storage[0..entry.name.len], entry.name);
+    @memcpy(storage[entry.name.len..], value);
     return .{
-        .name = name_copy,
-        .value = value_copy,
+        .name = storage[0..entry.name.len],
+        .value = storage[entry.name.len..],
         .never_indexed = never_indexed,
-        .name_storage = name_copy,
-        .value_storage = value_copy,
+        .name_storage = storage,
     };
 }
 
