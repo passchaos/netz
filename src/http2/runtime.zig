@@ -520,6 +520,9 @@ pub const TlsListenOptions = struct {
         &vail.tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
+    /// Absolute TLS handshake receive budget. HTTP/2 frame waits begin only
+    /// after this transport handshake succeeds.
+    tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
     tcp_nodelay: bool = true,
 };
@@ -555,6 +558,7 @@ pub const TlsServer = struct {
                 .cipher_suites = options.cipher_suites,
                 .max_client_hello_size = options.max_client_hello_size,
                 .max_client_handshake_size = options.max_client_handshake_size,
+                .handshake_timeout = options.tls_handshake_timeout,
                 .client_auth = options.client_auth,
                 .alpn_protocols = &.{"h2"},
             },
@@ -723,6 +727,7 @@ pub const Client = struct {
                 .alpn_protocols = &.{"h2"},
                 .cipher_suites = tls_options.cipher_suites,
                 .max_server_handshake_size = tls_options.max_server_handshake_size,
+                .handshake_timeout = tls_options.tls_handshake_timeout,
             },
         );
         stream_owned = false;
@@ -1039,6 +1044,8 @@ pub const TlsConnectOptions = struct {
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
+    /// Absolute receive budget spanning ServerHello and the encrypted flight.
+    tls_handshake_timeout: ?std.Io.Duration = null,
 };
 
 pub const Role = enum {

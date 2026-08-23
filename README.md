@@ -401,7 +401,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   compressed fragmented sends that stream discontiguous plaintext directly
   into DEFLATE with constant-space cross-fragment UTF-8 validation, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with optional absolute WS/WSS
-  opening-handshake deadlines and a `std.Io.async` concurrent
+  opening-handshake deadlines, shared absolute TLS 1.3 handshake budgets for
+  WSS listeners and client-identity connections, and a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
   Host/port synthesis, shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
@@ -448,7 +449,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   client/server runtime with a
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
   system or caller-provided CA roots, hostname verification, and optional
-  client identities, plus TLS 1.3
+  client identities, plus configurable absolute TLS 1.3 handshake budgets for
+  listeners and identity-enabled clients, plus TLS 1.3
   servers with caller-provided certificate chains/signers and concurrent
   serving, including optional/required client-certificate authentication,
   pluggable trust verification, and verified peer-chain access, and
@@ -506,6 +508,12 @@ explicit server verifier. The TLS server reuses the same MQTT
 broker-side state machine as TCP/WebSocket and supports optional or required
 TLS 1.3 client certificates with application-visible verified DER chains.
 Clients without an identity retain Zig's standard TLS implementation.
+`tls_handshake_timeout` applies to netz's vail-backed TLS 1.3 client and server
+handshakes as one absolute receive budget across all handshake records; the
+Zig 0.16 standard TLS client path does not expose an equivalent handshake
+deadline. HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT WSS listeners forward the
+same server option, while HTTP/2 and identity-enabled MQTT/WSS clients expose
+the client-side option.
 WSS servers reuse the cleartext HTTP Upgrade/frame state machine and may expose
 verified TLS client chains. Event loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on

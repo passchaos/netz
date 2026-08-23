@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const vail = @import("vail");
+const handshake_deadline = @import("handshake_deadline.zig");
 const stream_io = @import("../../internal/stream_io.zig");
 const record_io = @import("record_io.zig");
 
@@ -44,6 +45,10 @@ pub const Options = struct {
         &vail.tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
+    /// Absolute receive budget for the complete TLS handshake. The deadline is
+    /// established before reading ClientHello and is not renewed when a peer
+    /// trickles records. Null preserves the existing blocking behavior.
+    handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
     /// Server-preference ALPN list. A configured list is mandatory: the
     /// handshake fails when the client offers none of its protocols.
@@ -84,6 +89,10 @@ pub fn perform(
     options: Options,
 ) Error!TrafficKeys {
     try options.identity.validate();
+    const deadline = try handshake_deadline.fromTimeout(
+        io,
+        options.handshake_timeout,
+    );
 
     var client_hello_storage: std.ArrayList(u8) = .empty;
     defer client_hello_storage.deinit(allocator);
@@ -93,6 +102,7 @@ pub fn perform(
         stream,
         &client_hello_storage,
         options.max_client_hello_size,
+        deadline,
     );
     const client_hello = client_hello_storage.items;
     const parsed = try vail.tls.client_hello.parse(client_hello);
@@ -180,6 +190,7 @@ pub fn perform(
             max_client_finished_len
         else
             options.max_client_handshake_size,
+        deadline,
     );
     var peer_certificate_chain: ?PeerCertificateChain = null;
     errdefer if (peer_certificate_chain) |*chain| chain.deinit();
@@ -238,14 +249,19 @@ fn readCleartextHandshake(
     stream: net.Stream,
     message: *std.ArrayList(u8),
     max_message_size: usize,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     var encoded: [record_io.max_record_len]u8 = undefined;
     while (true) {
-        const record_bytes = try record_io.readRecord(
-            io,
-            stream,
-            &encoded,
-        );
+        const record_bytes = if (deadline) |absolute|
+            try record_io.readRecordWithDeadline(
+                io,
+                stream,
+                &encoded,
+                absolute,
+            )
+        else
+            try record_io.readRecord(io, stream, &encoded);
         if (record_bytes[0] != tls_record.content_type_handshake) {
             return error.ExpectedHandshakeRecord;
         }
@@ -271,15 +287,20 @@ fn readEncryptedHandshakeFlight(
     keys: *const tls_record.Keys,
     message: *std.ArrayList(u8),
     max_message_size: usize,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     var encoded: [record_io.max_record_len]u8 = undefined;
     var sequence: u64 = 0;
     while (true) {
-        const record_bytes = try record_io.readRecord(
-            io,
-            stream,
-            &encoded,
-        );
+        const record_bytes = if (deadline) |absolute|
+            try record_io.readRecordWithDeadline(
+                io,
+                stream,
+                &encoded,
+                absolute,
+            )
+        else
+            try record_io.readRecord(io, stream, &encoded);
         // TLS 1.3 compatibility mode permits dummy cleartext CCS records
         // between the encrypted server and client flights.
         if (record_bytes[0] == 0x14) {

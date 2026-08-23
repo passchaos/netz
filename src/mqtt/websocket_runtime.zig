@@ -117,6 +117,7 @@ pub const TlsServer = struct {
                     .cipher_suites = options.cipher_suites,
                     .max_client_hello_size = options.max_client_hello_size,
                     .max_client_handshake_size = options.max_client_handshake_size,
+                    .tls_handshake_timeout = options.tls_handshake_timeout,
                     .client_auth = options.client_auth,
                     .tcp_nodelay = options.tcp_nodelay,
                 },
@@ -209,6 +210,8 @@ pub const TlsListenOptions = struct {
         &@import("vail").tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
+    /// Absolute TLS handshake receive budget before the HTTP Upgrade budget.
+    tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?@import("vail").tls.client_auth.ServerPolicy = null,
     tcp_nodelay: bool = true,
     /// Optional exact Origin allowlist for browser MQTT clients.
@@ -345,6 +348,8 @@ pub const ConnectOptions = struct {
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
+    /// Absolute receive budget for the vail WSS client handshake.
+    tls_handshake_timeout: ?std.Io.Duration = null,
 };
 
 fn websocketLimits(
@@ -377,6 +382,7 @@ fn websocketConnectOptions(
                 .server_verifier = options.server_verifier,
                 .cipher_suites = options.cipher_suites,
                 .max_server_handshake_size = options.max_server_handshake_size,
+                .handshake_timeout = options.tls_handshake_timeout,
             }
         else
             null,

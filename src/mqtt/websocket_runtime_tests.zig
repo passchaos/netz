@@ -758,6 +758,118 @@ test "MQTT WebSocket server enforces Origin allowlist" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WSS listener bounds an idle TLS handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try mqtt_ws.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .tls_handshake_timeout = .fromMilliseconds(75),
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            accepted.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
+test "MQTT vail WSS client bounds an idle server handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const key_pair = try tls_testing.serverKeyPair();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *std.Io.net.Server,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(
+                self.io,
+                .fromMilliseconds(250),
+                .awake,
+            ) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://127.0.0.1:{d}/mqtt",
+        .{listener.socket.address.ip4.port},
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_ws.Client.connectUri(allocator, io, uri, .{
+            .mqtt = .{ .client_id = "wss-timeout" },
+            // Supplying an identity deliberately selects the vail path.
+            .client_identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .server_verifier = .{},
+            .tls_handshake_timeout = .fromMilliseconds(75),
+        }),
+    );
+    thread.join();
+    joined = true;
+}
+
 fn localCaBundle(
     allocator: std.mem.Allocator,
     io: std.Io,

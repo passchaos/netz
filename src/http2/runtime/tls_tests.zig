@@ -299,3 +299,102 @@ test "HTTP/2 TLS runtime exposes a required authenticated client chain" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "HTTP/2 TLS listener bounds an idle transport handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .tls_handshake_timeout = .fromMilliseconds(75),
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
+test "HTTP/2 TLS client bounds an idle server handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *std.Io.net.Server,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(
+                self.io,
+                .fromMilliseconds(250),
+                .awake,
+            ) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectTlsHost(
+            allocator,
+            io,
+            "127.0.0.1",
+            listener.socket.address.ip4.port,
+            .{},
+            .{
+                .server_verifier = .{},
+                .tls_handshake_timeout = .fromMilliseconds(75),
+            },
+        ),
+    );
+    thread.join();
+    joined = true;
+}

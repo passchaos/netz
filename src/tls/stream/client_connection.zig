@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const vail = @import("vail");
+const handshake_deadline = @import("handshake_deadline.zig");
 const record_io = @import("record_io.zig");
 const record_stream = @import("record_stream.zig");
 
@@ -47,6 +48,9 @@ pub const Options = struct {
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
+    /// Optional absolute receive budget for the complete TLS handshake. It is
+    /// not renewed between ServerHello and the encrypted server flight.
+    handshake_timeout: ?std.Io.Duration = null,
 };
 
 pub const CaBundle = struct {
@@ -70,6 +74,7 @@ pub const VerifiedOptions = struct {
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
+    handshake_timeout: ?std.Io.Duration = null,
 };
 
 pub const Connection = struct {
@@ -86,6 +91,10 @@ pub const Connection = struct {
         options: Options,
     ) Error!*Connection {
         if (options.client_identity) |identity| try identity.validate();
+        const deadline = try handshake_deadline.fromTimeout(
+            io,
+            options.handshake_timeout,
+        );
 
         var client_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_random);
@@ -135,6 +144,7 @@ pub const Connection = struct {
             stream,
             &server_hello,
             options.max_server_handshake_size,
+            deadline,
         );
         const parsed_server_hello =
             try vail.tls.server_hello.parseServerHello(
@@ -187,6 +197,7 @@ pub const Connection = struct {
             &handshake_read_keys,
             &server_flight,
             options.max_server_handshake_size,
+            deadline,
         );
 
         var client_flight: std.ArrayList(u8) = .empty;
@@ -296,6 +307,7 @@ pub const Connection = struct {
             .alpn_protocols = options.alpn_protocols,
             .cipher_suites = options.cipher_suites,
             .max_server_handshake_size = options.max_server_handshake_size,
+            .handshake_timeout = options.handshake_timeout,
         });
     }
 
@@ -386,10 +398,19 @@ fn readCleartextHandshake(
     stream: net.Stream,
     message: *std.ArrayList(u8),
     limit: usize,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     var encoded: [record_io.max_record_len]u8 = undefined;
     while (true) {
-        const record = try record_io.readRecord(io, stream, &encoded);
+        const record = if (deadline) |absolute|
+            try record_io.readRecordWithDeadline(
+                io,
+                stream,
+                &encoded,
+                absolute,
+            )
+        else
+            try record_io.readRecord(io, stream, &encoded);
         if (record[0] != tls_record.content_type_handshake) {
             return error.InvalidServerFlight;
         }
@@ -415,11 +436,20 @@ fn readEncryptedServerFlight(
     keys: *const tls_record.Keys,
     flight: *std.ArrayList(u8),
     limit: usize,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     var encoded: [record_io.max_record_len]u8 = undefined;
     var sequence: u64 = 0;
     while (true) {
-        const record = try record_io.readRecord(io, stream, &encoded);
+        const record = if (deadline) |absolute|
+            try record_io.readRecordWithDeadline(
+                io,
+                stream,
+                &encoded,
+                absolute,
+            )
+        else
+            try record_io.readRecord(io, stream, &encoded);
         if (record[0] == 0x14) {
             if (!std.mem.eql(
                 u8,

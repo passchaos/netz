@@ -49,6 +49,7 @@ pub const Server = struct {
                 .cipher_suites = options.cipher_suites,
                 .max_client_hello_size = options.max_client_hello_size,
                 .max_client_handshake_size = options.max_client_handshake_size,
+                .handshake_timeout = options.tls_handshake_timeout,
                 .client_auth = options.client_auth,
             },
             .tcp_nodelay = options.tcp_nodelay,
@@ -147,6 +148,8 @@ pub const ListenOptions = struct {
         &vail.tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
+    /// Absolute receive budget for TLS setup before MQTT CONNECT parsing.
+    tls_handshake_timeout: ?std.Io.Duration = null,
     /// Request and verify a TLS 1.3 client certificate. `required` is the
     /// default within the policy; use `.optional` to retain anonymous clients.
     client_auth: ?ClientAuthPolicy = null,
@@ -367,6 +370,9 @@ pub const ConnectOptions = struct {
     cipher_suites: []const CipherSuite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
+    /// Absolute receive budget for the vail client handshake. The standard
+    /// TLS path continues to use its own transport behavior.
+    tls_handshake_timeout: ?std.Io.Duration = null,
     /// MQTT control packets are small latency-sensitive records by default.
     /// Set false to retain Nagle when batching throughput matters more.
     tcp_nodelay: bool = true,
@@ -443,6 +449,7 @@ fn connectVailStreamAttempt(
             .client_identity = client_identity,
             .cipher_suites = options.cipher_suites,
             .max_server_handshake_size = options.max_server_handshake_size,
+            .handshake_timeout = options.tls_handshake_timeout,
         },
     );
     stream_owned = false;

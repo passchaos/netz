@@ -26,6 +26,8 @@ pub const Options = struct {
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
+    /// Absolute receive budget spanning all server handshake flights.
+    handshake_timeout: ?std.Io.Duration = null,
 };
 
 pub fn init(
@@ -51,6 +53,7 @@ pub fn init(
             .client_identity = identity_options.identity,
             .cipher_suites = identity_options.cipher_suites,
             .max_server_handshake_size = identity_options.max_server_handshake_size,
+            .handshake_timeout = identity_options.handshake_timeout,
         },
     );
 }

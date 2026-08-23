@@ -14,8 +14,10 @@ pub const Error = @import("client_connection.zig").Error ||
     @import("server_connection.zig").Error;
 
 test {
+    _ = @import("handshake_deadline.zig");
     _ = @import("record_io.zig");
     _ = @import("record_stream.zig");
     _ = @import("server_handshake.zig");
     _ = @import("alpn_tests.zig");
+    _ = @import("handshake_timeout_tests.zig");
 }
