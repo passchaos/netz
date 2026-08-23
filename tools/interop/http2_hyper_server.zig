@@ -27,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
         .max_body_bytes = 256 * 1024,
         .initial_window_size = constrained_stream_window,
         .initial_connection_window_size = 65_535,
+        .handshake_timeout = .fromSeconds(5),
     };
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(

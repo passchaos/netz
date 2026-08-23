@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
             .max_frame_payload = 4096,
             .max_body_bytes = 4096,
             .enable_connect_protocol = true,
+            .handshake_timeout = .fromSeconds(5),
         },
     );
     defer h2.close();

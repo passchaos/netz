@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
         .max_frame_payload = 16 * 1024,
         .max_body_bytes = 1024 * 1024,
         .max_concurrent_streams = 128,
+        .handshake_timeout = .fromSeconds(5),
     };
     if (use_tls) {
         var certificate_der: [netz.tls.testing.certificate_der_len]u8 =

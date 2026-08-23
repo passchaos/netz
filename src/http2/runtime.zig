@@ -175,6 +175,20 @@ fn tcpTransport(io: std.Io, stream: net.Stream) RuntimeTransport {
     return .{ .tcp = .{ .io = io, .stream = stream } };
 }
 
+fn connectionHandshakeDeadline(
+    transport: RuntimeTransport,
+    timeout: ?std.Io.Duration,
+) Error!?std.Io.Clock.Timestamp {
+    const duration = timeout orelse return null;
+    if (duration.nanoseconds <= 0) return error.Timeout;
+    const io = switch (transport) {
+        .tcp => |tcp| tcp.io,
+        .tls_client => |connection| connection.io,
+        .tls_server => |connection| connection.io,
+    };
+    return .fromNow(io, .{ .raw = duration, .clock = .awake });
+}
+
 pub const Limits = struct {
     /// Local allocation/test ceiling for any inbound or outbound frame payload.
     /// `max_frame_size` below is the HTTP/2 SETTINGS_MAX_FRAME_SIZE value that
@@ -210,6 +224,12 @@ pub const Limits = struct {
     /// bounded by the inbound frame-size limits. Reaching this cap fails the
     /// probe without discarding any frame already removed from the transport.
     max_pending_ping_frames: usize = 256,
+    /// Optional absolute budget for the HTTP/2 connection preface and initial
+    /// SETTINGS exchange after TCP/TLS setup. Interleaved permitted control
+    /// frames do not renew this deadline. For h2c Upgrade, the same duration
+    /// first bounds the HTTP/1 request/response head and a fresh budget starts
+    /// after the 101 response for the HTTP/2 bootstrap exchange.
+    handshake_timeout: ?std.Io.Duration = null,
     /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
     /// default because peers may start tunnelling arbitrary bytes on streams
     /// once extended CONNECT is accepted.
@@ -316,6 +336,8 @@ pub const Server = struct {
         if (self.limits.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
+        // The transport handshake owns cleanup from this point, including
+        // failures before it can return a Connection.
         stream_owned = false;
         return acceptConnectionTransport(
             self.allocator,
@@ -352,11 +374,25 @@ pub const Server = struct {
             .request_method = request.request.method,
         });
 
+        const transport = tcpTransport(self.io, stream);
+        // Parsing the HTTP/1 request has its own bounded head phase. Once the
+        // protocol switch is committed, one new deadline spans every byte of
+        // the client preface, its repeated SETTINGS, and its server-SETTINGS
+        // acknowledgement. Partial frames cannot turn this into an idle timer.
+        const deadline = try connectionHandshakeDeadline(
+            transport,
+            self.limits.handshake_timeout,
+        );
         var preface_buf: [http2.connection_preface.len]u8 = undefined;
-        try readExact(self.io, stream, &preface_buf);
+        try readExactTransportWithDeadline(transport, &preface_buf, deadline);
         try http2.validateClientPreface(&preface_buf);
 
-        var client_settings = try readFrame(self.allocator, self.io, stream, self.limits);
+        var client_settings = try readFrameTransportWithDeadline(
+            self.allocator,
+            transport,
+            self.limits,
+            deadline,
+        );
         defer client_settings.deinit(self.allocator);
         if (client_settings.frame.header.frame_type != .settings or (client_settings.frame.header.flags & flag_ack) != 0) {
             return error.UnexpectedFrame;
@@ -365,14 +401,25 @@ pub const Server = struct {
         const peer_settings = try http2.parseSettings(self.allocator, client_settings.frame.payload);
         defer self.allocator.free(peer_settings);
 
-        try writeInitialSettings(self.allocator, self.io, stream, self.limits, .server);
-        try writeInitialConnectionWindow(
+        try writeInitialSettingsTransport(
             self.allocator,
-            self.io,
-            stream,
+            transport,
+            self.limits,
+            .server,
+        );
+        try writeInitialConnectionWindowTransport(
+            self.allocator,
+            transport,
             self.limits,
         );
-        try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
+        try writeFrameTransport(
+            self.allocator,
+            transport,
+            .settings,
+            flag_ack,
+            0,
+            &.{},
+        );
 
         // The HTTP/1 Upgrade request already occupies stream 1, so the next
         // frame the server sees after its SETTINGS is normally the client's
@@ -380,7 +427,12 @@ pub const Server = struct {
         // applications can immediately answer the upgraded request without
         // leaving unread control bytes that would make a short-lived test/server
         // close look like a TCP reset to the client.
-        var client_ack = try readFrame(self.allocator, self.io, stream, self.limits);
+        var client_ack = try readFrameTransportWithDeadline(
+            self.allocator,
+            transport,
+            self.limits,
+            deadline,
+        );
         defer client_ack.deinit(self.allocator);
         if (client_ack.frame.header.frame_type != .settings or (client_ack.frame.header.flags & flag_ack) == 0) {
             return error.UnexpectedFrame;
@@ -390,7 +442,7 @@ pub const Server = struct {
             .io = self.io,
             .allocator = self.allocator,
             .stream = stream,
-            .transport = tcpTransport(self.io, stream),
+            .transport = transport,
             .role = .server,
             .limits = self.limits,
             .last_peer_frame_at = std.Io.Clock.awake.now(self.io),
@@ -461,8 +513,20 @@ fn acceptConnectionTransport(
     transport: RuntimeTransport,
     limits: Limits,
 ) Error!Connection {
+    // Ownership enters with the transport so failures before Connection is
+    // constructed (notably a preface timeout) still close TCP or TLS state.
+    var transport_owned = true;
+    errdefer if (transport_owned) transport.close();
+    const deadline = try connectionHandshakeDeadline(
+        transport,
+        limits.handshake_timeout,
+    );
     var preface_buf: [http2.connection_preface.len]u8 = undefined;
-    try readExactTransport(transport, &preface_buf);
+    try readExactTransportWithDeadline(
+        transport,
+        &preface_buf,
+        deadline,
+    );
     http2.validateClientPreface(&preface_buf) catch |err| {
         writeConnectionErrorGoAwayTransport(
             allocator,
@@ -473,7 +537,12 @@ fn acceptConnectionTransport(
         return err;
     };
 
-    var client_settings = try readFrameTransport(allocator, transport, limits);
+    var client_settings = try readFrameTransportWithDeadline(
+        allocator,
+        transport,
+        limits,
+        deadline,
+    );
     defer client_settings.deinit(allocator);
     if (client_settings.frame.header.frame_type != .settings or
         (client_settings.frame.header.flags & flag_ack) != 0)
@@ -507,6 +576,7 @@ fn acceptConnectionTransport(
         .last_peer_frame_at = std.Io.Clock.awake.now(io),
         .awaiting_settings_ack = true,
     };
+    transport_owned = false;
     errdefer connection.close();
     connection.applyLocalLimits();
     try connection.applySettings(peer_settings);
@@ -603,6 +673,8 @@ pub const TlsServer = struct {
         {
             return error.InvalidAlpn;
         }
+        // acceptConnectionTransport owns transport cleanup from this point,
+        // including failures before the HTTP/2 Connection exists.
         tls_owned = false;
         return acceptConnectionTransport(
             self.allocator,
@@ -744,6 +816,7 @@ pub const Client = struct {
             .{ host, port },
         );
         errdefer allocator.free(owned_host);
+        // connectTransport owns the TLS connection on every return path.
         tls_owned = false;
         var connection = try connectTransport(
             allocator,
@@ -771,8 +844,10 @@ pub const Client = struct {
         const stream = try address.connect(io, .{ .mode = .stream });
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
-        var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, request_options);
+        // connectStreamUpgrade takes ownership at entry and closes the stream
+        // through its partially built Connection on every failure.
         stream_owned = false;
+        var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, request_options);
         defer upgraded.deinit(allocator);
         return upgraded.connection.readResponse(
             1,
@@ -804,8 +879,9 @@ pub const Client = struct {
         options.path = target;
         if (options.authority == null) options.authority = endpoint.authority;
         if (options.scheme == null) options.scheme = uri.scheme;
-        var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, options);
+        // Transfer before the call so its error cleanup is the sole owner.
         stream_owned = false;
+        var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, options);
         defer upgraded.deinit(allocator);
         return upgraded.connection.readResponse(
             1,
@@ -817,8 +893,9 @@ pub const Client = struct {
 
     /// Upgrade an existing cleartext HTTP/1.1 stream to HTTP/2 and return the
     /// established connection plus the consumed 101 response metadata.  The
-    /// caller owns both and should call `H2cUpgradeResult.deinit` on error paths
-    /// or close/deinit each field manually after taking ownership.
+    /// stream transfers to this function. The caller owns both returned values
+    /// and should call `H2cUpgradeResult.deinit` or close/deinit each field
+    /// manually after taking ownership.
     pub fn connectStreamUpgrade(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -826,10 +903,9 @@ pub const Client = struct {
         limits: Limits,
         request_options: RequestOptions,
     ) Error!H2cUpgradeResult {
-        try validateLocalLimits(limits);
-        if (limits.tcp_nodelay) {
-            try socket_options.setTcpNoDelay(stream);
-        }
+        // Unlike connectStream, this public entry point has no wrapper that
+        // retains ownership. Constructing Connection immediately makes its
+        // errdefer the single close path for validation and handshake errors.
         var connection = Connection{
             .io = io,
             .allocator = allocator,
@@ -842,8 +918,12 @@ pub const Client = struct {
             .next_client_stream_id = 3,
             .default_scheme = "http",
         };
-        connection.applyLocalLimits();
         errdefer connection.close();
+        try validateLocalLimits(limits);
+        if (limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
+        connection.applyLocalLimits();
 
         const h2c_settings = try settingsForLimits(limits, .client);
         var settings_payload_buf: [max_settings_payload_len]u8 = undefined;
@@ -885,20 +965,26 @@ pub const Client = struct {
         if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_header, " \t"), "h2c")) return error.InvalidResponse;
         if (!containsHttpToken(connection_header, "upgrade")) return error.InvalidResponse;
 
-        try writeAll(io, stream, http2.connection_preface);
-        try writeFrame(allocator, io, stream, .settings, 0, 0, settings_payload);
-        var server_settings = try readFrame(allocator, io, stream, limits);
-        defer server_settings.deinit(allocator);
-        if (server_settings.frame.header.frame_type != .settings or (server_settings.frame.header.flags & flag_ack) != 0) return error.UnexpectedFrame;
-        const settings = try http2.parseSettings(allocator, server_settings.frame.payload);
-        defer allocator.free(settings);
-        try connection.applySettings(settings);
-        try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
-        // The Upgrade server waits specifically for this SETTINGS ACK before
-        // returning the connection to the application. Send the optional
-        // connection WINDOW_UPDATE afterward so it remains the next ordinary
-        // control frame consumed by the established runtime.
-        try writeInitialConnectionWindow(allocator, io, stream, limits);
+        const transport = connection.transportForIo();
+        // The 101 response head is bounded independently by limitsToHttp1.
+        // Start the binary-protocol budget only after the Upgrade is validated
+        // so a prompt HTTP/1 peer still receives the full HTTP/2 bootstrap
+        // allowance.
+        const deadline = try connectionHandshakeDeadline(
+            transport,
+            limits.handshake_timeout,
+        );
+        try transport.writeAll(http2.connection_preface);
+        try writeFrameTransport(
+            allocator,
+            transport,
+            .settings,
+            0,
+            0,
+            settings_payload,
+        );
+        try finishClientSettingsHandshake(&connection, deadline);
+        try writeInitialConnectionWindowTransport(allocator, transport, limits);
         return .{ .connection = connection, .upgrade_response = upgrade };
     }
 
@@ -925,12 +1011,16 @@ pub const Client = struct {
         transport: RuntimeTransport,
         limits: Limits,
     ) Error!Connection {
+        var transport_owned = true;
+        errdefer if (transport_owned) transport.close();
+        const deadline = try connectionHandshakeDeadline(
+            transport,
+            limits.handshake_timeout,
+        );
         try transport.writeAll(http2.connection_preface);
         try writeInitialSettingsTransport(allocator, transport, limits, .client);
         try writeInitialConnectionWindowTransport(allocator, transport, limits);
 
-        var saw_server_settings = false;
-        var saw_settings_ack = false;
         var connection = Connection{
             .io = io,
             .allocator = allocator,
@@ -941,11 +1031,27 @@ pub const Client = struct {
             .last_peer_frame_at = std.Io.Clock.awake.now(io),
             .awaiting_settings_ack = true,
         };
+        transport_owned = false;
         connection.applyLocalLimits();
         errdefer connection.close();
+        try finishClientSettingsHandshake(&connection, deadline);
+        return connection;
+    }
+
+    fn finishClientSettingsHandshake(
+        connection: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        var saw_server_settings = false;
+        var saw_settings_ack = false;
         while (!saw_server_settings or !saw_settings_ack) {
-            var frame = try readFrameTransport(allocator, transport, limits);
-            defer frame.deinit(allocator);
+            var frame = try readFrameTransportWithDeadline(
+                connection.allocator,
+                connection.transportForIo(),
+                connection.limits,
+                deadline,
+            );
+            defer frame.deinit(connection.allocator);
             if (frame.frame.header.frame_type != .settings) {
                 if (try connection.handleConnectionOrGoAwayFrame(frame.frame)) continue;
                 return error.UnexpectedFrame;
@@ -955,13 +1061,22 @@ pub const Client = struct {
                 connection.awaiting_settings_ack = false;
             } else {
                 saw_server_settings = true;
-                const settings = try http2.parseSettings(allocator, frame.frame.payload);
-                defer allocator.free(settings);
+                const settings = try http2.parseSettings(
+                    connection.allocator,
+                    frame.frame.payload,
+                );
+                defer connection.allocator.free(settings);
                 try connection.applySettings(settings);
-                try writeFrameTransport(allocator, transport, .settings, flag_ack, 0, &.{});
+                try writeFrameTransport(
+                    connection.allocator,
+                    connection.transportForIo(),
+                    .settings,
+                    flag_ack,
+                    0,
+                    &.{},
+                );
             }
         }
-        return connection;
     }
 
     pub fn requestUri(
@@ -8140,8 +8255,26 @@ fn readFrameTransport(
     transport: RuntimeTransport,
     limits: Limits,
 ) Error!OwnedFrame {
+    return readFrameTransportWithDeadline(
+        allocator,
+        transport,
+        limits,
+        null,
+    );
+}
+
+fn readFrameTransportWithDeadline(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!OwnedFrame {
     var header_buf: [@intCast(http2.FrameHeader.encoded_len)]u8 = undefined;
-    try readExactTransport(transport, &header_buf);
+    try readExactTransportWithDeadline(
+        transport,
+        &header_buf,
+        deadline,
+    );
     const header = try http2.FrameHeader.parse(&header_buf);
     const payload_len: usize = header.length;
     // SETTINGS_MAX_FRAME_SIZE is the receive ceiling we advertise to the peer.
@@ -8153,7 +8286,11 @@ fn readFrameTransport(
     const bytes = try allocator.alloc(u8, header_buf.len + payload_len);
     errdefer allocator.free(bytes);
     @memcpy(bytes[0..header_buf.len], &header_buf);
-    try readExactTransport(transport, bytes[header_buf.len..]);
+    try readExactTransportWithDeadline(
+        transport,
+        bytes[header_buf.len..],
+        deadline,
+    );
     const frame = try http2.Frame.parse(bytes);
     try validateFrameEnvelope(frame);
     return .{ .bytes = bytes, .frame = frame };
@@ -9429,6 +9566,8 @@ fn limitsToHttp1(limits: Limits) http1_runtime.Limits {
     return .{
         .max_head_bytes = limits.max_header_list_size,
         .max_body_bytes = limits.max_body_bytes,
+        .request_head_timeout = limits.handshake_timeout,
+        .response_head_timeout = limits.handshake_timeout,
     };
 }
 
@@ -9461,6 +9600,22 @@ fn readExactTransport(
     var offset: usize = 0;
     while (offset < buffer.len) {
         const n = try transport.read(buffer[offset..]);
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+}
+
+fn readExactTransportWithDeadline(
+    transport: RuntimeTransport,
+    buffer: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const n = if (deadline) |absolute|
+            try transport.readWithDeadline(buffer[offset..], absolute)
+        else
+            try transport.read(buffer[offset..]);
         if (n == 0) return error.ConnectionClosed;
         offset += n;
     }
@@ -10182,6 +10337,7 @@ test "HTTP/2 h2c upgrade request receives stream one response" {
             defer server_settings_payload.deinit(shared.allocator);
             try http2.writeSettings(&server_settings_payload, shared.allocator, &.{.{ .id = .max_frame_size, .value = 16_384 }});
             try writeFrame(shared.allocator, shared.io, stream, .settings, 0, 0, server_settings_payload.items);
+            try writeFrame(shared.allocator, shared.io, stream, .settings, flag_ack, 0, &.{});
             var client_ack = try readFrame(shared.allocator, shared.io, stream, .{ .max_frame_payload = 4096 });
             defer client_ack.deinit(shared.allocator);
             try std.testing.expectEqual(http2.FrameType.settings, client_ack.frame.header.frame_type);
@@ -16680,4 +16836,5 @@ test {
     _ = @import("runtime/response_writer_tests.zig");
     _ = @import("runtime/request_writer_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
+    _ = @import("runtime/handshake_timeout_tests.zig");
 }
