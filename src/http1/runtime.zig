@@ -31,6 +31,7 @@ pub const Error = http1.Error || tls_stream.Error || error{
     ConnectionBusy,
     ConnectionUnusable,
     InvalidWriterState,
+    TimedReadUnsupported,
     TooManyInformationalResponses,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
 
@@ -41,6 +42,11 @@ fn setTcpNoDelay(stream: net.Stream) Error!void {
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
+    /// Optional absolute budget for each request head. The deadline begins
+    /// when a server read first needs transport bytes and is not extended by
+    /// partial progress, preventing Slowloris-style trickle attacks. Message
+    /// bodies and response reads are intentionally outside this deadline.
+    request_head_timeout: ?std.Io.Duration = null,
     /// Maximum interim responses accepted before one final response. This
     /// bounds callback work even when a peer emits an endless 1xx sequence.
     max_informational_responses: usize = 16,
@@ -615,6 +621,40 @@ const RuntimeTransport = union(enum) {
         };
     }
 
+    fn readWithDeadline(
+        self: RuntimeTransport,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        return switch (self) {
+            .tcp => |tcp| stream_io.readSomeWithDeadline(
+                tcp.io,
+                tcp.stream,
+                buffer,
+                deadline,
+            ) catch |err| return mapHttpTimedReadError(err),
+            .tls_client => |conn| conn.readWithDeadline(buffer, deadline),
+            .tls_server => |conn| conn.readWithDeadline(buffer, deadline),
+            // The raw io_uring adapter currently has no linked-timeout read.
+            // Reject an explicitly configured deadline instead of silently
+            // weakening the server's admission policy.
+            .linux_io_uring => error.TimedReadUnsupported,
+        };
+    }
+
+    fn deadlineFromNow(
+        self: RuntimeTransport,
+        duration: std.Io.Duration,
+    ) Error!std.Io.Clock.Timestamp {
+        const io = switch (self) {
+            .tcp => |tcp| tcp.io,
+            .tls_client => |conn| conn.io,
+            .tls_server => |conn| conn.io,
+            .linux_io_uring => return error.TimedReadUnsupported,
+        };
+        return .fromNow(io, .{ .raw = duration, .clock = .awake });
+    }
+
     fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
@@ -669,6 +709,22 @@ const RuntimeTransport = union(enum) {
         };
     }
 };
+
+fn mapHttpTimedReadError(err: stream_io.TimedReadError) Error {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.Canceled => error.Canceled,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.NetworkDown => error.NetworkDown,
+        error.SocketUnconnected => error.SocketUnconnected,
+        error.SystemResources,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+        => error.SystemResources,
+        error.Timeout => error.Timeout,
+        else => error.Unexpected,
+    };
+}
 
 const WriteScratch = runtime_write.Scratch;
 const StreamingBodyWriter = body_writer.Writer(Error);
@@ -947,7 +1003,17 @@ pub const LinuxIoUringConnection = if (builtin.os.tag == .linux) struct {
     }
 
     pub fn readRequest(self: *LinuxIoUringConnection, options: http1.ParseOptions) Error!OwnedRequest {
-        return readRequestFromTransportBuffered(self.allocator, .{ .linux_io_uring = self.stream }, self.limits, options, &self.inbuf);
+        if (self.limits.request_head_timeout != null) {
+            return error.TimedReadUnsupported;
+        }
+        return readRequestFromTransportBuffered(
+            self.allocator,
+            .{ .linux_io_uring = self.stream },
+            self.limits,
+            options,
+            &self.inbuf,
+            null,
+        );
     }
 
     pub fn writeResponse(self: *LinuxIoUringConnection, response: ResponseOptions) Error!void {
@@ -1727,6 +1793,7 @@ pub const Connection = struct {
     write_scratch: WriteScratch = .{},
     writer_state: body_writer.State = .{},
     tls_server_conn: ?*tls_stream.ServerConnection = null,
+    request_head_deadline: ?std.Io.Clock.Timestamp = null,
 
     fn transport(self: *Connection) RuntimeTransport {
         if (self.tls_server_conn) |connection| {
@@ -1757,13 +1824,19 @@ pub const Connection = struct {
 
     pub fn readRequest(self: *Connection, options: http1.ParseOptions) Error!OwnedRequest {
         try self.writer_state.ensureReadable();
+        try self.beginRequestHeadDeadline();
+        defer self.request_head_deadline = null;
         return readRequestFromTransportBuffered(
             self.allocator,
             self.transport(),
             self.limits,
             options,
             &self.inbuf,
-        );
+            self.request_head_deadline,
+        ) catch |read_err| {
+            if (read_err == error.Timeout) self.writer_state.phase = .unusable;
+            return read_err;
+        };
     }
 
     /// Read a request while delivering body bytes without aggregation.
@@ -1786,10 +1859,16 @@ pub const Connection = struct {
         comptime consume: anytype,
     ) !StreamingRequest {
         try self.writer_state.beginRead();
+        self.beginRequestHeadDeadline() catch |err| {
+            self.writer_state.finishRead();
+            return err;
+        };
+        defer self.request_head_deadline = null;
         var reader = StreamingBodyReader{
             .allocator = self.allocator,
             .context = self,
             .read_some = connectionReadSome,
+            .read_head_some = connectionReadHeadSome,
             .before_request_body = connectionMaybeWriteContinue,
             .inbuf = &self.inbuf,
             .limits = .{
@@ -1811,6 +1890,22 @@ pub const Connection = struct {
         return streamingRequestFromReader(result);
     }
 
+    fn beginRequestHeadDeadline(self: *Connection) Error!void {
+        std.debug.assert(self.request_head_deadline == null);
+        // Parsing a head already carried in the previous read must not fail
+        // merely because a configured timeout is zero or has no backend.
+        // The protection starts only when this request needs socket input.
+        if (try findHttpHeadEndWithinLimit(
+            self.inbuf.items,
+            self.limits.max_head_bytes,
+        ) != null) return;
+        const timeout = self.limits.request_head_timeout orelse return;
+        self.request_head_deadline = try requestHeadDeadline(
+            self.transport(),
+            timeout,
+        );
+    }
+
     /// Read and parse an exact batch of pipelined request heads without
     /// per-request allocation.
     ///
@@ -1826,6 +1921,7 @@ pub const Connection = struct {
         options: http1.ParseOptions,
     ) Error!usize {
         try self.writer_state.ensureReadable();
+        defer self.request_head_deadline = null;
         if (heads.len == 0 or heads.len != bodies.len) {
             return error.InvalidResponse;
         }
@@ -1854,6 +1950,7 @@ pub const Connection = struct {
             max_batch_head_bytes,
             max_batch_body_bytes,
         ) catch return error.BodyTooLarge;
+        var timed_head_index: ?usize = null;
 
         while (true) {
             var offset: usize = 0;
@@ -1866,6 +1963,16 @@ pub const Connection = struct {
                     options,
                 ) catch |err| switch (err) {
                     error.BufferTooShort => {
+                        if (self.limits.request_head_timeout != null and
+                            timed_head_index != index)
+                        {
+                            self.request_head_deadline =
+                                try requestHeadDeadline(
+                                    self.transport(),
+                                    self.limits.request_head_timeout.?,
+                                );
+                            timed_head_index = index;
+                        }
                         // A missing terminator must still respect the limit of
                         // this request head, rather than consuming the aggregate
                         // allowance of all later pipeline entries.
@@ -1878,6 +1985,13 @@ pub const Connection = struct {
                     },
                     else => return err,
                 };
+                // Header completion ends this request's budget even when its
+                // body is incomplete. A later pipelined head receives a fresh
+                // budget when parsing first needs more transport bytes.
+                if (timed_head_index == index) {
+                    self.request_head_deadline = null;
+                    timed_head_index = null;
+                }
                 if (head.head_len > self.limits.max_head_bytes) {
                     return error.HeadersTooLarge;
                 }
@@ -1903,7 +2017,10 @@ pub const Connection = struct {
                 body.* = self.inbuf.items[offset + head.head_len .. next_offset];
                 offset = next_offset;
             }
-            if (complete) return offset;
+            if (complete) {
+                self.request_head_deadline = null;
+                return offset;
+            }
 
             // Do not over-read merely to discover that the batch cannot fit.
             // A complete batch may coexist with a larger already-buffered
@@ -1914,11 +2031,15 @@ pub const Connection = struct {
             }
             var read_buffer: [16 * 1024]u8 = undefined;
             const remaining = max_batch_bytes - self.inbuf.items.len;
-            const count = try readSome(
-                self.io,
-                self.stream,
-                read_buffer[0..@min(remaining, read_buffer.len)],
-            );
+            const destination =
+                read_buffer[0..@min(remaining, read_buffer.len)];
+            const count = connectionReadHeadSome(self, destination) catch |read_err|
+                {
+                    if (read_err == error.Timeout) {
+                        self.writer_state.phase = .unusable;
+                    }
+                    return read_err;
+                };
             if (count == 0) return error.ConnectionClosed;
             try self.inbuf.appendSlice(
                 self.allocator,
@@ -2469,6 +2590,24 @@ fn connectionReadSome(
     return connection.transport().read(buffer);
 }
 
+fn connectionReadHeadSome(
+    context: ?*anyopaque,
+    buffer: []u8,
+) Error!usize {
+    const connection: *Connection = @ptrCast(@alignCast(context.?));
+    const deadline = connection.request_head_deadline orelse
+        return connection.transport().read(buffer);
+    return connection.transport().readWithDeadline(buffer, deadline);
+}
+
+fn requestHeadDeadline(
+    transport: RuntimeTransport,
+    timeout: std.Io.Duration,
+) Error!std.Io.Clock.Timestamp {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return transport.deadlineFromNow(timeout);
+}
+
 fn connectionMaybeWriteContinue(
     context: ?*anyopaque,
     head: []const u8,
@@ -2562,8 +2701,19 @@ fn readRequestFromTransportBuffered(
     limits: Limits,
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
+    head_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedRequest {
-    const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, options, inbuf, null, true, false);
+    const bytes = try readMessageBytesBufferedWithContext(
+        allocator,
+        transport,
+        limits,
+        options,
+        inbuf,
+        null,
+        true,
+        false,
+        head_deadline,
+    );
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -3079,15 +3229,27 @@ fn requestOptionsKeepAlive(request: RequestOptions) bool {
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, null, false, true);
+    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, null, false, true, null);
 }
 
 fn readMessageBytesForResponse(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, request_method: http1.Method) Error![]u8 {
-    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, request_method, false, true);
+    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, request_method, false, true, null);
 }
 
 fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, null, true, false);
+    const transport = RuntimeTransport{ .tcp = .{ .io = io, .stream = stream } };
+    return readMessageBytesWithContext(
+        allocator,
+        transport,
+        limits,
+        null,
+        true,
+        false,
+        if (limits.request_head_timeout) |timeout|
+            try requestHeadDeadline(transport, timeout)
+        else
+            null,
+    );
 }
 
 fn readMessageBytesWithContext(
@@ -3097,6 +3259,7 @@ fn readMessageBytesWithContext(
     request_method: ?http1.Method,
     auto_continue: bool,
     close_delimited_when_unknown: bool,
+    head_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
@@ -3108,7 +3271,10 @@ fn readMessageBytesWithContext(
         // the next pipelined message.  Read the head one byte at a time until
         // CRLFCRLF so this API remains safe even without an explicit inbuf.
         const read_buf = scratch[0..1];
-        const n = try transport.read(read_buf);
+        const n = if (head_deadline) |deadline|
+            try transport.readWithDeadline(read_buf, deadline)
+        else
+            try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
         head_end = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
@@ -3168,7 +3334,7 @@ fn readMessageBytesBuffered(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, null, false, true);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, null, false, true, null);
 }
 
 fn readMessageBytesBufferedForResponse(
@@ -3180,7 +3346,7 @@ fn readMessageBytesBufferedForResponse(
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, request_method, false, true);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, request_method, false, true, null);
 }
 
 fn readRequestMessageBytesBuffered(
@@ -3191,7 +3357,21 @@ fn readRequestMessageBytesBuffered(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, null, true, false);
+    const transport = RuntimeTransport{ .tcp = .{ .io = io, .stream = stream } };
+    return readMessageBytesBufferedWithContext(
+        allocator,
+        transport,
+        limits,
+        options,
+        inbuf,
+        null,
+        true,
+        false,
+        if (limits.request_head_timeout) |timeout|
+            try requestHeadDeadline(transport, timeout)
+        else
+            null,
+    );
 }
 
 fn readResponseFromTransportBufferedForRequest(
@@ -3308,6 +3488,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         request_method,
         false,
         true,
+        null,
     );
     errdefer allocator.free(bytes);
     var response = try parseResponseForRuntime(
@@ -3330,12 +3511,16 @@ fn readMessageBytesBufferedWithContext(
     request_method: ?http1.Method,
     auto_continue: bool,
     close_delimited_when_unknown: bool,
+    head_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
     while (head_end == null) {
         const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - inbuf.items.len)];
-        const n = try transport.read(read_buf);
+        const n = if (head_deadline) |deadline|
+            try transport.readWithDeadline(read_buf, deadline)
+        else
+            try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try inbuf.appendSlice(allocator, scratch[0..n]);
         head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
@@ -3427,6 +3612,7 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
         null,
         false,
         true,
+        null,
     );
     defer allocator.free(bytes);
 
@@ -6459,5 +6645,6 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
 test {
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
+    _ = @import("runtime/header_timeout_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
 }

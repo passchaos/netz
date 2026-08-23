@@ -56,6 +56,12 @@ benchmark response:
 
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
+- server `Limits.request_head_timeout` applies one absolute deadline to each
+  request head over TCP or TLS, starts while the connection is idle before its
+  first byte, does not reset on trickled bytes, resets for each persistent
+  request (and each unbuffered member of a pipeline batch), and stops before
+  body reads; unsupported raw io_uring use fails explicitly rather than
+  silently dropping the policy;
 - non-chunked bodies are borrowed and sent with header+body vectored TCP I/O
   (or one TLS flush) instead of copied into a temporary whole-message buffer;
 - `Connection.writeResponses` validates and flushes a response pipeline in one
@@ -529,7 +535,7 @@ connection credit while a more urgent stream has no stream credit.
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling |
+| HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, absolute per-request-head deadlines over TCP/TLS, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers; certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling; its server header-read timeout has equivalent absolute per-head semantics |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue, ordered 1xx observation and bounded interim chains | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server and Upgrade plus native TLS 1.3 client/server with mandatory `h2` ALPN and optional/required client authentication, HPACK, bounded ordered informational callbacks, push, priorities, flow control, graceful GOAWAY draining, tunnels/RFC 8441; certificate-verified TLS interop with Hyper/h2 is exercised in both endpoint roles, including 1xx, push, and push opt-out | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |

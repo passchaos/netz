@@ -14,6 +14,10 @@ pub fn Reader(comptime RuntimeError: type) type {
             context: ?*anyopaque,
             buffer: []u8,
         ) RuntimeError!usize,
+        read_head_some: ?*const fn (
+            context: ?*anyopaque,
+            buffer: []u8,
+        ) RuntimeError!usize = null,
         before_request_body: ?*const fn (
             context: ?*anyopaque,
             head: []const u8,
@@ -364,7 +368,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 self.limits.max_head_bytes,
             );
             while (head_end == null) {
-                try self.readMore(self.limits.max_head_bytes);
+                try self.readHeadMore(self.limits.max_head_bytes);
                 head_end = try findHeadEnd(
                     self.buffered(),
                     self.limits.max_head_bytes,
@@ -377,6 +381,16 @@ pub fn Reader(comptime RuntimeError: type) type {
             );
             self.consumePrefix(len);
             return bytes;
+        }
+
+        fn readHeadMore(
+            self: *Self,
+            max_buffer_bytes: usize,
+        ) RuntimeError!void {
+            return self.readMoreWith(
+                max_buffer_bytes,
+                self.read_head_some orelse self.read_some,
+            );
         }
 
         fn readBody(
@@ -654,6 +668,17 @@ pub fn Reader(comptime RuntimeError: type) type {
             self: *Self,
             max_buffer_bytes: usize,
         ) RuntimeError!void {
+            return self.readMoreWith(max_buffer_bytes, self.read_some);
+        }
+
+        fn readMoreWith(
+            self: *Self,
+            max_buffer_bytes: usize,
+            read_some: *const fn (
+                context: ?*anyopaque,
+                buffer: []u8,
+            ) RuntimeError!usize,
+        ) RuntimeError!void {
             self.compact();
             if (self.inbuf.items.len >= max_buffer_bytes) {
                 return error.BodyTooLarge;
@@ -666,7 +691,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     max_buffer_bytes - original_len,
                 ),
             );
-            const count = self.read_some(
+            const count = read_some(
                 self.context,
                 destination,
             ) catch |err| {
