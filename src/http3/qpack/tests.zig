@@ -660,6 +660,38 @@ test "HTTP/3 QPACK literal-only dynamic block keeps a zero Base" {
     try std.testing.expectEqual(@as(usize, 0), references.items.len);
 }
 
+test "HTTP/3 QPACK prefix excludes shadowed dynamic name matches" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert(":path", "/dynamic-value");
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var references: std.ArrayList(u64) = .empty;
+    defer references.deinit(allocator);
+    try Qpack.encodeDynamicBlockKnownReceived(
+        &encoded,
+        allocator,
+        &.{.{ .name = ":path", .value = "/literal-value" }},
+        table,
+        table.insert_count,
+        &references,
+    );
+
+    // The static :path name reference wins over the dynamic name-only match.
+    // Advertising a nonzero RIC here would create a phantom dependency and a
+    // Section Acknowledgment for which the encoder retained no section.
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00 }, encoded.items[0..2]);
+    try std.testing.expectEqual(@as(usize, 0), references.items.len);
+    var decoded = try Qpack.decodeDynamicBlock(allocator, encoded.items, table);
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(@as(u64, 0), decoded.required_insert_count);
+    try std.testing.expectEqualStrings(":path", decoded.fields[0].name);
+    try std.testing.expectEqualStrings("/literal-value", decoded.fields[0].value);
+}
+
 test "HTTP/3 QPACK field section prefix detects blocking without allocation" {
     const allocator = std.testing.allocator;
     var encoder_table = Qpack.DynamicTable.init(allocator, 256);

@@ -413,10 +413,12 @@ pub fn encodeDynamicBlockWithReferenceLimit(
                 reference_limit,
             );
             if (dynamic_match.*) |match| {
-                required_insert_count = @max(
-                    required_insert_count,
-                    match.absolute_index + 1,
-                );
+                if (usesDynamicMatch(field, match)) {
+                    required_insert_count = @max(
+                        required_insert_count,
+                        match.absolute_index + 1,
+                    );
+                }
             }
         }
     }
@@ -526,6 +528,18 @@ pub fn encodeDynamicBlockWithReferenceLimit(
         list.appendSliceAssumeCapacity(field.name);
         try encodeString(list, allocator, field.value);
     }
+}
+
+fn usesDynamicMatch(
+    field: HeaderField,
+    match: DynamicTable.Match,
+) bool {
+    // An exact dynamic entry is preferred unless Never Indexed forbids that
+    // representation. A static name/full match otherwise wins before the
+    // dynamic-name branch below. Keep prefix dependency calculation aligned
+    // with those choices so the peer never acknowledges an unused entry.
+    if (match.full_match and !field.never_indexed) return true;
+    return static_table_module.findMatch(field.name, field.value) == null;
 }
 
 fn appendReferenceUnique(
