@@ -246,6 +246,310 @@ test "broker access control denies before durable state mutation" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker enforces unsubscribe and outgoing delivery access control" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Subscription,
+        ) bool {
+            return true;
+        }
+
+        fn unsubscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            filter: []const u8,
+        ) bool {
+            return !std.mem.eql(u8, filter, "acl/kept");
+        }
+
+        fn delivery(
+            _: *anyopaque,
+            authorization: context.DeliveryAuthorization,
+        ) bool {
+            return !(std.mem.eql(
+                u8,
+                authorization.client_id,
+                "acl-reader",
+            ) and std.mem.eql(u8, authorization.topic, "acl/hidden"));
+        }
+    };
+    var policy_context: u8 = 0;
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .access_control = .{
+                .context = &policy_context,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+                .authorize_unsubscribe = Policy.unsubscribe,
+                .authorize_delivery = Policy.delivery,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 3 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "acl-reader" },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{
+            .{ .topic_filter = "acl/kept", .qos = .at_least_once },
+            .{ .topic_filter = "acl/hidden", .qos = .at_least_once },
+            .{ .topic_filter = "acl/visible", .qos = .at_least_once },
+        },
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x01, 0x01 },
+        suback.suback.reason_codes,
+    );
+    var unsuback = try subscriber.unsubscribe(
+        &.{ "acl/kept", "acl/visible" },
+        .{},
+    );
+    defer unsuback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x87, 0x00 },
+        unsuback.unsuback.reason_codes,
+    );
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "acl-writer" },
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "acl/hidden",
+        "secret",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+    try publisher.publish(
+        "acl/kept",
+        "visible",
+        .{ .qos = .at_least_once },
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings("acl/kept", delivered.publish.topic);
+    try std.testing.expectEqualStrings("visible", delivered.publish.payload);
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+    var hidden_unsuback = try subscriber.unsubscribe(
+        &.{"acl/hidden"},
+        .{},
+    );
+    defer hidden_unsuback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{0x00},
+        hidden_unsuback.unsuback.reason_codes,
+    );
+    var hidden_suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "acl/hidden",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer hidden_suback.deinit(allocator);
+    // A denied retained replay must not sit ahead of this PINGRESP.
+    try subscriber.ping();
+
+    // The outgoing denial is recipient-specific and does not suppress retained
+    // storage. A different client receives the same Application Message as a
+    // retained replay after subscribing later.
+    var allowed_reader = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "acl-allowed-reader" },
+    );
+    defer allowed_reader.close();
+    var allowed_suback = try allowed_reader.subscribe(
+        &.{.{
+            .topic_filter = "acl/hidden",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer allowed_suback.deinit(allocator);
+    var retained = try allowed_reader.readPublish();
+    defer retained.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "acl/hidden",
+        retained.publish.topic,
+    );
+    try std.testing.expectEqualStrings("secret", retained.publish.payload);
+    try std.testing.expect(retained.publish.retain);
+    try allowed_reader.writePubAck(retained.publish.packet_id.?, 0);
+
+    try subscriber.disconnect(0);
+    try publisher.disconnect(0);
+    try allowed_reader.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker rechecks delivery access before resumed Session transmission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        allow_delivery: std.atomic.Value(bool) = .init(true),
+
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Subscription,
+        ) bool {
+            return true;
+        }
+
+        fn delivery(
+            context_ptr: *anyopaque,
+            _: context.DeliveryAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            return self.allow_delivery.load(.acquire);
+        }
+    };
+    var policy: Policy = .{};
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .access_control = .{
+                .context = &policy,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+                .authorize_delivery = Policy.delivery,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 3 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const session_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    var subscriber = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "acl-durable-reader",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "acl/durable",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try subscriber.disconnect(0);
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "acl-durable-writer" },
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "acl/durable",
+        "queued-before-policy-change",
+        .{ .qos = .at_least_once },
+    );
+    policy.allow_delivery.store(false, .release);
+
+    var resumed_result = try context.runtime_mod.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "acl-durable-reader",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    // If the denied queued PUBLISH were left at the Session head, this PING
+    // would observe it instead of PINGRESP. Successful ping therefore proves
+    // both suppression and forward progress after policy re-evaluation.
+    try resumed.ping();
+
+    try resumed.disconnect(0);
+    try publisher.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker caps MQTT 5 subscriptions and live delivery at Maximum QoS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

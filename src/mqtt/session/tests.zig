@@ -969,6 +969,44 @@ test "session drops oversized PUBLISH without dropping PUBREL" {
     try std.testing.expectEqual(@as(usize, 1), stats.inflight_count);
 }
 
+test "session drops ACL-denied queued PUBLISH without blocking the queue" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("acl-drop", false, 60, .zero);
+    try std.testing.expectEqualStrings(
+        "acl-drop",
+        try store.clientId(opened.handle),
+    );
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "denied",
+        "first",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "allowed",
+        "second",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+
+    var output: [1]Transmission = undefined;
+    const denied = try store.drainInto(opened.handle, .zero, 1, &output);
+    try std.testing.expectEqualStrings("denied", denied[0].publish.topic);
+    try std.testing.expectEqual(
+        session.DropAction.dropped,
+        try store.dropOutgoingPublish(
+            opened.handle,
+            denied[0].publish.packet_id,
+        ),
+    );
+    const allowed = try store.drainInto(opened.handle, .zero, 1, &output);
+    try std.testing.expectEqual(@as(usize, 1), allowed.len);
+    try std.testing.expectEqualStrings("allowed", allowed[0].publish.topic);
+    try std.testing.expectEqualStrings("second", allowed[0].publish.payload);
+}
+
 test "session unsent publish retry remains first delivery" {
     var store = Store.init(std.testing.allocator, .{});
     defer store.deinit();

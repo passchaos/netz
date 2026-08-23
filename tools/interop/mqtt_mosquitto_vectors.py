@@ -588,6 +588,145 @@ def publish_subscribe_access_control(
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
 
 
+def unsubscribe_delivery_access_control(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Mosquitto distinguishes SUBSCRIBE, UNSUBSCRIBE, WRITE, and READ ACL
+    # decisions. Verify that denied unsubscription retains the route and that
+    # an outgoing READ denial suppresses only the selected Application Message.
+    kept = "acl/kept"
+    removed = "acl/removed"
+    hidden = "acl/hidden-delivery"
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=(
+            f"--deny-unsubscribe-filter={kept}",
+            f"--deny-delivery-topic={hidden}",
+        ),
+    ) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_v5(subscriber, mqtt_packets, "acl-reader")
+            subscriber.sendall(mqtt_packets.gen_subscribe(
+                1, kept, 1, proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 1, proto_ver=5),
+                "MQTT 5 delivery ACL SUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_subscribe(
+                2, hidden, 1, proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(2, 1, proto_ver=5),
+                "MQTT 5 hidden delivery SUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_subscribe(
+                3, removed, 1, proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(3, 1, proto_ver=5),
+                "MQTT 5 removable delivery SUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_unsubscribe_multiple(
+                4, [kept, removed], proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_unsuback(
+                    4, [0x87, 0x00], proto_ver=5
+                ), "MQTT 5 mixed denied/allowed UNSUBSCRIBE",
+            )
+
+            connect_v5(publisher, mqtt_packets, "acl-delivery-writer")
+            publisher.sendall(mqtt_packets.gen_publish(
+                hidden, qos=1, mid=1, payload="secret", proto_ver=5,
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(1, proto_ver=5),
+                "MQTT 5 hidden delivery publisher PUBACK",
+            )
+            publisher.sendall(mqtt_packets.gen_publish(
+                removed, qos=1, mid=2, payload="removed", proto_ver=5,
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(
+                    2, proto_ver=5, reason_code=0x10
+                ),
+                "MQTT 5 removed subscription publisher PUBACK",
+            )
+            publisher.sendall(mqtt_packets.gen_publish(
+                kept, qos=1, mid=3, payload="visible", proto_ver=5,
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(3, proto_ver=5),
+                "MQTT 5 retained subscription publisher PUBACK",
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_publish(
+                    kept, qos=1, mid=1, payload="visible", proto_ver=5,
+                ), "MQTT 5 delivery after denied UNSUBSCRIBE",
+            )
+            subscriber.sendall(mqtt_packets.gen_puback(1, proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_unsubscribe(
+                5, hidden, proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_unsuback(
+                    5, 0x00, proto_ver=5
+                ), "MQTT 5 hidden delivery UNSUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_subscribe(
+                6, hidden, 1, proto_ver=5
+            ))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(6, 1, proto_ver=5),
+                "MQTT 5 denied retained replay SUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                subscriber, mqtt_packets.gen_pingresp(),
+                "MQTT 5 denied retained replay PINGRESP",
+            )
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=(f"--deny-unsubscribe-filter={kept}",),
+    ) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            connect_client(subscriber, mqtt_packets, "acl-reader-v311", 4)
+            subscriber.sendall(mqtt_packets.gen_subscribe(1, kept, 1))
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 1),
+                "MQTT 3.1.1 delivery ACL SUBACK",
+            )
+            subscriber.sendall(mqtt_packets.gen_unsubscribe(2, kept))
+            expect_packet(
+                subscriber, mqtt_packets.gen_unsuback(2),
+                "MQTT 3.1.1 denied UNSUBSCRIBE acknowledgement",
+            )
+            connect_client(
+                publisher, mqtt_packets, "acl-delivery-writer-v311", 4
+            )
+            publisher.sendall(mqtt_packets.gen_publish(
+                kept, qos=1, mid=1, payload="still-subscribed",
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(1),
+                "MQTT 3.1.1 denied unsubscribe publisher PUBACK",
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_publish(
+                    kept, qos=1, mid=1, payload="still-subscribed",
+                ), "MQTT 3.1.1 delivery after denied UNSUBSCRIBE",
+            )
+            subscriber.sendall(mqtt_packets.gen_puback(1))
+            subscriber.sendall(mqtt_packets.gen_disconnect())
+            publisher.sendall(mqtt_packets.gen_disconnect())
+
+
 def duplicate_client_takeover(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -5059,6 +5198,9 @@ def main() -> None:
     publish_subscribe_access_control(
         args.broker, mqtt_packets, mqtt5_props
     )
+    unsubscribe_delivery_access_control(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -5066,7 +5208,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
-    print("Mosquitto-derived MQTT wire vectors passed: 121 scenarios")
+    print("Mosquitto-derived MQTT wire vectors passed: 123 scenarios")
 
 
 if __name__ == "__main__":

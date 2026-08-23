@@ -85,9 +85,13 @@ pub const Options = struct {
     /// routing state is created. This covers MQTT 3.1.1/5 username/password
     /// policy; Enhanced Authentication remains owned by `authentication`.
     connect_authorization: ?ConnectAuthorizationHandler = null,
-    /// Optional per-client checks for incoming PUBLISH and SUBSCRIBE packets.
-    /// Callbacks can run concurrently and receive borrowed packet/CONNECT
-    /// views. Denials are handled before retained, Session, or router mutation.
+    /// Optional per-client checks for incoming PUBLISH, SUBSCRIBE, and
+    /// UNSUBSCRIBE packets plus outgoing Application Message delivery.
+    /// Callbacks can run concurrently and receive borrowed views. They must
+    /// not re-enter this Broker: delivery checks run under its state lock so
+    /// routing and Session admission remain one atomic authorization decision.
+    /// Incoming denials precede retained, Session, and router mutation;
+    /// outgoing denials precede the destination's queue mutation.
     access_control: ?AccessControlHandler = null,
 };
 
@@ -112,6 +116,27 @@ pub const AccessControlHandler = struct {
         connect: mqtt.Connect,
         subscription: mqtt.Subscription,
     ) bool,
+    authorize_unsubscribe: ?*const fn (
+        context: *anyopaque,
+        connect: mqtt.Connect,
+        topic_filter: []const u8,
+    ) bool = null,
+    authorize_delivery: ?*const fn (
+        context: *anyopaque,
+        delivery: DeliveryAuthorization,
+    ) bool = null,
+};
+
+/// Borrowed recipient and Application Message metadata for an outgoing ACL.
+/// The packet identifier is intentionally absent because this authorization
+/// precedes Session/inflight allocation and applies equally to QoS 0.
+pub const DeliveryAuthorization = struct {
+    client_id: []const u8,
+    topic: []const u8,
+    payload: []const u8,
+    qos: mqtt.QoS,
+    retain: bool,
+    properties: []const mqtt.Property,
 };
 
 pub const AuthenticationHandler = struct {
@@ -1457,55 +1482,63 @@ pub const Broker = struct {
 
     /// Queue retained replay while `state_mutex` is held.
     ///
-    /// Each Store delivery is a borrowed view. Clone it into one
-    /// reference-counted Publication per retained Application Message before
-    /// releasing the Store lock, then transfer that sole reference into the
-    /// subscriber queue.
+    /// Each Store delivery is a borrowed view. Apply the recipient's read ACL
+    /// before reserving any Session/connection queue state, then clone it into
+    /// one reference-counted Publication per retained Application Message.
+    /// The Store lock is released only after that sole reference has moved to
+    /// the subscriber queue.
     fn enqueueRetainedDeliveries(
         self: *Broker,
         slot: *ClientSlot,
         deliveries: []const retained_mod.Delivery,
         now: std.Io.Timestamp,
     ) Error!void {
+        const handle = slot.session_handle orelse
+            return error.SessionNotFound;
+        const client_id = try self.sessions.clientId(handle);
         for (deliveries) |delivery| {
+            var properties: std.ArrayList(mqtt.Property) = .empty;
+            defer properties.deinit(self.allocator);
+            try properties.ensureTotalCapacity(
+                self.allocator,
+                delivery.properties.len,
+            );
+            for (delivery.properties) |property| {
+                if (property == .four_byte and
+                    property.four_byte.id == .message_expiry_interval)
+                {
+                    const remaining =
+                        delivery.message_expiry_interval orelse continue;
+                    properties.appendAssumeCapacity(.{ .four_byte = .{
+                        .id = .message_expiry_interval,
+                        .value = remaining,
+                    } });
+                } else {
+                    properties.appendAssumeCapacity(property);
+                }
+            }
+            const publish = mqtt.Publish{
+                .dup = false,
+                .qos = delivery.qos,
+                .retain = delivery.retain,
+                .topic = delivery.topic,
+                .packet_id = null,
+                .properties = properties.items,
+                .payload = delivery.payload,
+            };
+            if (!self.deliveryAuthorized(.{
+                .client_id = client_id,
+                .topic = publish.topic,
+                .payload = publish.payload,
+                .qos = publish.qos,
+                .retain = publish.retain,
+                .properties = publish.properties,
+            })) continue;
             if (delivery.qos != .at_most_once) {
                 // Persistent Session State is the sole Packet Identifier
                 // owner for every QoS 1/2 delivery to this client, including
                 // retained replay. Mixing this path with Connection.writePublish
                 // would let two independent allocators reuse the same ID.
-                const handle = slot.session_handle orelse
-                    return error.SessionNotFound;
-                var properties: std.ArrayList(mqtt.Property) = .empty;
-                defer properties.deinit(self.allocator);
-                try properties.ensureTotalCapacity(
-                    self.allocator,
-                    delivery.properties.len,
-                );
-                for (delivery.properties) |property| {
-                    if (property == .four_byte and
-                        property.four_byte.id ==
-                            .message_expiry_interval)
-                    {
-                        const remaining =
-                            delivery.message_expiry_interval orelse
-                            continue;
-                        properties.appendAssumeCapacity(.{ .four_byte = .{
-                            .id = .message_expiry_interval,
-                            .value = remaining,
-                        } });
-                    } else {
-                        properties.appendAssumeCapacity(property);
-                    }
-                }
-                const publish = mqtt.Publish{
-                    .dup = false,
-                    .qos = delivery.qos,
-                    .retain = delivery.retain,
-                    .topic = delivery.topic,
-                    .packet_id = null,
-                    .properties = properties.items,
-                    .payload = delivery.payload,
-                };
                 try self.enqueueSessionDeliveryLocked(
                     handle,
                     delivery.subscription_identifier,
@@ -1544,6 +1577,7 @@ pub const Broker = struct {
         self: *Broker,
         id: router_mod.SubscriberId,
         connection: *runtime.Connection,
+        connect: mqtt.Connect,
         unsubscribe: mqtt.Unsubscribe,
     ) Error!void {
         const reasons = try self.allocator.alloc(
@@ -1554,6 +1588,16 @@ pub const Broker = struct {
         const slot = try self.slotForSubscriber(id);
         self.state_mutex.lockUncancelable(self.io);
         for (unsubscribe.topic_filters, 0..) |filter, index| {
+            if (self.options.access_control) |access| {
+                if (access.authorize_unsubscribe) |authorize| {
+                    if (!authorize(access.context, connect, filter)) {
+                        reasons[index] = unsubscribeDeniedReason(
+                            connection.protocol,
+                        );
+                        continue;
+                    }
+                }
+            }
             const session_handle = slot.session_handle orelse {
                 self.state_mutex.unlock(self.io);
                 return error.SessionNotFound;
@@ -1882,7 +1926,6 @@ pub const Broker = struct {
                 // below.
                 continue;
             };
-            has_matching_subscriber = true;
             const owner_id = self.session_owners.get(route.route_id);
             const destination_index = if (owner_id) |id|
                 subscriberIndex(id, self.slots.len)
@@ -1905,6 +1948,22 @@ pub const Broker = struct {
             // Cap the route even if the stored subscription predates the
             // listener's current Maximum QoS setting.
             route.qos = minQos(route.qos, self.maximumQoS());
+            if (!self.deliveryAuthorized(.{
+                .client_id = try self.sessions.clientId(handle),
+                .topic = publish.topic,
+                .payload = publish.payload,
+                .qos = route.qos,
+                .retain = route.retain,
+                .properties = publish.properties,
+            })) {
+                // A read denial suppresses every overlapping subscription for
+                // this Session before either its durable queue or live queue
+                // changes. The raw router match still counts for the
+                // publisher's MQTT 5 "matching subscriber" PUBACK reason,
+                // as it does in Mosquitto.
+                continue;
+            }
+            has_matching_subscriber = true;
             if ((route.qos == .at_most_once and
                 (!self.options.queue_qos0_messages or online)) or
                 (online and !destination.?.session_persistent))
@@ -2239,6 +2298,15 @@ pub const Broker = struct {
         return self.options.accept.maximum_qos orelse .exactly_once;
     }
 
+    fn deliveryAuthorized(
+        self: Broker,
+        delivery: DeliveryAuthorization,
+    ) bool {
+        const access = self.options.access_control orelse return true;
+        const authorize = access.authorize_delivery orelse return true;
+        return authorize(access.context, delivery);
+    }
+
     fn releaseRouteReservations(
         self: *Broker,
         plan: []const router_mod.Match,
@@ -2460,39 +2528,63 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         const route_id = try self.sessions.routeId(handle);
+        const client_id = try self.sessions.clientId(handle);
 
-        var storage: [1]session_mod.Transmission = undefined;
-        const transmissions = self.sessions.drainInto(
-            handle,
-            std.Io.Clock.awake.now(self.io),
-            connection.max_outgoing_inflight,
-            &storage,
-        ) catch |err| switch (err) {
-            error.SessionNotFound => return null,
-            else => return err,
-        };
-        if (transmissions.len == 0) return null;
-        const transmission = transmissions[0];
-        const encoded = session_route.encodeTransmission(
-            self.allocator,
-            connection.protocol,
-            transmission,
-            self.maximumQoS(),
-        ) catch |err| {
-            switch (transmission) {
-                .publish => |publish| self.sessions.retryUnsentPublish(
+        while (true) {
+            var storage: [1]session_mod.Transmission = undefined;
+            const transmissions = self.sessions.drainInto(
+                handle,
+                std.Io.Clock.awake.now(self.io),
+                connection.max_outgoing_inflight,
+                &storage,
+            ) catch |err| switch (err) {
+                error.SessionNotFound => return null,
+                else => return err,
+            };
+            if (transmissions.len == 0) return null;
+            const transmission = transmissions[0];
+            if (transmission == .publish and
+                !self.deliveryAuthorized(.{
+                    .client_id = client_id,
+                    .topic = transmission.publish.topic,
+                    .payload = transmission.publish.payload,
+                    .qos = transmission.publish.qos,
+                    .retain = transmission.publish.retain,
+                    .properties = transmission.publish.properties,
+                }))
+            {
+                // Re-check durable messages immediately before their first or
+                // resumed delivery, matching Mosquitto's removal of queued and
+                // inflight messages when read ACL policy changes. A PUBREL is
+                // never dropped: the peer has already accepted that QoS 2
+                // PUBLISH and its handshake must be completed.
+                _ = try self.sessions.dropOutgoingPublish(
                     handle,
-                    publish.packet_id,
-                ) catch {},
-                .pubrel => {},
+                    transmission.publish.packet_id,
+                );
+                continue;
             }
-            return err;
-        };
-        return .{
-            .encoded = encoded,
-            .handle = handle,
-            .route_id = route_id,
-        };
+            const encoded = session_route.encodeTransmission(
+                self.allocator,
+                connection.protocol,
+                transmission,
+                self.maximumQoS(),
+            ) catch |err| {
+                switch (transmission) {
+                    .publish => |publish| self.sessions.retryUnsentPublish(
+                        handle,
+                        publish.packet_id,
+                    ) catch {},
+                    .pubrel => {},
+                }
+                return err;
+            };
+            return .{
+                .encoded = encoded,
+                .handle = handle,
+                .route_id = route_id,
+            };
+        }
     }
 
     fn runWillDriver(
@@ -2666,6 +2758,7 @@ const ClientTask = struct {
                     try task.broker.handleUnsubscribe(
                         task.subscriber_id,
                         connection,
+                        connect,
                         owned.unsubscribe,
                     );
                 },
@@ -2937,6 +3030,12 @@ fn subscriptionDeniedReason(protocol: mqtt.ProtocolVersion) u8 {
     // MQTT 3.1.1 uses the generic SUBACK failure byte. MQTT 5 can expose the
     // precise Not Authorized reason without terminating the connection.
     return if (protocol == .v5) 0x87 else 0x80;
+}
+
+fn unsubscribeDeniedReason(protocol: mqtt.ProtocolVersion) u8 {
+    // MQTT 3.1.1 UNSUBACK has no per-filter result. The subscription stays in
+    // place while the only representable acknowledgement remains Success.
+    return if (protocol == .v5) 0x87 else 0x00;
 }
 
 test {

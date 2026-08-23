@@ -8,6 +8,7 @@ const Broker = broker_mod.Broker;
 pub const TestContext = struct {
     pub const mqtt_mod = mqtt;
     pub const BrokerType = Broker;
+    pub const DeliveryAuthorization = broker_mod.DeliveryAuthorization;
     pub const runtime_mod = runtime;
     pub const ServeStateType = ServeState;
 

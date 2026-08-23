@@ -1297,6 +1297,15 @@ pub const Store = struct {
         return (try self.getSession(handle)).route_id;
     }
 
+    /// Borrow the stable ClientID associated with a Session. The slice remains
+    /// valid until that Session is removed or the Store is deinitialized.
+    pub fn clientId(
+        self: *Store,
+        handle: Handle,
+    ) Error![]const u8 {
+        return (try self.getSession(handle)).client_id;
+    }
+
     pub fn handleForRouteId(
         self: Store,
         route_id: u64,
@@ -1698,6 +1707,18 @@ pub const Store = struct {
     /// intentionally not droppable because it is the continuation of an
     /// already accepted QoS 2 transaction.
     pub fn dropOversizedPublish(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!DropAction {
+        return self.dropOutgoingPublish(handle, packet_id);
+    }
+
+    /// Drop a selected outgoing PUBLISH before it reaches the peer. This is
+    /// used for both packet-size policy and delivery ACL re-evaluation. A
+    /// PUBREL is intentionally retained because its QoS 2 PUBLISH was already
+    /// accepted by the peer and the transaction must still complete.
+    pub fn dropOutgoingPublish(
         self: *Store,
         handle: Handle,
         packet_id: u16,
