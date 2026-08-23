@@ -2281,7 +2281,9 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
-        if (self.popPendingPingPacket()) |packet| return packet;
+        // Handshake callers have no pending PING traffic. Keeping this helper
+        // transport-only also prevents a future bounded wait from recycling a
+        // pre-existing queued packet under an unrelated deadline.
         return self.readTransportPacketWithDeadline(deadline);
     }
 
