@@ -93,7 +93,8 @@ pub fn main() !void {
     }
     const stateless_ns = nowNs(io) -| stateless_start;
     const speedup_x100 = ratioTimes100(stateless_ns, stateful_ns);
-    const churn_ns = try measureDynamicTableChurn(allocator, io);
+    const encoder_churn_ns = try measureDynamicTableChurn(allocator, io, true);
+    const decoder_churn_ns = try measureDynamicTableChurn(allocator, io, false);
 
     std.debug.print(
         \\HTTP/2 HPACK benchmark
@@ -104,7 +105,8 @@ pub fn main() !void {
         \\  stateful total bytes: {d}, ns/op: {d}
         \\  stateless total bytes: {d}, ns/op: {d}
         \\  stateful speedup: {d}.{d:0>2}x
-        \\  dynamic table churn iterations: {d}, ns/insert: {d}
+        \\  encoder table churn iterations: {d}, ns/insert: {d}
+        \\  decoder table churn iterations: {d}, ns/insert: {d}
         \\
     , .{
         iterations,
@@ -121,12 +123,20 @@ pub fn main() !void {
         speedup_x100 / 100,
         speedup_x100 % 100,
         churn_iterations,
-        churn_ns / churn_iterations,
+        encoder_churn_ns / churn_iterations,
+        churn_iterations,
+        decoder_churn_ns / churn_iterations,
     });
 }
 
-fn measureDynamicTableChurn(allocator: std.mem.Allocator, io: std.Io) !u64 {
-    var table = netz.http2.Hpack.DynamicTable{};
+fn measureDynamicTableChurn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    maintain_lookup_indexes: bool,
+) !u64 {
+    var table = netz.http2.Hpack.DynamicTable{
+        .maintain_lookup_indexes = maintain_lookup_indexes,
+    };
     defer table.deinit(allocator);
     table.setLimit(allocator, 4096);
 

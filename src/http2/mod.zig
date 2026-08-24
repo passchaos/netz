@@ -940,6 +940,11 @@ pub const Hpack = struct {
 
     pub const DynamicTable = struct {
         entries: std.ArrayList(HeaderField) = .empty,
+        /// Only encoders need reverse name/value lookup when selecting an
+        /// indexed representation. Decoders address entries exclusively by
+        /// their wire index, so omitting these maps removes two hash-table
+        /// probes and their retained capacity from every inbound insertion.
+        maintain_lookup_indexes: bool = true,
         /// Exact indexes point at the latest physical entry for a name or
         /// name/value pair. Keys borrow entry-owned strings and are rebuilt
         /// after compaction or redirected when evicting the current latest.
@@ -972,7 +977,10 @@ pub const Hpack = struct {
             self: DynamicTable,
             allocator: std.mem.Allocator,
         ) !DynamicTable {
-            var copy = DynamicTable{ .size_limit = self.size_limit };
+            var copy = DynamicTable{
+                .maintain_lookup_indexes = self.maintain_lookup_indexes,
+                .size_limit = self.size_limit,
+            };
             errdefer copy.deinit(allocator);
             try copy.entries.ensureTotalCapacity(
                 allocator,
@@ -1001,15 +1009,6 @@ pub const Hpack = struct {
 
             self.compactIfNeeded();
             try self.entries.ensureUnusedCapacity(allocator, 1);
-            const name_slot = try self.latest_name.getOrPut(allocator, name);
-            errdefer if (!name_slot.found_existing) {
-                _ = self.latest_name.remove(name);
-            };
-            const exact_key = DynamicExactKey{ .name = name, .value = value };
-            const exact_slot = try self.latest_exact.getOrPut(allocator, exact_key);
-            errdefer if (!exact_slot.found_existing) {
-                _ = self.latest_exact.remove(exact_key);
-            };
             const owned = try ownedHeaderField(
                 allocator,
                 name,
@@ -1019,14 +1018,35 @@ pub const Hpack = struct {
             errdefer allocator.free(owned.block_storage.?);
 
             const physical_index = self.entries.items.len;
+            if (self.maintain_lookup_indexes) {
+                // Insert the owned strings into the maps. This ensures map
+                // keys never transiently borrow the caller while later map
+                // growth can still fail. The errdefers restore both indexes
+                // and the single string allocation transactionally.
+                const name_slot = try self.latest_name.getOrPut(
+                    allocator,
+                    owned.name,
+                );
+                errdefer if (!name_slot.found_existing) {
+                    _ = self.latest_name.remove(owned.name);
+                };
+                const exact_key = DynamicExactKey{
+                    .name = owned.name,
+                    .value = owned.value,
+                };
+                const exact_slot = try self.latest_exact.getOrPut(
+                    allocator,
+                    exact_key,
+                );
+                errdefer if (!exact_slot.found_existing) {
+                    _ = self.latest_exact.remove(exact_key);
+                };
+                name_slot.key_ptr.* = owned.name;
+                name_slot.value_ptr.* = physical_index;
+                exact_slot.key_ptr.* = exact_key;
+                exact_slot.value_ptr.* = physical_index;
+            }
             self.entries.appendAssumeCapacity(owned);
-            name_slot.key_ptr.* = owned.name;
-            name_slot.value_ptr.* = physical_index;
-            exact_slot.key_ptr.* = .{
-                .name = owned.name,
-                .value = owned.value,
-            };
-            exact_slot.value_ptr.* = physical_index;
             self.used += size;
             self.evictToLimit(allocator);
         }
@@ -1038,6 +1058,7 @@ pub const Hpack = struct {
         }
 
         fn findIndex(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
+            std.debug.assert(self.maintain_lookup_indexes);
             if (self.entryCount() == 0) return null;
             const physical_index = self.latest_exact.get(.{ .name = name, .value = value }) orelse return null;
             if (!self.validPhysicalIndex(physical_index)) return null;
@@ -1045,6 +1066,7 @@ pub const Hpack = struct {
         }
 
         fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
+            std.debug.assert(self.maintain_lookup_indexes);
             if (self.entryCount() == 0) return null;
             const physical_index = self.latest_name.get(name) orelse return null;
             if (!self.validPhysicalIndex(physical_index)) return null;
@@ -1055,7 +1077,9 @@ pub const Hpack = struct {
             while (self.used > self.size_limit and self.entryCount() != 0) {
                 const removed = &self.entries.items[self.head];
                 self.used -= entrySize(removed.name, removed.value);
-                self.removeLatestIndexes(removed.*, self.head);
+                if (self.maintain_lookup_indexes) {
+                    self.removeLatestIndexes(removed.*, self.head);
+                }
                 allocator.free(removed.block_storage.?);
                 self.head += 1;
             }
@@ -1110,7 +1134,7 @@ pub const Hpack = struct {
             @memmove(self.entries.items[0..remaining], self.entries.items[self.head..]);
             self.entries.items.len = remaining;
             self.head = 0;
-            self.rebuildIndexes();
+            if (self.maintain_lookup_indexes) self.rebuildIndexes();
         }
 
         fn rebuildIndexes(self: *DynamicTable) void {
@@ -1127,7 +1151,9 @@ pub const Hpack = struct {
     };
 
     pub const Decoder = struct {
-        dynamic_table: DynamicTable = .{},
+        dynamic_table: DynamicTable = .{
+            .maintain_lookup_indexes = false,
+        },
         max_dynamic_table_size: usize = default_dynamic_table_size,
 
         pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
@@ -1468,7 +1494,9 @@ pub const Hpack = struct {
     /// Decoder-owned string storage (for Huffman literals) is released with
     /// `freeDecodedFields`.
     pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
-        var dynamic_table = DynamicTable{};
+        var dynamic_table = DynamicTable{
+            .maintain_lookup_indexes = false,
+        };
         defer dynamic_table.deinit(allocator);
         return decodeBlockWithDynamicTable(allocator, block, &dynamic_table, default_dynamic_table_size);
     }
@@ -2721,6 +2749,85 @@ test "HTTP/2 HPACK dynamic insertion uses one string allocation" {
     try std.testing.expectEqual(
         storage.len,
         entry.name.len + entry.value.len,
+    );
+}
+
+test "HTTP/2 HPACK decoder omits encoder lookup indexes" {
+    const allocator = std.testing.allocator;
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(tracked);
+    var output: [1]Hpack.HeaderField = undefined;
+
+    // A raw incremental literal needs only the entry-vector allocation and
+    // the entry's contiguous string block. The decoder never performs reverse
+    // lookup, so it must not allocate either of the encoder-only hash maps.
+    const literal = "\x40\x09x-inbound\x05value";
+    const before = tracking.allocations;
+    const first = try decoder.decodeBlockInto(tracked, literal, &output);
+    defer Hpack.freeDecodedFieldStorages(tracked, first);
+    try std.testing.expectEqual(before + 2, tracking.allocations);
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.latest_name.count());
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.latest_exact.count());
+    try std.testing.expectEqualStrings("x-inbound", decoder.dynamic_table.get(0).?.name);
+
+    // Wire index 62 is the newest dynamic entry. Reading it remains O(1) from
+    // the entry vector and only allocates the application-owned field block.
+    const before_indexed = tracking.allocations;
+    const indexed = try decoder.decodeBlockInto(tracked, &.{0xbe}, &output);
+    defer Hpack.freeDecodedFieldStorages(tracked, indexed);
+    try std.testing.expectEqual(before_indexed + 1, tracking.allocations);
+    try std.testing.expectEqualStrings("value", indexed[0].value);
+
+    decoder.dynamic_table.setLimit(tracked, 0);
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.latest_name.count());
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.latest_exact.count());
+}
+
+fn checkHpackDecoderTableWithoutLookupIndexes(
+    allocator: std.mem.Allocator,
+) !void {
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    var output: [1]Hpack.HeaderField = undefined;
+
+    const first = try decoder.decodeBlockInto(
+        allocator,
+        "\x40\x09x-inbound\x05value",
+        &output,
+    );
+    Hpack.freeDecodedFieldStorages(allocator, first);
+    const second = try decoder.decodeBlockInto(
+        allocator,
+        "\x7e\x06second",
+        &output,
+    );
+    Hpack.freeDecodedFieldStorages(allocator, second);
+    const indexed = try decoder.decodeBlockInto(
+        allocator,
+        &.{0xbe},
+        &output,
+    );
+    defer Hpack.freeDecodedFieldStorages(allocator, indexed);
+    var cloned = try decoder.dynamic_table.clone(allocator);
+    defer cloned.deinit(allocator);
+
+    try std.testing.expectEqualStrings("second", indexed[0].value);
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.latest_name.count());
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.latest_exact.count());
+    try std.testing.expect(!cloned.maintain_lookup_indexes);
+    try std.testing.expectEqual(@as(usize, 0), cloned.latest_name.count());
+    try std.testing.expectEqual(@as(usize, 0), cloned.latest_exact.count());
+    try std.testing.expectEqualStrings("second", cloned.get(0).?.value);
+}
+
+test "HTTP/2 HPACK decoder table without lookup indexes is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkHpackDecoderTableWithoutLookupIndexes,
+        .{},
     );
 }
 

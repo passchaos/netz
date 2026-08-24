@@ -596,7 +596,14 @@ dynamic indexed fields now each keep name/value bytes in one contiguous
 allocation; eviction, clear, clone and allocation-failure tests cover the
 single-owner invariant while the public field slices remain unchanged. A
 warmed-table regression verifies each additional insertion needs one string
-allocation rather than two.
+allocation rather than two. Decoder tables additionally omit the encoder-only
+name and exact-value hash indexes: inbound wire references are positional, so
+maintaining those maps spent two probes and retained capacity without serving
+a decode operation. The HPACK benchmark reports encoder and decoder churn
+separately; three pinned ReleaseFast runs measured 277-282 ns/insert with
+reverse indexes and 46-50 ns/insert for the decoder's positional-only table.
+Allocation, eviction, clone and failure-path tests verify the no-index
+lifecycle while encoder lookup behavior remains unchanged.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse
