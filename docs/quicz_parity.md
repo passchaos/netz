@@ -244,6 +244,20 @@ and native wtransport matrices remain green. The unrelated cleartext benchmark
 was noisy at 9.764-10.753 us/request across the five stable follow-up samples
 (10.205 us mean, 4.17% standard deviation), so it is retained only as a
 regression check and not evidence of a Push throughput change.
+Handshake-backed SETTINGS and QPACK encoder/decoder sends now have their own
+session-level payload and STREAM-descriptor scratch, independent of ordinary
+messages and Push encodings that must remain live while encoder instructions
+are sent first. SETTINGS encodes all three critical-stream prefixes before
+forming any borrowing slice, so ArrayList growth cannot invalidate a previously
+built frame. The dynamic-QPACK handshake test records stable critical-scratch
+capacity and backing pointers across steady-state instruction/feedback rounds;
+a direct connection test forces the initial SETTINGS allocation to fail and
+verifies settings state, all critical stream offsets, prefix flags, and packet
+number remain unchanged before a successful retry. The full 1,593-test suite,
+quic-zig QPACK gate, quic-go v1/v2 matrix, tquic normal/Retry/GOAWAY matrix, and
+native wtransport matrix remain green. Five CPU-0 real-handshake 1-MiB upload
+runs measured 104.96-109.62 MiB/s (108.17 MiB/s mean); this transfer-dominated
+sample is a regression guard rather than a critical-stream speed claim.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
