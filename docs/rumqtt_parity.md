@@ -192,9 +192,9 @@ fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
 Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
-green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.796 us per
-PUBLISH/PUBACK over WebSocket (92,624 operations/s) and 11.539 us over native
-TLS (86,659 operations/s). These check the shared packet receive/send paths
+green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
+PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
+TLS (86,640 operations/s). These check the shared packet receive/send paths
 rather than isolating one control codec.
 Property-free DISCONNECT now follows the same design: normal shutdown uses its
 canonical two bytes and an MQTT 5 error reason uses three bytes, both from

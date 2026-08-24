@@ -277,43 +277,11 @@ fn readStreamPacket(
     connection: anytype,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    var header: [5]u8 = undefined;
-    try readExactTls(connection, header[0..1]);
-    var remaining_len_len: usize = 0;
-    while (remaining_len_len < 4) : (remaining_len_len += 1) {
-        try readExactTls(
-            connection,
-            header[1 + remaining_len_len .. 2 + remaining_len_len],
-        );
-        if ((header[1 + remaining_len_len] & 0x80) == 0) {
-            break;
-        }
-    } else {
-        return error.MalformedRemainingLength;
-    }
-
-    const decoded = try mqtt.decodeRemainingLength(
-        header[1 .. 2 + remaining_len_len],
+    var reader = TlsPacketReader(@TypeOf(connection)).init(
+        connection,
+        .none,
     );
-    const payload_start = 1 + decoded.len;
-    const packet_len = std.math.add(
-        usize,
-        payload_start,
-        decoded.value,
-    ) catch return error.PacketTooLarge;
-    if (packet_len > max_packet_size) return error.PacketTooLarge;
-    // The header stays on the stack until its complete Variable Byte Integer
-    // reveals the final packet size. Allocate the owned result exactly once;
-    // growing an ArrayList for each header byte and then transferring it used
-    // to require multiple small allocator operations per Control Packet.
-    const bytes = try allocator.alloc(u8, packet_len);
-    errdefer allocator.free(bytes);
-    @memcpy(bytes[0..payload_start], header[0..payload_start]);
-    try readExactTls(connection, bytes[payload_start..]);
-    return .{
-        .bytes = bytes,
-        .fixed = try mqtt.FixedHeader.parse(bytes),
-    };
+    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readStreamPacketWithInactivityTimeout(
@@ -323,54 +291,11 @@ fn readStreamPacketWithInactivityTimeout(
     timeout: std.Io.Clock.Duration,
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
-    var deadline = std.Io.Clock.Timestamp.fromNow(connection.io, timeout);
-
-    var header: [5]u8 = undefined;
-    try readExactTlsWithDeadline(connection, header[0..1], deadline);
-    var remaining_len_len: usize = 0;
-    while (remaining_len_len < 4) : (remaining_len_len += 1) {
-        try readExactTlsWithDeadline(
-            connection,
-            header[1 + remaining_len_len .. 2 + remaining_len_len],
-            deadline,
-        );
-        if ((header[1 + remaining_len_len] & 0x80) == 0) break;
-    } else return error.MalformedRemainingLength;
-
-    const decoded = try mqtt.decodeRemainingLength(
-        header[1 .. 2 + remaining_len_len],
+    var reader = TlsPacketReader(@TypeOf(connection)).init(
+        connection,
+        .{ .inactivity_timeout = timeout },
     );
-    const payload_start = 1 + decoded.len;
-    const packet_len = std.math.add(
-        usize,
-        payload_start,
-        decoded.value,
-    ) catch return error.PacketTooLarge;
-    if (packet_len > max_packet_size) return error.PacketTooLarge;
-    const bytes = try allocator.alloc(u8, packet_len);
-    errdefer allocator.free(bytes);
-    @memcpy(bytes[0..payload_start], header[0..payload_start]);
-
-    var offset = payload_start;
-    if (decoded.value > keep_alive_reader.progress_threshold) {
-        deadline = .fromNow(connection.io, timeout);
-    }
-    while (offset < packet_len) {
-        const count = try connection.readWithDeadline(
-            bytes[offset..],
-            deadline,
-        );
-        if (count == 0) return error.ConnectionClosed;
-        offset += count;
-        if (packet_len - offset > keep_alive_reader.progress_threshold) {
-            deadline = .fromNow(connection.io, timeout);
-        }
-    }
-
-    return .{
-        .bytes = bytes,
-        .fixed = try mqtt.FixedHeader.parse(bytes),
-    };
+    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readStreamPacketWithDeadline(
@@ -379,40 +304,11 @@ fn readStreamPacketWithDeadline(
     max_packet_size: usize,
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedPacket {
-    var header: [5]u8 = undefined;
-    try readExactTlsWithDeadline(connection, header[0..1], deadline);
-    var remaining_len_len: usize = 0;
-    while (remaining_len_len < 4) : (remaining_len_len += 1) {
-        try readExactTlsWithDeadline(
-            connection,
-            header[1 + remaining_len_len .. 2 + remaining_len_len],
-            deadline,
-        );
-        if ((header[1 + remaining_len_len] & 0x80) == 0) break;
-    } else return error.MalformedRemainingLength;
-
-    const decoded = try mqtt.decodeRemainingLength(
-        header[1 .. 2 + remaining_len_len],
-    );
-    const payload_start = 1 + decoded.len;
-    const packet_len = std.math.add(
-        usize,
-        payload_start,
-        decoded.value,
-    ) catch return error.PacketTooLarge;
-    if (packet_len > max_packet_size) return error.PacketTooLarge;
-    const bytes = try allocator.alloc(u8, packet_len);
-    errdefer allocator.free(bytes);
-    @memcpy(bytes[0..payload_start], header[0..payload_start]);
-    try readExactTlsWithDeadline(
+    var reader = TlsPacketReader(@TypeOf(connection)).init(
         connection,
-        bytes[payload_start..],
-        deadline,
+        .{ .absolute_deadline = deadline },
     );
-    return .{
-        .bytes = bytes,
-        .fixed = try mqtt.FixedHeader.parse(bytes),
-    };
+    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 pub const OwnedPacket = struct {
@@ -435,7 +331,7 @@ fn readTcpPacket(
     max_packet_size: usize,
 ) Error!OwnedPacket {
     var reader = keep_alive_reader.Reader.init(io, stream, null);
-    return readTcpPacketFromReader(allocator, &reader, max_packet_size);
+    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readTcpPacketWithInactivityTimeout(
@@ -447,7 +343,7 @@ fn readTcpPacketWithInactivityTimeout(
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
     var reader = keep_alive_reader.Reader.init(io, stream, timeout);
-    return readTcpPacketFromReader(allocator, &reader, max_packet_size);
+    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readTcpPacketWithDeadline(
@@ -462,12 +358,16 @@ fn readTcpPacketWithDeadline(
         stream,
         deadline,
     );
-    return readTcpPacketFromReader(allocator, &reader, max_packet_size);
+    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
-fn readTcpPacketFromReader(
+/// Assemble one owned packet from any reader that implements the shared
+/// `readExact(buffer, renew_large_progress)` contract. TCP and TLS therefore
+/// cannot drift in fixed-header validation, size preflight, or allocation
+/// behavior as their deadline policies evolve.
+fn readPacketFromReader(
     allocator: std.mem.Allocator,
-    reader: *keep_alive_reader.Reader,
+    reader: anytype,
     max_packet_size: usize,
 ) Error!OwnedPacket {
     var header: [5]u8 = undefined;
@@ -672,32 +572,75 @@ fn discardPacketPrefix(
     input.items.len = remaining;
 }
 
-fn readExactTls(
-    connection: anytype,
-    buffer: []u8,
-) Error!void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        const n = try connection.read(buffer[offset..]);
-        if (n == 0) return error.ConnectionClosed;
-        offset += n;
-    }
-}
+const StreamReadPolicy = union(enum) {
+    none,
+    inactivity_timeout: std.Io.Clock.Duration,
+    absolute_deadline: std.Io.Clock.Timestamp,
+};
 
-fn readExactTlsWithDeadline(
-    connection: anytype,
-    buffer: []u8,
-    deadline: std.Io.Clock.Timestamp,
-) Error!void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        const count = try connection.readWithDeadline(
-            buffer[offset..],
-            deadline,
-        );
-        if (count == 0) return error.ConnectionClosed;
-        offset += count;
-    }
+fn TlsPacketReader(comptime ConnectionType: type) type {
+    return struct {
+        connection: ConnectionType,
+        policy: StreamReadPolicy,
+        deadline: ?std.Io.Clock.Timestamp,
+
+        const Self = @This();
+
+        fn init(connection: ConnectionType, policy: StreamReadPolicy) Self {
+            const deadline: ?std.Io.Clock.Timestamp = switch (policy) {
+                .none => null,
+                .inactivity_timeout => |timeout| blk: {
+                    std.debug.assert(timeout.raw.nanoseconds > 0);
+                    break :blk .fromNow(connection.io, timeout);
+                },
+                .absolute_deadline => |value| value,
+            };
+            return .{
+                .connection = connection,
+                .policy = policy,
+                .deadline = deadline,
+            };
+        }
+
+        fn readExact(
+            self: *Self,
+            buffer: []u8,
+            renew_large_progress: bool,
+        ) Error!void {
+            if (self.policy == .inactivity_timeout and
+                renew_large_progress and
+                buffer.len > keep_alive_reader.progress_threshold)
+            {
+                self.renewInactivityDeadline();
+            }
+            var offset: usize = 0;
+            while (offset < buffer.len) {
+                const count = if (self.deadline) |deadline|
+                    try self.connection.readWithDeadline(
+                        buffer[offset..],
+                        deadline,
+                    )
+                else
+                    try self.connection.read(buffer[offset..]);
+                if (count == 0) return error.ConnectionClosed;
+                offset += count;
+                if (self.policy == .inactivity_timeout and
+                    renew_large_progress and
+                    buffer.len - offset > keep_alive_reader.progress_threshold)
+                {
+                    self.renewInactivityDeadline();
+                }
+            }
+        }
+
+        fn renewInactivityDeadline(self: *Self) void {
+            const timeout = switch (self.policy) {
+                .inactivity_timeout => |value| value,
+                else => return,
+            };
+            self.deadline = .fromNow(self.connection.io, timeout);
+        }
+    };
 }
 
 fn writeAll(
