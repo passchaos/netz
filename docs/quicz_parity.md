@@ -203,6 +203,19 @@ post-change CPU-0 cleartext regression measured 9.765 us/request over 1,000
 persistent requests; a five-run 1-MiB real-handshake upload measured 107.40
 MiB/s mean with 3.99% standard deviation. Both remain internal regression
 samples rather than equal-wire quicz comparisons.
+Protected SETTINGS and QPACK encoder/decoder critical-stream sends now retain
+their construction bytes and borrowing STREAM descriptors inside the existing
+protected send state. The same state also routes one-datagram sends through the
+exact-sized batch-into API, eliminating the frame-payload and protected-packet
+allocations that the former single-packet convenience path still performed. A
+fail-first test proves SETTINGS state/offset rollback, then switches both the
+HTTP/3 sender and UDP endpoint to an allocator that rejects allocation and
+successfully sends warmed SETTINGS, encoder instructions, decoder feedback, and
+a single packet without moving any scratch allocation. The 1,590-test suite,
+quic-zig QPACK gate, quic-go v1/v2 matrix, tquic normal/Retry/GOAWAY matrix, and
+native wtransport matrix remain green. Five CPU-0 cleartext samples measured
+9.554-9.710 us/request (9.647 us mean, 0.71% standard deviation), again an
+internal regression sample rather than an equal-wire comparison.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992

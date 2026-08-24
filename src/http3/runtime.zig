@@ -335,6 +335,11 @@ test "HTTP/3 URI endpoint parses authorities for handshake clients" {
 /// same lifetime explicitly to avoid sizing allocations on every packet batch.
 const ProtectedSendState = struct {
     allocator: std.mem.Allocator,
+    /// Control and QPACK STREAM descriptors borrow these bytes until packet
+    /// protection finishes. Keep them separate from the wire payload scratch,
+    /// which is overwritten while serializing those same descriptors.
+    critical_stream_payload: std.ArrayList(u8) = .empty,
+    critical_stream_frames: std.ArrayList(quic.Frame) = .empty,
     payload_scratch: std.ArrayList(u8) = .empty,
     packet_scratch: std.ArrayList(u8) = .empty,
 
@@ -345,7 +350,14 @@ const ProtectedSendState = struct {
     fn deinit(self: *ProtectedSendState) void {
         self.payload_scratch.deinit(self.allocator);
         self.packet_scratch.deinit(self.allocator);
+        self.critical_stream_frames.deinit(self.allocator);
+        self.critical_stream_payload.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn resetCriticalStreamScratch(self: *ProtectedSendState) void {
+        self.critical_stream_payload.clearRetainingCapacity();
+        self.critical_stream_frames.clearRetainingCapacity();
     }
 
     fn sendFrames(
@@ -371,23 +383,9 @@ const ProtectedSendState = struct {
                 frame_offset = end;
             }
 
-            // Preserve the direct path for the latency-sensitive single-packet
-            // case. Batch sizing and scratch management only pay off once at
-            // least two UDP datagrams can share one GSO/sendmmsg submission.
-            if (packet_count == 1) {
-                try quic.one_rtt.sendFrames(endpoint, to, keys, .{
-                    .destination_connection_id = destination_connection_id,
-                    .packet_number = next_packet_number.*,
-                    .frames = packets[0],
-                });
-                next_packet_number.* = std.math.add(
-                    u64,
-                    next_packet_number.*,
-                    1,
-                ) catch return error.InvalidPacketNumber;
-                continue;
-            }
-
+            // The batch-into API is allocation-free for one packet as well as
+            // many. Reusing its exact payload/packet storage avoids two heap
+            // allocations on the latency-sensitive single-datagram path.
             const options: quic.one_rtt.BatchSendOptions = .{
                 .destination_connection_id = destination_connection_id,
                 .first_packet_number = next_packet_number.*,
@@ -11418,8 +11416,6 @@ fn sendProtectedSettings(
 ) Error!void {
     if (control.settings.sent) return;
 
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
     const previous_settings = control.settings;
     const previous_control_send = control_send.*;
     const previous_encoder_send = qpack_encoder_send.*;
@@ -11431,35 +11427,48 @@ fn sendProtectedSettings(
     errdefer control_send.* = previous_control_send;
     errdefer qpack_encoder_send.* = previous_encoder_send;
     errdefer qpack_decoder_send.* = previous_decoder_send;
-    try control.writeSettingsStream(&payload, endpoint.allocator, config.local_settings);
-
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
-    if (control_send.stream_id != stream_id) control_send.* = quic.stream_state.SendState.init(stream_id);
-    try control_send.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
-
-    var qpack_encoder: std.ArrayList(u8) = .empty;
-    defer qpack_encoder.deinit(endpoint.allocator);
-    var qpack_decoder: std.ArrayList(u8) = .empty;
-    defer qpack_decoder.deinit(endpoint.allocator);
+    protected_send.resetCriticalStreamScratch();
+    const payload = &protected_send.critical_stream_payload;
+    const frames = &protected_send.critical_stream_frames;
+    try control.writeSettingsStream(
+        payload,
+        endpoint.allocator,
+        config.local_settings,
+    );
+    const control_end = payload.items.len;
+    const encoder_start = control_end;
     const is_client = stream_id == client_control_stream_id;
     if (!qpack_encoder_prefix_sent.*) {
-        try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, endpoint.allocator);
+        try http3.writeQpackEncoderStreamPrefix(payload, endpoint.allocator);
     }
+    const encoder_end = payload.items.len;
+    const decoder_start = encoder_end;
     if (!qpack_decoder_prefix_sent.*) {
-        try http3.writeQpackDecoderStreamPrefix(&qpack_decoder, endpoint.allocator);
+        try http3.writeQpackDecoderStreamPrefix(payload, endpoint.allocator);
     }
+
+    // Form borrowing slices only after every append is complete: growing the
+    // shared byte list while frames already point into it would invalidate the
+    // earlier control/QPACK STREAM descriptors.
+    if (control_send.stream_id != stream_id) control_send.* = quic.stream_state.SendState.init(stream_id);
+    try control_send.appendFrames(
+        frames,
+        endpoint.allocator,
+        payload.items[0..control_end],
+        control_end,
+        false,
+    );
     const encoder_stream_id =
         if (is_client) client_qpack_encoder_stream_id else server_qpack_encoder_stream_id;
     if (qpack_encoder_send.stream_id != encoder_stream_id) {
         qpack_encoder_send.* = quic.stream_state.SendState.init(encoder_stream_id);
     }
-    if (qpack_encoder.items.len != 0) {
+    if (encoder_end != encoder_start) {
         try qpack_encoder_send.appendFrames(
-            &frames,
+            frames,
             endpoint.allocator,
-            qpack_encoder.items,
-            qpack_encoder.items.len,
+            payload.items[encoder_start..encoder_end],
+            encoder_end - encoder_start,
             false,
         );
     }
@@ -11468,12 +11477,12 @@ fn sendProtectedSettings(
             if (is_client) client_qpack_decoder_stream_id else server_qpack_decoder_stream_id,
         );
     }
-    if (qpack_decoder.items.len != 0) {
+    if (payload.items.len != decoder_start) {
         try qpack_decoder_send.appendFrames(
-            &frames,
+            frames,
             endpoint.allocator,
-            qpack_decoder.items,
-            qpack_decoder.items.len,
+            payload.items[decoder_start..],
+            payload.items.len - decoder_start,
             false,
         );
     }
@@ -11487,8 +11496,8 @@ fn sendProtectedSettings(
         config.max_frames_per_packet,
         protected_send,
     );
-    if (qpack_encoder.items.len != 0) qpack_encoder_prefix_sent.* = true;
-    if (qpack_decoder.items.len != 0) qpack_decoder_prefix_sent.* = true;
+    if (encoder_end != encoder_start) qpack_encoder_prefix_sent.* = true;
+    if (payload.items.len != decoder_start) qpack_decoder_prefix_sent.* = true;
 }
 
 fn sendProtectedQpackEncoderInstructions(
@@ -11506,21 +11515,20 @@ fn sendProtectedQpackEncoderInstructions(
 
     const previous_send = send_state.*;
     errdefer send_state.* = previous_send;
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
+    protected_send.resetCriticalStreamScratch();
+    const payload = &protected_send.critical_stream_payload;
+    const frames = &protected_send.critical_stream_frames;
     try payload.ensureTotalCapacity(
         endpoint.allocator,
         @intFromBool(!prefix_sent.*) + pending.len,
     );
     if (!prefix_sent.*) {
-        try http3.writeQpackEncoderStreamPrefix(&payload, endpoint.allocator);
+        try http3.writeQpackEncoderStreamPrefix(payload, endpoint.allocator);
     }
     payload.appendSliceAssumeCapacity(pending);
 
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
     try send_state.appendFrames(
-        &frames,
+        frames,
         endpoint.allocator,
         payload.items,
         config.max_stream_frame_data,
@@ -11558,23 +11566,21 @@ fn sendProtectedQpackFeedback(
 
     const previous_send = send_state.*;
     errdefer send_state.* = previous_send;
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
+    protected_send.resetCriticalStreamScratch();
+    const payload = &protected_send.critical_stream_payload;
+    const frames = &protected_send.critical_stream_frames;
     try payload.ensureTotalCapacity(
         endpoint.allocator,
         @intFromBool(!prefix_sent.*) + pending.len,
     );
     if (!prefix_sent.*) try http3.writeQpackDecoderStreamPrefix(
-        &payload,
+        payload,
         endpoint.allocator,
     );
-    const instruction_offset = payload.items.len;
     payload.appendSliceAssumeCapacity(pending);
 
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
     try send_state.appendFrames(
-        &frames,
+        frames,
         endpoint.allocator,
         payload.items,
         config.max_stream_frame_data,
@@ -11591,7 +11597,6 @@ fn sendProtectedQpackFeedback(
         protected_send,
     );
     prefix_sent.* = true;
-    _ = instruction_offset;
     qpack.clearDecoderInstructions();
 }
 
@@ -12440,6 +12445,274 @@ test "HTTP/3 protected send state reuses batch scratch" {
     try std.testing.expectEqual(payload_capacity, send_state.payload_scratch.capacity);
     try std.testing.expectEqual(packet_capacity, send_state.packet_scratch.capacity);
     try std.testing.expectEqual(@as(u64, 6), next_packet_number);
+
+    // The one-packet path uses the same retained wire scratch. Pointing the
+    // endpoint itself at the failing allocator catches a regression to the
+    // allocating `one_rtt.sendFrames` convenience function.
+    const original_endpoint_allocator = sender.allocator;
+    sender.allocator = no_alloc.allocator();
+    defer sender.allocator = original_endpoint_allocator;
+    try send_state.sendFrames(
+        &sender,
+        receiver.address(),
+        keys,
+        "cid",
+        &next_packet_number,
+        frame_storage[0..1],
+        1,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 7), next_packet_number);
+}
+
+test "HTTP/3 protected critical streams reuse send scratch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x7b} ** quic.protection.secret_len,
+    );
+    const local_cid = "client";
+    const peer_cid = "server";
+    const config: ProtectedConfig = .{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = local_cid,
+        .peer_connection_id = peer_cid,
+        .local_settings = .{ .qpack_max_table_capacity = 256 },
+        .max_stream_frame_data = 5,
+        .max_frames_per_packet = 2,
+    };
+    var protected_send = ProtectedSendState.init(allocator);
+    defer protected_send.deinit();
+    var next_packet_number: u64 = 0;
+
+    // Allocation failure before the first SETTINGS write must leave all
+    // protocol offsets and sent flags retryable.
+    var control = http3.ControlState{};
+    defer control.deinit(allocator);
+    var control_send = quic.stream_state.SendState.init(
+        client_control_stream_id,
+    );
+    var qpack_encoder_send = quic.stream_state.SendState.init(
+        client_qpack_encoder_stream_id,
+    );
+    var qpack_decoder_send = quic.stream_state.SendState.init(
+        client_qpack_decoder_stream_id,
+    );
+    var encoder_prefix_sent = false;
+    var decoder_prefix_sent = false;
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    sender.allocator = fail_first.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sendProtectedSettings(
+            &sender,
+            receiver.address(),
+            config,
+            &control,
+            &control_send,
+            &qpack_encoder_send,
+            &encoder_prefix_sent,
+            &qpack_decoder_send,
+            &decoder_prefix_sent,
+            &next_packet_number,
+            &protected_send,
+            client_control_stream_id,
+        ),
+    );
+    sender.allocator = allocator;
+    try std.testing.expect(fail_first.has_induced_failure);
+    try std.testing.expect(!control.settings.sent);
+    try std.testing.expectEqual(@as(u64, 0), control_send.next_offset);
+    try std.testing.expectEqual(@as(u64, 0), qpack_encoder_send.next_offset);
+    try std.testing.expectEqual(@as(u64, 0), qpack_decoder_send.next_offset);
+    try std.testing.expect(!encoder_prefix_sent);
+    try std.testing.expect(!decoder_prefix_sent);
+    try std.testing.expectEqual(@as(u64, 0), next_packet_number);
+
+    try sendProtectedSettings(
+        &sender,
+        receiver.address(),
+        config,
+        &control,
+        &control_send,
+        &qpack_encoder_send,
+        &encoder_prefix_sent,
+        &qpack_decoder_send,
+        &decoder_prefix_sent,
+        &next_packet_number,
+        &protected_send,
+        client_control_stream_id,
+    );
+
+    var encoder = QpackEncodeState.init(allocator, 256, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(256);
+    _ = try encoder.insertField(
+        "x-critical-one",
+        "encoder-instruction",
+    );
+    try sendProtectedQpackEncoderInstructions(
+        &sender,
+        receiver.address(),
+        config,
+        &encoder,
+        &qpack_encoder_send,
+        &encoder_prefix_sent,
+        &next_packet_number,
+        &protected_send,
+    );
+
+    var decoder = QpackDecodeState.init(allocator, 256, 4096);
+    defer decoder.deinit();
+    try decoder.recordStreamCancellation(quic.varint.max_value);
+    try sendProtectedQpackFeedback(
+        &sender,
+        receiver.address(),
+        config,
+        &decoder,
+        &qpack_decoder_send,
+        &decoder_prefix_sent,
+        &next_packet_number,
+        &protected_send,
+    );
+
+    const critical_payload_capacity =
+        protected_send.critical_stream_payload.capacity;
+    const critical_frame_capacity =
+        protected_send.critical_stream_frames.capacity;
+    const wire_payload_capacity = protected_send.payload_scratch.capacity;
+    const wire_packet_capacity = protected_send.packet_scratch.capacity;
+    const critical_payload_ptr = protected_send.critical_stream_payload
+        .allocatedSlice().ptr;
+    const critical_frame_ptr = protected_send.critical_stream_frames
+        .allocatedSlice().ptr;
+    const wire_payload_ptr = protected_send.payload_scratch.allocatedSlice().ptr;
+    const wire_packet_ptr = protected_send.packet_scratch.allocatedSlice().ptr;
+    try std.testing.expect(critical_payload_capacity != 0);
+    try std.testing.expect(critical_frame_capacity != 0);
+    try std.testing.expect(wire_payload_capacity != 0);
+    try std.testing.expect(wire_packet_capacity != 0);
+
+    // Prepare all protocol-owned instructions before switching allocators so
+    // the assertion isolates transport scratch rather than QPACK table growth.
+    _ = try encoder.insertField(
+        "x-critical-two",
+        "encoder-instruction",
+    );
+    try decoder.recordStreamCancellation(quic.varint.max_value - 4);
+    var second_control = http3.ControlState{};
+    defer second_control.deinit(allocator);
+    var second_control_send = quic.stream_state.SendState.init(
+        client_control_stream_id,
+    );
+    var second_encoder_send = quic.stream_state.SendState.init(
+        client_qpack_encoder_stream_id,
+    );
+    var second_decoder_send = quic.stream_state.SendState.init(
+        client_qpack_decoder_stream_id,
+    );
+    var second_encoder_prefix = false;
+    var second_decoder_prefix = false;
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    sender.allocator = no_alloc.allocator();
+    protected_send.allocator = no_alloc.allocator();
+    defer {
+        sender.allocator = allocator;
+        protected_send.allocator = allocator;
+    }
+    try sendProtectedSettings(
+        &sender,
+        receiver.address(),
+        config,
+        &second_control,
+        &second_control_send,
+        &second_encoder_send,
+        &second_encoder_prefix,
+        &second_decoder_send,
+        &second_decoder_prefix,
+        &next_packet_number,
+        &protected_send,
+        client_control_stream_id,
+    );
+    try sendProtectedQpackEncoderInstructions(
+        &sender,
+        receiver.address(),
+        config,
+        &encoder,
+        &qpack_encoder_send,
+        &encoder_prefix_sent,
+        &next_packet_number,
+        &protected_send,
+    );
+    try sendProtectedQpackFeedback(
+        &sender,
+        receiver.address(),
+        config,
+        &decoder,
+        &qpack_decoder_send,
+        &decoder_prefix_sent,
+        &next_packet_number,
+        &protected_send,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        critical_payload_capacity,
+        protected_send.critical_stream_payload.capacity,
+    );
+    try std.testing.expectEqual(
+        critical_frame_capacity,
+        protected_send.critical_stream_frames.capacity,
+    );
+    try std.testing.expectEqual(
+        wire_payload_capacity,
+        protected_send.payload_scratch.capacity,
+    );
+    try std.testing.expectEqual(
+        wire_packet_capacity,
+        protected_send.packet_scratch.capacity,
+    );
+    try std.testing.expectEqual(
+        critical_payload_ptr,
+        protected_send.critical_stream_payload.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(
+        critical_frame_ptr,
+        protected_send.critical_stream_frames.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(
+        wire_payload_ptr,
+        protected_send.payload_scratch.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(
+        wire_packet_ptr,
+        protected_send.packet_scratch.allocatedSlice().ptr,
+    );
 }
 
 test "HTTP/3 QPACK decoder state reassembles split and reordered encoder instructions" {
