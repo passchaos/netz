@@ -277,25 +277,15 @@ fn readStreamPacket(
     connection: anytype,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
-
-    var first: [1]u8 = undefined;
-    try readExactTls(connection, &first);
-    try encoded.append(allocator, first[0]);
-
-    var remaining_bytes: [4]u8 = undefined;
+    var header: [5]u8 = undefined;
+    try readExactTls(connection, header[0..1]);
     var remaining_len_len: usize = 0;
-    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+    while (remaining_len_len < 4) : (remaining_len_len += 1) {
         try readExactTls(
             connection,
-            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            header[1 + remaining_len_len .. 2 + remaining_len_len],
         );
-        try encoded.append(
-            allocator,
-            remaining_bytes[remaining_len_len],
-        );
-        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) {
+        if ((header[1 + remaining_len_len] & 0x80) == 0) {
             break;
         }
     } else {
@@ -303,20 +293,23 @@ fn readStreamPacket(
     }
 
     const decoded = try mqtt.decodeRemainingLength(
-        remaining_bytes[0 .. remaining_len_len + 1],
+        header[1 .. 2 + remaining_len_len],
     );
-    const payload_start = encoded.items.len;
+    const payload_start = 1 + decoded.len;
     const packet_len = std.math.add(
         usize,
         payload_start,
         decoded.value,
     ) catch return error.PacketTooLarge;
     if (packet_len > max_packet_size) return error.PacketTooLarge;
-    try encoded.resize(allocator, packet_len);
-    try readExactTls(connection, encoded.items[payload_start..]);
-
-    const bytes = try encoded.toOwnedSlice(allocator);
+    // The header stays on the stack until its complete Variable Byte Integer
+    // reveals the final packet size. Allocate the owned result exactly once;
+    // growing an ArrayList for each header byte and then transferring it used
+    // to require multiple small allocator operations per Control Packet.
+    const bytes = try allocator.alloc(u8, packet_len);
     errdefer allocator.free(bytes);
+    @memcpy(bytes[0..payload_start], header[0..payload_start]);
+    try readExactTls(connection, bytes[payload_start..]);
     return .{
         .bytes = bytes,
         .fixed = try mqtt.FixedHeader.parse(bytes),
@@ -330,37 +323,33 @@ fn readStreamPacketWithInactivityTimeout(
     timeout: std.Io.Clock.Duration,
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
     var deadline = std.Io.Clock.Timestamp.fromNow(connection.io, timeout);
 
-    var first: [1]u8 = undefined;
-    try readExactTlsWithDeadline(connection, &first, deadline);
-    try encoded.append(allocator, first[0]);
-
-    var remaining_bytes: [4]u8 = undefined;
+    var header: [5]u8 = undefined;
+    try readExactTlsWithDeadline(connection, header[0..1], deadline);
     var remaining_len_len: usize = 0;
-    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+    while (remaining_len_len < 4) : (remaining_len_len += 1) {
         try readExactTlsWithDeadline(
             connection,
-            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            header[1 + remaining_len_len .. 2 + remaining_len_len],
             deadline,
         );
-        try encoded.append(allocator, remaining_bytes[remaining_len_len]);
-        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) break;
+        if ((header[1 + remaining_len_len] & 0x80) == 0) break;
     } else return error.MalformedRemainingLength;
 
     const decoded = try mqtt.decodeRemainingLength(
-        remaining_bytes[0 .. remaining_len_len + 1],
+        header[1 .. 2 + remaining_len_len],
     );
-    const payload_start = encoded.items.len;
+    const payload_start = 1 + decoded.len;
     const packet_len = std.math.add(
         usize,
         payload_start,
         decoded.value,
     ) catch return error.PacketTooLarge;
     if (packet_len > max_packet_size) return error.PacketTooLarge;
-    try encoded.resize(allocator, packet_len);
+    const bytes = try allocator.alloc(u8, packet_len);
+    errdefer allocator.free(bytes);
+    @memcpy(bytes[0..payload_start], header[0..payload_start]);
 
     var offset = payload_start;
     if (decoded.value > keep_alive_reader.progress_threshold) {
@@ -368,7 +357,7 @@ fn readStreamPacketWithInactivityTimeout(
     }
     while (offset < packet_len) {
         const count = try connection.readWithDeadline(
-            encoded.items[offset..],
+            bytes[offset..],
             deadline,
         );
         if (count == 0) return error.ConnectionClosed;
@@ -378,8 +367,6 @@ fn readStreamPacketWithInactivityTimeout(
         }
     }
 
-    const bytes = try encoded.toOwnedSlice(allocator);
-    errdefer allocator.free(bytes);
     return .{
         .bytes = bytes,
         .fixed = try mqtt.FixedHeader.parse(bytes),
@@ -392,44 +379,36 @@ fn readStreamPacketWithDeadline(
     max_packet_size: usize,
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedPacket {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
-
-    var first: [1]u8 = undefined;
-    try readExactTlsWithDeadline(connection, &first, deadline);
-    try encoded.append(allocator, first[0]);
-
-    var remaining_bytes: [4]u8 = undefined;
+    var header: [5]u8 = undefined;
+    try readExactTlsWithDeadline(connection, header[0..1], deadline);
     var remaining_len_len: usize = 0;
-    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+    while (remaining_len_len < 4) : (remaining_len_len += 1) {
         try readExactTlsWithDeadline(
             connection,
-            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            header[1 + remaining_len_len .. 2 + remaining_len_len],
             deadline,
         );
-        try encoded.append(allocator, remaining_bytes[remaining_len_len]);
-        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) break;
+        if ((header[1 + remaining_len_len] & 0x80) == 0) break;
     } else return error.MalformedRemainingLength;
 
     const decoded = try mqtt.decodeRemainingLength(
-        remaining_bytes[0 .. remaining_len_len + 1],
+        header[1 .. 2 + remaining_len_len],
     );
-    const payload_start = encoded.items.len;
+    const payload_start = 1 + decoded.len;
     const packet_len = std.math.add(
         usize,
         payload_start,
         decoded.value,
     ) catch return error.PacketTooLarge;
     if (packet_len > max_packet_size) return error.PacketTooLarge;
-    try encoded.resize(allocator, packet_len);
+    const bytes = try allocator.alloc(u8, packet_len);
+    errdefer allocator.free(bytes);
+    @memcpy(bytes[0..payload_start], header[0..payload_start]);
     try readExactTlsWithDeadline(
         connection,
-        encoded.items[payload_start..],
+        bytes[payload_start..],
         deadline,
     );
-
-    const bytes = try encoded.toOwnedSlice(allocator);
-    errdefer allocator.free(bytes);
     return .{
         .bytes = bytes,
         .fixed = try mqtt.FixedHeader.parse(bytes),
@@ -491,25 +470,15 @@ fn readTcpPacketFromReader(
     reader: *keep_alive_reader.Reader,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
-
-    var first: [1]u8 = undefined;
-    try reader.readExact(&first, false);
-    try encoded.append(allocator, first[0]);
-
-    var remaining_bytes: [4]u8 = undefined;
+    var header: [5]u8 = undefined;
+    try reader.readExact(header[0..1], false);
     var remaining_len_len: usize = 0;
-    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+    while (remaining_len_len < 4) : (remaining_len_len += 1) {
         try reader.readExact(
-            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+            header[1 + remaining_len_len .. 2 + remaining_len_len],
             false,
         );
-        try encoded.append(
-            allocator,
-            remaining_bytes[remaining_len_len],
-        );
-        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) {
+        if ((header[1 + remaining_len_len] & 0x80) == 0) {
             break;
         }
     } else {
@@ -517,9 +486,9 @@ fn readTcpPacketFromReader(
     }
 
     const decoded = try mqtt.decodeRemainingLength(
-        remaining_bytes[0 .. remaining_len_len + 1],
+        header[1 .. 2 + remaining_len_len],
     );
-    const payload_start = encoded.items.len;
+    const payload_start = 1 + decoded.len;
     const packet_len = std.math.add(
         usize,
         payload_start,
@@ -528,11 +497,13 @@ fn readTcpPacketFromReader(
     // MQTT 5 Maximum Packet Size is defined over the entire Control Packet,
     // not just the Remaining Length payload. Enforce it before allocation.
     if (packet_len > max_packet_size) return error.PacketTooLarge;
-    try encoded.resize(allocator, packet_len);
-    try reader.readExact(encoded.items[payload_start..], true);
-
-    const bytes = try encoded.toOwnedSlice(allocator);
+    // Preserve the public owned-packet lifetime while avoiding incremental
+    // heap growth: all framing bytes are bounded to five stack bytes and the
+    // full packet receives one exact allocation after preflight.
+    const bytes = try allocator.alloc(u8, packet_len);
     errdefer allocator.free(bytes);
+    @memcpy(bytes[0..payload_start], header[0..payload_start]);
+    try reader.readExact(bytes[payload_start..], true);
     return .{
         .bytes = bytes,
         .fixed = try mqtt.FixedHeader.parse(bytes),
@@ -788,4 +759,82 @@ test "packet prefix discard retains following packet bytes" {
     );
     discardPacketPrefix(&input, 2);
     try std.testing.expectEqual(@as(usize, 0), input.items.len);
+}
+
+test "TCP packet receive allocates the owned packet exactly once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    defer receiver.close(io);
+
+    var wire_bytes: [133]u8 = @splat(0x5a);
+    wire_bytes[0] = 0x30;
+    wire_bytes[1] = 0x82;
+    wire_bytes[2] = 0x01;
+    try writeAll(io, sender, &wire_bytes);
+
+    // Allow exactly the allocation that owns the returned packet. The former
+    // incremental ArrayList path needed additional allocation/remap activity
+    // while collecting the five-byte fixed header.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1, .resize_fail_index = 0 },
+    );
+    var transport = Transport.initTcp(io, receiver);
+    var packet = try transport.readPacket(
+        failing.allocator(),
+        wire_bytes.len,
+    );
+    defer packet.deinit(failing.allocator());
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations);
+    try std.testing.expectEqual(@as(usize, 0), failing.resize_index);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, &wire_bytes, packet.bytes);
+    try std.testing.expectEqual(@as(usize, 130), packet.fixed.remaining_len);
+    try std.testing.expectEqual(@as(usize, 3), packet.fixed.header_len);
+}
+
+test "TCP packet receive rejects oversize before allocating" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    defer receiver.close(io);
+
+    // Only the three-byte header is needed to prove that the complete packet
+    // exceeds the configured limit; its body deliberately never arrives.
+    try writeAll(io, sender, &.{ 0x30, 0x82, 0x01 });
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    var transport = Transport.initTcp(io, receiver);
+    try std.testing.expectError(
+        error.PacketTooLarge,
+        transport.readPacket(fail_first.allocator(), 132),
+    );
+    try std.testing.expect(!fail_first.has_induced_failure);
 }

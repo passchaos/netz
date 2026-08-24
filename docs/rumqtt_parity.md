@@ -192,9 +192,10 @@ fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
 Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
-green. A CPU-0-pinned WebSocket QoS 1 regression run measured 11.351 us per
-1-KiB PUBLISH/PUBACK and 88,094 operations/s; this checks the shared transport
-rather than isolating PING throughput.
+green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.796 us per
+PUBLISH/PUBACK over WebSocket (92,624 operations/s) and 11.539 us over native
+TLS (86,659 operations/s). These check the shared packet receive/send paths
+rather than isolating one control codec.
 Property-free DISCONNECT now follows the same design: normal shutdown uses its
 canonical two bytes and an MQTT 5 error reason uses three bytes, both from
 caller-owned storage. The TCP runtime test sends a non-zero Keep Alive timeout
@@ -231,6 +232,16 @@ UNSUBACK reason list, MQTT 5 reason lists, and the 128-byte Remaining Length
 boundary. In contrast, the audited rumqttd SUBACK/UNSUBACK writers first
 collect mapped reason bytes into another `Vec<u8>` before copying them into
 `BytesMut`.
+TCP and TLS packet readers now collect only the at-most-five-byte MQTT fixed
+header on the stack, validate the complete packet length, then allocate the
+public owned packet exactly once at its final size. This removes the former
+incremental ArrayList growth and ownership-transfer work without weakening
+absolute CONNECT/PING deadlines or broker Keep Alive progress renewal. A real
+TCP test permits exactly one allocation and forbids resizing for a packet with
+a multi-byte Remaining Length; a second sends only an oversized header and
+proves rejection happens before any allocation. Rumqttd instead starts each
+connection with a retained 10-KiB `BytesMut` receive buffer, favoring pooled
+read-ahead at the cost of that per-connection reservation.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
