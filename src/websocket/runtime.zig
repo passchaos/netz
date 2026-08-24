@@ -1078,10 +1078,12 @@ pub const Connection = struct {
     }
 
     pub fn sendCloseFrame(self: *Connection, close_frame: ?websocket.CloseFrame) Error!void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
-        try websocket.writeClosePayload(&payload, self.allocator, close_frame);
-        try self.sendFrame(.close, payload.items);
+        var storage: [125]u8 = undefined;
+        const payload = try websocket.writeClosePayloadInto(
+            &storage,
+            close_frame,
+        );
+        try self.sendFrame(.close, payload);
     }
 
     pub fn receiveCloseFrame(self: *Connection) Error!?websocket.OwnedCloseFrame {
@@ -1849,10 +1851,12 @@ pub const H2Connection = struct {
     }
 
     pub fn sendCloseFrame(self: *H2Connection, close_frame: ?websocket.CloseFrame) Error!void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
-        try websocket.writeClosePayload(&payload, self.allocator, close_frame);
-        try self.sendFrame(.close, payload.items);
+        var storage: [125]u8 = undefined;
+        const payload = try websocket.writeClosePayloadInto(
+            &storage,
+            close_frame,
+        );
+        try self.sendFrame(.close, payload);
     }
 
     pub fn receiveCloseFrame(self: *H2Connection) Error!?websocket.OwnedCloseFrame {

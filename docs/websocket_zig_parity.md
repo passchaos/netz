@@ -349,7 +349,9 @@ bounded step without duplicating Close. Tests cover silent peers, control-frame
 trickling, successful close details, in-flight data, WSS, and HTTP/2 extended
 CONNECT. This is stricter shutdown liveness than the audited websocket.zig
 close helper, which writes Close and closes the socket without waiting for a
-peer response.
+peer response. Both TCP/WSS and RFC 8441 close senders encode the bounded
+125-byte control payload in stack storage, avoiding a transient allocation at
+the shutdown boundary.
 
 ## Remaining evidence before a broad completion claim
 

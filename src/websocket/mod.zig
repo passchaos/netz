@@ -422,12 +422,25 @@ pub fn parseClosePayloadOwned(allocator: std.mem.Allocator, payload: []const u8)
 }
 
 pub fn writeClosePayload(list: *std.ArrayList(u8), allocator: std.mem.Allocator, close_frame: ?CloseFrame) Error!void {
-    const frame = close_frame orelse return;
+    var storage: [125]u8 = undefined;
+    const payload = try writeClosePayloadInto(&storage, close_frame);
+    try list.appendSlice(allocator, payload);
+}
+
+/// Encode a Close payload into caller-owned RFC 6455 control-frame storage.
+/// The returned slice aliases `storage` and is valid until that storage is
+/// reused. This lets runtimes send Close without a transient heap allocation.
+pub fn writeClosePayloadInto(
+    storage: *[125]u8,
+    close_frame: ?CloseFrame,
+) Error![]const u8 {
+    const frame = close_frame orelse return storage[0..0];
     if (!validCloseCode(frame.code)) return error.InvalidCloseCode;
     if (!std.unicode.utf8ValidateSlice(frame.reason)) return error.InvalidUtf8;
     if (frame.reason.len > 123) return error.InvalidControlFrame;
-    try wire.appendInt(list, allocator, u16, @intFromEnum(frame.code), .big);
-    try list.appendSlice(allocator, frame.reason);
+    std.mem.writeInt(u16, storage[0..2], @intFromEnum(frame.code), .big);
+    @memcpy(storage[2..][0..frame.reason.len], frame.reason);
+    return storage[0 .. 2 + frame.reason.len];
 }
 
 pub fn validCloseCode(code: CloseCode) bool {
@@ -1613,6 +1626,12 @@ test "WebSocket close payload validation" {
     defer encoded.deinit(allocator);
     try writeClosePayload(&encoded, allocator, .{ .code = .going_away, .reason = "restart" });
     try std.testing.expectEqualSlices(u8, &.{ 0x03, 0xe9, 'r', 'e', 's', 't', 'a', 'r', 't' }, encoded.items);
+    var fixed_storage: [125]u8 = undefined;
+    const fixed_payload = try writeClosePayloadInto(
+        &fixed_storage,
+        .{ .code = .going_away, .reason = "restart" },
+    );
+    try std.testing.expectEqualSlices(u8, encoded.items, fixed_payload);
     const encoded_parsed = (try parseClosePayload(encoded.items)).?;
     try std.testing.expectEqual(CloseCode.going_away, encoded_parsed.code);
     try std.testing.expectEqualStrings("restart", encoded_parsed.reason);
@@ -1620,6 +1639,10 @@ test "WebSocket close payload validation" {
     encoded.clearRetainingCapacity();
     try writeClosePayload(&encoded, allocator, null);
     try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try writeClosePayloadInto(&fixed_storage, null)).len,
+    );
 
     var bad_reserved = [_]u8{ 0x03, 0xed };
     try std.testing.expectError(error.InvalidCloseCode, validateClosePayload(&bad_reserved));
