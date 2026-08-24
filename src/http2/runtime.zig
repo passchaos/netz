@@ -8610,12 +8610,18 @@ fn cloneDecodedHeaders(
     else
         try allocator.alloc(http2.Hpack.HeaderField, limits.max_header_fields);
     defer if (limits.max_header_fields > stack_scratch.len) allocator.free(scratch);
-    const decoded = decoder.decodeBlockInto(allocator, block, scratch) catch |err| switch (err) {
-        error.BufferTooShort => return error.MessageTooLarge,
+    const decoded = decoder.decodeBlockIntoWithLimit(
+        allocator,
+        block,
+        scratch,
+        limits.max_header_list_size,
+    ) catch |err| switch (err) {
+        error.BufferTooShort,
+        error.HeaderListTooLarge,
+        => return error.MessageTooLarge,
         else => |e| return e,
     };
     defer http2.Hpack.freeDecodedFieldStorages(allocator, decoded);
-    try validateHeaderListSize(decoded, limits.max_header_list_size);
     const cloned = try allocator.alloc(http2.Hpack.HeaderField, decoded.len);
     errdefer allocator.free(cloned);
     if (decoded.len == 0) return cloned;
@@ -16689,6 +16695,35 @@ test "HTTP/2 runtime enforces header list size limits" {
         .max_header_fields = 16,
         .max_header_list_size = 120,
     }, &decoder));
+    var no_alloc_block: std.ArrayList(u8) = .empty;
+    defer no_alloc_block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(
+        &no_alloc_block,
+        allocator,
+        &.{.{
+            .name = "authorization",
+            .value = "compressible-value",
+        }},
+    );
+    var no_alloc_decoder = http2.Hpack.Decoder{};
+    defer no_alloc_decoder.deinit(allocator);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        cloneDecodedHeaders(
+            no_alloc.allocator(),
+            no_alloc_block.items,
+            .{
+                .max_header_fields = 16,
+                .max_header_list_size = 1,
+            },
+            &no_alloc_decoder,
+        ),
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
 
     var connection = Connection{
         .io = undefined,

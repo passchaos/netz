@@ -579,6 +579,19 @@ cap preservation; native TLS tests cover both direct PING and scheduled idle
 keep-alive. Unlike Hyper's continuously polled background connection driver,
 the blocking netz driver deliberately runs one cycle at a time and must be the
 sole frame reader; applications repeat it from their owning event loop.
+
+Inbound HPACK decoding now enforces `Limits.max_header_list_size` while walking
+the compressed block rather than after materializing every header. Static,
+dynamic and Huffman-backed fields are charged using RFC 9113's uncompressed
+`name + value + 32` accounting before allocating application-visible output.
+After the limit is crossed, the decoder still consumes and validates the rest
+of the block and applies incremental-indexing updates, keeping the connection's
+compression context synchronized for later streams without retaining oversized
+output. Failing-allocator tests cover the allocation-free non-indexed rejection
+path, while a second block proves indexed state survives an oversized first
+block. Incremental literals also interpret all six name-index bits correctly;
+the high index bit is no longer confused with the Never Indexed marker from
+the separate four-bit representation.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse
