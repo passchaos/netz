@@ -5356,10 +5356,27 @@ pub const Connection = struct {
 
     pub fn sendGoAway(self: *Connection, last_stream_id: u31, error_code: http2.ErrorCode, debug_data: []const u8) Error!void {
         try self.validateLocalGoAway(last_stream_id);
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try http2.GoAwayPayload.write(&encoded, self.allocator, last_stream_id, error_code, debug_data);
-        try self.transportForIo().writeAll(encoded.items);
+        var stack_storage: [256]u8 = undefined;
+        const total_len = try http2.GoAwayPayload.encodedLen(debug_data.len);
+        if (total_len <= stack_storage.len) {
+            const encoded = try http2.GoAwayPayload.writeInto(
+                &stack_storage,
+                last_stream_id,
+                error_code,
+                debug_data,
+            );
+            try self.transportForIo().writeAll(encoded);
+        } else {
+            const storage = try self.allocator.alloc(u8, total_len);
+            defer self.allocator.free(storage);
+            const encoded = try http2.GoAwayPayload.writeInto(
+                storage,
+                last_stream_id,
+                error_code,
+                debug_data,
+            );
+            try self.transportForIo().writeAll(encoded);
+        }
         self.local_goaway_last_stream_id = last_stream_id;
     }
 
@@ -5452,15 +5469,13 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try http2.ResetStreamPayload.write(
-            &encoded,
-            self.allocator,
+        var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
+        const encoded = try http2.ResetStreamPayload.writeInto(
+            &storage,
             stream_id,
             error_code,
         );
-        try self.transportForIo().writeAll(encoded.items);
+        try self.transportForIo().writeAll(encoded);
         self.rememberLocallyResetStream(stream_id);
     }
 

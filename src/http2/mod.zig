@@ -581,6 +581,7 @@ pub const DataPayload = struct {
 };
 
 pub const ResetStreamPayload = struct {
+    pub const encoded_len = FrameHeader.encoded_len + 4;
     stream_id: u31,
     error_code: ErrorCode,
 
@@ -595,17 +596,30 @@ pub const ResetStreamPayload = struct {
     }
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, error_code: ErrorCode) Error!void {
+        var encoded: [encoded_len]u8 = undefined;
+        const bytes = try writeInto(&encoded, stream_id, error_code);
+        try list.appendSlice(allocator, bytes);
+    }
+
+    pub fn writeInto(
+        storage: *[encoded_len]u8,
+        stream_id: u31,
+        error_code: ErrorCode,
+    ) Error![]const u8 {
         if (stream_id == 0) return error.InvalidStreamId;
-        const start = list.items.len;
-        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 4);
-        list.items.len = start + FrameHeader.encoded_len + 4;
         (FrameHeader{
             .length = 4,
             .frame_type = .rst_stream,
             .flags = 0,
             .stream_id = stream_id,
-        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
-        std.mem.writeInt(u32, list.items[start + FrameHeader.encoded_len ..][0..4], @intFromEnum(error_code), .big);
+        }).writeInto(storage[0..FrameHeader.encoded_len]);
+        std.mem.writeInt(
+            u32,
+            storage[FrameHeader.encoded_len..][0..4],
+            @intFromEnum(error_code),
+            .big,
+        );
+        return storage;
     }
 };
 
@@ -708,22 +722,48 @@ pub const GoAwayPayload = struct {
         error_code: ErrorCode,
         debug_data: []const u8,
     ) Error!void {
-        const payload_len = std.math.add(usize, 8, debug_data.len) catch return error.InvalidFrameSize;
-        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
-        const total_len = FrameHeader.encoded_len + payload_len;
-        const start = list.items.len;
+        const total_len = try encodedLen(debug_data.len);
         try list.ensureUnusedCapacity(allocator, total_len);
-        list.items.len = start + total_len;
+        const start = list.items.len;
+        list.items.len += total_len;
+        _ = try writeInto(
+            list.items[start..],
+            last_stream_id,
+            error_code,
+            debug_data,
+        );
+    }
+
+    pub fn encodedLen(debug_data_len: usize) Error!usize {
+        const payload_len = std.math.add(usize, 8, debug_data_len) catch return error.InvalidFrameSize;
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
+        _ = payload_len_u24;
+        return FrameHeader.encoded_len + payload_len;
+    }
+
+    pub fn writeInto(
+        storage: []u8,
+        last_stream_id: u31,
+        error_code: ErrorCode,
+        debug_data: []const u8,
+    ) Error![]const u8 {
+        const payload_len = std.math.add(usize, 8, debug_data.len) catch
+            return error.InvalidFrameSize;
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse
+            return error.InvalidFrameSize;
+        const total_len = FrameHeader.encoded_len + payload_len;
+        if (storage.len < total_len) return error.BufferTooShort;
         (FrameHeader{
             .length = payload_len_u24,
             .frame_type = .goaway,
             .flags = 0,
             .stream_id = 0,
-        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
-        const payload = list.items[start + FrameHeader.encoded_len ..][0..payload_len];
+        }).writeInto(storage[0..FrameHeader.encoded_len]);
+        const payload = storage[FrameHeader.encoded_len..][0..payload_len];
         std.mem.writeInt(u32, payload[0..4], @as(u32, last_stream_id), .big);
         std.mem.writeInt(u32, payload[4..8], @intFromEnum(error_code), .big);
         @memcpy(payload[8..], debug_data);
+        return storage[0..total_len];
     }
 };
 
@@ -2752,6 +2792,28 @@ test "HTTP/2 ping and goaway payload helpers" {
     try std.testing.expectEqual(@as(u31, 7), goaway.last_stream_id);
     try std.testing.expectEqual(ErrorCode.no_error, goaway.error_code);
     try std.testing.expectEqualStrings("bye", goaway.debug_data);
+    var goaway_storage: [64]u8 = undefined;
+    const direct_goaway = try GoAwayPayload.writeInto(
+        &goaway_storage,
+        7,
+        .no_error,
+        "bye",
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        goaway_bytes.items,
+        direct_goaway,
+    );
+    var short_storage: [10]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        GoAwayPayload.writeInto(
+            &short_storage,
+            7,
+            .no_error,
+            "bye",
+        ),
+    );
 
     var no_alloc_goaway: std.ArrayList(u8) = .empty;
     defer no_alloc_goaway.deinit(allocator);
@@ -2786,6 +2848,14 @@ test "HTTP/2 RST_STREAM payload helper" {
     try std.testing.expectEqual(@as(u31, 3), reset.stream_id);
     try std.testing.expectEqual(ErrorCode.cancel, reset.error_code);
     try std.testing.expectError(error.InvalidStreamId, ResetStreamPayload.write(&encoded, allocator, 0, .cancel));
+
+    var storage: [ResetStreamPayload.encoded_len]u8 = undefined;
+    const direct = try ResetStreamPayload.writeInto(
+        &storage,
+        3,
+        .cancel,
+    );
+    try std.testing.expectEqualSlices(u8, encoded.items, direct);
 }
 
 test "HTTP/2 HPACK static table decode" {
