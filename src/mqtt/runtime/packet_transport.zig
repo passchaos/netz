@@ -145,15 +145,14 @@ pub const Transport = union(enum) {
     }
 
     /// Write a packet prefix and borrowed application payload as one logical
-    /// transport operation. Stream transports can use scatter/gather without
-    /// copying the payload. WebSocket must preserve one MQTT packet per binary
-    /// message and client masking is in-place, so it intentionally reports that
-    /// the caller should use the contiguous compatibility path instead.
+    /// transport operation. Stream transports use scatter/gather directly;
+    /// WebSocket emits one binary frame and applies one continuous client mask
+    /// across both slices without concatenating the MQTT packet.
     pub fn writePacketParts(
         self: *Transport,
         prefix: []const u8,
         payload: []const u8,
-    ) Error!bool {
+    ) Error!void {
         switch (self.*) {
             .tcp => |tcp| try stream_io.writeAllParts(
                 tcp.io,
@@ -173,16 +172,11 @@ pub const Transport = union(enum) {
                 prefix,
                 payload,
             ),
-            .websocket => return false,
+            .websocket => |*ws| try ws.connection.sendBinaryParts(
+                prefix,
+                payload,
+            ),
         }
-        return true;
-    }
-
-    pub fn supportsBorrowedPacketPayload(self: Transport) bool {
-        return switch (self) {
-            .tcp, .tls, .tls_vail, .tls_server => true,
-            .websocket => false,
-        };
     }
 
     pub fn readPacket(

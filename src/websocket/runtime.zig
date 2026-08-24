@@ -1033,6 +1033,93 @@ pub const Connection = struct {
         try self.sendMessage(.binary, payload);
     }
 
+    /// Send two borrowed slices as one binary message.
+    ///
+    /// The uncompressed server path submits header, prefix, and payload without
+    /// concatenating them; transports with vectored writes use scatter/gather.
+    /// The uncompressed client path must mask every payload byte, so each slice
+    /// is copied through bounded stack storage while continuing the same
+    /// four-byte mask offset. Negotiated compression retains existing behavior
+    /// and may join the slices because the compressor needs one logical input.
+    pub fn sendBinaryParts(
+        self: *Connection,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        if (!canSendOpcode(.binary, self.close_sent, self.close_received)) {
+            return error.ConnectionClosed;
+        }
+        const payload_len = std.math.add(
+            usize,
+            first.len,
+            second.len,
+        ) catch return error.PayloadTooLarge;
+        if (payload_len > self.limits.max_message_bytes or
+            payload_len > self.limits.max_frame_bytes)
+        {
+            return error.PayloadTooLarge;
+        }
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+
+        if (self.permessage_deflate and
+            payload_len >= self.compression_threshold)
+        {
+            // Compression needs one logical plaintext input. Preserve the
+            // existing negotiated behavior rather than silently emitting an
+            // uncompressed frame through the zero-copy fast path.
+            var joined = try std.ArrayList(u8).initCapacity(
+                self.allocator,
+                payload_len,
+            );
+            defer joined.deinit(self.allocator);
+            joined.appendSliceAssumeCapacity(first);
+            joined.appendSliceAssumeCapacity(second);
+            const compressed = try self.compressMessageLocked(joined.items);
+            if (compressed.len < joined.items.len) {
+                try self.writeFrameLockedExtended(
+                    .binary,
+                    compressed,
+                    true,
+                    .{ .rsv1 = true },
+                );
+                return;
+            }
+        }
+
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        if (self.role == .server) {
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &header_storage,
+                .binary,
+                payload_len,
+                .{},
+            );
+            try self.transport().writeAllSlices(&.{
+                header,
+                first,
+                second,
+            });
+            return;
+        }
+
+        var mask_key: [4]u8 = undefined;
+        try std.Io.randomSecure(self.io, &mask_key);
+        const header = try websocket.writeFrameHeaderForLengthInto(
+            &header_storage,
+            .binary,
+            payload_len,
+            .{ .mask_key = mask_key },
+        );
+        try writeMaskedPayloadParts(
+            self.transport(),
+            header,
+            first,
+            second,
+            mask_key,
+        );
+    }
+
     /// Send one binary message by masking the caller buffer in place.
     ///
     /// This opt-in API matches mutable-buffer WebSocket clients such as
@@ -3141,6 +3228,54 @@ fn writeMaskedPayload(
     }
 }
 
+fn writeMaskedPayloadParts(
+    transport: RuntimeTransport,
+    header: []const u8,
+    first: []const u8,
+    second: []const u8,
+    mask_key: [4]u8,
+) Error!void {
+    var scratch: [masked_write_scratch_len]u8 = undefined;
+    const parts = [_][]const u8{ first, second };
+    var part_index: usize = 0;
+    var part_offset: usize = 0;
+    var mask_offset: usize = 0;
+    var header_pending = true;
+
+    while (part_index < parts.len) {
+        var count: usize = 0;
+        while (part_index < parts.len and count < scratch.len) {
+            const part = parts[part_index];
+            if (part_offset == part.len) {
+                part_index += 1;
+                part_offset = 0;
+                continue;
+            }
+            const chunk_len = @min(
+                scratch.len - count,
+                part.len - part_offset,
+            );
+            try websocket.applyMaskCopy(
+                scratch[count..][0..chunk_len],
+                part[part_offset..][0..chunk_len],
+                mask_key,
+                mask_offset,
+            );
+            count += chunk_len;
+            part_offset += chunk_len;
+            mask_offset += chunk_len;
+        }
+        if (count == 0) break;
+        if (header_pending) {
+            try transport.writeAllParts(header, scratch[0..count]);
+            header_pending = false;
+        } else {
+            try transport.writeAll(scratch[0..count]);
+        }
+    }
+    if (header_pending) try transport.writeAll(header);
+}
+
 test "WebSocket client handshake accepts split Connection and rejects duplicate critical headers" {
     const allocator = std.testing.allocator;
     const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -3448,6 +3583,59 @@ test "WebSocket runtime streams large immutable payload without mutation" {
     defer response.deinit(allocator);
     try std.testing.expectEqualSlices(u8, expected, response.payload);
     try client.sendClose(.normal_closure, "");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket binary parts preserve one frame and continuous masking" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+            var frame = try connection.receiveFrame();
+            defer frame.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.binary, frame.header.opcode);
+            try std.testing.expect(frame.header.fin);
+            try std.testing.expectEqualStrings("prefix-payload", frame.payload);
+            try connection.sendBinaryParts("reply-", "parts");
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/binary-parts",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    try client.sendBinaryParts("prefix-", "payload");
+    var response = try client.receiveFrame();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, response.header.opcode);
+    try std.testing.expectEqualStrings("reply-parts", response.payload);
 
     thread.join();
     if (shared.err) |err| return err;

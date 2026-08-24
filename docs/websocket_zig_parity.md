@@ -157,6 +157,15 @@ The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw
 inflater may overwrite output before consuming aliased input. A regression test
 checks that scratch holds the exact wire payload before caller-buffer inflate.
+Uncompressed binary messages also accept two borrowed application slices. The
+server submits header plus both slices without concatenation, using
+scatter/gather where the transport supports it; the client masks both through
+bounded stack chunks while carrying the RFC 6455 mask offset across the slice
+boundary. The receiver still observes one binary frame, which lets
+MQTT-over-WebSocket avoid concatenating its encoded packet prefix and application
+payload without changing message boundaries. Header-length parity tests cover
+the 125/126/65535 transitions and a bidirectional runtime test covers continuous
+masking across the join.
 
 Netz uses `sendBinaryInPlace` and `receiveMessageInto`; the former deliberately
 leaves caller storage masked, matching websocket.zig's mutable-input contract,

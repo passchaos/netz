@@ -196,21 +196,23 @@ green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
 rather than isolating one control codec.
-PUBLISH encoding now exposes a validated prefix-only form. Plain TCP and both
-native TLS transports submit that retained prefix together with the borrowed
-application payload, so payload size no longer drives the connection's packet
-scratch capacity or an extra memcpy. MQTT-over-WebSocket deliberately retains
-the contiguous fallback because one MQTT packet maps to one binary message and
-clients mask that mutable packet in place. V3.1.1 and MQTT 5 tests compare the
-prefix plus borrowed payload byte-for-byte with the original contiguous encoder,
+PUBLISH encoding now exposes a validated prefix-only form. Plain TCP, native
+TLS, WS, and WSS submit that retained prefix together with the borrowed
+application payload, so payload size no longer drives the MQTT connection's
+packet scratch capacity. MQTT-over-WebSocket still preserves one MQTT packet per
+binary message: its new two-part WebSocket writer emits one frame and carries a
+continuous client mask across both slices through bounded stack scratch rather
+than concatenating the message. V3.1.1 and MQTT 5 tests compare the prefix plus
+borrowed payload byte-for-byte with the original contiguous encoder,
 including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
-parses the complete bytes. The full 1,596-test suite, 129-scenario
+parses the complete bytes. WebSocket tests independently verify one-frame
+masked client and unmasked server messages assembled from two parts. The full 1,599-test suite, 129-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
-CPU-0 native-TLS samples measured 11.075-11.555 us per QoS 1 PUBLISH/PUBACK
-(11.219 us mean); WebSocket, which intentionally does not use this path, was
-noisy at 10.635-14.782 us with a 10.667-us median.
+CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
+(11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
+10.450-us median and 10.534-us mean.
 Property-free DISCONNECT now follows the same design: normal shutdown uses its
 canonical two bytes and an MQTT 5 error reason uses three bytes, both from
 caller-owned storage. The TCP runtime test sends a non-zero Keep Alive timeout

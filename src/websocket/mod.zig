@@ -558,6 +558,54 @@ pub fn writeFrameHeaderInto(
     options: WriteFrameOptions,
 ) Error![]const u8 {
     try validateOutgoingFrame(opcode, payload, options);
+    return writeFrameHeaderForLengthAssumeValid(
+        storage,
+        opcode,
+        payload.len,
+        options,
+    );
+}
+
+/// Encode a frame header for a payload supplied as multiple transport slices.
+/// Validation that depends on payload contents (text UTF-8 and Close syntax)
+/// remains the caller's responsibility; this API is intended for binary data.
+pub fn writeFrameHeaderForLengthInto(
+    storage: *[max_frame_header_len]u8,
+    opcode: Opcode,
+    payload_len: usize,
+    options: WriteFrameOptions,
+) Error![]const u8 {
+    switch (opcode) {
+        .continuation, .text, .binary, .close, .ping, .pong => {},
+        else => return error.InvalidOpcode,
+    }
+    if (opcode.isControl()) {
+        if (!options.fin or payload_len > 125) {
+            return error.InvalidControlFrame;
+        }
+        if (options.rsv1 or options.rsv2 or options.rsv3) {
+            return error.UnexpectedRsv;
+        }
+    }
+    if (opcode == .continuation and
+        (options.rsv1 or options.rsv2 or options.rsv3))
+    {
+        return error.UnexpectedRsv;
+    }
+    return writeFrameHeaderForLengthAssumeValid(
+        storage,
+        opcode,
+        payload_len,
+        options,
+    );
+}
+
+fn writeFrameHeaderForLengthAssumeValid(
+    storage: *[max_frame_header_len]u8,
+    opcode: Opcode,
+    payload_len: usize,
+    options: WriteFrameOptions,
+) Error![]const u8 {
     storage[0] = (if (options.fin) @as(u8, 0x80) else 0) |
         (if (options.rsv1) @as(u8, 0x40) else 0) |
         (if (options.rsv2) @as(u8, 0x20) else 0) |
@@ -565,17 +613,17 @@ pub fn writeFrameHeaderInto(
         @intFromEnum(opcode);
     const masked_bit: u8 = if (options.mask_key != null) 0x80 else 0;
     var pos: usize = 2;
-    if (payload.len <= 125) {
-        storage[1] = masked_bit | @as(u8, @intCast(payload.len));
-    } else if (payload.len <= std.math.maxInt(u16)) {
+    if (payload_len <= 125) {
+        storage[1] = masked_bit | @as(u8, @intCast(payload_len));
+    } else if (payload_len <= std.math.maxInt(u16)) {
         storage[1] = masked_bit | 126;
-        std.mem.writeInt(u16, storage[2..4], @intCast(payload.len), .big);
+        std.mem.writeInt(u16, storage[2..4], @intCast(payload_len), .big);
         pos = 4;
     } else {
-        const payload_len = std.math.cast(u64, payload.len) orelse
+        const payload_len_u64 = std.math.cast(u64, payload_len) orelse
             return error.PayloadTooLarge;
         storage[1] = masked_bit | 127;
-        std.mem.writeInt(u64, storage[2..10], payload_len, .big);
+        std.mem.writeInt(u64, storage[2..10], payload_len_u64, .big);
         pos = 10;
     }
     if (options.mask_key) |mask| {
@@ -1448,6 +1496,48 @@ test "WebSocket caller-buffer frame encoding matches allocating writer" {
             try std.testing.expectEqual(mask_key != null, header.masked);
         }
     }
+}
+
+test "WebSocket length-only frame header matches payload-based encoder" {
+    const payload_lengths = [_]usize{
+        0,
+        1,
+        125,
+        126,
+        std.math.maxInt(u16),
+        @as(usize, std.math.maxInt(u16)) + 1,
+    };
+    for (payload_lengths) |payload_len| {
+        const payload = try std.testing.allocator.alloc(u8, payload_len);
+        defer std.testing.allocator.free(payload);
+        for ([_]?[4]u8{ null, .{ 1, 2, 3, 4 } }) |mask_key| {
+            var expected_storage: [max_frame_header_len]u8 = undefined;
+            const expected = try writeFrameHeaderInto(
+                &expected_storage,
+                .binary,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            var actual_storage: [max_frame_header_len]u8 = undefined;
+            const actual = try writeFrameHeaderForLengthInto(
+                &actual_storage,
+                .binary,
+                payload_len,
+                .{ .mask_key = mask_key },
+            );
+            try std.testing.expectEqualSlices(u8, expected, actual);
+        }
+    }
+    var storage: [max_frame_header_len]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidControlFrame,
+        writeFrameHeaderForLengthInto(
+            &storage,
+            .ping,
+            126,
+            .{},
+        ),
+    );
 }
 
 test "WebSocket fixed frame encoder rejects short output transactionally" {
