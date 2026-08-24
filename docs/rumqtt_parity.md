@@ -172,7 +172,9 @@ PUBREL/PUBCOMP use the same retained-capacity path while preserving MQTT 5's
 shortest legal omission of reason code and Property Length. SUBSCRIBE,
 SUBACK, UNSUBSCRIBE and UNSUBACK preflight complete filter/reason lists and
 also write directly after one final reservation. Warmed mixed-property and
-multi-filter tests run these writers under a fail-first allocator.
+multi-filter tests run these writers under a fail-first allocator. DISCONNECT
+and enhanced-authentication AUTH complete the same treatment, including their
+zero-length and reason-plus-properties MQTT 5 forms.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload

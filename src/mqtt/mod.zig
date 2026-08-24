@@ -1769,21 +1769,34 @@ pub const Disconnect = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (protocol == .v3_1_1) {
             if (reason_code != 0) return error.InvalidReasonCode;
             if (properties.len != 0) return error.InvalidProperty;
         } else try validateDisconnectReason(reason_code);
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        if (protocol == .v5 and reason_code != 0 and properties.len == 0) {
-            try variable.append(allocator, reason_code);
-        } else if (protocol == .v5 and (reason_code != 0 or properties.len != 0)) {
-            try variable.append(allocator, reason_code);
+        const include_reason = protocol == .v5 and
+            (reason_code != 0 or properties.len != 0);
+        const properties_len = if (protocol == .v5 and properties.len != 0) blk: {
             try validatePropertiesFor(.disconnect, properties);
-            try writeProperties(&variable, allocator, properties);
+            break :blk try propertiesEncodedLen(properties);
+        } else 0;
+        const remaining_len = @intFromBool(include_reason) +
+            if (properties.len != 0)
+                remainingLengthEncodedLen(properties_len) + properties_len
+            else
+                0;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .disconnect,
+            0,
+            remaining_len,
+        );
+        if (include_reason) list.appendAssumeCapacity(reason_code);
+        if (properties.len != 0) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
         }
-        try (FixedHeader{ .packet_type = .disconnect, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
     }
 };
 
@@ -1824,18 +1837,33 @@ pub const Auth = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (protocol != .v5) return error.InvalidPacketType;
         try validateAuthReason(reason_code);
         try validateAuthProperties(properties);
 
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        if (reason_code != 0 or properties.len != 0) {
-            try variable.append(allocator, reason_code);
-            try writeProperties(&variable, allocator, properties);
+        const include_reason = reason_code != 0 or properties.len != 0;
+        const properties_len = if (include_reason)
+            try propertiesEncodedLen(properties)
+        else
+            0;
+        const remaining_len = @intFromBool(include_reason) +
+            if (include_reason)
+                remainingLengthEncodedLen(properties_len) + properties_len
+            else
+                0;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .auth,
+            0,
+            remaining_len,
+        );
+        if (include_reason) {
+            list.appendAssumeCapacity(reason_code);
+            writePropertiesAssumeCapacity(list, properties, properties_len);
         }
-        try (FixedHeader{ .packet_type = .auth, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
     }
 };
 
@@ -3346,6 +3374,67 @@ test "MQTT v5 AUTH control" {
     try std.testing.expectError(error.InvalidProperty, Auth.write(&encoded, allocator, .v5, 0x18, &.{
         .{ .two_byte = .{ .id = .receive_maximum, .value = 10 } },
     }));
+}
+
+test "MQTT DISCONNECT and AUTH writers reuse output capacity" {
+    const allocator = std.testing.allocator;
+    const disconnect_properties = [_]Property{
+        .{ .utf8 = .{ .id = .reason_string, .value = "moving" } },
+        .{ .utf8 = .{ .id = .server_reference, .value = "other.example" } },
+    };
+    const auth_properties = [_]Property{
+        .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
+        .{ .binary = .{ .id = .authentication_data, .value = "server-final" } },
+    };
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+
+    try Disconnect.write(
+        &output,
+        allocator,
+        .v5,
+        0x9c,
+        &disconnect_properties,
+    );
+    const disconnect = try allocator.dupe(u8, output.items);
+    defer allocator.free(disconnect);
+    output.clearRetainingCapacity();
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try Disconnect.write(
+        &output,
+        no_alloc.allocator(),
+        .v5,
+        0x9c,
+        &disconnect_properties,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, disconnect, output.items);
+    var parsed_disconnect = try Disconnect.parse(allocator, .v5, output.items);
+    defer parsed_disconnect.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x9c), parsed_disconnect.reason_code);
+
+    output.clearRetainingCapacity();
+    try Auth.write(&output, allocator, .v5, 0x18, &auth_properties);
+    const auth = try allocator.dupe(u8, output.items);
+    defer allocator.free(auth);
+    output.clearRetainingCapacity();
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try Auth.write(
+        &output,
+        no_alloc.allocator(),
+        .v5,
+        0x18,
+        &auth_properties,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, auth, output.items);
+    var parsed_auth = try Auth.parse(allocator, .v5, output.items);
+    defer parsed_auth.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x18), parsed_auth.reason_code);
+    try std.testing.expectEqual(@as(usize, 2), parsed_auth.properties.len);
 }
 
 test "MQTT CONNECT information preference helpers use protocol defaults" {
