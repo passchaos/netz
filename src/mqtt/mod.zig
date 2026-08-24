@@ -1780,6 +1780,11 @@ pub const Disconnect = struct {
     reason_code: u8 = 0,
     properties: []Property = &.{},
 
+    /// Largest complete DISCONNECT packet without properties. A normal
+    /// disconnect is only the two-byte fixed header; MQTT 5 adds one optional
+    /// Reason Code byte for every non-zero reason.
+    pub const no_properties_max_len: usize = 3;
+
     pub fn deinit(self: *Disconnect, allocator: std.mem.Allocator) void {
         allocator.free(self.properties);
         self.* = undefined;
@@ -1836,6 +1841,33 @@ pub const Disconnect = struct {
         if (properties.len != 0) {
             writePropertiesAssumeCapacity(list, properties, properties_len);
         }
+    }
+
+    /// Encode a property-free DISCONNECT directly into caller storage.
+    ///
+    /// Normal shutdown is a frequent fixed-size control path. Keeping its
+    /// storage under caller control avoids allocating solely to write two or
+    /// three bytes, while `write` continues to support the unbounded property
+    /// forms.
+    pub fn writeNoPropertiesInto(
+        storage: *[no_properties_max_len]u8,
+        protocol: ProtocolVersion,
+        reason_code: u8,
+    ) Error![]u8 {
+        if (protocol == .v3_1_1) {
+            if (reason_code != 0) return error.InvalidReasonCode;
+        } else {
+            try validateDisconnectReason(reason_code);
+        }
+
+        storage[0] = @as(u8, @intFromEnum(PacketType.disconnect)) << 4;
+        if (protocol == .v5 and reason_code != 0) {
+            storage[1] = 1;
+            storage[2] = reason_code;
+            return storage;
+        }
+        storage[1] = 0;
+        return storage[0..2];
     }
 };
 
@@ -3462,6 +3494,31 @@ test "MQTT disconnect control" {
     try std.testing.expectError(error.InvalidProperty, Disconnect.write(&encoded, allocator, .v3_1_1, 0, &.{
         .{ .utf8 = .{ .id = .reason_string, .value = "v3 has no properties" } },
     }));
+
+    var direct: [Disconnect.no_properties_max_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xe0, 0x00 },
+        try Disconnect.writeNoPropertiesInto(&direct, .v5, 0),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xe0, 0x01, 0x8d },
+        try Disconnect.writeNoPropertiesInto(&direct, .v5, 0x8d),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xe0, 0x00 },
+        try Disconnect.writeNoPropertiesInto(&direct, .v3_1_1, 0),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        Disconnect.writeNoPropertiesInto(&direct, .v3_1_1, 0x8d),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        Disconnect.writeNoPropertiesInto(&direct, .v5, 0x05),
+    );
 
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
