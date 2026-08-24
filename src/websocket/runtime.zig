@@ -1039,8 +1039,9 @@ pub const Connection = struct {
     /// concatenating them; transports with vectored writes use scatter/gather.
     /// The uncompressed client path must mask every payload byte, so each slice
     /// is copied through bounded stack storage while continuing the same
-    /// four-byte mask offset. Negotiated compression retains existing behavior
-    /// and may join the slices because the compressor needs one logical input.
+    /// four-byte mask offset. Negotiated compression consumes the same borrowed
+    /// slices through Vort's chunked-input API, retaining only compressed wire
+    /// output and encoder workspace on the connection.
     pub fn sendBinaryParts(
         self: *Connection,
         first: []const u8,
@@ -1065,18 +1066,12 @@ pub const Connection = struct {
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
         {
-            // Compression needs one logical plaintext input. Preserve the
-            // existing negotiated behavior rather than silently emitting an
-            // uncompressed frame through the zero-copy fast path.
-            var joined = try std.ArrayList(u8).initCapacity(
-                self.allocator,
+            const parts = [_][]const u8{ first, second };
+            const compressed = try self.compressMessagePartsLocked(
+                &parts,
                 payload_len,
             );
-            defer joined.deinit(self.allocator);
-            joined.appendSliceAssumeCapacity(first);
-            joined.appendSliceAssumeCapacity(second);
-            const compressed = try self.compressMessageLocked(joined.items);
-            if (compressed.len < joined.items.len) {
+            if (compressed.len < payload_len) {
                 try self.writeFrameLockedExtended(
                     .binary,
                     compressed,
@@ -1636,6 +1631,23 @@ pub const Connection = struct {
             &self.compression_send.encoder.?,
             &self.compression_send.payload,
             payload,
+            self.compression_send_max_window_bits,
+        );
+    }
+
+    fn compressMessagePartsLocked(
+        self: *Connection,
+        parts: []const []const u8,
+        payload_len: usize,
+    ) Error![]const u8 {
+        try self.compression_send.prepare(
+            self.allocator,
+            payload_len,
+        );
+        return websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
+            &self.compression_send.encoder.?,
+            &self.compression_send.payload,
+            parts,
             self.compression_send_max_window_bits,
         );
     }

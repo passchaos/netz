@@ -165,7 +165,11 @@ boundary. The receiver still observes one binary frame, which lets
 MQTT-over-WebSocket avoid concatenating its encoded packet prefix and application
 payload without changing message boundaries. Header-length parity tests cover
 the 125/126/65535 transitions and a bidirectional runtime test covers continuous
-masking across the join.
+masking across the join. When permessage-deflate is negotiated, the same API
+feeds both borrowed slices directly to the retained Vort encoder rather than
+allocating and copying a contiguous plaintext message. A fail-after-warmup
+runtime test verifies that repeated compressed two-part sends do not allocate
+through the connection allocator.
 
 Netz uses `sendBinaryInPlace` and `receiveMessageInto`; the former deliberately
 leaves caller storage masked, matching websocket.zig's mutable-input contract,

@@ -551,6 +551,113 @@ test "WebSocket compressed sender uses RSV1 only when wire payload shrinks" {
     try std.testing.expect(!shared.fallback_rsv1);
 }
 
+test "WebSocket compressed binary parts reuse scratch without plaintext join" {
+    const allocator = std.testing.allocator;
+    const first = "mqtt-publish-prefix-";
+    const second = "compressible-application-payload-" ** 64;
+    const expected = first ++ second;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = expected.len,
+            .max_message_bytes = expected.len,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept(.{
+                .enable_permessage_deflate = true,
+            });
+            defer connection.close();
+            for (0..2) |_| {
+                var frame = try connection.receiveFrame();
+                defer frame.deinit(shared.server.http.allocator);
+                try std.testing.expectEqual(
+                    websocket.Opcode.binary,
+                    frame.header.opcode,
+                );
+                try std.testing.expect(frame.header.fin);
+                try std.testing.expect(frame.header.rsv1);
+                const decoded = try websocket.decompressMessage(
+                    shared.server.http.allocator,
+                    frame.payload,
+                    expected.len,
+                );
+                defer shared.server.http.allocator.free(decoded);
+                try std.testing.expectEqualStrings(expected, decoded);
+            }
+            try connection.sendBinaryParts(first, second);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/compressed-binary-parts",
+        .enable_permessage_deflate = true,
+        .compression_threshold = 0,
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = expected.len,
+            .max_message_bytes = expected.len,
+        },
+    });
+    defer client.close();
+    try client.sendBinaryParts(first, second);
+    const compressed_ptr = client.compression_send.payload.allocatedSlice().ptr;
+
+    // The first send warms both retained Vort stores. Failing the connection
+    // allocator now distinguishes chunked compression from the old temporary
+    // plaintext join, which allocated the full input on every call.
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    client.allocator = failing.allocator();
+    failing.fail_index = failing.alloc_index;
+    try client.sendBinaryParts(first, second);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(
+        compressed_ptr,
+        client.compression_send.payload.allocatedSlice().ptr,
+    );
+    client.allocator = allocator;
+    var response = try client.receiveFrame();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, response.header.opcode);
+    try std.testing.expect(response.header.fin);
+    try std.testing.expect(response.header.rsv1);
+    const decoded = try websocket.decompressMessage(
+        allocator,
+        response.payload,
+        expected.len,
+    );
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(expected, decoded);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket permessage-deflate reuses receive scratch" {
     const allocator = std.testing.allocator;
     const payload = "reusable compressed caller buffer " ** 4;
