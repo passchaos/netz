@@ -2370,6 +2370,23 @@ pub const H2Connection = struct {
             try self.tunnel.write(frame, opcode == .close);
             return;
         }
+        if (mask_key == null) {
+            // RFC 8441 server frames do not require masking. Keep the frame
+            // header on the stack and let HTTP/2 frame the header plus borrowed
+            // application payload as one ordered tunnel byte sequence.
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderInto(
+                &header_storage,
+                opcode,
+                payload,
+                .{
+                    .fin = fin,
+                    .rsv1 = options.rsv1,
+                },
+            );
+            try self.tunnel.writeParts(header, payload, false);
+            return;
+        }
         self.send_frame_buffer.clearRetainingCapacity();
         const required = std.math.add(
             usize,
@@ -4500,6 +4517,97 @@ test "WebSocket over HTTP/2 control sends do not retain frame scratch" {
     try std.testing.expectEqualStrings("stack", pong.payload);
     try client.sendClose(.normal_closure, "bye");
     try std.testing.expectEqual(@as(usize, 0), client.send_frame_buffer.capacity);
+    var close = try client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP/2 server borrows application payload across flow control" {
+    const allocator = std.testing.allocator;
+    const payload = "borrowed-rfc8441-payload-" ** 16;
+    const h2_limits: http2_runtime.Limits = .{
+        // A 32-byte stream window makes the server wait for several peer
+        // WINDOW_UPDATE frames. The first 32-byte credit burst also places the
+        // four-byte WebSocket header and payload join inside one DATA frame.
+        .initial_window_size = 32,
+        .max_body_bytes = payload.len + websocket.max_frame_header_len,
+        .enable_connect_protocol = true,
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        h2_limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *http2_runtime.Server) !void {
+            var h2 = try server_ptr.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
+                .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = payload.len,
+                    .max_message_bytes = payload.len,
+                },
+            });
+            defer ws.close();
+
+            try ws.sendBinary(payload);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                ws.send_frame_buffer.capacity,
+            );
+            var close = try ws.receiveFrameAuto();
+            defer close.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        h2_limits,
+    );
+    defer h2_client.close();
+    var client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/borrowed-frame",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    });
+    defer client.close();
+
+    var message = try client.receiveMessage();
+    defer message.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);
+    try std.testing.expectEqualStrings(payload, message.payload);
+    try client.sendClose(.normal_closure, "done");
     var close = try client.receiveFrame();
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);

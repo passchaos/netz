@@ -7103,6 +7103,72 @@ pub const Connection = struct {
         );
     }
 
+    fn writeDataParts(
+        self: *Connection,
+        stream_id: u31,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+    ) Error!void {
+        if (first.len == 0) return self.writeData(
+            stream_id,
+            second,
+            end_stream,
+        );
+        if (second.len == 0) return self.writeData(
+            stream_id,
+            first,
+            end_stream,
+        );
+        const total_len = std.math.add(
+            usize,
+            first.len,
+            second.len,
+        ) catch return error.MessageTooLarge;
+        if (!self.outboundStreamIsActive(stream_id)) {
+            return error.InvalidStreamId;
+        }
+        if (self.role == .client and
+            self.pendingApplicationFrameCount() != 0)
+        {
+            return error.ResponseAvailable;
+        }
+
+        const chunk_size = self.outboundFramePayloadLimit();
+        var offset: usize = 0;
+        while (offset < total_len) {
+            const stream_window = try self.sendStreamWindow(stream_id);
+            const available_credit = @min(
+                total_len - offset,
+                self.send_connection_window.available(),
+                stream_window.available(),
+            );
+            if (available_credit == 0) {
+                try self.waitForSendCapacity(stream_id);
+                continue;
+            }
+
+            const burst_limit = std.math.mul(
+                usize,
+                chunk_size,
+                max_data_frames_per_write,
+            ) catch std.math.maxInt(usize);
+            const burst_len = @min(available_credit, burst_limit);
+            try self.writeDataPartsBurst(
+                stream_id,
+                first,
+                second,
+                offset,
+                burst_len,
+                total_len,
+                end_stream,
+                chunk_size,
+                stream_window,
+            );
+            offset += burst_len;
+        }
+    }
+
     fn writeDataTracked(
         self: *Connection,
         stream_id: u31,
@@ -7208,6 +7274,81 @@ pub const Connection = struct {
         }
         try self.transportForIo().writeAllSlices(
             parts[0..part_count],
+        );
+    }
+
+    fn writeDataPartsBurst(
+        self: *Connection,
+        stream_id: u31,
+        first: []const u8,
+        second: []const u8,
+        logical_offset: usize,
+        payload_len: usize,
+        total_len: usize,
+        end_stream: bool,
+        chunk_size: usize,
+        stream_window: *FlowWindow,
+    ) Error!void {
+        std.debug.assert(first.len != 0 and second.len != 0);
+        std.debug.assert(payload_len != 0);
+        std.debug.assert(payload_len <=
+            chunk_size *| max_data_frames_per_write);
+        std.debug.assert(logical_offset + payload_len <= total_len);
+
+        try self.send_connection_window.reserve(payload_len);
+        errdefer self.send_connection_window.update(
+            @intCast(payload_len),
+        ) catch unreachable;
+        try stream_window.reserve(payload_len);
+        errdefer stream_window.update(
+            @intCast(payload_len),
+        ) catch unreachable;
+
+        var headers: [max_data_frames_per_write][
+            http2.FrameHeader.encoded_len
+        ]u8 = undefined;
+        // One DATA frame can straddle the input join, so reserve one header and
+        // both borrowed ranges per frame. In practice only one frame has three
+        // parts, but the fixed upper bound keeps this loop branch-independent.
+        var wire_parts: [3 * max_data_frames_per_write][]const u8 = undefined;
+        var wire_part_count: usize = 0;
+        const burst_end = logical_offset + payload_len;
+        var frame_start = logical_offset;
+        var frame_index: usize = 0;
+        while (frame_start < burst_end) : (frame_index += 1) {
+            const frame_end = @min(burst_end, frame_start + chunk_size);
+            try encodeFrameHeader(
+                &headers[frame_index],
+                .data,
+                if (end_stream and frame_end == total_len)
+                    flag_end_stream
+                else
+                    0,
+                stream_id,
+                frame_end - frame_start,
+            );
+            wire_parts[wire_part_count] = &headers[frame_index];
+            wire_part_count += 1;
+
+            const first_end = @min(frame_end, first.len);
+            if (frame_start < first_end) {
+                wire_parts[wire_part_count] = first[frame_start..first_end];
+                wire_part_count += 1;
+            }
+            if (frame_end > first.len) {
+                const second_start = if (frame_start > first.len)
+                    frame_start - first.len
+                else
+                    0;
+                const second_end = frame_end - first.len;
+                wire_parts[wire_part_count] =
+                    second[second_start..second_end];
+                wire_part_count += 1;
+            }
+            frame_start = frame_end;
+        }
+        try self.transportForIo().writeAllSlices(
+            wire_parts[0..wire_part_count],
         );
     }
 
@@ -8227,6 +8368,27 @@ pub const Tunnel = struct {
 
     pub fn write(self: *Tunnel, data: []const u8, end_stream: bool) Error!void {
         try self.connection.writeData(self.stream_id, data, end_stream);
+        if (end_stream) {
+            self.connection.releaseLocalStream(self.stream_id);
+            self.connection.releasePeerStream(self.stream_id);
+        }
+    }
+
+    /// Write two borrowed slices as one ordered tunnel byte sequence. DATA
+    /// frame boundaries and flow-control bursts may cross the slice join; the
+    /// caller must retain both slices until this synchronous call returns.
+    pub fn writeParts(
+        self: *Tunnel,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+    ) Error!void {
+        try self.connection.writeDataParts(
+            self.stream_id,
+            first,
+            second,
+            end_stream,
+        );
         if (end_stream) {
             self.connection.releaseLocalStream(self.stream_id);
             self.connection.releasePeerStream(self.stream_id);
@@ -14377,7 +14539,7 @@ test "HTTP/2 CONNECT tunnel rejects content-length on informational response" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
+test "HTTP/2 runtime accepts multipart traditional CONNECT DATA tunnel" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -14419,8 +14581,7 @@ test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
             try std.testing.expectEqualStrings("client tunnel bytes", inbound.data);
             try std.testing.expect(!inbound.end_stream);
 
-            try tunnel.write("server tunnel bytes", false);
-            try tunnel.closeWrite();
+            try tunnel.writeParts("server tunnel ", "bytes", true);
         }
     };
 
@@ -14442,15 +14603,11 @@ test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
     try std.testing.expect(findHeader(response.headers, "content-length") == null);
 
     var tunnel = response.tunnel;
-    try tunnel.write("client tunnel bytes", false);
+    try tunnel.writeParts("client ", "tunnel bytes", false);
     var inbound = try tunnel.read();
     defer inbound.deinit(allocator);
     try std.testing.expectEqualStrings("server tunnel bytes", inbound.data);
-
-    var fin = try tunnel.read();
-    defer fin.deinit(allocator);
-    try std.testing.expectEqualStrings("", fin.data);
-    try std.testing.expect(fin.end_stream);
+    try std.testing.expect(inbound.end_stream);
 
     thread.join();
     if (shared.err) |err| return err;

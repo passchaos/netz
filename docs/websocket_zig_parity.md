@@ -152,6 +152,21 @@ RFC 8441 echo runs measured 31.105-31.955 us/roundtrip (31.507 us mean, 0.94%
 standard deviation, 244.48-251.16 logical MiB/s). This is a persistent-connection
 regression sample; the one-time CONNECT allocation removal is intentionally not
 presented as a steady-state echo throughput gain.
+RFC 8441 server application frames now keep their RFC 6455 header on the stack
+and pass it with the borrowed payload to `Tunnel.writeParts`. HTTP/2 applies
+DATA frame sizing and connection/stream flow control across that logical join,
+including a DATA frame that contains the end of the WebSocket header and the
+start of its payload, without retaining a payload-sized `send_frame_buffer`. A
+32-byte-window regression forces multiple WINDOW_UPDATE cycles and verifies the
+complete message plus zero retained frame scratch. Client frames still require
+mutable masking storage and keep the existing bounded connection scratch path.
+Five CPU-0 4-KiB regression samples after this change measured 31.396-33.298
+us/roundtrip (32.150 us mean, 31.892 us median, 2.01% relative standard
+deviation, 234.62-248.83 logical MiB/s). The range overlaps the earlier
+31.105-31.955 us sample, so it is recorded as no demonstrated steady-state
+speedup; the proven improvement is eliminating payload-sized retained scratch
+on the unmasked server send path. The full 1,601-test suite and the bidirectional
+Hyper RFC 8441 gate remain green.
 
 The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw
