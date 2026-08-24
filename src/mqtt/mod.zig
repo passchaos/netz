@@ -1137,6 +1137,10 @@ pub const ConnAck = struct {
     reason_code: u8,
     properties: []Property = &.{},
 
+    /// Largest complete CONNACK without properties. MQTT 3.1.1 uses four
+    /// bytes, while MQTT 5 appends the mandatory zero Property Length byte.
+    pub const no_properties_max_len: usize = 5;
+
     pub fn deinit(self: *ConnAck, allocator: std.mem.Allocator) void {
         allocator.free(self.properties);
         self.* = undefined;
@@ -1198,6 +1202,31 @@ pub const ConnAck = struct {
         if (protocol == .v5) {
             writePropertiesAssumeCapacity(list, properties, properties_len);
         }
+    }
+
+    /// Encode a property-free CONNACK directly into caller storage.
+    ///
+    /// This bounded form is useful for MQTT 3.1.1 and for MQTT 5 connection
+    /// refusals, where a server should still be able to report the protocol
+    /// result when its general-purpose allocator is exhausted.
+    pub fn writeNoPropertiesInto(
+        storage: *[no_properties_max_len]u8,
+        protocol: ProtocolVersion,
+        session_present: bool,
+        reason_code: u8,
+    ) Error![]u8 {
+        try validateConnAckReason(protocol, reason_code);
+        try validateConnAckSessionPresent(session_present, reason_code);
+
+        storage[0] = @as(u8, @intFromEnum(PacketType.connack)) << 4;
+        storage[1] = if (protocol == .v5) 3 else 2;
+        storage[2] = @intFromBool(session_present);
+        storage[3] = reason_code;
+        if (protocol == .v5) {
+            storage[4] = 0;
+            return storage;
+        }
+        return storage[0..4];
     }
 };
 
@@ -3193,6 +3222,56 @@ test "MQTT connack ack and ping controls" {
     connack = try ConnAck.parse(allocator, .v3_1_1, connack_bytes.items);
     try std.testing.expectEqual(@as(u8, 0x05), connack.reason_code);
     try std.testing.expectError(error.InvalidReasonCode, ConnAck.write(&connack_bytes, allocator, .v3_1_1, false, 0x80, &.{}));
+
+    var direct_connack: [ConnAck.no_properties_max_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x20, 0x03, 0x01, 0x00, 0x00 },
+        try ConnAck.writeNoPropertiesInto(
+            &direct_connack,
+            .v5,
+            true,
+            0,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x20, 0x03, 0x00, 0x80, 0x00 },
+        try ConnAck.writeNoPropertiesInto(
+            &direct_connack,
+            .v5,
+            false,
+            0x80,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x20, 0x02, 0x00, 0x05 },
+        try ConnAck.writeNoPropertiesInto(
+            &direct_connack,
+            .v3_1_1,
+            false,
+            0x05,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidFlags,
+        ConnAck.writeNoPropertiesInto(
+            &direct_connack,
+            .v5,
+            true,
+            0x80,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        ConnAck.writeNoPropertiesInto(
+            &direct_connack,
+            .v3_1_1,
+            false,
+            0x80,
+        ),
+    );
 
     var invalid_connack: std.ArrayList(u8) = .empty;
     defer invalid_connack.deinit(allocator);

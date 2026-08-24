@@ -708,6 +708,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "accepted"));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.ConnAck,
+        "writeNoPropertiesInto",
+    ));
+    try std.testing.expectEqual(
+        @as(usize, 5),
+        netz.mqtt.ConnAck.no_properties_max_len,
+    );
+    try std.testing.expect(@hasDecl(
         netz.mqtt.AckPacket,
         "writeNoPropertiesInto",
     ));

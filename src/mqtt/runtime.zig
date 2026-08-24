@@ -1115,8 +1115,6 @@ pub const Connection = struct {
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         try properties.appendSlice(self.allocator, options.properties);
@@ -1160,8 +1158,28 @@ pub const Connection = struct {
         if (accepted and self.protocol == .v5 and mqtt.sharedSubscriptionAvailable(options.properties) == null and !options.shared_subscription_available) {
             try properties.append(self.allocator, .{ .byte = .{ .id = .shared_subscription_available, .value = 0 } });
         }
-        try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
-        try self.writePacket(encoded.items);
+        var fixed_storage: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        const bytes = if (properties.items.len == 0)
+            try mqtt.ConnAck.writeNoPropertiesInto(
+                &fixed_storage,
+                self.protocol,
+                options.session_present,
+                options.reason_code,
+            )
+        else blk: {
+            try mqtt.ConnAck.write(
+                &encoded,
+                self.allocator,
+                self.protocol,
+                options.session_present,
+                options.reason_code,
+                properties.items,
+            );
+            break :blk encoded.items;
+        };
+        try self.writePacket(bytes);
         self.local_maximum_qos = options.maximum_qos orelse .exactly_once;
         self.local_retain_available = options.retain_available;
         if (self.protocol == .v5) {
@@ -3717,6 +3735,63 @@ test "MQTT runtime property-free AUTH uses fixed caller storage" {
         0xf0, 0x00,
         0xf0, 0x02,
         0x18, 0x00,
+    };
+    var received: [expected.len]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < received.len) {
+        var buffers = [_][]u8{received[offset..]};
+        const n = try io.vtable.netRead(
+            io.userdata,
+            server_stream.socket.handle,
+            &buffers,
+        );
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+    try std.testing.expectEqualSlices(u8, &expected, &received);
+}
+
+test "MQTT runtime bare CONNACK uses fixed caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+    };
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = fail_first.allocator();
+
+    // Rejected v5 connections do not advertise negotiated capabilities; v3
+    // has no CONNACK property field at all. Both forms must remain writable
+    // even when the general allocator cannot provide a scratch allocation.
+    try connection.writeConnAck(.{ .reason_code = 0x80 });
+    connection.protocol = .v3_1_1;
+    try connection.writeConnAck(.{ .reason_code = 0x05 });
+    try std.testing.expect(!fail_first.has_induced_failure);
+
+    const expected = [_]u8{
+        0x20, 0x03, 0x00, 0x80,
+        0x00, 0x20, 0x02, 0x00,
+        0x05,
     };
     var received: [expected.len]u8 = undefined;
     var offset: usize = 0;
