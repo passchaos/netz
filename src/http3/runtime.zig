@@ -94,6 +94,35 @@ const StreamMessageSendScratch = struct {
     }
 };
 
+/// Reusable storage for one server-push operation.
+///
+/// PUSH_PROMISE plus the parent response and the pushed response must coexist:
+/// STREAM descriptors borrow both byte ranges until QUIC has copied/protected
+/// them. Keeping two independent encoded lists preserves that lifetime while
+/// still allowing every later push on the serialized session API to reuse all
+/// three allocations.
+const PushSendScratch = struct {
+    parent: std.ArrayList(u8) = .empty,
+    pushed: std.ArrayList(u8) = .empty,
+    frames: std.ArrayList(quic.Frame) = .empty,
+
+    fn reset(self: *PushSendScratch) void {
+        self.parent.clearRetainingCapacity();
+        self.pushed.clearRetainingCapacity();
+        self.frames.clearRetainingCapacity();
+    }
+
+    fn deinit(
+        self: *PushSendScratch,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.frames.deinit(allocator);
+        self.pushed.deinit(allocator);
+        self.parent.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const UriEndpoint = struct {
     allocator: std.mem.Allocator,
     host_storage: []u8,
@@ -2533,6 +2562,7 @@ pub const HandshakeServerSession = struct {
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     stream_send_scratch: StreamMessageSendScratch = .{},
+    push_send_scratch: PushSendScratch = .{},
     sent_push_ids: std.ArrayList(u64) = .empty,
     peer_promised_push_ids: std.ArrayList(u64) = .empty,
     next_push_stream_id: u62 = first_server_push_stream_id,
@@ -2575,6 +2605,9 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.push_send_scratch.deinit(
+            self.established.connection.endpoint.allocator,
+        );
         self.stream_send_scratch.deinit(
             self.established.connection.endpoint.allocator,
         );
@@ -2803,6 +2836,7 @@ pub const HandshakeServerSession = struct {
         );
         try sendConnectionPush(
             &self.established.connection,
+            &self.push_send_scratch,
             self.options,
             self.control.settings.peer,
             request_stream_id,
@@ -4985,6 +5019,7 @@ pub const ProtectedServer = struct {
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     stream_send_scratch: StreamMessageSendScratch = .{},
+    push_send_scratch: PushSendScratch = .{},
     sent_push_ids: std.ArrayList(u64) = .empty,
     peer_promised_push_ids: std.ArrayList(u64) = .empty,
     next_push_stream_id: u62 = first_server_push_stream_id,
@@ -5033,6 +5068,9 @@ pub const ProtectedServer = struct {
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.push_send_scratch.deinit(
+            self.quic_server.endpoint.allocator,
+        );
         self.stream_send_scratch.deinit(
             self.quic_server.endpoint.allocator,
         );
@@ -5199,6 +5237,7 @@ pub const ProtectedServer = struct {
             &self.quic_server.endpoint,
             to,
             self.config,
+            &self.push_send_scratch,
             self.control.settings.peer,
             request_stream_id,
             response,
@@ -9594,6 +9633,7 @@ fn appendMessageFrames(
 
 fn sendConnectionPush(
     connection: *quic.one_rtt.Connection,
+    scratch: *PushSendScratch,
     options: HandshakeSessionOptions,
     peer_settings: http3.Settings,
     request_stream_id: u62,
@@ -9604,10 +9644,7 @@ fn sendConnectionPush(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
 ) Error!void {
-    var parent: std.ArrayList(u8) = .empty;
-    defer parent.deinit(connection.endpoint.allocator);
-    var pushed: std.ArrayList(u8) = .empty;
-    defer pushed.deinit(connection.endpoint.allocator);
+    scratch.reset();
     const pending_sections_len = qpack.pending_sections.items.len;
     errdefer qpack.rollbackPendingSections(pending_sections_len);
     try encodePushMessages(
@@ -9618,8 +9655,8 @@ fn sendConnectionPush(
         push_stream_id,
         push,
         qpack,
-        &parent,
-        &pushed,
+        &scratch.parent,
+        &scratch.pushed,
     );
     try sendConnectionQpackEncoderInstructions(
         connection,
@@ -9628,28 +9665,26 @@ fn sendConnectionPush(
         qpack_encoder_prefix_sent,
         options,
     );
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
     // Promise bytes precede the pushed response in this frame list. QUIC may
     // reorder the streams, and the receive lifecycle deliberately tolerates
     // that, but same-call ordering minimizes unnecessary buffering.
     try appendMessageFrames(
-        &frames,
+        &scratch.frames,
         connection.endpoint.allocator,
         request_stream_id,
-        parent.items,
+        scratch.parent.items,
         options.max_stream_frame_data,
     );
     try appendMessageFrames(
-        &frames,
+        &scratch.frames,
         connection.endpoint.allocator,
         push_stream_id,
-        pushed.items,
+        scratch.pushed.items,
         options.max_stream_frame_data,
     );
     try sendConnectionFrames(
         connection,
-        frames.items,
+        scratch.frames.items,
         options.max_frames_per_packet,
     );
 }
@@ -9658,6 +9693,7 @@ fn sendProtectedPush(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
     config: ProtectedConfig,
+    scratch: *PushSendScratch,
     peer_settings: http3.Settings,
     request_stream_id: u62,
     response: http3.Response,
@@ -9669,10 +9705,7 @@ fn sendProtectedPush(
     next_packet_number: *u64,
     protected_send: *ProtectedSendState,
 ) Error!void {
-    var parent: std.ArrayList(u8) = .empty;
-    defer parent.deinit(endpoint.allocator);
-    var pushed: std.ArrayList(u8) = .empty;
-    defer pushed.deinit(endpoint.allocator);
+    scratch.reset();
     const pending_sections_len = qpack.pending_sections.items.len;
     errdefer qpack.rollbackPendingSections(pending_sections_len);
     try encodePushMessages(
@@ -9683,8 +9716,8 @@ fn sendProtectedPush(
         push_stream_id,
         push,
         qpack,
-        &parent,
-        &pushed,
+        &scratch.parent,
+        &scratch.pushed,
     );
     try sendProtectedQpackEncoderInstructions(
         endpoint,
@@ -9696,20 +9729,18 @@ fn sendProtectedPush(
         next_packet_number,
         protected_send,
     );
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
     try appendMessageFrames(
-        &frames,
+        &scratch.frames,
         endpoint.allocator,
         request_stream_id,
-        parent.items,
+        scratch.parent.items,
         config.max_stream_frame_data,
     );
     try appendMessageFrames(
-        &frames,
+        &scratch.frames,
         endpoint.allocator,
         push_stream_id,
-        pushed.items,
+        scratch.pushed.items,
         config.max_stream_frame_data,
     );
     try sendProtectedFrames(
@@ -9718,7 +9749,7 @@ fn sendProtectedPush(
         config.send_keys,
         config.peer_connection_id,
         next_packet_number,
-        frames.items,
+        scratch.frames.items,
         config.max_frames_per_packet,
         protected_send,
     );
@@ -16729,62 +16760,224 @@ test "HTTP/3 protected server sends promised push response" {
         },
     );
     defer client.deinit();
-    try client.sendMaxPushId(2);
-    const request_stream_id = try client.sendRequest(.{
-        .method = "GET",
-        .path = "/",
-        .authority = "example.test",
-    });
-    var request = try server.receiveRequest();
-    defer request.deinit(allocator);
-    const push_stream_id = try server.sendResponseWithPush(
-        request.from,
-        request.stream_id,
-        .{ .status = 204 },
-        .{
-            .push_id = 2,
-            .request = .{
-                .method = "GET",
-                .path = "/style.css",
-                .authority = "example.test",
+    try client.sendMaxPushId(3);
+    var parent_capacity: usize = 0;
+    var pushed_capacity: usize = 0;
+    var frame_capacity: usize = 0;
+    var parent_ptr: [*]u8 = undefined;
+    var pushed_ptr: [*]u8 = undefined;
+    var frame_ptr: [*]quic.Frame = undefined;
+    for (0..2) |exchange| {
+        const request_stream_id = try client.sendRequest(.{
+            .method = "GET",
+            .path = "/",
+            .authority = "example.test",
+        });
+        var request = try server.receiveRequest();
+        defer request.deinit(allocator);
+        const push_id: u64 = @intCast(exchange + 2);
+        const push_stream_id = try server.sendResponseWithPush(
+            request.from,
+            request.stream_id,
+            .{ .status = 204 },
+            .{
+                .push_id = push_id,
+                .request = .{
+                    .method = "GET",
+                    .path = "/style.css",
+                    .authority = "example.test",
+                },
+                .response = .{
+                    .status = 200,
+                    .body = "css",
+                },
             },
-            .response = .{
-                .status = 200,
-                .body = "css",
+        );
+        try std.testing.expectEqual(
+            first_server_push_stream_id + @as(u62, @intCast(exchange * 4)),
+            push_stream_id,
+        );
+        if (exchange == 0) {
+            parent_capacity = server.push_send_scratch.parent.capacity;
+            pushed_capacity = server.push_send_scratch.pushed.capacity;
+            frame_capacity = server.push_send_scratch.frames.capacity;
+            try std.testing.expect(parent_capacity != 0);
+            try std.testing.expect(pushed_capacity != 0);
+            try std.testing.expect(frame_capacity != 0);
+            parent_ptr = server.push_send_scratch.parent.allocatedSlice().ptr;
+            pushed_ptr = server.push_send_scratch.pushed.allocatedSlice().ptr;
+            frame_ptr = server.push_send_scratch.frames.allocatedSlice().ptr;
+        } else {
+            try std.testing.expectEqual(
+                parent_capacity,
+                server.push_send_scratch.parent.capacity,
+            );
+            try std.testing.expectEqual(
+                pushed_capacity,
+                server.push_send_scratch.pushed.capacity,
+            );
+            try std.testing.expectEqual(
+                frame_capacity,
+                server.push_send_scratch.frames.capacity,
+            );
+            try std.testing.expectEqual(
+                parent_ptr,
+                server.push_send_scratch.parent.allocatedSlice().ptr,
+            );
+            try std.testing.expectEqual(
+                pushed_ptr,
+                server.push_send_scratch.pushed.allocatedSlice().ptr,
+            );
+            try std.testing.expectEqual(
+                frame_ptr,
+                server.push_send_scratch.frames.allocatedSlice().ptr,
+            );
+        }
+        var promise = while (true) {
+            if (try client.receiveResponseEvent(request_stream_id)) |event| {
+                break event;
+            }
+        };
+        defer promise.deinit(allocator);
+        try std.testing.expect(promise == .push_promise);
+        try std.testing.expectEqual(push_id, promise.push_promise.push_id);
+        try std.testing.expectEqualStrings(
+            "/style.css",
+            promise.push_promise.request.path,
+        );
+        var parent_head = while (true) {
+            if (try client.receiveResponseEvent(request_stream_id)) |event| {
+                break event;
+            }
+        };
+        defer parent_head.deinit(allocator);
+        try std.testing.expect(parent_head == .head);
+        try std.testing.expectEqual(
+            @as(u16, 204),
+            parent_head.head.response.status,
+        );
+        var pushed = try client.receivePush();
+        defer pushed.deinit(allocator);
+        try std.testing.expectEqual(push_stream_id, pushed.stream_id);
+        try std.testing.expectEqualStrings("css", pushed.response.body);
+    }
+}
+
+test "HTTP/3 Push send scratch rolls back QPACK references on allocation failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf9} ** quic.protection.secret_len,
+    );
+    const config: ProtectedConfig = .{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .max_stream_frame_data = 1200,
+    };
+    var protected_send = ProtectedSendState.init(allocator);
+    defer protected_send.deinit();
+    var qpack = QpackEncodeState.init(allocator, 256, 4096);
+    defer qpack.deinit();
+    try qpack.setCapacity(256);
+    _ = try qpack.insertField("x-push-dynamic", "reused-value");
+    qpack.known_received_count = qpack.table.insert_count;
+
+    var scratch: PushSendScratch = .{};
+    defer scratch.deinit(allocator);
+    try scratch.parent.ensureTotalCapacity(allocator, 512);
+    try scratch.pushed.ensureTotalCapacity(allocator, 16);
+    try scratch.frames.ensureTotalCapacity(allocator, 16);
+    const parent_ptr = scratch.parent.allocatedSlice().ptr;
+    const pushed_ptr = scratch.pushed.allocatedSlice().ptr;
+    const frame_ptr = scratch.frames.allocatedSlice().ptr;
+    const pending_sections_len = qpack.pending_sections.items.len;
+    var qpack_encoder_send = quic.stream_state.SendState.init(
+        server_qpack_encoder_stream_id,
+    );
+    var qpack_encoder_prefix_sent = false;
+    var next_packet_number: u64 = 0;
+
+    var fail_growth = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    sender.allocator = fail_growth.allocator();
+    defer sender.allocator = allocator;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sendProtectedPush(
+            &sender,
+            receiver.address(),
+            config,
+            &scratch,
+            .{
+                .qpack_max_table_capacity = 256,
+                .qpack_blocked_streams = 2,
             },
-        },
+            0,
+            .{
+                .status = 204,
+                .headers = &.{.{
+                    .name = "x-push-dynamic",
+                    .value = "reused-value",
+                }},
+            },
+            first_server_push_stream_id,
+            .{
+                .push_id = 0,
+                .request = .{
+                    .method = "GET",
+                    .path = "/asset.css",
+                    .authority = "example.test",
+                    .headers = &.{.{
+                        .name = "x-push-dynamic",
+                        .value = "reused-value",
+                    }},
+                },
+                // Force the second live output buffer to grow only after the
+                // parent has already registered dynamic QPACK references.
+                .response = .{
+                    .status = 200,
+                    .body = &([_]u8{'x'} ** 512),
+                },
+            },
+            &qpack,
+            &qpack_encoder_send,
+            &qpack_encoder_prefix_sent,
+            &next_packet_number,
+            &protected_send,
+        ),
     );
+    try std.testing.expect(fail_growth.has_induced_failure);
     try std.testing.expectEqual(
-        first_server_push_stream_id,
-        push_stream_id,
+        pending_sections_len,
+        qpack.pending_sections.items.len,
     );
-    var promise = while (true) {
-        if (try client.receiveResponseEvent(request_stream_id)) |event| {
-            break event;
-        }
-    };
-    defer promise.deinit(allocator);
-    try std.testing.expect(promise == .push_promise);
-    try std.testing.expectEqual(@as(u64, 2), promise.push_promise.push_id);
-    try std.testing.expectEqualStrings(
-        "/style.css",
-        promise.push_promise.request.path,
-    );
-    var parent_head = while (true) {
-        if (try client.receiveResponseEvent(request_stream_id)) |event| {
-            break event;
-        }
-    };
-    defer parent_head.deinit(allocator);
-    try std.testing.expect(parent_head == .head);
-    try std.testing.expectEqual(
-        @as(u16, 204),
-        parent_head.head.response.status,
-    );
-    var pushed = try client.receivePush();
-    defer pushed.deinit(allocator);
-    try std.testing.expectEqual(push_stream_id, pushed.stream_id);
-    try std.testing.expectEqualStrings("css", pushed.response.body);
+    try std.testing.expectEqual(@as(usize, 0), qpack.reference_counts.count());
+    try std.testing.expectEqual(@as(u64, 0), qpack_encoder_send.next_offset);
+    try std.testing.expect(!qpack_encoder_prefix_sent);
+    try std.testing.expectEqual(@as(u64, 0), next_packet_number);
+    try std.testing.expectEqual(parent_ptr, scratch.parent.allocatedSlice().ptr);
+    try std.testing.expectEqual(pushed_ptr, scratch.pushed.allocatedSlice().ptr);
+    try std.testing.expectEqual(frame_ptr, scratch.frames.allocatedSlice().ptr);
 }
 
 test "HTTP/3 protected client reports next response reset with stream id" {
@@ -19671,62 +19864,39 @@ test "HTTP/3 handshake client streams promised push response" {
             while (session.control.peer_max_push_id != 1) {
                 try session.receiveRequestPacket();
             }
-            const session_allocator =
-                session.established.connection.endpoint.allocator;
-            var promise_fields: std.ArrayList(u8) = .empty;
-            defer promise_fields.deinit(session_allocator);
-            var table = http3.Qpack.DynamicTable.init(session_allocator, 0);
-            defer table.deinit();
-            try http3.Qpack.encodeDynamicBlock(
-                &promise_fields,
-                session_allocator,
-                &.{
-                    .{ .name = ":method", .value = "GET" },
-                    .{ .name = ":scheme", .value = "https" },
-                    .{ .name = ":path", .value = "/handshake.css" },
-                    .{ .name = ":authority", .value = "localhost" },
+            const push_stream_id = try session.sendResponseWithPush(
+                request.stream_id,
+                .{ .status = 204 },
+                .{
+                    .push_id = 1,
+                    .request = .{
+                        .method = "GET",
+                        .path = "/handshake.css",
+                        .authority = "localhost",
+                    },
+                    .informational = &.{
+                        .{ .status = 103 },
+                        .{ .status = 102 },
+                    },
+                    .response = .{
+                        .status = 200,
+                        .body = "handshake-asset",
+                    },
                 },
-                table,
             );
-            var response_bytes: std.ArrayList(u8) = .empty;
-            defer response_bytes.deinit(session_allocator);
-            try http3.writePushPromiseFrame(
-                &response_bytes,
-                session_allocator,
-                1,
-                promise_fields.items,
+            try std.testing.expectEqual(
+                first_server_push_stream_id,
+                push_stream_id,
             );
-            try (http3.Response{ .status = 204 }).write(
-                &response_bytes,
-                session_allocator,
+            try std.testing.expect(
+                session.push_send_scratch.parent.capacity != 0,
             );
-            var push_bytes: std.ArrayList(u8) = .empty;
-            defer push_bytes.deinit(session_allocator);
-            try quic.varint.encode(
-                &push_bytes,
-                session_allocator,
-                @intFromEnum(http3.StreamType.push),
+            try std.testing.expect(
+                session.push_send_scratch.pushed.capacity != 0,
             );
-            try quic.varint.encode(&push_bytes, session_allocator, 1);
-            try http3.writeResponseSequence(
-                &push_bytes,
-                session_allocator,
-                &.{ .{ .status = 103 }, .{ .status = 102 } },
-                .{ .status = 200, .body = "handshake-asset" },
+            try std.testing.expect(
+                session.push_send_scratch.frames.capacity != 0,
             );
-            const frames = [_]quic.Frame{
-                .{ .stream = .{
-                    .stream_id = request.stream_id,
-                    .data = response_bytes.items,
-                    .fin = true,
-                } },
-                .{ .stream = .{
-                    .stream_id = 15,
-                    .data = push_bytes.items,
-                    .fin = true,
-                } },
-            };
-            try session.established.connection.send(&frames);
         }
     };
 

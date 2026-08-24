@@ -230,6 +230,20 @@ normal/Retry/GOAWAY, and native wtransport gates remain green. Five CPU-0
 cleartext samples measured 9.569-9.674 us/request (9.645 us mean, 0.40% standard
 deviation). A six-iteration real-handshake 1-MiB upload regression measured
 108.65 MiB/s mean with 4.06% standard deviation; these remain internal samples.
+Server Push now owns a separate reusable pair of encoded buffers plus one frame
+descriptor list in both handshake and protected server sessions. Two buffers
+remain necessary because the parent PUSH_PROMISE/response and pushed response
+must coexist until their borrowing STREAM descriptors have been copied into
+transport-owned packet/recovery storage. A two-exchange protected test verifies the
+parent, pushed, and frame backing pointers remain stable while stream and push
+IDs advance. A fail-first full protected-send test forces the pushed-response
+buffer to grow after the parent acquired dynamic QPACK references and verifies
+pending sections, reference counts, encoder offset/prefix, and packet number all
+roll back. The 1,592-test suite plus quic-go v1/v2, tquic normal/Retry/GOAWAY,
+and native wtransport matrices remain green. The unrelated cleartext benchmark
+was noisy at 9.764-10.753 us/request across the five stable follow-up samples
+(10.205 us mean, 4.17% standard deviation), so it is retained only as a
+regression check and not evidence of a Push throughput change.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
