@@ -93,6 +93,7 @@ pub fn main() !void {
         &value_slices,
     );
     const churn_ns = try measureDynamicTableChurn(allocator, io);
+    const decode_ns = try measureOwnedDecode(allocator, io, table, encoded.items);
 
     std.debug.print(
         \\HTTP/3 QPACK dynamic encode benchmark
@@ -101,6 +102,7 @@ pub fn main() !void {
         \\  ns/block: {d}, ns/field: {d}
         \\  512-reference block: {d} ns/block, {d} ns/field
         \\  dynamic table churn: {d} ns/insert
+        \\  owned dynamic decode: {d} ns/block
         \\  checksum: {d}
         \\
     , .{
@@ -114,8 +116,28 @@ pub fn main() !void {
         large_ns / iterations,
         large_ns / (iterations * large_fields_per_block),
         churn_ns / churn_iterations,
+        decode_ns / iterations,
         encoded_total +| reference_total,
     });
+}
+
+fn measureOwnedDecode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    table: netz.http3.Qpack.DynamicTable,
+    encoded: []const u8,
+) !u64 {
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        var decoded = try netz.http3.Qpack.decodeDynamicBlockOwnedWithLimit(
+            allocator,
+            encoded,
+            table,
+            64 * 1024,
+        );
+        netz.http3.Qpack.freeDynamicBlock(allocator, &decoded);
+    }
+    return nowNs(io) -| started;
 }
 
 fn measureLargeReferenceBlock(

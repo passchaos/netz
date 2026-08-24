@@ -762,6 +762,18 @@ test "HTTP/3 QPACK dynamic block decodes RFC 9204 Appendix B post-base fields" {
     try std.testing.expectEqualStrings("www.example.com", decoded.fields[0].value);
     try std.testing.expectEqualStrings(":path", decoded.fields[1].name);
     try std.testing.expectEqualStrings("/sample/path", decoded.fields[1].value);
+
+    var owned = try Qpack.decodeDynamicBlockOwnedWithLimit(
+        allocator,
+        &appendix_b_field_section,
+        table,
+        1024,
+    );
+    defer Qpack.freeDynamicBlock(allocator, &owned);
+    try std.testing.expectEqualStrings("www.example.com", owned.fields[0].value);
+    try std.testing.expectEqualStrings("/sample/path", owned.fields[1].value);
+    try std.testing.expect(owned.fields[0].block_storage != null);
+    try std.testing.expect(owned.fields[1].block_storage == null);
 }
 
 test "HTTP/3 QPACK dynamic block round trips and reduces wire size" {
@@ -843,6 +855,88 @@ test "HTTP/3 QPACK exact dynamic field decodes with one string allocation" {
         storage.ptr + field.name.len,
         field.value.ptr,
     );
+}
+
+fn checkOwnedQpackDecode(allocator: std.mem.Allocator) !void {
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-owned", "dynamic-value");
+    _ = try table.insert("x-name-only", "old-value");
+    const fields = [_]Qpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "x-owned", .value = "dynamic-value" },
+        .{ .name = "x-name-only", .value = "compressible-new-value" },
+        .{ .name = "authorization", .value = "secret", .never_indexed = true },
+    };
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &fields, table);
+
+    var decoded = try Qpack.decodeDynamicBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        table,
+        1024,
+    );
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(fields.len, decoded.fields.len);
+    const storage = decoded.fields[0].block_storage orelse
+        return error.TestUnexpectedResult;
+    for (fields, decoded.fields) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+        try std.testing.expectEqualStrings(expected.value, actual.value);
+        try std.testing.expect(actual.name_storage == null);
+        try std.testing.expect(actual.value_storage == null);
+        try std.testing.expect(
+            @intFromPtr(actual.value.ptr) + actual.value.len <=
+                @intFromPtr(storage.ptr) + storage.len,
+        );
+    }
+}
+
+test "HTTP/3 QPACK owned dynamic decode is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkOwnedQpackDecode,
+        .{},
+    );
+}
+
+test "HTTP/3 QPACK owned decoders allocate final field section twice" {
+    const allocator = std.testing.allocator;
+    var literal: std.ArrayList(u8) = .empty;
+    defer literal.deinit(allocator);
+    const fields = [_]Qpack.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "x-compressible-name", .value = "compressible-value" },
+    };
+    try Qpack.encodeLiteralBlock(&literal, allocator, &fields);
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const before = tracking.allocations;
+    const decoded = try Qpack.decodeLiteralBlockOwnedWithLimit(
+        tracking.allocator(),
+        literal.items,
+        1024,
+    );
+    defer Qpack.freeDecodedFields(tracking.allocator(), decoded);
+    try std.testing.expectEqual(before + 2, tracking.allocations);
+    try std.testing.expect(decoded[0].block_storage != null);
+    try std.testing.expect(decoded[1].block_storage == null);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        Qpack.decodeLiteralBlockOwnedWithLimit(
+            no_alloc.allocator(),
+            literal.items,
+            1,
+        ),
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
 test "HTTP/3 QPACK bounded decode rejects before field allocation" {

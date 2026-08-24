@@ -293,6 +293,17 @@ pub const DynamicBlockDecode = struct {
     base: u64,
 };
 
+const owned_plan_stack_fields: usize = 32;
+const owned_string_stack_bytes: usize = 16 * 1024;
+
+const OwnedFieldPlan = struct {
+    name_offset: usize,
+    name_len: usize,
+    value_offset: usize,
+    value_len: usize,
+    never_indexed: bool,
+};
+
 pub const FieldSectionPrefix = struct {
     required_insert_count: u64,
     base: u64,
@@ -727,6 +738,147 @@ pub fn decodeDynamicBlockWithLimit(
     };
 }
 
+/// Decode a dynamic field section directly into its final two-allocation
+/// ownership form: one field array and one shared name/value byte block.
+pub fn decodeDynamicBlockOwnedWithLimit(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    table: DynamicTable,
+    max_field_section_size: u64,
+) !DynamicBlockDecode {
+    const prefix = try decodeFieldSectionPrefix(block, table);
+    if (prefix.required_insert_count > table.insert_count) {
+        return error.QpackBlocked;
+    }
+    var cursor = wire.Cursor.init(block);
+    cursor.pos = prefix.consumed;
+    var actual_required_insert_count: u64 = 0;
+    var budget = FieldSectionBudget{ .max = max_field_section_size };
+    var plan_fallback = std.heap.stackFallback(
+        owned_plan_stack_fields * @sizeOf(OwnedFieldPlan),
+        allocator,
+    );
+    var string_fallback = std.heap.stackFallback(
+        owned_string_stack_bytes,
+        allocator,
+    );
+    var builder = OwnedFieldBuilder.init(
+        allocator,
+        plan_fallback.get(),
+        string_fallback.get(),
+    );
+    defer builder.deinit();
+
+    while (!cursor.eof()) {
+        const first = try cursor.readByte();
+        if ((first & 0x80) != 0) {
+            const static = (first & 0x40) != 0;
+            const index = try decodePrefixedInteger(&cursor, 6, first);
+            const field = if (static)
+                staticEntry(index) orelse return error.QpackDecompressionFailed
+            else blk: {
+                const entry = table.fieldRelativeToBase(prefix.base, index) orelse
+                    return error.QpackDecompressionFailed;
+                try noteDynamicReference(
+                    &actual_required_insert_count,
+                    prefix.required_insert_count,
+                    entry,
+                );
+                break :blk HeaderField{
+                    .name = entry.name,
+                    .value = entry.value,
+                };
+            };
+            try budget.charge(field.name.len, field.value.len);
+            try builder.appendBorrowed(field.name, field.value, false);
+        } else if ((first & 0xf0) == 0x10) {
+            const entry = table.fieldPostBase(
+                prefix.base,
+                try decodePrefixedInteger(&cursor, 4, first),
+            ) orelse return error.QpackDecompressionFailed;
+            try noteDynamicReference(
+                &actual_required_insert_count,
+                prefix.required_insert_count,
+                entry,
+            );
+            try budget.charge(entry.name.len, entry.value.len);
+            try builder.appendBorrowed(entry.name, entry.value, false);
+        } else if ((first & 0xc0) == 0x40) {
+            const never_indexed = (first & 0x20) != 0;
+            const static = (first & 0x10) != 0;
+            const index = try decodePrefixedInteger(&cursor, 4, first);
+            const name = if (static) blk: {
+                const entry = staticEntry(index) orelse
+                    return error.QpackDecompressionFailed;
+                break :blk entry.name;
+            } else blk: {
+                const entry = table.fieldRelativeToBase(prefix.base, index) orelse
+                    return error.QpackDecompressionFailed;
+                try noteDynamicReference(
+                    &actual_required_insert_count,
+                    prefix.required_insert_count,
+                    entry,
+                );
+                break :blk entry.name;
+            };
+            const value = try scanString(&cursor);
+            try budget.charge(name.len, value.decoded_len);
+            try builder.append(
+                .{
+                    .raw = name,
+                    .huffman = false,
+                    .decoded_len = name.len,
+                },
+                value,
+                never_indexed,
+            );
+        } else if ((first & 0xf0) == 0x00) {
+            const entry = table.fieldPostBase(
+                prefix.base,
+                try decodePrefixedInteger(&cursor, 3, first),
+            ) orelse return error.QpackDecompressionFailed;
+            try noteDynamicReference(
+                &actual_required_insert_count,
+                prefix.required_insert_count,
+                entry,
+            );
+            const value = try scanString(&cursor);
+            try budget.charge(entry.name.len, value.decoded_len);
+            try builder.append(
+                .{
+                    .raw = entry.name,
+                    .huffman = false,
+                    .decoded_len = entry.name.len,
+                },
+                value,
+                (first & 0x08) != 0,
+            );
+        } else if ((first & 0xe0) == 0x20) {
+            const name = try scanMaybeHuffman(
+                try cursor.readSlice(try decodePrefixedInteger(
+                    &cursor,
+                    3,
+                    first,
+                )),
+                (first & 0x08) != 0,
+            );
+            const value = try scanString(&cursor);
+            try budget.charge(name.decoded_len, value.decoded_len);
+            try builder.append(name, value, (first & 0x10) != 0);
+        } else {
+            return error.QpackDecompressionFailed;
+        }
+    }
+    if (actual_required_insert_count != prefix.required_insert_count) {
+        return error.QpackDecompressionFailed;
+    }
+    return .{
+        .fields = try builder.finish(),
+        .required_insert_count = prefix.required_insert_count,
+        .base = prefix.base,
+    };
+}
+
 fn noteDynamicReference(
     actual_required_insert_count: *u64,
     declared_required_insert_count: u64,
@@ -919,6 +1071,175 @@ pub fn decodeLiteralBlockWithLimit(
     return fields.toOwnedSlice(allocator);
 }
 
+/// Literal-only counterpart of `decodeDynamicBlockOwnedWithLimit`.
+pub fn decodeLiteralBlockOwnedWithLimit(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    max_field_section_size: u64,
+) ![]HeaderField {
+    var cursor = wire.Cursor.init(block);
+    const required_insert_count = try decodePrefixedInteger(
+        &cursor,
+        8,
+        try cursor.readByte(),
+    );
+    const base = try decodePrefixedInteger(
+        &cursor,
+        7,
+        try cursor.readByte(),
+    );
+    if (required_insert_count != 0 or base != 0) {
+        return error.QpackDynamicTableUnsupported;
+    }
+    var budget = FieldSectionBudget{ .max = max_field_section_size };
+    var plan_fallback = std.heap.stackFallback(
+        owned_plan_stack_fields * @sizeOf(OwnedFieldPlan),
+        allocator,
+    );
+    var string_fallback = std.heap.stackFallback(
+        owned_string_stack_bytes,
+        allocator,
+    );
+    var builder = OwnedFieldBuilder.init(
+        allocator,
+        plan_fallback.get(),
+        string_fallback.get(),
+    );
+    defer builder.deinit();
+    while (!cursor.eof()) {
+        const first = try cursor.readByte();
+        if ((first & 0xc0) == 0xc0) {
+            const entry = staticEntry(try decodePrefixedInteger(
+                &cursor,
+                6,
+                first,
+            )) orelse return error.InvalidFrame;
+            try budget.charge(entry.name.len, entry.value.len);
+            try builder.appendBorrowed(entry.name, entry.value, false);
+        } else if ((first & 0xc0) == 0x40) {
+            if ((first & 0x10) == 0) {
+                return error.QpackDynamicTableUnsupported;
+            }
+            const entry = staticEntry(try decodePrefixedInteger(
+                &cursor,
+                4,
+                first,
+            )) orelse return error.InvalidFrame;
+            const value = try scanString(&cursor);
+            try budget.charge(entry.name.len, value.decoded_len);
+            try builder.append(
+                .{
+                    .raw = entry.name,
+                    .huffman = false,
+                    .decoded_len = entry.name.len,
+                },
+                value,
+                (first & 0x20) != 0,
+            );
+        } else if ((first & 0xe0) == 0x20) {
+            const name = try scanMaybeHuffman(
+                try cursor.readSlice(try decodePrefixedInteger(
+                    &cursor,
+                    3,
+                    first,
+                )),
+                (first & 0x08) != 0,
+            );
+            const value = try scanString(&cursor);
+            try budget.charge(name.decoded_len, value.decoded_len);
+            try builder.append(name, value, (first & 0x10) != 0);
+        } else {
+            return error.QpackDynamicTableUnsupported;
+        }
+    }
+    return builder.finish();
+}
+
+const OwnedFieldBuilder = struct {
+    allocator: std.mem.Allocator,
+    plan_allocator: std.mem.Allocator,
+    string_allocator: std.mem.Allocator,
+    plans: std.ArrayList(OwnedFieldPlan) = .empty,
+    strings: std.ArrayList(u8) = .empty,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        plan_allocator: std.mem.Allocator,
+        string_allocator: std.mem.Allocator,
+    ) OwnedFieldBuilder {
+        return .{
+            .allocator = allocator,
+            .plan_allocator = plan_allocator,
+            .string_allocator = string_allocator,
+        };
+    }
+
+    fn deinit(self: *OwnedFieldBuilder) void {
+        self.plans.deinit(self.plan_allocator);
+        self.strings.deinit(self.string_allocator);
+    }
+
+    fn appendBorrowed(
+        self: *OwnedFieldBuilder,
+        name: []const u8,
+        value: []const u8,
+        never_indexed: bool,
+    ) !void {
+        return self.append(
+            .{ .raw = name, .huffman = false, .decoded_len = name.len },
+            .{ .raw = value, .huffman = false, .decoded_len = value.len },
+            never_indexed,
+        );
+    }
+
+    fn append(
+        self: *OwnedFieldBuilder,
+        name: EncodedString,
+        value: EncodedString,
+        never_indexed: bool,
+    ) !void {
+        try self.plans.ensureUnusedCapacity(self.plan_allocator, 1);
+        const additional = std.math.add(
+            usize,
+            name.decoded_len,
+            value.decoded_len,
+        ) catch return error.ExcessiveLoad;
+        try self.strings.ensureUnusedCapacity(
+            self.string_allocator,
+            additional,
+        );
+        const original_len = self.strings.items.len;
+        errdefer self.strings.items.len = original_len;
+        const name_offset = self.strings.items.len;
+        try name.appendDecodedAssumeCapacity(&self.strings);
+        const value_offset = self.strings.items.len;
+        try value.appendDecodedAssumeCapacity(&self.strings);
+        self.plans.appendAssumeCapacity(.{
+            .name_offset = name_offset,
+            .name_len = name.decoded_len,
+            .value_offset = value_offset,
+            .value_len = value.decoded_len,
+            .never_indexed = never_indexed,
+        });
+    }
+
+    fn finish(self: *OwnedFieldBuilder) ![]HeaderField {
+        const fields = try self.allocator.alloc(HeaderField, self.plans.items.len);
+        errdefer self.allocator.free(fields);
+        if (fields.len == 0) return fields;
+        const strings = try self.allocator.dupe(u8, self.strings.items);
+        for (self.plans.items, fields, 0..) |plan, *field, index| {
+            field.* = .{
+                .name = strings[plan.name_offset..][0..plan.name_len],
+                .value = strings[plan.value_offset..][0..plan.value_len],
+                .never_indexed = plan.never_indexed,
+                .block_storage = if (index == 0) strings else null,
+            };
+        }
+        return fields;
+    }
+};
+
 pub fn freeDecodedFields(allocator: std.mem.Allocator, fields: []HeaderField) void {
     freeFieldStorages(allocator, fields);
     allocator.free(fields);
@@ -991,6 +1312,27 @@ const EncodedString = struct {
     raw: []const u8,
     huffman: bool,
     decoded_len: usize,
+
+    fn decodeInto(self: EncodedString, output: []u8) !void {
+        if (output.len != self.decoded_len) return error.InvalidEncoding;
+        if (self.huffman) {
+            return huffman_codec.decodeHuffmanInto(output, self.raw);
+        }
+        @memcpy(output, self.raw);
+    }
+
+    fn appendDecodedAssumeCapacity(
+        self: EncodedString,
+        output: *std.ArrayList(u8),
+    ) !void {
+        std.debug.assert(
+            output.capacity - output.items.len >= self.decoded_len,
+        );
+        const start = output.items.len;
+        output.items.len += self.decoded_len;
+        errdefer output.items.len = start;
+        try self.decodeInto(output.items[start..]);
+    }
 
     fn decode(
         self: EncodedString,
