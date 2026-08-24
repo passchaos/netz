@@ -8825,6 +8825,7 @@ const OutboundBodySet = struct {
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     frame_scratch: std.ArrayList(quic.Frame) = .empty,
     payload_scratch: std.ArrayList(u8) = .empty,
+    data_prefix_scratch: body_batch.Prefix = undefined,
     batch_scratch: body_batch.Scratch = .{},
     max_streams: usize,
 
@@ -10122,24 +10123,54 @@ fn sendProtectedBodyChunk(
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     errdefer entry.* = previous;
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
-    try writeDataFrame(&payload, endpoint.allocator, data);
+    try bodies.prepareChunkForEntry(entry, data.len, fin);
+    bodies.frame_scratch.clearRetainingCapacity();
+    if (try body_batch.appendDataStreamFrames(
+        &entry.send,
+        &bodies.frame_scratch,
+        endpoint.allocator,
+        &bodies.data_prefix_scratch,
+        data,
+        fin,
+        config.max_stream_frame_data,
+    )) {
+        if (entry.flow_limit) |limit| {
+            if (entry.send.next_offset > limit) {
+                return error.FlowControlBlocked;
+            }
+        }
+        try sendProtectedFrames(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            bodies.frame_scratch.items,
+            config.max_frames_per_packet,
+            protected_send,
+        );
+        if (fin) _ = bodies.finish(stream_id);
+        return;
+    }
+
+    bodies.payload_scratch.clearRetainingCapacity();
+    try writeDataFrame(
+        &bodies.payload_scratch,
+        endpoint.allocator,
+        data,
+    );
     if (entry.flow_limit) |limit| {
         const next_offset = std.math.add(
             u64,
             entry.send.next_offset,
-            payload.items.len,
+            bodies.payload_scratch.items.len,
         ) catch return error.InvalidFrameLength;
         if (next_offset > limit) return error.FlowControlBlocked;
     }
-    try bodies.prepareChunkForEntry(entry, data.len, fin);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
     try entry.send.appendFrames(
-        &frames,
+        &bodies.frame_scratch,
         endpoint.allocator,
-        payload.items,
+        bodies.payload_scratch.items,
         config.max_stream_frame_data,
         fin,
     );
@@ -10149,7 +10180,7 @@ fn sendProtectedBodyChunk(
         config.send_keys,
         config.peer_connection_id,
         next_packet_number,
-        frames.items,
+        bodies.frame_scratch.items,
         config.max_frames_per_packet,
         protected_send,
     );
@@ -16899,6 +16930,10 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 .{ .status = 200 },
                 "response-chunks".len,
             );
+            try server_ptr.outbound_bodies.frame_scratch.ensureTotalCapacity(
+                server_ptr.quic_server.endpoint.allocator,
+                16,
+            );
             const head_encoded_capacity =
                 server_ptr.stream_send_scratch.encoded.capacity;
             const head_frame_capacity =
@@ -16906,6 +16941,10 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
             const head_encoded_ptr = server_ptr.stream_send_scratch.encoded
                 .allocatedSlice().ptr;
             const head_frame_ptr = server_ptr.stream_send_scratch.frames
+                .allocatedSlice().ptr;
+            const body_frame_capacity =
+                server_ptr.outbound_bodies.frame_scratch.capacity;
+            const body_frame_ptr = server_ptr.outbound_bodies.frame_scratch
                 .allocatedSlice().ptr;
             try server_ptr.sendResponseBody(
                 request.from,
@@ -16927,6 +16966,20 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 request.stream_id,
                 "chunks",
                 false,
+            );
+            try std.testing.expectEqual(
+                body_frame_capacity,
+                server_ptr.outbound_bodies.frame_scratch.capacity,
+            );
+            try std.testing.expectEqual(
+                body_frame_ptr,
+                server_ptr.outbound_bodies.frame_scratch.allocatedSlice().ptr,
+            );
+            // The direct DATA-prefix path borrows the application bytes and
+            // should never materialize a complete DATA frame in payload scratch.
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                server_ptr.outbound_bodies.payload_scratch.capacity,
             );
             const response_entry = server_ptr.outbound_bodies.find(
                 request.stream_id,
@@ -16995,6 +17048,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
 
     try client.stream_send_scratch.encoded.ensureTotalCapacity(allocator, 256);
     try client.stream_send_scratch.frames.ensureTotalCapacity(allocator, 32);
+    try client.outbound_bodies.frame_scratch.ensureTotalCapacity(allocator, 16);
     const stream_id = try client.startRequest(
         .{
             .method = "POST",
@@ -17009,12 +17063,27 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
         .allocatedSlice().ptr;
     const head_frame_ptr = client.stream_send_scratch.frames
         .allocatedSlice().ptr;
+    const body_frame_capacity = client.outbound_bodies.frame_scratch.capacity;
+    const body_frame_ptr = client.outbound_bodies.frame_scratch
+        .allocatedSlice().ptr;
     try client.sendRequestBody(stream_id, "request-", false);
     try std.testing.expectError(
         error.InvalidContentLength,
         client.sendRequestBody(stream_id, "short", true),
     );
     try client.sendRequestBody(stream_id, "chunks", false);
+    try std.testing.expectEqual(
+        body_frame_capacity,
+        client.outbound_bodies.frame_scratch.capacity,
+    );
+    try std.testing.expectEqual(
+        body_frame_ptr,
+        client.outbound_bodies.frame_scratch.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.outbound_bodies.payload_scratch.capacity,
+    );
     const request_entry = client.outbound_bodies.find(stream_id).?;
     request_entry.flow_limit = request_entry.send.next_offset;
     try std.testing.expectError(
@@ -17060,6 +17129,141 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     try std.testing.expectEqualStrings(
         "ok",
         response.response.trailers[0].value,
+    );
+}
+
+test "HTTP/3 protected DATA send retries without allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb5} ** quic.protection.secret_len,
+    );
+    const config: ProtectedConfig = .{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .max_stream_frame_data = 5,
+        .max_frames_per_packet = 2,
+    };
+    var protected_send = ProtectedSendState.init(allocator);
+    defer protected_send.deinit();
+    var bodies = OutboundBodySet.init(allocator, 1);
+    defer bodies.deinit();
+    try bodies.reserveOpen(0);
+    bodies.appendOpenAssumeCapacity(
+        0,
+        quic.stream_state.SendState.init(0),
+        12,
+    );
+    try bodies.frame_scratch.ensureTotalCapacity(allocator, 16);
+
+    var next_packet_number: u64 = 0;
+    try sendProtectedBodyChunk(
+        &sender,
+        receiver.address(),
+        config,
+        &next_packet_number,
+        &protected_send,
+        &bodies,
+        0,
+        "first-",
+        false,
+    );
+    const first_entry = bodies.find(0).?.*;
+    const body_frame_capacity = bodies.frame_scratch.capacity;
+    const body_frame_ptr = bodies.frame_scratch.allocatedSlice().ptr;
+    const wire_payload_capacity = protected_send.payload_scratch.capacity;
+    const wire_packet_capacity = protected_send.packet_scratch.capacity;
+    const wire_payload_ptr = protected_send.payload_scratch.allocatedSlice().ptr;
+    const wire_packet_ptr = protected_send.packet_scratch.allocatedSlice().ptr;
+    try std.testing.expectEqual(@as(usize, 0), bodies.payload_scratch.capacity);
+
+    // Flow-control rejection happens after the direct-prefix frame plan is
+    // built. The body offset, byte count, and FIN state must all roll back.
+    bodies.find(0).?.flow_limit = first_entry.send.next_offset;
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        sendProtectedBodyChunk(
+            &sender,
+            receiver.address(),
+            config,
+            &next_packet_number,
+            &protected_send,
+            &bodies,
+            0,
+            "second",
+            true,
+        ),
+    );
+    const blocked_entry = bodies.find(0).?.*;
+    try std.testing.expectEqual(first_entry.send.next_offset, blocked_entry.send.next_offset);
+    try std.testing.expectEqual(first_entry.written, blocked_entry.written);
+    try std.testing.expectEqual(first_entry.send.fin_sent, blocked_entry.send.fin_sent);
+    // Flow-control validation precedes packet protection, so a rejected retry
+    // cannot consume a packet number.
+    try std.testing.expectEqual(@as(u64, 1), next_packet_number);
+    bodies.find(0).?.flow_limit = null;
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    sender.allocator = no_alloc.allocator();
+    protected_send.allocator = no_alloc.allocator();
+    defer {
+        sender.allocator = allocator;
+        protected_send.allocator = allocator;
+    }
+    try sendProtectedBodyChunk(
+        &sender,
+        receiver.address(),
+        config,
+        &next_packet_number,
+        &protected_send,
+        &bodies,
+        0,
+        "second",
+        true,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expect(bodies.find(0) == null);
+    try std.testing.expectEqual(body_frame_capacity, bodies.frame_scratch.capacity);
+    try std.testing.expectEqual(body_frame_ptr, bodies.frame_scratch.allocatedSlice().ptr);
+    try std.testing.expectEqual(@as(usize, 0), bodies.payload_scratch.capacity);
+    try std.testing.expectEqual(
+        wire_payload_capacity,
+        protected_send.payload_scratch.capacity,
+    );
+    try std.testing.expectEqual(
+        wire_packet_capacity,
+        protected_send.packet_scratch.capacity,
+    );
+    try std.testing.expectEqual(
+        wire_payload_ptr,
+        protected_send.payload_scratch.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(
+        wire_packet_ptr,
+        protected_send.packet_scratch.allocatedSlice().ptr,
     );
 }
 

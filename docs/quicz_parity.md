@@ -216,6 +216,20 @@ quic-zig QPACK gate, quic-go v1/v2 matrix, tquic normal/Retry/GOAWAY matrix, and
 native wtransport matrix remain green. Five CPU-0 cleartext samples measured
 9.554-9.710 us/request (9.647 us mean, 0.71% standard deviation), again an
 internal regression sample rather than an equal-wire comparison.
+Protected DATA chunks now use the same split-prefix strategy as the
+handshake-backed batch sender: the small HTTP/3 DATA prefix and first fragment
+live in session-owned fixed storage, remaining STREAM frames borrow the caller
+body only for the synchronous send, and the existing body frame list is reused.
+The retained full-payload list remains only as a fallback for empty/oversized
+prefix edge cases. Tests exercise both endpoints across multiple chunks, prove
+that the common path never allocates the full DATA payload, and retry a
+flow-control-blocked final chunk under an allocator that rejects every new
+allocation while checking stream offset, byte-count, FIN, packet-number, and
+scratch-pointer stability. The full 1,591-test suite plus quic-go v1/v2, tquic
+normal/Retry/GOAWAY, and native wtransport gates remain green. Five CPU-0
+cleartext samples measured 9.569-9.674 us/request (9.645 us mean, 0.40% standard
+deviation). A six-iteration real-handshake 1-MiB upload regression measured
+108.65 MiB/s mean with 4.06% standard deviation; these remain internal samples.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
