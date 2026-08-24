@@ -1752,8 +1752,6 @@ pub const Connection = struct {
     }
 
     pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
         var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
         defer filtered_properties.deinit(self.allocator);
         const outgoing_properties = try self.outgoingProblemProperties(
@@ -1761,6 +1759,16 @@ pub const Connection = struct {
             .auth,
             properties,
         );
+        if (outgoing_properties.len == 0) {
+            var encoded: [mqtt.Auth.no_properties_max_len]u8 = undefined;
+            return self.writePacket(try mqtt.Auth.writeNoPropertiesInto(
+                &encoded,
+                self.protocol,
+                reason_code,
+            ));
+        }
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
         try mqtt.Auth.write(
             &encoded,
             self.allocator,
@@ -3651,6 +3659,65 @@ test "MQTT runtime property-free DISCONNECT uses fixed caller storage" {
     try std.testing.expect(!fail_first.has_induced_failure);
 
     const expected = [_]u8{ 0xe0, 0x01, 0x8d };
+    var received: [expected.len]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < received.len) {
+        var buffers = [_][]u8{received[offset..]};
+        const n = try io.vtable.netRead(
+            io.userdata,
+            server_stream.socket.handle,
+            &buffers,
+        );
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+    try std.testing.expectEqualSlices(u8, &expected, &received);
+}
+
+test "MQTT runtime property-free AUTH uses fixed caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .peer_requested_problem_information = false,
+    };
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = fail_first.allocator();
+
+    try connection.writeAuth(0, &.{});
+    try connection.writeAuth(0x18, &.{
+        .{ .utf8 = .{
+            .id = .reason_string,
+            .value = "suppressed",
+        } },
+    });
+    try std.testing.expect(!fail_first.has_induced_failure);
+
+    const expected = [_]u8{
+        0xf0, 0x00,
+        0xf0, 0x02,
+        0x18, 0x00,
+    };
     var received: [expected.len]u8 = undefined;
     var offset: usize = 0;
     while (offset < received.len) {

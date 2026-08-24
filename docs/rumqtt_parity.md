@@ -192,8 +192,8 @@ fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
 Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
-green. A CPU-0-pinned WebSocket QoS 1 regression run measured 11.450 us per
-1-KiB PUBLISH/PUBACK and 87,330 operations/s; this checks the shared transport
+green. A CPU-0-pinned WebSocket QoS 1 regression run measured 11.401 us per
+1-KiB PUBLISH/PUBACK and 87,707 operations/s; this checks the shared transport
 rather than isolating PING throughput.
 Property-free DISCONNECT now follows the same design: normal shutdown uses its
 canonical two bytes and an MQTT 5 error reason uses three bytes, both from
@@ -201,6 +201,13 @@ caller-owned storage. The TCP runtime test sends a non-zero Keep Alive timeout
 reason through a fail-first allocator and validates the exact peer bytes. The
 audited rumqtt implementations again encode into a growable `BytesMut`; the
 netz path has no retained-capacity prerequisite.
+Property-free MQTT 5 AUTH packets also use caller-owned storage, including the
+distinct four-byte Continue/Re-authenticate form whose zero Property Length is
+mandatory. Request Problem Information suppression takes this path when only
+diagnostic properties remain. Exact wire tests and a real TCP fail-first
+allocator test cover the two- and four-byte forms; rumqttc's audited AUTH
+writer always targets a growable `BytesMut` and emits the longer form even for
+Success.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload

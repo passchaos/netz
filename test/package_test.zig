@@ -742,6 +742,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writeAuth"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readAuth"));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.Auth,
+        "writeNoPropertiesInto",
+    ));
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        netz.mqtt.Auth.no_properties_max_len,
+    );
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
         "ClientAuthHandler",
     ));

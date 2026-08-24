@@ -1875,6 +1875,11 @@ pub const Auth = struct {
     reason_code: u8 = 0,
     properties: []Property = &.{},
 
+    /// Largest complete AUTH packet without properties. Success uses the
+    /// two-byte zero-length form; Continue/Re-authenticate must also carry the
+    /// zero Property Length byte and therefore use four bytes.
+    pub const no_properties_max_len: usize = 4;
+
     pub fn deinit(self: *Auth, allocator: std.mem.Allocator) void {
         allocator.free(self.properties);
         self.* = undefined;
@@ -1935,6 +1940,31 @@ pub const Auth = struct {
             list.appendAssumeCapacity(reason_code);
             writePropertiesAssumeCapacity(list, properties, properties_len);
         }
+    }
+
+    /// Encode a property-free MQTT 5 AUTH packet into caller storage.
+    ///
+    /// Unlike acknowledgement and DISCONNECT packets, a non-zero AUTH reason
+    /// cannot omit its zero Property Length. Encoding both legal shapes here
+    /// keeps that protocol distinction explicit while avoiding a tiny heap
+    /// allocation in authentication completion/filtering paths.
+    pub fn writeNoPropertiesInto(
+        storage: *[no_properties_max_len]u8,
+        protocol: ProtocolVersion,
+        reason_code: u8,
+    ) Error![]u8 {
+        if (protocol != .v5) return error.InvalidPacketType;
+        try validateAuthReason(reason_code);
+
+        storage[0] = @as(u8, @intFromEnum(PacketType.auth)) << 4;
+        if (reason_code == 0) {
+            storage[1] = 0;
+            return storage[0..2];
+        }
+        storage[1] = 2;
+        storage[2] = reason_code;
+        storage[3] = 0;
+        return storage;
     }
 };
 
@@ -3555,6 +3585,31 @@ test "MQTT v5 AUTH control" {
     auth = try Auth.parse(allocator, .v5, encoded.items);
     try std.testing.expectEqual(@as(u8, 0), auth.reason_code);
     try std.testing.expectEqual(@as(usize, 0), auth.properties.len);
+
+    var direct: [Auth.no_properties_max_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xf0, 0x00 },
+        try Auth.writeNoPropertiesInto(&direct, .v5, 0),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xf0, 0x02, 0x18, 0x00 },
+        try Auth.writeNoPropertiesInto(&direct, .v5, 0x18),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xf0, 0x02, 0x19, 0x00 },
+        try Auth.writeNoPropertiesInto(&direct, .v5, 0x19),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        Auth.writeNoPropertiesInto(&direct, .v5, 0x01),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        Auth.writeNoPropertiesInto(&direct, .v3_1_1, 0),
+    );
 
     // MQTT 5 AUTH packets either omit the variable header entirely (remaining
     // length 0, implicit Success/no properties) or include both a reason code
