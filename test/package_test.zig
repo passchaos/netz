@@ -1051,7 +1051,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "sendManyBytes"));
     try std.testing.expect(@hasDecl(netz.quic, "RetryPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "writeRetryPacket"));
+    try std.testing.expect(@hasDecl(netz.quic, "retryPacketLen"));
+    try std.testing.expect(@hasDecl(netz.quic, "writeRetryPacketInto"));
     try std.testing.expect(@hasDecl(netz.quic, "verifyRetryIntegrityTag"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "issueInto"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "address_validation_token"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "retry_source_connection_id"));
@@ -1308,8 +1311,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "pmtu"));
     try std.testing.expect(@hasDecl(netz.quic, "address_validation_token"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "encode"));
+    try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "encodeInto"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validate"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "encodeRetry"));
+    try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "encodeRetryInto"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validateRetry"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validateRetryAnySecret"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "ReplayFilter"));

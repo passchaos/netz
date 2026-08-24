@@ -310,33 +310,86 @@ pub fn parseRetryPacket(bytes: []const u8) Error!RetryPacket {
 }
 
 pub fn writeRetryPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: RetryPacketOptions) Error!void {
+    const retry_len = try retryPacketLen(options);
+    const start = list.items.len;
+    try list.ensureUnusedCapacity(allocator, retry_len);
+    list.items.len += retry_len;
+    _ = writeRetryPacketInto(
+        list.items[start..][0..retry_len],
+        options,
+    ) catch unreachable;
+}
+
+/// Return the exact Retry packet size after validating its bounded fields.
+pub fn retryPacketLen(options: RetryPacketOptions) Error!usize {
     _ = try retryIntegrityProfile(options.version);
     try validatePacketConnectionIdLen(options.destination_connection_id.len);
     try validatePacketConnectionIdLen(options.source_connection_id.len);
     try validatePacketConnectionIdLen(options.original_destination_connection_id.len);
     if (options.token.len == 0) return error.InvalidFrame;
 
-    const start = list.items.len;
-    const type_bits = longHeaderPacketTypeBits(options.version, .retry);
     var retry_len: usize = 1 + 4 + 1 + 1 + retry_integrity_tag_len;
     retry_len = try addWireLen(retry_len, options.destination_connection_id.len);
     retry_len = try addWireLen(retry_len, options.source_connection_id.len);
     retry_len = try addWireLen(retry_len, options.token.len);
-    try list.ensureUnusedCapacity(allocator, retry_len);
-    list.appendAssumeCapacity(0x80 | 0x40 | (type_bits << 4) | @as(u8, options.type_specific_bits));
-    appendU32AssumeCapacity(list, options.version);
-    list.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
-    list.appendSliceAssumeCapacity(options.destination_connection_id);
-    list.appendAssumeCapacity(@intCast(options.source_connection_id.len));
-    list.appendSliceAssumeCapacity(options.source_connection_id);
-    list.appendSliceAssumeCapacity(options.token);
+    // The integrity tag authenticates an ODCID-length byte, ODCID, and the
+    // packet without its final tag. Preflight that derived length here so the
+    // caller-buffer writer cannot fail after modifying output.
+    _ = try addWireLen(
+        1 + options.original_destination_connection_id.len,
+        retry_len - retry_integrity_tag_len,
+    );
+    return retry_len;
+}
 
-    const tag = try retryIntegrityTag(allocator, options.original_destination_connection_id, list.items[start..]);
-    list.appendSliceAssumeCapacity(&tag);
+/// Encode Retry directly into caller storage, including its integrity tag.
+/// Validation and sizing finish before output is touched.
+pub fn writeRetryPacketInto(
+    storage: []u8,
+    options: RetryPacketOptions,
+) Error![]const u8 {
+    const retry_len = try retryPacketLen(options);
+    if (storage.len < retry_len) return error.BufferTooShort;
+    const type_bits = longHeaderPacketTypeBits(options.version, .retry);
+    var offset: usize = 0;
+    storage[offset] = 0x80 | 0x40 | (type_bits << 4) |
+        @as(u8, options.type_specific_bits);
+    offset += 1;
+    std.mem.writeInt(u32, storage[offset..][0..4], options.version, .big);
+    offset += 4;
+    storage[offset] = @intCast(options.destination_connection_id.len);
+    offset += 1;
+    @memcpy(storage[offset..][0..options.destination_connection_id.len], options.destination_connection_id);
+    offset += options.destination_connection_id.len;
+    storage[offset] = @intCast(options.source_connection_id.len);
+    offset += 1;
+    @memcpy(storage[offset..][0..options.source_connection_id.len], options.source_connection_id);
+    offset += options.source_connection_id.len;
+    @memcpy(storage[offset..][0..options.token.len], options.token);
+    offset += options.token.len;
+    const tag = retryIntegrityTagDirect(
+        options.original_destination_connection_id,
+        storage[0..offset],
+    ) catch unreachable;
+    @memcpy(storage[offset..][0..retry_integrity_tag_len], &tag);
+    offset += retry_integrity_tag_len;
+    std.debug.assert(offset == retry_len);
+    return storage[0..retry_len];
 }
 
 pub fn retryIntegrityTag(
     allocator: std.mem.Allocator,
+    original_destination_connection_id: []const u8,
+    retry_without_integrity_tag: []const u8,
+) Error![retry_integrity_tag_len]u8 {
+    _ = allocator;
+    return retryIntegrityTagDirect(
+        original_destination_connection_id,
+        retry_without_integrity_tag,
+    );
+}
+
+fn retryIntegrityTagDirect(
     original_destination_connection_id: []const u8,
     retry_without_integrity_tag: []const u8,
 ) Error![retry_integrity_tag_len]u8 {
@@ -346,16 +399,34 @@ pub fn retryIntegrityTag(
     const version = std.mem.readInt(u32, retry_without_integrity_tag[1..5], .big);
     const profile = try retryIntegrityProfile(version);
     const pseudo_len = std.math.add(usize, 1 + original_destination_connection_id.len, retry_without_integrity_tag.len) catch return error.IntegerOverflow;
-    const pseudo_packet = try allocator.alloc(u8, pseudo_len);
-    defer allocator.free(pseudo_packet);
-    pseudo_packet[0] = @intCast(original_destination_connection_id.len);
-    @memcpy(pseudo_packet[1..][0..original_destination_connection_id.len], original_destination_connection_id);
-    @memcpy(pseudo_packet[1 + original_destination_connection_id.len ..], retry_without_integrity_tag);
 
-    const plaintext: [0]u8 = .{};
-    var ciphertext: [0]u8 = .{};
+    // Retry integrity is AES-GCM with an empty plaintext and a segmented
+    // pseudo-packet as associated data. Feeding GHASH incrementally avoids
+    // concatenating ODCID and the Retry packet into temporary heap storage.
+    const Aes = std.crypto.core.aes.Aes128;
+    const Ghash = std.crypto.onetimeauth.Ghash;
+    const aes = Aes.initEnc(profile.key);
+    const zeros = [_]u8{0} ** 16;
+    var h: [16]u8 = undefined;
+    aes.encrypt(&h, &zeros);
+    const block_count = std.math.divCeil(usize, pseudo_len, Ghash.block_length) catch unreachable;
+    var mac = Ghash.initForBlockCount(&h, block_count + 1);
+    var odcid_len: [1]u8 = .{@intCast(original_destination_connection_id.len)};
+    mac.update(&odcid_len);
+    mac.update(original_destination_connection_id);
+    mac.update(retry_without_integrity_tag);
+    mac.pad();
+    var final_block = [_]u8{0} ** 16;
+    std.mem.writeInt(u64, final_block[0..8], @as(u64, @intCast(pseudo_len)) * 8, .big);
+    mac.update(&final_block);
     var tag: [retry_integrity_tag_len]u8 = undefined;
-    Aes128Gcm.encrypt(&ciphertext, &tag, &plaintext, pseudo_packet, profile.nonce, profile.key);
+    mac.final(&tag);
+    var j = [_]u8{0} ** 16;
+    j[0..Aes128Gcm.nonce_length].* = profile.nonce;
+    std.mem.writeInt(u32, j[Aes128Gcm.nonce_length..][0..4], 1, .big);
+    var encrypted_counter: [16]u8 = undefined;
+    aes.encrypt(&encrypted_counter, &j);
+    for (encrypted_counter, 0..) |byte, i| tag[i] ^= byte;
     return tag;
 }
 
@@ -2773,6 +2844,30 @@ test "QUIC Retry packet matches RFC vector and verifies integrity" {
         .token = &token,
         .original_destination_connection_id = &original_dcid,
     });
+    const options: RetryPacketOptions = .{
+        .destination_connection_id = &empty_cid,
+        .source_connection_id = &retry_scid,
+        .token = &token,
+        .original_destination_connection_id = &original_dcid,
+    };
+    var direct_storage: [64]u8 = undefined;
+    const direct = try writeRetryPacketInto(&direct_storage, options);
+    try std.testing.expectEqual(try retryPacketLen(options), direct.len);
+    try std.testing.expectEqualSlices(u8, &expected, direct);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        writeRetryPacketInto(direct_storage[0 .. direct.len - 1], options),
+    );
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expect(try verifyRetryIntegrityTag(
+        no_alloc.allocator(),
+        &original_dcid,
+        direct,
+    ));
+    try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualSlices(u8, &expected, encoded.items);
 }
 

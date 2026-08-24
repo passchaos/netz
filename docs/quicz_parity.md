@@ -128,6 +128,18 @@ change, including QUIC v1/v2, forced Retry, flow control, resets, cancellation
 retransmission, key update, migration, NAT rebinding, and peer close. Those
 gates do not themselves send an unsupported-version trigger, so the dedicated
 real-UDP Version Negotiation test remains the direct evidence for this path.
+The integrated Retry response now follows the same model. Fixed-size address
+validation tokens are encoded into caller storage, ODCID/RSCID binding is fed
+to HMAC incrementally instead of materializing a concatenated binding, and the
+RFC 9001 Retry integrity pseudo-packet is fed to GHASH in segments rather than
+allocated. `retry_flow.issueInto` then writes the complete bounded Retry packet
+into the handshake's stack buffer. The compatibility APIs retain ownership
+semantics with one final exact allocation. RFC v1/v2 vectors, wire-parity and
+failing-allocator tests cover the direct codec and validation paths; forced
+Retry succeeds against both quic-go v1/v2 and s2n-quic. A CPU-0-aligned
+100-connection handshake regression sample without Retry measured 472.770 us
+p50 and 2,048.1 connections/s; it checks the shared handshake path but is not
+a Retry-specific performance claim.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
 fills unpredictable bytes, caps responses at 1200 bytes, requires a valid

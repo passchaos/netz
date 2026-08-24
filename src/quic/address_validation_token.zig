@@ -58,17 +58,27 @@ pub fn encode(allocator: std.mem.Allocator, secret: Secret, context: Context) Er
     try validateContext(context);
     const out = try allocator.alloc(u8, token_len);
     errdefer allocator.free(out);
-
-    @memcpy(out[0..magic.len], magic);
-    out[magic.len] = @intFromEnum(context.kind);
-    std.mem.writeInt(u32, out[magic.len + 1 ..][0..version_len], context.version.wireValue(), .big);
-    std.mem.writeInt(u64, out[magic.len + 1 + version_len ..][0..8], @intCast(context.issued_ns), .big);
-    std.mem.writeInt(u64, out[magic.len + 1 + version_len + 8 ..][0..8], context.lifetime_ns, .big);
-    @memcpy(out[magic.len + 1 + version_len + 16 ..][0..nonce_len], &context.nonce);
-
-    const tag = tokenMac(secret, out[0..body_len], context.peer_address);
-    @memcpy(out[body_len..], &tag);
+    _ = try encodeInto(out[0..token_len], secret, context);
     return out;
+}
+
+/// Encode the fixed-size authenticated token into caller-owned storage.
+pub fn encodeInto(
+    storage: *[token_len]u8,
+    secret: Secret,
+    context: Context,
+) Error![]const u8 {
+    try validateContext(context);
+    @memcpy(storage[0..magic.len], magic);
+    storage[magic.len] = @intFromEnum(context.kind);
+    std.mem.writeInt(u32, storage[magic.len + 1 ..][0..version_len], context.version.wireValue(), .big);
+    std.mem.writeInt(u64, storage[magic.len + 1 + version_len ..][0..8], @intCast(context.issued_ns), .big);
+    std.mem.writeInt(u64, storage[magic.len + 1 + version_len + 8 ..][0..8], context.lifetime_ns, .big);
+    @memcpy(storage[magic.len + 1 + version_len + 16 ..][0..nonce_len], &context.nonce);
+
+    const tag = tokenMac(secret, storage[0..body_len], context.peer_address);
+    @memcpy(storage[body_len..], &tag);
+    return storage;
 }
 
 pub fn encodeRetry(
@@ -78,17 +88,49 @@ pub fn encodeRetry(
     original_destination_connection_id: []const u8,
     retry_source_connection_id: []const u8,
 ) Error![]u8 {
-    if (context.kind != .retry) return error.InvalidToken;
-    const binding = try retryPeerBinding(allocator, context.peer_address, original_destination_connection_id, retry_source_connection_id);
-    defer allocator.free(binding);
-    return encode(allocator, secret, .{
-        .kind = context.kind,
-        .version = context.version,
-        .issued_ns = context.issued_ns,
-        .lifetime_ns = context.lifetime_ns,
-        .peer_address = binding,
-        .nonce = context.nonce,
-    });
+    _ = try validateRetryContext(
+        context,
+        original_destination_connection_id,
+        retry_source_connection_id,
+    );
+    const out = try allocator.alloc(u8, token_len);
+    errdefer allocator.free(out);
+    _ = try encodeRetryInto(
+        out[0..token_len],
+        secret,
+        context,
+        original_destination_connection_id,
+        retry_source_connection_id,
+    );
+    return out;
+}
+
+/// Encode a Retry token without materializing the ODCID/RSCID binding. The MAC
+/// absorbs that logical binding as one length-delimited part, preserving exact
+/// wire compatibility with `encode` while avoiding scratch allocation.
+pub fn encodeRetryInto(
+    storage: *[token_len]u8,
+    secret: Secret,
+    context: Context,
+    original_destination_connection_id: []const u8,
+    retry_source_connection_id: []const u8,
+) Error![]const u8 {
+    const binding_len = try validateRetryContext(
+        context,
+        original_destination_connection_id,
+        retry_source_connection_id,
+    );
+    writeTokenBody(storage[0..body_len], context);
+    const tag = retryTokenMac(
+        secret,
+        storage[0..body_len],
+        context.peer_address,
+        original_destination_connection_id,
+        retry_source_connection_id,
+        binding_len,
+    );
+    @memcpy(storage[body_len..], &tag);
+    return storage;
 }
 
 pub fn validateRetry(
@@ -101,9 +143,29 @@ pub fn validateRetry(
     retry_source_connection_id: []const u8,
     token: []const u8,
 ) Error!Validation {
-    const binding = try retryPeerBinding(allocator, peer_address, original_destination_connection_id, retry_source_connection_id);
-    defer allocator.free(binding);
-    return validate(secret, .retry, expected_version, now_ns, binding, token);
+    _ = allocator;
+    const validation = try parseValidationEnvelope(
+        .retry,
+        expected_version,
+        token,
+    );
+    const binding_len = try retryBindingLen(
+        peer_address,
+        original_destination_connection_id,
+        retry_source_connection_id,
+    );
+    const expected = retryTokenMac(
+        secret,
+        token[0..body_len],
+        peer_address,
+        original_destination_connection_id,
+        retry_source_connection_id,
+        binding_len,
+    );
+    const got = token[body_len..][0..mac_len].*;
+    if (!vail.crypto.mac.verify(expected, got)) return error.InvalidToken;
+    try validateLifetime(validation, now_ns);
+    return validation;
 }
 
 pub fn validateRetryAnySecret(
@@ -116,36 +178,47 @@ pub fn validateRetryAnySecret(
     retry_source_connection_id: []const u8,
     token: []const u8,
 ) Error!Validation {
-    const binding = try retryPeerBinding(allocator, peer_address, original_destination_connection_id, retry_source_connection_id);
-    defer allocator.free(binding);
-    return validateAnySecret(secrets, .retry, expected_version, now_ns, binding, token);
+    _ = allocator;
+    if (secrets.len == 0) return error.InvalidToken;
+    const validation = try parseValidationEnvelope(
+        .retry,
+        expected_version,
+        token,
+    );
+    const binding_len = try retryBindingLen(
+        peer_address,
+        original_destination_connection_id,
+        retry_source_connection_id,
+    );
+    const got = token[body_len..][0..mac_len].*;
+    for (secrets) |secret| {
+        const expected = retryTokenMac(
+            secret,
+            token[0..body_len],
+            peer_address,
+            original_destination_connection_id,
+            retry_source_connection_id,
+            binding_len,
+        );
+        if (vail.crypto.mac.verify(expected, got)) {
+            try validateLifetime(validation, now_ns);
+            return validation;
+        }
+    }
+    return error.InvalidToken;
 }
 
 pub fn validate(secret: Secret, expected_kind: Kind, expected_version: quic.Version, now_ns: i64, peer_address: []const u8, token: []const u8) Error!Validation {
-    try validateEnvelope(token);
-    if (std.enums.fromInt(Kind, token[magic.len]) != expected_kind) return error.InvalidToken;
-
-    const version_wire = std.mem.readInt(u32, token[magic.len + 1 ..][0..version_len], .big);
-    const version: quic.Version = @enumFromInt(version_wire);
-    if (version.wireValue() != expected_version.wireValue()) return error.InvalidToken;
-    if (version == .negotiation) return error.InvalidToken;
-
-    const issued_u64 = std.mem.readInt(u64, token[magic.len + 1 + version_len ..][0..8], .big);
-    if (issued_u64 > @as(u64, @intCast(std.math.maxInt(i64)))) return error.InvalidToken;
-    const issued_ns: i64 = @intCast(issued_u64);
-    const lifetime_ns = std.mem.readInt(u64, token[magic.len + 1 + version_len + 8 ..][0..8], .big);
-    if (lifetime_ns == 0) return error.InvalidToken;
-    const nonce = token[magic.len + 1 + version_len + 16 ..][0..nonce_len].*;
-
+    const validation = try parseValidationEnvelope(
+        expected_kind,
+        expected_version,
+        token,
+    );
     const expected = tokenMac(secret, token[0..body_len], peer_address);
     const got = token[body_len..][0..mac_len].*;
     if (!vail.crypto.mac.verify(expected, got)) return error.InvalidToken;
-
-    if (now_ns < issued_ns) return error.TokenNotYetValid;
-    const expires = expiresAt(issued_ns, lifetime_ns) orelse return error.InvalidToken;
-    if (now_ns > expires) return error.TokenExpired;
-
-    return .{ .kind = expected_kind, .version = version, .issued_ns = issued_ns, .lifetime_ns = lifetime_ns, .nonce = nonce };
+    try validateLifetime(validation, now_ns);
+    return validation;
 }
 
 pub fn validateAnySecret(secrets: []const Secret, expected_kind: Kind, expected_version: quic.Version, now_ns: i64, peer_address: []const u8, token: []const u8) Error!Validation {
@@ -303,23 +376,33 @@ pub fn validateAnySecretAndRemember(secrets: []const Secret, expected_kind: Kind
     return validation;
 }
 
-fn retryPeerBinding(allocator: std.mem.Allocator, peer_address: []const u8, odcid: []const u8, rscid: []const u8) Error![]u8 {
-    if (odcid.len == 0 or odcid.len > 20 or rscid.len == 0 or rscid.len > 20) return error.InvalidToken;
-    const len = peer_address.len + 3 + odcid.len + rscid.len;
-    const out = try allocator.alloc(u8, len);
-    var pos: usize = 0;
-    @memcpy(out[pos..][0..peer_address.len], peer_address);
-    pos += peer_address.len;
-    out[pos] = 0xff;
-    pos += 1;
-    out[pos] = @intCast(odcid.len);
-    pos += 1;
-    @memcpy(out[pos..][0..odcid.len], odcid);
-    pos += odcid.len;
-    out[pos] = @intCast(rscid.len);
-    pos += 1;
-    @memcpy(out[pos..][0..rscid.len], rscid);
-    return out;
+fn retryBindingLen(
+    peer_address: []const u8,
+    odcid: []const u8,
+    rscid: []const u8,
+) Error!usize {
+    if (odcid.len == 0 or odcid.len > 20 or rscid.len == 0 or rscid.len > 20) {
+        return error.InvalidToken;
+    }
+    const ids_len = std.math.add(usize, odcid.len, rscid.len) catch
+        return error.InvalidToken;
+    return std.math.add(usize, peer_address.len, 3 + ids_len) catch
+        error.InvalidToken;
+}
+
+fn validateRetryContext(context: Context, odcid: []const u8, rscid: []const u8) Error!usize {
+    if (context.kind != .retry) return error.InvalidToken;
+    try validateContext(context);
+    return retryBindingLen(context.peer_address, odcid, rscid);
+}
+
+fn writeTokenBody(out: *[body_len]u8, context: Context) void {
+    @memcpy(out[0..magic.len], magic);
+    out[magic.len] = @intFromEnum(context.kind);
+    std.mem.writeInt(u32, out[magic.len + 1 ..][0..version_len], context.version.wireValue(), .big);
+    std.mem.writeInt(u64, out[magic.len + 1 + version_len ..][0..8], @intCast(context.issued_ns), .big);
+    std.mem.writeInt(u64, out[magic.len + 1 + version_len + 8 ..][0..8], context.lifetime_ns, .big);
+    @memcpy(out[magic.len + 1 + version_len + 16 ..][0..nonce_len], &context.nonce);
 }
 
 fn validateContext(context: Context) Error!void {
@@ -332,6 +415,58 @@ fn validateEnvelope(token: []const u8) Error!void {
     if (token.len != token_len) return error.InvalidToken;
     if (!std.mem.eql(u8, token[0..magic.len], magic)) return error.InvalidToken;
     _ = std.enums.fromInt(Kind, token[magic.len]) orelse return error.InvalidToken;
+}
+
+fn parseValidationEnvelope(
+    expected_kind: Kind,
+    expected_version: quic.Version,
+    token: []const u8,
+) Error!Validation {
+    try validateEnvelope(token);
+    if (std.enums.fromInt(Kind, token[magic.len]) != expected_kind) {
+        return error.InvalidToken;
+    }
+
+    const version_wire = std.mem.readInt(
+        u32,
+        token[magic.len + 1 ..][0..version_len],
+        .big,
+    );
+    const version: quic.Version = @enumFromInt(version_wire);
+    if (version.wireValue() != expected_version.wireValue() or
+        version == .negotiation) return error.InvalidToken;
+
+    const issued_u64 = std.mem.readInt(
+        u64,
+        token[magic.len + 1 + version_len ..][0..8],
+        .big,
+    );
+    if (issued_u64 > @as(u64, @intCast(std.math.maxInt(i64)))) {
+        return error.InvalidToken;
+    }
+    const issued_ns: i64 = @intCast(issued_u64);
+    const lifetime_ns = std.mem.readInt(
+        u64,
+        token[magic.len + 1 + version_len + 8 ..][0..8],
+        .big,
+    );
+    if (lifetime_ns == 0) return error.InvalidToken;
+    return .{
+        .kind = expected_kind,
+        .version = version,
+        .issued_ns = issued_ns,
+        .lifetime_ns = lifetime_ns,
+        .nonce = token[magic.len + 1 + version_len + 16 ..][0..nonce_len].*,
+    };
+}
+
+fn validateLifetime(validation: Validation, now_ns: i64) Error!void {
+    if (now_ns < validation.issued_ns) return error.TokenNotYetValid;
+    const expires = expiresAt(
+        validation.issued_ns,
+        validation.lifetime_ns,
+    ) orelse return error.InvalidToken;
+    if (now_ns > expires) return error.TokenExpired;
 }
 
 fn expiresAt(issued_ns: i64, lifetime_ns: u64) ?i64 {
@@ -349,12 +484,64 @@ fn tokenMac(secret: Secret, body: []const u8, peer_address: []const u8) [mac_len
     );
 }
 
+fn retryTokenMac(
+    secret: Secret,
+    body: []const u8,
+    peer_address: []const u8,
+    odcid: []const u8,
+    rscid: []const u8,
+    binding_len: usize,
+) [mac_len]u8 {
+    var separator_and_odcid_len = [_]u8{ 0xff, @intCast(odcid.len) };
+    var rscid_len = [_]u8{@intCast(rscid.len)};
+    var binding_len_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &binding_len_bytes, binding_len, .big);
+
+    const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+    var hmac = HmacSha256.init(&secret);
+    const domain = "netz/quic/address-validation/v1";
+    var domain_len: [2]u8 = undefined;
+    std.mem.writeInt(u16, &domain_len, domain.len, .big);
+    hmac.update(&domain_len);
+    hmac.update(domain);
+
+    var body_len_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &body_len_bytes, body.len, .big);
+    hmac.update(&body_len_bytes);
+    hmac.update(body);
+    hmac.update(&binding_len_bytes);
+    hmac.update(peer_address);
+    hmac.update(&separator_and_odcid_len);
+    hmac.update(odcid);
+    hmac.update(&rscid_len);
+    hmac.update(rscid);
+    var tag: [mac_len]u8 = undefined;
+    hmac.final(&tag);
+    return tag;
+}
+
 test "QUIC address validation token validates kind lifetime version and peer address" {
     const allocator = std.testing.allocator;
     const secret: Secret = [_]u8{0x42} ** secret_len;
     const nonce: Nonce = [_]u8{0x99} ** nonce_len;
     const token = try encode(allocator, secret, .{ .kind = .retry, .issued_ns = 100, .lifetime_ns = 50, .peer_address = "peer-a", .nonce = nonce });
     defer allocator.free(token);
+    var direct_storage: [token_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        token,
+        try encodeInto(
+            &direct_storage,
+            secret,
+            .{
+                .kind = .retry,
+                .issued_ns = 100,
+                .lifetime_ns = 50,
+                .peer_address = "peer-a",
+                .nonce = nonce,
+            },
+        ),
+    );
 
     const validation = try validate(secret, .retry, .version_1, 120, "peer-a", token);
     try std.testing.expectEqual(Kind.retry, validation.kind);
@@ -389,6 +576,45 @@ test "QUIC Retry address token binds ODCID and RSCID" {
     const validation = try validateRetry(allocator, secret, .version_1, 120, "client-path", &odcid, &rscid, token);
     try std.testing.expectEqual(Kind.retry, validation.kind);
     try std.testing.expectEqualSlices(u8, &nonce, &validation.nonce);
+
+    var direct_storage: [token_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        token,
+        try encodeRetryInto(
+            &direct_storage,
+            secret,
+            .{
+                .kind = .retry,
+                .issued_ns = 100,
+                .lifetime_ns = 500,
+                .peer_address = "client-path",
+                .nonce = nonce,
+            },
+            &odcid,
+            &rscid,
+        ),
+    );
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const no_alloc_validation = try validateRetry(
+        no_alloc.allocator(),
+        secret,
+        .version_1,
+        120,
+        "client-path",
+        &odcid,
+        &rscid,
+        token,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(
+        u8,
+        &nonce,
+        &no_alloc_validation.nonce,
+    );
     try std.testing.expectEqual(Kind.retry, (try validateRetryAnySecret(
         allocator,
         &[_]Secret{secret},

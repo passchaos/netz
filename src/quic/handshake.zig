@@ -1347,8 +1347,9 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 options.local_connection_id,
             );
         errdefer endpoint.allocator.free(rscid);
-        const prepared = retry.prepare(
-            endpoint.allocator,
+        var retry_storage: [quic.retry_flow.max_datagram_len]u8 = undefined;
+        const prepared = retry.prepareInto(
+            &retry_storage,
             endpoint.io,
             policy,
             rscid,
@@ -1364,7 +1365,6 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             => return error.InvalidPacket,
             else => |other| return @errorCast(other),
         };
-        defer endpoint.allocator.free(prepared.datagram);
         try endpoint.sendBytes(client_initial.from, prepared.datagram);
         client_initial.deinit(endpoint.allocator);
 

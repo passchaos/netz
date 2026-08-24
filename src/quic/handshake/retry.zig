@@ -29,6 +29,11 @@ pub const Prepared = struct {
     source_connection_id: []const u8,
 };
 
+pub const PreparedInto = struct {
+    datagram: []const u8,
+    source_connection_id: []const u8,
+};
+
 pub const InitialResponseFilter = struct {
     allocator: std.mem.Allocator,
     version: quic.Version,
@@ -82,6 +87,31 @@ pub fn prepare(
     original_destination_connection_id: []const u8,
     client_source_connection_id: []const u8,
 ) (quic.retry_flow.Error || std.Io.RandomSecureError)!Prepared {
+    var storage: [quic.retry_flow.max_datagram_len]u8 = undefined;
+    const prepared = try prepareInto(
+        &storage,
+        io,
+        policy,
+        default_source_connection_id,
+        original_destination_connection_id,
+        client_source_connection_id,
+    );
+    return .{
+        .datagram = try allocator.dupe(u8, prepared.datagram),
+        .source_connection_id = prepared.source_connection_id,
+    };
+}
+
+/// Prepare Retry in caller-owned storage so the integrated server can send it
+/// directly without allocating a short-lived datagram.
+pub fn prepareInto(
+    storage: []u8,
+    io: std.Io,
+    policy: Policy,
+    default_source_connection_id: []const u8,
+    original_destination_connection_id: []const u8,
+    client_source_connection_id: []const u8,
+) (quic.retry_flow.Error || std.Io.RandomSecureError)!PreparedInto {
     if (policy.peer_address.len == 0 or
         policy.lifetime_ns == 0)
     {
@@ -101,7 +131,7 @@ pub fn prepare(
     };
     defer std.crypto.secureZero(u8, &nonce);
     return .{
-        .datagram = try quic.retry_flow.issue(allocator, .{
+        .datagram = try quic.retry_flow.issueInto(storage, .{
             .original_destination_connection_id = original_destination_connection_id,
             .client_source_connection_id = client_source_connection_id,
             .retry_source_connection_id = source_connection_id,
@@ -148,5 +178,46 @@ test "integrated Retry policy defaults to the server connection ID" {
     try std.testing.expectEqualStrings(
         server_scid,
         packet.source_connection_id,
+    );
+
+    var direct_storage: [quic.retry_flow.max_datagram_len]u8 = undefined;
+    const direct = try prepareInto(
+        &direct_storage,
+        threaded.io(),
+        .{
+            .secret = [_]u8{0x31} **
+                quic.address_validation_token.secret_len,
+            .peer_address = "path",
+            .issued_ns = 100,
+            .lifetime_ns = 1_000,
+            .nonce = [_]u8{0x32} **
+                quic.address_validation_token.nonce_len,
+        },
+        server_scid,
+        odcid,
+        client_scid,
+    );
+    try std.testing.expectEqualSlices(u8, prepared.datagram, direct.datagram);
+    try std.testing.expectEqualStrings(server_scid, direct.source_connection_id);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const verified = try quic.retry_flow.validate(
+        no_alloc.allocator(),
+        .{
+            .original_destination_connection_id = odcid,
+            .peer_address = "path",
+            .now_ns = 100,
+            .secret = [_]u8{0x31} **
+                quic.address_validation_token.secret_len,
+        },
+        direct.datagram,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(
+        server_scid,
+        verified.packet.source_connection_id,
     );
 }

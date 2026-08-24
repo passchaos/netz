@@ -18,6 +18,11 @@ pub const IssueOptions = struct {
     secret: quic.address_validation_token.Secret,
 };
 
+/// Maximum Retry datagram produced by this module: fixed long-header fields,
+/// two 20-byte connection IDs, one fixed-size authenticated token, and tag.
+pub const max_datagram_len: usize = 1 + 4 + 1 + 20 + 1 + 20 +
+    quic.address_validation_token.token_len + quic.retry_integrity_tag_len;
+
 pub const ValidateOptions = struct {
     original_destination_connection_id: []const u8,
     peer_address: []const u8,
@@ -170,30 +175,44 @@ pub const ClientState = struct {
 /// Issue a QUIC Retry datagram with an address-validation token bound to the
 /// client's original DCID and the Retry SCID.
 pub fn issue(allocator: std.mem.Allocator, options: IssueOptions) Error![]u8 {
+    var scratch: [max_datagram_len]u8 = undefined;
+    const encoded = try issueInto(&scratch, options);
+    return allocator.dupe(u8, encoded);
+}
+
+/// Produce a complete Retry packet in caller-owned storage. Token binding and
+/// Retry integrity authentication are both streamed into their MACs, so the
+/// stateless server path requires no intermediate allocations.
+pub fn issueInto(
+    storage: []u8,
+    options: IssueOptions,
+) Error![]const u8 {
     if (std.mem.eql(u8, options.retry_source_connection_id, options.original_destination_connection_id)) {
         return error.InvalidToken;
     }
 
-    const token = try quic.address_validation_token.encodeRetry(allocator, options.secret, .{
-        .kind = .retry,
-        .version = options.version,
-        .issued_ns = options.issued_ns,
-        .lifetime_ns = options.lifetime_ns,
-        .peer_address = options.peer_address,
-        .nonce = options.nonce,
-    }, options.original_destination_connection_id, options.retry_source_connection_id);
-    defer allocator.free(token);
-
-    var datagram: std.ArrayList(u8) = .empty;
-    errdefer datagram.deinit(allocator);
-    try quic.writeRetryPacket(&datagram, allocator, .{
+    var token_storage: [quic.address_validation_token.token_len]u8 = undefined;
+    const token = try quic.address_validation_token.encodeRetryInto(
+        &token_storage,
+        options.secret,
+        .{
+            .kind = .retry,
+            .version = options.version,
+            .issued_ns = options.issued_ns,
+            .lifetime_ns = options.lifetime_ns,
+            .peer_address = options.peer_address,
+            .nonce = options.nonce,
+        },
+        options.original_destination_connection_id,
+        options.retry_source_connection_id,
+    );
+    return quic.writeRetryPacketInto(storage, .{
         .version = options.version.wireValue(),
         .destination_connection_id = options.client_source_connection_id,
         .source_connection_id = options.retry_source_connection_id,
         .token = token,
         .original_destination_connection_id = options.original_destination_connection_id,
     });
-    return datagram.toOwnedSlice(allocator);
 }
 
 /// Verify Retry integrity and validate the embedded Retry token binding.
@@ -349,6 +368,39 @@ test "QUIC Retry flow issues and validates address-bound Retry datagram" {
         .secret = secret,
     });
     defer allocator.free(datagram);
+
+    var direct_storage: [max_datagram_len]u8 = undefined;
+    const direct = try issueInto(&direct_storage, .{
+        .version = .version_2,
+        .original_destination_connection_id = &odcid,
+        .client_source_connection_id = &client_scid,
+        .retry_source_connection_id = &retry_scid,
+        .peer_address = "client-path",
+        .issued_ns = 100,
+        .lifetime_ns = 500,
+        .nonce = nonce,
+        .secret = secret,
+    });
+    try std.testing.expectEqualSlices(u8, datagram, direct);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const no_alloc_validation = try validate(
+        no_alloc.allocator(),
+        .{
+            .original_destination_connection_id = &odcid,
+            .peer_address = "client-path",
+            .now_ns = 120,
+            .secret = secret,
+        },
+        direct,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        quic.address_validation_token.Kind.retry,
+        no_alloc_validation.token.kind,
+    );
 
     const result = try validate(allocator, .{
         .original_destination_connection_id = &odcid,
