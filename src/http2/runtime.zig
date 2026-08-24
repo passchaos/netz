@@ -1519,16 +1519,16 @@ pub const Connection = struct {
             request_options.headers.len,
             7,
         ) catch return error.MessageTooLarge;
-        const fields_buffer = if (fields_capacity <= fields_stack.len)
-            fields_stack[0..fields_capacity]
-        else
-            try self.allocator.alloc(
-                http2.Hpack.HeaderField,
-                fields_capacity,
-            );
-        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
-            self.allocator.free(fields_buffer);
-        };
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
         var fields: std.ArrayList(http2.Hpack.HeaderField) =
             .initBuffer(fields_buffer);
         const method_is_connect = methodIsConnect(request_options.method);
@@ -1644,16 +1644,16 @@ pub const Connection = struct {
             request_options.headers.len,
             7,
         ) catch return error.MessageTooLarge;
-        const fields_buffer = if (fields_capacity <= fields_stack.len)
-            fields_stack[0..fields_capacity]
-        else
-            try self.allocator.alloc(
-                http2.Hpack.HeaderField,
-                fields_capacity,
-            );
-        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
-            self.allocator.free(fields_buffer);
-        };
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
         var fields: std.ArrayList(http2.Hpack.HeaderField) =
             .initBuffer(fields_buffer);
         fields.appendAssumeCapacity(.{
@@ -2167,16 +2167,16 @@ pub const Connection = struct {
             request_options.headers.len,
             7,
         ) catch return error.MessageTooLarge;
-        const fields_buffer = if (fields_capacity <= fields_stack.len)
-            fields_stack[0..fields_capacity]
-        else
-            try self.allocator.alloc(
-                http2.Hpack.HeaderField,
-                fields_capacity,
-            );
-        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
-            self.allocator.free(fields_buffer);
-        };
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
         var fields: std.ArrayList(http2.Hpack.HeaderField) =
             .initBuffer(fields_buffer);
         fields.appendAssumeCapacity(.{
@@ -3169,21 +3169,37 @@ pub const Connection = struct {
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
         const scheme = request_options.scheme orelse self.default_scheme orelse "https";
 
-        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer fields.deinit(self.allocator);
-        try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
-        try fields.append(self.allocator, .{ .name = ":path", .value = request_options.path });
-        try fields.append(self.allocator, .{ .name = ":scheme", .value = scheme });
-        try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
-        if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            request_options.headers.len,
+            @as(usize, 5) + @intFromBool(request_options.priority != null),
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{ .name = ":method", .value = "CONNECT" });
+        fields.appendAssumeCapacity(.{ .name = ":path", .value = request_options.path });
+        fields.appendAssumeCapacity(.{ .name = ":scheme", .value = scheme });
+        fields.appendAssumeCapacity(.{ .name = ":protocol", .value = protocol });
+        if (request_options.authority) |authority| fields.appendAssumeCapacity(.{ .name = ":authority", .value = authority });
         var priority_buf: [16]u8 = undefined;
         if (request_options.priority) |value| {
-            try fields.append(self.allocator, .{
+            fields.appendAssumeCapacity(.{
                 .name = "priority",
                 .value = value.serialize(&priority_buf),
             });
         }
-        for (request_options.headers) |header| try fields.append(self.allocator, header);
+        fields.appendSliceAssumeCapacity(request_options.headers);
         stripConnectionHeaders(&fields, .request);
         try validateHeaderBlock(fields.items, .request);
 
@@ -3204,18 +3220,34 @@ pub const Connection = struct {
         if (request_options.authority == null) return error.MissingPseudoHeader;
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
 
-        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer fields.deinit(self.allocator);
-        try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
-        try fields.append(self.allocator, .{ .name = ":authority", .value = request_options.authority.? });
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            request_options.headers.len,
+            @as(usize, 2) + @intFromBool(request_options.priority != null),
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{ .name = ":method", .value = "CONNECT" });
+        fields.appendAssumeCapacity(.{ .name = ":authority", .value = request_options.authority.? });
         var priority_buf: [16]u8 = undefined;
         if (request_options.priority) |value| {
-            try fields.append(self.allocator, .{
+            fields.appendAssumeCapacity(.{
                 .name = "priority",
                 .value = value.serialize(&priority_buf),
             });
         }
-        for (request_options.headers) |header| try fields.append(self.allocator, header);
+        fields.appendSliceAssumeCapacity(request_options.headers);
         stripConnectionHeaders(&fields, .request);
         try validateHeaderBlock(fields.items, .request);
 
@@ -6717,10 +6749,26 @@ pub const Connection = struct {
         var status_buf: [3]u8 = undefined;
         if (status_code < 100 or status_code > 999) return error.InvalidStatus;
         const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
-        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer fields.deinit(self.allocator);
-        try fields.append(self.allocator, .{ .name = ":status", .value = status });
-        for (response_headers) |header| try fields.append(self.allocator, header);
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            response_headers.len,
+            1,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{ .name = ":status", .value = status });
+        fields.appendSliceAssumeCapacity(response_headers);
         stripConnectionHeaders(&fields, .response);
         try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         if (status_code >= 200 and status_code < 300) {
@@ -8665,6 +8713,26 @@ fn decodeOwnedHeaders(
         => return error.MessageTooLarge,
         else => |e| return e,
     };
+}
+
+/// Use caller stack storage for ordinary header counts and allocate an exact
+/// slice only for unusually large field sets. Pointer identity records
+/// ownership without another flag at each short-lived assembly call site.
+fn stackFirstHeaderFieldBuffer(
+    allocator: std.mem.Allocator,
+    stack: []http2.Hpack.HeaderField,
+    required: usize,
+) std.mem.Allocator.Error![]http2.Hpack.HeaderField {
+    if (required <= stack.len) return stack[0..required];
+    return allocator.alloc(http2.Hpack.HeaderField, required);
+}
+
+fn freeStackFirstHeaderFieldBuffer(
+    allocator: std.mem.Allocator,
+    stack: []http2.Hpack.HeaderField,
+    fields: []http2.Hpack.HeaderField,
+) void {
+    if (fields.ptr != stack.ptr) allocator.free(fields);
 }
 
 fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField) void {
@@ -14447,6 +14515,51 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try stripSuccessfulConnectContentLength(&connect_headers);
     try std.testing.expect(findHeader(connect_headers.items, "content-length") == null);
     try std.testing.expectEqualStrings("kept", findHeader(connect_headers.items, "x-ok") orelse return error.MissingPseudoHeader);
+}
+
+test "HTTP/2 CONNECT header assembly is stack-first with exact fallback" {
+    const allocator = std.testing.allocator;
+    var stack: [16]http2.Hpack.HeaderField = undefined;
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const common = try stackFirstHeaderFieldBuffer(
+        no_alloc.allocator(),
+        &stack,
+        stack.len,
+    );
+    defer freeStackFirstHeaderFieldBuffer(
+        no_alloc.allocator(),
+        &stack,
+        common,
+    );
+    try std.testing.expectEqual(stack[0..].ptr, common.ptr);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        stackFirstHeaderFieldBuffer(
+            no_alloc.allocator(),
+            &stack,
+            stack.len + 1,
+        ),
+    );
+    try std.testing.expect(no_alloc.has_induced_failure);
+
+    const overflow = try stackFirstHeaderFieldBuffer(
+        allocator,
+        &stack,
+        stack.len + 1,
+    );
+    defer freeStackFirstHeaderFieldBuffer(
+        allocator,
+        &stack,
+        overflow,
+    );
+    try std.testing.expect(overflow.ptr != stack[0..].ptr);
+    try std.testing.expectEqual(stack.len + 1, overflow.len);
 }
 
 test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {

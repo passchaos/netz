@@ -140,6 +140,18 @@ fragmented gate took 98.55-137.68 us. The batch therefore reduces latency by
 2.2-3.2x while preserving every WebSocket frame boundary; its remaining
 15.1-16.0% cost versus one frame is the real framing/masking work. Each run
 verified checksum 51,000.
+The HTTP/2 Extended CONNECT, traditional CONNECT, and tunnel-response builders
+now stage their pseudo-headers and ordinary headers in 16-entry stack buffers,
+matching the ordinary HTTP/2 request/response path. Larger application header
+sets retain an exact heap fallback. A fail-first unit test proves the full
+common stack capacity does not allocate and that the first overflow reports OOM
+cleanly before a successful fallback allocation. The 1,595-test suite and the
+external Hyper RFC 8441 fragmented-text/Ping/Pong/bounded-Close gate remain
+green, as does the broader bidirectional Hyper h2c/TLS gate. Five CPU-0 4-KiB
+RFC 8441 echo runs measured 31.105-31.955 us/roundtrip (31.507 us mean, 0.94%
+standard deviation, 244.48-251.16 logical MiB/s). This is a persistent-connection
+regression sample; the one-time CONNECT allocation removal is intentionally not
+presented as a steady-state echo throughput gain.
 
 The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw
