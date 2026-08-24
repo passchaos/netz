@@ -10780,16 +10780,15 @@ fn rejectByLocalGoAway(control: http3.ControlState, role: ControlStreamRole, str
     };
 }
 
-fn controlFramePayload(
+fn controlFramePayloadInto(
     control: *http3.ControlState,
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    storage: *[http3.max_single_varint_frame_len]u8,
     kind: ControlFrameKind,
     value: u64,
-) Error!void {
-    switch (kind) {
-        .goaway => try control.writeGoAway(list, allocator, value),
-    }
+) Error![]const u8 {
+    return switch (kind) {
+        .goaway => control.writeGoAwayInto(storage, value),
+    };
 }
 
 fn sendConnectionControlFrame(
@@ -10800,35 +10799,84 @@ fn sendConnectionControlFrame(
     kind: ControlFrameKind,
     value: u64,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(connection.endpoint.allocator);
-    try controlFramePayload(control, &payload, connection.endpoint.allocator, kind, value);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
-    try control_send.appendFrames(&frames, connection.endpoint.allocator, payload.items, payload.items.len, false);
-    try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_goaway_id = control.local_goaway_id;
+    errdefer control.local_goaway_id = previous_goaway_id;
+    const payload = try controlFramePayloadInto(control, &payload_storage, kind, value);
+    try sendConnectionControlBytes(connection, control_send, options, payload);
 }
 
-fn pushControlFramePayload(
+fn pushControlFramePayloadInto(
     control: *http3.ControlState,
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    storage: *[http3.max_single_varint_frame_len]u8,
     kind: PushControlFrameKind,
     push_id: u64,
-) Error!void {
-    switch (kind) {
-        .max_push_id => try control.writeMaxPushId(
-            list,
-            allocator,
-            push_id,
-        ),
+) Error![]const u8 {
+    return switch (kind) {
+        .max_push_id => control.writeMaxPushIdInto(storage, push_id),
         .cancel_push => {
             const max_push_id = control.local_max_push_id orelse
                 return error.PushIdExceeded;
             if (push_id > max_push_id) return error.PushIdExceeded;
-            try http3.writeCancelPushFrame(list, allocator, push_id);
+            return http3.writeCancelPushFrameInto(storage, push_id);
         },
+    };
+}
+
+fn sendConnectionControlBytes(
+    connection: *quic.one_rtt.Connection,
+    control_send: *quic.stream_state.SendState,
+    options: HandshakeSessionOptions,
+    payload: []const u8,
+) Error!void {
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frame_storage: [http3.max_priority_update_frame_len]quic.Frame = undefined;
+    const frames = try controlFramesInto(
+        control_send,
+        &frame_storage,
+        payload,
+        options.max_stream_frame_data,
+    );
+    try sendConnectionFrames(connection, frames, options.max_frames_per_packet);
+}
+
+/// Split a small control message without allocating a temporary frame list.
+/// The largest runtime control payload is a canonical PRIORITY_UPDATE at 19
+/// bytes, so even the deliberately tiny one-byte STREAM chunk size used by
+/// tests fits the fixed frame array.
+fn controlFramesInto(
+    control_send: *quic.stream_state.SendState,
+    storage: *[http3.max_priority_update_frame_len]quic.Frame,
+    payload: []const u8,
+    max_frame_data_len: usize,
+) Error![]const quic.Frame {
+    std.debug.assert(payload.len <= storage.len);
+    if (control_send.fin_sent) return error.FinalSizeMismatch;
+    if (max_frame_data_len == 0) return error.InvalidStreamRange;
+    const next_offset = std.math.add(
+        u64,
+        control_send.next_offset,
+        payload.len,
+    ) catch return error.InvalidStreamRange;
+    var payload_offset: usize = 0;
+    var frame_count: usize = 0;
+    while (payload_offset < payload.len) {
+        const chunk_len = @min(
+            max_frame_data_len,
+            payload.len - payload_offset,
+        );
+        storage[frame_count] = .{ .stream = .{
+            .stream_id = control_send.stream_id,
+            .offset = control_send.next_offset + payload_offset,
+            .data = payload[payload_offset..][0..chunk_len],
+            .fin = false,
+        } };
+        frame_count += 1;
+        payload_offset += chunk_len;
     }
+    control_send.next_offset = next_offset;
+    return storage[0..frame_count];
 }
 
 fn sendConnectionPushControl(
@@ -10839,33 +10887,16 @@ fn sendConnectionPushControl(
     kind: PushControlFrameKind,
     push_id: u64,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(connection.endpoint.allocator);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
     const previous_max_push_id = control.local_max_push_id;
-    const previous_send = control_send.*;
     errdefer control.local_max_push_id = previous_max_push_id;
-    errdefer control_send.* = previous_send;
-    try pushControlFramePayload(
+    const payload = try pushControlFramePayloadInto(
         control,
-        &payload,
-        connection.endpoint.allocator,
+        &payload_storage,
         kind,
         push_id,
     );
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
-    try control_send.appendFrames(
-        &frames,
-        connection.endpoint.allocator,
-        payload.items,
-        payload.items.len,
-        false,
-    );
-    try sendConnectionFrames(
-        connection,
-        frames.items,
-        options.max_frames_per_packet,
-    );
+    try sendConnectionControlBytes(connection, control_send, options, payload);
 }
 
 fn sendConnectionPriorityUpdate(
@@ -10893,32 +10924,21 @@ fn sendConnectionPriorityUpdateRaw(
     prioritized_element_id: u64,
     priority: http3.Priority,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(connection.endpoint.allocator);
-    var field_value_buf: [16]u8 = undefined;
-    try http3.writePriorityUpdateFrameRaw(
-        &payload,
-        connection.endpoint.allocator,
-        frame_type,
-        prioritized_element_id,
-        priority.serialize(&field_value_buf),
-    );
-    const previous_send = control_send.*;
-    errdefer control_send.* = previous_send;
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
-    try control_send.appendFrames(
-        &frames,
-        connection.endpoint.allocator,
-        payload.items,
-        payload.items.len,
-        false,
-    );
-    try sendConnectionFrames(
-        connection,
-        frames.items,
-        options.max_frames_per_packet,
-    );
+    var payload_storage: [http3.max_priority_update_frame_len]u8 = undefined;
+    const payload = switch (frame_type) {
+        http3.FrameType.priority_update_request => try http3.writePriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        http3.FrameType.priority_update_push => try http3.writePushPriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        else => return error.InvalidPriorityUpdate,
+    };
+    try sendConnectionControlBytes(connection, control_send, options, payload);
 }
 
 fn sendProtectedControlFrame(
@@ -10932,13 +10952,24 @@ fn sendProtectedControlFrame(
     kind: ControlFrameKind,
     value: u64,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
-    try controlFramePayload(control, &payload, endpoint.allocator, kind, value);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
-    try control_send.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
-    try sendProtectedFrames(endpoint, to, config.send_keys, config.peer_connection_id, next_packet_number, frames.items, config.max_frames_per_packet, protected_send);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_goaway_id = control.local_goaway_id;
+    errdefer control.local_goaway_id = previous_goaway_id;
+    const payload = try controlFramePayloadInto(
+        control,
+        &payload_storage,
+        kind,
+        value,
+    );
+    try sendProtectedControlBytes(
+        endpoint,
+        to,
+        config,
+        control_send,
+        next_packet_number,
+        protected_send,
+        payload,
+    );
 }
 
 fn sendProtectedPushControl(
@@ -10952,27 +10983,43 @@ fn sendProtectedPushControl(
     kind: PushControlFrameKind,
     push_id: u64,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
     const previous_max_push_id = control.local_max_push_id;
-    const previous_send = control_send.*;
     errdefer control.local_max_push_id = previous_max_push_id;
-    errdefer control_send.* = previous_send;
-    try pushControlFramePayload(
+    const payload = try pushControlFramePayloadInto(
         control,
-        &payload,
-        endpoint.allocator,
+        &payload_storage,
         kind,
         push_id,
     );
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
-    try control_send.appendFrames(
-        &frames,
-        endpoint.allocator,
-        payload.items,
-        payload.items.len,
-        false,
+    try sendProtectedControlBytes(
+        endpoint,
+        to,
+        config,
+        control_send,
+        next_packet_number,
+        protected_send,
+        payload,
+    );
+}
+
+fn sendProtectedControlBytes(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    payload: []const u8,
+) Error!void {
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frame_storage: [http3.max_priority_update_frame_len]quic.Frame = undefined;
+    const frames = try controlFramesInto(
+        control_send,
+        &frame_storage,
+        payload,
+        config.max_stream_frame_data,
     );
     try sendProtectedFrames(
         endpoint,
@@ -10980,7 +11027,7 @@ fn sendProtectedPushControl(
         config.send_keys,
         config.peer_connection_id,
         next_packet_number,
-        frames.items,
+        frames,
         config.max_frames_per_packet,
         protected_send,
     );
@@ -11020,36 +11067,28 @@ fn sendProtectedPriorityUpdateRaw(
     prioritized_element_id: u64,
     priority: http3.Priority,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
-    var field_value_buf: [16]u8 = undefined;
-    try http3.writePriorityUpdateFrameRaw(
-        &payload,
-        endpoint.allocator,
-        frame_type,
-        prioritized_element_id,
-        priority.serialize(&field_value_buf),
-    );
-    const previous_send = control_send.*;
-    errdefer control_send.* = previous_send;
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
-    try control_send.appendFrames(
-        &frames,
-        endpoint.allocator,
-        payload.items,
-        payload.items.len,
-        false,
-    );
-    try sendProtectedFrames(
+    var payload_storage: [http3.max_priority_update_frame_len]u8 = undefined;
+    const payload = switch (frame_type) {
+        http3.FrameType.priority_update_request => try http3.writePriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        http3.FrameType.priority_update_push => try http3.writePushPriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        else => return error.InvalidPriorityUpdate,
+    };
+    try sendProtectedControlBytes(
         endpoint,
         to,
-        config.send_keys,
-        config.peer_connection_id,
+        config,
+        control_send,
         next_packet_number,
-        frames.items,
-        config.max_frames_per_packet,
         protected_send,
+        payload,
     );
 }
 
@@ -11882,6 +11921,33 @@ fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
         if (frame == .stream) return frame.stream;
     }
     return null;
+}
+
+test "HTTP/3 control frame splitting uses caller storage transactionally" {
+    var send = quic.stream_state.SendState.init(client_control_stream_id);
+    send.next_offset = 9;
+    var storage: [http3.max_priority_update_frame_len]quic.Frame = undefined;
+    const frames = try controlFramesInto(&send, &storage, "abcdef", 2);
+    try std.testing.expectEqual(@as(usize, 3), frames.len);
+    try std.testing.expectEqual(@as(u64, 15), send.next_offset);
+    for (frames, 0..) |frame, i| {
+        try std.testing.expect(frame == .stream);
+        try std.testing.expectEqual(client_control_stream_id, frame.stream.stream_id);
+        try std.testing.expectEqual(@as(u64, 9 + i * 2), frame.stream.offset);
+        try std.testing.expectEqualSlices(
+            u8,
+            "abcdef"[i * 2 ..][0..2],
+            frame.stream.data,
+        );
+        try std.testing.expect(!frame.stream.fin);
+    }
+
+    const before = send;
+    try std.testing.expectError(
+        error.InvalidStreamRange,
+        controlFramesInto(&send, &storage, "x", 0),
+    );
+    try std.testing.expectEqualDeep(before, send);
 }
 
 test "HTTP/3 server GOAWAY validates request stream ids" {

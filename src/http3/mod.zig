@@ -876,17 +876,57 @@ pub const ControlState = struct {
         if (self.local_goaway_id) |previous| {
             if (stream_id > previous) return error.GoAwayIdIncreased;
         }
-
-        try writeSingleVarintFrame(list, allocator, FrameType.goaway, stream_id);
+        var storage: [max_single_varint_frame_len]u8 = undefined;
+        const bytes = try writeSingleVarintFrameInto(
+            &storage,
+            FrameType.goaway,
+            stream_id,
+        );
+        try list.ensureUnusedCapacity(allocator, bytes.len);
+        list.appendSliceAssumeCapacity(bytes);
         self.local_goaway_id = stream_id;
+    }
+
+    /// Encodes GOAWAY into caller storage and commits the monotonic local ID
+    /// only after validation and encoding have succeeded.
+    pub fn writeGoAwayInto(
+        self: *ControlState,
+        storage: *[max_single_varint_frame_len]u8,
+        stream_id: u64,
+    ) Error![]const u8 {
+        if (self.local_goaway_id) |previous| {
+            if (stream_id > previous) return error.GoAwayIdIncreased;
+        }
+
+        const bytes = try writeSingleVarintFrameInto(storage, FrameType.goaway, stream_id);
+        self.local_goaway_id = stream_id;
+        return bytes;
     }
 
     pub fn writeMaxPushId(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, push_id: u64) Error!void {
         if (self.local_max_push_id) |previous| {
             if (push_id < previous) return error.MaxPushIdReduced;
         }
-        try writeMaxPushIdFrame(list, allocator, push_id);
+        var storage: [max_single_varint_frame_len]u8 = undefined;
+        const bytes = try writeMaxPushIdFrameInto(&storage, push_id);
+        try list.ensureUnusedCapacity(allocator, bytes.len);
+        list.appendSliceAssumeCapacity(bytes);
         self.local_max_push_id = push_id;
+    }
+
+    /// Encodes MAX_PUSH_ID into caller storage and updates state only after a
+    /// valid frame has been produced.
+    pub fn writeMaxPushIdInto(
+        self: *ControlState,
+        storage: *[max_single_varint_frame_len]u8,
+        push_id: u64,
+    ) Error![]const u8 {
+        if (self.local_max_push_id) |previous| {
+            if (push_id < previous) return error.MaxPushIdReduced;
+        }
+        const bytes = try writeMaxPushIdFrameInto(storage, push_id);
+        self.local_max_push_id = push_id;
+        return bytes;
     }
 
     pub fn applyControlStreamBytes(self: *ControlState, allocator: std.mem.Allocator, bytes: []const u8) Error!void {
@@ -1148,6 +1188,15 @@ pub const DecodedPushPromise = struct {
 
 pub const Priority = priority_field.Priority;
 
+/// The largest supported single-varint HTTP/3 control frame: one-byte frame
+/// type, one-byte encoded payload length, and an eight-byte value.
+pub const max_single_varint_frame_len: usize = 1 + 1 + 8;
+
+/// Canonical PRIORITY_UPDATE values emitted by `Priority.serialize` are at
+/// most `"u=7, i"` (6 bytes). The extension frame type needs four bytes,
+/// its payload length one, and the prioritized element ID at most eight.
+pub const max_priority_update_frame_len: usize = 4 + 1 + 8 + 6;
+
 pub const PriorityUpdatePayload = struct {
     prioritized_element_id: u64,
     field_value: []const u8,
@@ -1189,12 +1238,28 @@ pub fn writeCancelPushFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocat
     try writeSingleVarintFrame(list, allocator, FrameType.cancel_push, push_id);
 }
 
+/// Encodes a complete CANCEL_PUSH frame into caller-owned fixed storage.
+pub fn writeCancelPushFrameInto(
+    storage: *[max_single_varint_frame_len]u8,
+    push_id: u64,
+) Error![]const u8 {
+    return writeSingleVarintFrameInto(storage, FrameType.cancel_push, push_id);
+}
+
 pub fn parseCancelPushPayload(payload: []const u8) Error!u64 {
     return parseSingleVarintPayload(payload);
 }
 
 pub fn writeMaxPushIdFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, push_id: u64) Error!void {
     try writeSingleVarintFrame(list, allocator, FrameType.max_push_id, push_id);
+}
+
+/// Encodes a complete MAX_PUSH_ID frame into caller-owned fixed storage.
+pub fn writeMaxPushIdFrameInto(
+    storage: *[max_single_varint_frame_len]u8,
+    push_id: u64,
+) Error![]const u8 {
+    return writeSingleVarintFrameInto(storage, FrameType.max_push_id, push_id);
 }
 
 pub fn parseMaxPushIdPayload(payload: []const u8) Error!u64 {
@@ -1305,6 +1370,51 @@ pub fn writePushPriorityUpdateFrame(
     );
 }
 
+/// Encodes a canonical request PRIORITY_UPDATE without allocating.
+pub fn writePriorityUpdateFrameInto(
+    storage: *[max_priority_update_frame_len]u8,
+    request_stream_id: u64,
+    priority: Priority,
+) Error![]const u8 {
+    try validateRequestStreamId(request_stream_id);
+    return writePriorityUpdateFrameRawInto(
+        storage,
+        FrameType.priority_update_request,
+        request_stream_id,
+        priority,
+    );
+}
+
+/// Encodes a canonical push PRIORITY_UPDATE without allocating.
+pub fn writePushPriorityUpdateFrameInto(
+    storage: *[max_priority_update_frame_len]u8,
+    push_id: u64,
+    priority: Priority,
+) Error![]const u8 {
+    return writePriorityUpdateFrameRawInto(
+        storage,
+        FrameType.priority_update_push,
+        push_id,
+        priority,
+    );
+}
+
+fn writePriorityUpdateFrameRawInto(
+    storage: *[max_priority_update_frame_len]u8,
+    frame_type: u64,
+    prioritized_element_id: u64,
+    priority: Priority,
+) Error![]const u8 {
+    var field_value_storage: [6]u8 = undefined;
+    const field_value = priority.serialize(&field_value_storage);
+    return writeVarintPayloadFrameInto(
+        storage,
+        frame_type,
+        prioritized_element_id,
+        field_value,
+    );
+}
+
 pub fn writePriorityUpdateFrameRaw(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1353,17 +1463,53 @@ pub fn validateResponsePushPromises(control: ControlState, bytes: []const u8) Er
 }
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
+    var storage: [max_single_varint_frame_len]u8 = undefined;
+    const bytes = try writeSingleVarintFrameInto(&storage, frame_type, value);
+    try list.ensureUnusedCapacity(allocator, bytes.len);
+    list.appendSliceAssumeCapacity(bytes);
+}
+
+fn writeSingleVarintFrameInto(
+    storage: *[max_single_varint_frame_len]u8,
+    frame_type: u64,
+    value: u64,
+) Error![]const u8 {
     try validateFrameType(frame_type);
     const payload_len = try quic.varint.length(value);
+    var offset: usize = 0;
+    offset += (try quic.varint.encodeInto(storage[offset..], frame_type)).len;
+    offset += (try quic.varint.encodeInto(storage[offset..], payload_len)).len;
+    offset += (try quic.varint.encodeInto(storage[offset..], value)).len;
+    return storage[0..offset];
+}
+
+fn writeVarintPayloadFrameInto(
+    storage: []u8,
+    frame_type: u64,
+    value: u64,
+    tail: []const u8,
+) Error![]const u8 {
+    try validateFrameType(frame_type);
+    const value_len = try quic.varint.length(value);
+    const payload_len = std.math.add(usize, value_len, tail.len) catch
+        return error.IntegerOverflow;
+    const payload_len_u64 = std.math.cast(u64, payload_len) orelse
+        return error.IntegerOverflow;
     const frame_type_len = try quic.varint.length(frame_type);
-    const payload_len_len = try quic.varint.length(payload_len);
-    try list.ensureUnusedCapacity(
-        allocator,
-        @as(usize, frame_type_len) + payload_len_len + payload_len,
-    );
-    quic.varint.encodeWithLenAssumeCapacity(list, frame_type, frame_type_len);
-    quic.varint.encodeWithLenAssumeCapacity(list, payload_len, payload_len_len);
-    quic.varint.encodeWithLenAssumeCapacity(list, value, payload_len);
+    const payload_len_len = try quic.varint.length(payload_len_u64);
+    const total_len = std.math.add(
+        usize,
+        @as(usize, frame_type_len) + payload_len_len,
+        payload_len,
+    ) catch return error.IntegerOverflow;
+    if (storage.len < total_len) return error.BufferTooShort;
+
+    var offset: usize = 0;
+    offset += (try quic.varint.encodeInto(storage[offset..], frame_type)).len;
+    offset += (try quic.varint.encodeInto(storage[offset..], payload_len_u64)).len;
+    offset += (try quic.varint.encodeInto(storage[offset..], value)).len;
+    @memcpy(storage[offset..][0..tail.len], tail);
+    return storage[0..total_len];
 }
 
 fn writeVarintPayloadFrame(
@@ -3916,6 +4062,42 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     const no_alloc_payload = try parsePriorityUpdatePayload(no_alloc_frame.payload);
     try std.testing.expectEqual(@as(u64, 16), no_alloc_payload.prioritized_element_id);
     try std.testing.expectEqualStrings("u=2", no_alloc_payload.field_value);
+
+    var direct_storage: [max_priority_update_frame_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        no_alloc_priority.items,
+        try writePriorityUpdateFrameInto(
+            &direct_storage,
+            16,
+            .{ .urgency = 2 },
+        ),
+    );
+    var push_list: std.ArrayList(u8) = .empty;
+    defer push_list.deinit(allocator);
+    try writePushPriorityUpdateFrame(
+        &push_list,
+        allocator,
+        quic.varint.max_value,
+        .{ .urgency = 7, .incremental = true },
+    );
+    try std.testing.expectEqual(
+        max_priority_update_frame_len,
+        push_list.items.len,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        push_list.items,
+        try writePushPriorityUpdateFrameInto(
+            &direct_storage,
+            quic.varint.max_value,
+            .{ .urgency = 7, .incremental = true },
+        ),
+    );
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        writePriorityUpdateFrameInto(&direct_storage, 1, .{}),
+    );
 }
 
 fn checkPriorityUpdateStateAllocationFailure(
@@ -4227,6 +4409,65 @@ test "HTTP/3 single-varint control frames avoid temporary payload allocation" {
         FrameType.max_push_id, 1, 4,
         FrameType.goaway,      1, 12,
     }, encoded.items);
+
+    var storage: [max_single_varint_frame_len]u8 = undefined;
+    var direct_control = ControlState{};
+    try std.testing.expectEqualSlices(
+        u8,
+        encoded.items[0..3],
+        try writeCancelPushFrameInto(&storage, 7),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        encoded.items[3..6],
+        try direct_control.writeMaxPushIdInto(&storage, 4),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        encoded.items[6..9],
+        try direct_control.writeGoAwayInto(&storage, 12),
+    );
+    try std.testing.expectError(
+        error.GoAwayIdIncreased,
+        direct_control.writeGoAwayInto(&storage, 16),
+    );
+    try std.testing.expectError(
+        error.MaxPushIdReduced,
+        direct_control.writeMaxPushIdInto(&storage, 2),
+    );
+    const max_value_frame = try writeCancelPushFrameInto(
+        &storage,
+        quic.varint.max_value,
+    );
+    try std.testing.expectEqual(max_single_varint_frame_len, max_value_frame.len);
+    try std.testing.expectEqual(
+        quic.varint.max_value,
+        try parseCancelPushPayload((try Frame.parse(max_value_frame)).payload),
+    );
+    try std.testing.expectError(
+        error.VarIntTooLarge,
+        writeCancelPushFrameInto(
+            &storage,
+            @as(u64, quic.varint.max_value) + 1,
+        ),
+    );
+
+    var failed_control = ControlState{};
+    var failed: std.ArrayList(u8) = .empty;
+    defer failed.deinit(allocator);
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed_control.writeGoAway(
+            &failed,
+            fail_first.allocator(),
+            4,
+        ),
+    );
+    try std.testing.expectEqual(@as(?u64, null), failed_control.local_goaway_id);
 }
 
 test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {

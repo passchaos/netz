@@ -126,6 +126,19 @@ request/response/QPACK work, and response completion. No equal-wire quicz H3
 benchmark currently exists, so the netz H3 numbers are reported as internal
 progress rather than a direct superiority claim.
 
+HTTP/3's post-handshake GOAWAY, MAX_PUSH_ID, CANCEL_PUSH, and canonical
+PRIORITY_UPDATE transmit paths now encode into fixed caller-owned arrays and
+split them into a fixed stack frame array. This removes both transient
+ArrayLists previously created for every such control message while preserving
+stream offsets and transactional rollback on validation or send failure. The
+public fixed-buffer encoders have wire-parity, maximum-varint, invalid-ID, and
+state-rollback tests. A CPU-0-pinned cleartext regression run measured 9.878
+us/request over 1,000 persistent requests; this is an internal regression
+sample rather than an equal-wire quicz comparison. The bidirectional tquic
+GOAWAY/Retry matrix and the quic-go v1/v2 request, cancellation, and 1xx matrix
+remain green after the change. The audited quicz H3 layer has no RFC 9218
+PRIORITY_UPDATE support.
+
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
 bytes. Larger same-process loopback bursts overflow that kernel queue and
