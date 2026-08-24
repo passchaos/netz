@@ -167,7 +167,12 @@ codec and socket tests prove warmed writes are allocation-free while parsing
 verifies exact wire parity and invalid input leaves prior output unchanged.
 CONNECT itself now applies the same direct path across MQTT 3.1.1/5 Client ID,
 Will properties/topic/payload and username/password instead of assembling and
-copying a whole temporary variable payload.
+copying a whole temporary variable payload. CONNACK and QoS PUBACK/PUBREC/
+PUBREL/PUBCOMP use the same retained-capacity path while preserving MQTT 5's
+shortest legal omission of reason code and Property Length. SUBSCRIBE,
+SUBACK, UNSUBSCRIBE and UNSUBACK preflight complete filter/reason lists and
+also write directly after one final reservation. Warmed mixed-property and
+multi-filter tests run these writers under a fail-first allocator.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload

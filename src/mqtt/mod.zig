@@ -787,6 +787,25 @@ fn appendLengthPrefixedAssumeCapacity(
     list.appendSliceAssumeCapacity(value);
 }
 
+fn writeFixedHeaderAssumeCapacity(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    packet_type: PacketType,
+    flags: u4,
+    remaining_len: usize,
+) Error!void {
+    if (remaining_len > 268_435_455) return error.RemainingLengthTooLarge;
+    const header_len = 1 + remainingLengthEncodedLen(remaining_len);
+    try list.ensureUnusedCapacity(
+        allocator,
+        try addEncodedComponent(header_len, remaining_len),
+    );
+    list.appendAssumeCapacity(
+        (@as(u8, @intFromEnum(packet_type)) << 4) | flags,
+    );
+    encodeRemainingLengthAssumeCapacity(list, remaining_len);
+}
+
 fn validateProperty(property: Property) Error!void {
     if (!propertyHasExpectedWireType(property)) return error.InvalidProperty;
 
@@ -1153,20 +1172,32 @@ pub const ConnAck = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         try validateConnAckReason(protocol, reason_code);
         try validateConnAckSessionPresent(session_present, reason_code);
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        try variable.append(allocator, if (session_present) 0x01 else 0x00);
-        try variable.append(allocator, reason_code);
-        if (protocol == .v5) {
+        const properties_len = if (protocol == .v5) blk: {
             try validatePropertiesFor(.connack, properties);
-            try writeProperties(&variable, allocator, properties);
+            break :blk try propertiesEncodedLen(properties);
         } else if (properties.len != 0) {
             return error.InvalidProperty;
+        } else 0;
+        const remaining_len = 2 + if (protocol == .v5)
+            remainingLengthEncodedLen(properties_len) + properties_len
+        else
+            0;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .connack,
+            0,
+            remaining_len,
+        );
+        list.appendAssumeCapacity(if (session_present) 0x01 else 0x00);
+        list.appendAssumeCapacity(reason_code);
+        if (protocol == .v5) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
         }
-        try (FixedHeader{ .packet_type = .connack, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
     }
 };
 
@@ -1281,6 +1312,8 @@ pub const AckPacket = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         switch (packet_type) {
             .puback, .pubrec, .pubrel, .pubcomp => {},
@@ -1293,21 +1326,29 @@ pub const AckPacket = struct {
             try validateAckReasonCode(packet_type, reason_code);
             try validateAckProperties(packet_type, properties);
         }
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5 and properties.len != 0) {
-            try variable.append(allocator, reason_code);
-            try writeProperties(&variable, allocator, properties);
-        } else if (protocol == .v5 and reason_code != 0) {
-            // MQTT 5 lets PUBACK/PUBREC/PUBREL/PUBCOMP omit Property Length
-            // when no properties are present.  Emit the shorter reason-only
-            // form used by rumqtt instead of appending a redundant zero-length
-            // property section.
-            try variable.append(allocator, reason_code);
+        const properties_len = if (protocol == .v5 and properties.len != 0)
+            try propertiesEncodedLen(properties)
+        else
+            0;
+        const include_reason = protocol == .v5 and
+            (reason_code != 0 or properties.len != 0);
+        const remaining_len = @as(usize, 2) + @intFromBool(include_reason) +
+            if (properties.len != 0)
+                remainingLengthEncodedLen(properties_len) + properties_len
+            else
+                0;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            packet_type,
+            packet_type.defaultFlags(),
+            remaining_len,
+        );
+        appendIntAssumeCapacity(list, u16, packet_id);
+        if (include_reason) list.appendAssumeCapacity(reason_code);
+        if (properties.len != 0) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
         }
-        try (FixedHeader{ .packet_type = packet_type, .flags = packet_type.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
     }
 
     pub fn accepted(self: AckPacket) bool {
@@ -1408,30 +1449,57 @@ pub const Subscribe = struct {
         properties: []const Property,
         subscriptions: []const Subscription,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         if (subscriptions.len == 0) return error.InvalidSubscription;
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) {
+        const properties_len = if (protocol == .v5) blk: {
             try validatePropertiesFor(.subscribe, properties);
-            try writeProperties(&variable, allocator, properties);
+            break :blk try propertiesEncodedLen(properties);
         } else if (properties.len != 0) {
             return error.InvalidProperty;
-        }
+        } else 0;
+        var remaining_len: usize = 2;
+        if (protocol == .v5) remaining_len = try addEncodedComponent(
+            remaining_len,
+            remainingLengthEncodedLen(properties_len) + properties_len,
+        );
         for (subscriptions) |subscription| {
             try validateTopicFilter(subscription.topic_filter);
-            try writeUtf8(&variable, allocator, subscription.topic_filter);
             const options: u8 = @intFromEnum(subscription.qos) |
                 (if (subscription.no_local) @as(u8, 0x04) else 0) |
                 (if (subscription.retain_as_published) @as(u8, 0x08) else 0) |
                 (@as(u8, subscription.retain_handling) << 4);
             try validateSubscriptionOptions(protocol, options);
             try validateSharedSubscriptionOptions(protocol, subscription.topic_filter, options);
-            try variable.append(allocator, options);
+            remaining_len = try addEncodedComponent(
+                remaining_len,
+                1 + try encodedLengthPrefixedLen(
+                    subscription.topic_filter,
+                    true,
+                ),
+            );
         }
-        try (FixedHeader{ .packet_type = .subscribe, .flags = PacketType.subscribe.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .subscribe,
+            PacketType.subscribe.defaultFlags(),
+            remaining_len,
+        );
+        appendIntAssumeCapacity(list, u16, packet_id);
+        if (protocol == .v5) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
+        }
+        for (subscriptions) |subscription| {
+            appendLengthPrefixedAssumeCapacity(list, subscription.topic_filter);
+            list.appendAssumeCapacity(
+                @intFromEnum(subscription.qos) |
+                    (if (subscription.no_local) @as(u8, 0x04) else 0) |
+                    (if (subscription.retain_as_published) @as(u8, 0x08) else 0) |
+                    (@as(u8, subscription.retain_handling) << 4),
+            );
+        }
     }
 };
 
@@ -1473,23 +1541,35 @@ pub const SubAck = struct {
         properties: []const Property,
         reason_codes: []const u8,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         if (reason_codes.len == 0) return error.InvalidReasonCode;
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) {
+        const properties_len = if (protocol == .v5) blk: {
             try validatePropertiesFor(.suback, properties);
-            try writeProperties(&variable, allocator, properties);
+            break :blk try propertiesEncodedLen(properties);
         } else if (properties.len != 0) {
             return error.InvalidProperty;
+        } else 0;
+        for (reason_codes) |code| try validateSubAckReason(protocol, code);
+        const remaining_len = @as(usize, 2) + reason_codes.len +
+            if (protocol == .v5)
+                remainingLengthEncodedLen(properties_len) +
+                    properties_len
+            else
+                0;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .suback,
+            0,
+            remaining_len,
+        );
+        appendIntAssumeCapacity(list, u16, packet_id);
+        if (protocol == .v5) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
         }
-        for (reason_codes) |code| {
-            try validateSubAckReason(protocol, code);
-            try variable.append(allocator, code);
-        }
-        try (FixedHeader{ .packet_type = .suback, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
+        list.appendSliceAssumeCapacity(reason_codes);
     }
 };
 
@@ -1535,23 +1615,42 @@ pub const Unsubscribe = struct {
         properties: []const Property,
         topic_filters: []const []const u8,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         if (topic_filters.len == 0) return error.InvalidSubscription;
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) {
+        const properties_len = if (protocol == .v5) blk: {
             try validatePropertiesFor(.unsubscribe, properties);
-            try writeProperties(&variable, allocator, properties);
+            break :blk try propertiesEncodedLen(properties);
         } else if (properties.len != 0) {
             return error.InvalidProperty;
-        }
+        } else 0;
+        var remaining_len: usize = 2;
+        if (protocol == .v5) remaining_len = try addEncodedComponent(
+            remaining_len,
+            remainingLengthEncodedLen(properties_len) + properties_len,
+        );
         for (topic_filters) |filter| {
             try validateTopicFilter(filter);
-            try writeUtf8(&variable, allocator, filter);
+            remaining_len = try addEncodedComponent(
+                remaining_len,
+                try encodedLengthPrefixedLen(filter, true),
+            );
         }
-        try (FixedHeader{ .packet_type = .unsubscribe, .flags = PacketType.unsubscribe.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .unsubscribe,
+            PacketType.unsubscribe.defaultFlags(),
+            remaining_len,
+        );
+        appendIntAssumeCapacity(list, u16, packet_id);
+        if (protocol == .v5) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
+        }
+        for (topic_filters) |filter| {
+            appendLengthPrefixedAssumeCapacity(list, filter);
+        }
     }
 };
 
@@ -1601,25 +1700,40 @@ pub const UnsubAck = struct {
         properties: []const Property,
         reason_codes: []const u8,
     ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        var variable: std.ArrayList(u8) = .empty;
-        defer variable.deinit(allocator);
-        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) {
+        const properties_len: usize = if (protocol == .v5) blk: {
             if (reason_codes.len == 0) return error.InvalidReasonCode;
             try validatePropertiesFor(.ack, properties);
-            try writeProperties(&variable, allocator, properties);
-            for (reason_codes) |code| {
-                try validateUnsubAckReason(code);
-                try variable.append(allocator, code);
-            }
-        } else {
+            break :blk try propertiesEncodedLen(properties);
+        } else blk: {
             if (properties.len != 0) return error.InvalidProperty;
             if (reason_codes.len > 1) return error.InvalidReasonCode;
             if (reason_codes.len == 1 and reason_codes[0] != 0x00) return error.InvalidReasonCode;
+            break :blk 0;
+        };
+        if (protocol == .v5) {
+            for (reason_codes) |code| try validateUnsubAckReason(code);
         }
-        try (FixedHeader{ .packet_type = .unsuback, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-        try list.appendSlice(allocator, variable.items);
+        const remaining_len = @as(usize, 2) + if (protocol == .v5)
+            reason_codes.len +
+                remainingLengthEncodedLen(properties_len) +
+                properties_len
+        else
+            0;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .unsuback,
+            0,
+            remaining_len,
+        );
+        appendIntAssumeCapacity(list, u16, packet_id);
+        if (protocol == .v5) {
+            writePropertiesAssumeCapacity(list, properties, properties_len);
+            list.appendSliceAssumeCapacity(reason_codes);
+        }
     }
 };
 
@@ -2284,6 +2398,117 @@ test "MQTT CONNECT direct encoding reuses exact output capacity" {
     try std.testing.expectEqualStrings("offline", parsed.will.?.payload);
     try std.testing.expectEqualStrings("user", parsed.username.?);
     try std.testing.expectEqualStrings("password", parsed.password.?);
+}
+
+test "MQTT CONNACK and publish acknowledgments reuse output capacity" {
+    const allocator = std.testing.allocator;
+    const properties = [_]Property{
+        .{ .utf8 = .{ .id = .reason_string, .value = "accepted" } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } },
+    };
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try ConnAck.write(&output, allocator, .v5, true, 0, &properties);
+    const connack = try allocator.dupe(u8, output.items);
+    defer allocator.free(connack);
+    output.clearRetainingCapacity();
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try ConnAck.write(
+        &output,
+        no_alloc.allocator(),
+        .v5,
+        true,
+        0,
+        &properties,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, connack, output.items);
+
+    output.clearRetainingCapacity();
+    try AckPacket.write(
+        &output,
+        allocator,
+        .v5,
+        .puback,
+        7,
+        0x10,
+        &properties,
+    );
+    const ack = try allocator.dupe(u8, output.items);
+    defer allocator.free(ack);
+    output.clearRetainingCapacity();
+    no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try AckPacket.write(
+        &output,
+        no_alloc.allocator(),
+        .v5,
+        .puback,
+        7,
+        0x10,
+        &properties,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, ack, output.items);
+    var parsed = try AckPacket.parse(allocator, .v5, output.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 7), parsed.packet_id);
+    try std.testing.expectEqual(@as(u8, 0x10), parsed.reason_code);
+}
+
+test "MQTT subscription control writers reuse output capacity" {
+    const allocator = std.testing.allocator;
+    const properties = [_]Property{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 19 } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "source", .value = "test" } },
+    };
+    const subscriptions = [_]Subscription{
+        .{ .topic_filter = "sensors/+", .qos = .at_least_once },
+        .{ .topic_filter = "alerts/#", .qos = .exactly_once, .no_local = true },
+    };
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try Subscribe.write(&output, allocator, .v5, 9, &properties, &subscriptions);
+    const subscribe = try allocator.dupe(u8, output.items);
+    defer allocator.free(subscribe);
+    output.clearRetainingCapacity();
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try Subscribe.write(
+        &output,
+        no_alloc.allocator(),
+        .v5,
+        9,
+        &properties,
+        &subscriptions,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, subscribe, output.items);
+
+    output.clearRetainingCapacity();
+    const filters = [_][]const u8{ "sensors/+", "alerts/#" };
+    try Unsubscribe.write(&output, allocator, .v5, 10, &.{}, &filters);
+    const unsubscribe = try allocator.dupe(u8, output.items);
+    defer allocator.free(unsubscribe);
+    output.clearRetainingCapacity();
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try Unsubscribe.write(
+        &output,
+        no_alloc.allocator(),
+        .v5,
+        10,
+        &.{},
+        &filters,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, unsubscribe, output.items);
 }
 
 test "MQTT Assigned Client Identifier lookup" {
