@@ -189,6 +189,20 @@ normal/Retry process matrices remain green. A CPU-0 1-MiB single-stream upload
 regression ran five iterations at 110.23 MiB/s mean with 2.31% standard
 deviation; this small transfer is a
 regression sample rather than an equal-wire quicz result.
+The lightweight preconfigured-key client and server now apply the same retained
+message/frame scratch to complete request/response sequences, streaming heads,
+and trailers. Protected sends synchronously protect and submit the datagrams
+before returning, so these borrowing descriptors have the same bounded lifetime;
+Push remains separate because its promise and pushed-response encodings must be
+live together. Three dynamic-QPACK exchanges assert stable backing pointers on
+both endpoints, while streamed request/response tests reuse the same allocations
+from HEADERS through trailers and through a flow-control-blocked trailer retry.
+The full 1,589-test suite, quic-zig QPACK gate, quic-go v1/v2 matrix, tquic
+normal/Retry and GOAWAY matrix, and native wtransport matrix remain green. A
+post-change CPU-0 cleartext regression measured 9.765 us/request over 1,000
+persistent requests; a five-run 1-MiB real-handshake upload measured 107.40
+MiB/s mean with 3.99% standard deviation. Both remain internal regression
+samples rather than equal-wire quicz comparisons.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992

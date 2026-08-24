@@ -70,10 +70,11 @@ const first_server_push_stream_id: u62 = 15;
 
 /// Reusable storage for one HTTP/3 request-stream send operation.
 ///
-/// The HTTP/3 session APIs serialize writes through `*Session`; QUIC copies
-/// protected payloads into connection-owned recovery storage before returning.
-/// Consequently both the encoded message bytes and their borrowing STREAM
-/// frame descriptors may be cleared for the next call as soon as send returns.
+/// The HTTP/3 session APIs serialize writes through mutable session ownership.
+/// Handshake connections copy protected payloads into recovery-owned storage,
+/// while the preconfigured-key runtime protects and submits each datagram
+/// synchronously. Consequently both the encoded message bytes and their
+/// borrowing STREAM frame descriptors may be cleared as soon as send returns.
 const StreamMessageSendScratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     frames: std.ArrayList(quic.Frame) = .empty,
@@ -4985,6 +4986,7 @@ pub const ProtectedServer = struct {
     receive_packets: ProtectedPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
+    stream_send_scratch: StreamMessageSendScratch = .{},
     sent_push_ids: std.ArrayList(u64) = .empty,
     peer_promised_push_ids: std.ArrayList(u64) = .empty,
     next_push_stream_id: u62 = first_server_push_stream_id,
@@ -5033,6 +5035,9 @@ pub const ProtectedServer = struct {
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.stream_send_scratch.deinit(
+            self.quic_server.endpoint.allocator,
+        );
         self.outbound_bodies.deinit();
         self.sent_push_ids.deinit(self.quic_server.endpoint.allocator);
         self.peer_promised_push_ids.deinit(
@@ -5235,10 +5240,9 @@ pub const ProtectedServer = struct {
             &self.protected_send,
             server_control_stream_id,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.quic_server.endpoint.allocator);
+        self.stream_send_scratch.reset();
         const streaming = try response.writeStreamingHeadDynamic(
-            &encoded,
+            &self.stream_send_scratch.encoded,
             self.quic_server.endpoint.allocator,
             self.control.settings.peer,
             stream_id,
@@ -5250,7 +5254,7 @@ pub const ProtectedServer = struct {
             &self.quic_server.endpoint,
             to,
             self.config,
-            encoded.items,
+            &self.stream_send_scratch,
             stream_id,
             streaming.expected_length,
             streaming.body_allowed,
@@ -5356,6 +5360,7 @@ pub const ProtectedServer = struct {
             &self.qpack_encode,
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
+            &self.stream_send_scratch,
         );
         self.request_lifecycle.markFinished(stream_id);
     }
@@ -5399,48 +5404,21 @@ pub const ProtectedServer = struct {
             &self.protected_send,
             server_control_stream_id,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.quic_server.endpoint.allocator);
-        // A field section can acquire dynamic-table references before any
-        // network I/O. Release those references if either the encoder stream
-        // or response stream cannot be sent; speculative inserts remain useful
-        // for a later response and are safe because they are not referenced.
-        var response_sent = false;
-        errdefer if (!response_sent) self.qpack_encode.abandonStream(stream_id);
-        try http3.writeResponseSequenceDynamic(
-            &encoded,
-            self.quic_server.endpoint.allocator,
-            informational,
-            response,
-            self.control.settings.peer,
-            stream_id,
-            &self.qpack_encode,
-        );
-        try sendProtectedQpackEncoderInstructions(
+        try sendProtectedResponseSequence(
             &self.quic_server.endpoint,
             to,
             self.config,
+            &self.stream_send_scratch,
+            stream_id,
+            informational,
+            response,
+            self.control.settings.peer,
             &self.qpack_encode,
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
             &self.next_packet_number,
             &self.protected_send,
         );
-        var send_state = quic.stream_state.SendState.init(stream_id);
-        var frames: std.ArrayList(quic.Frame) = .empty;
-        defer frames.deinit(self.quic_server.endpoint.allocator);
-        try send_state.appendFrames(&frames, self.quic_server.endpoint.allocator, encoded.items, self.config.max_stream_frame_data, true);
-        try sendProtectedFrames(
-            &self.quic_server.endpoint,
-            to,
-            self.config.send_keys,
-            self.config.peer_connection_id,
-            &self.next_packet_number,
-            frames.items,
-            self.config.max_frames_per_packet,
-            &self.protected_send,
-        );
-        response_sent = true;
         self.request_lifecycle.markFinished(stream_id);
     }
 
@@ -5734,6 +5712,7 @@ pub const ProtectedClient = struct {
     receive_packets: ProtectedPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
+    stream_send_scratch: StreamMessageSendScratch = .{},
     next_stream_id: u62 = 0,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
@@ -5788,6 +5767,9 @@ pub const ProtectedClient = struct {
     }
 
     pub fn deinit(self: *ProtectedClient) void {
+        self.stream_send_scratch.deinit(
+            self.quic_client.endpoint.allocator,
+        );
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
         self.push_streams.deinit();
@@ -5841,42 +5823,20 @@ pub const ProtectedClient = struct {
             &self.protected_send,
             client_control_stream_id,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.quic_client.endpoint.allocator);
-        var request_sent = false;
-        errdefer if (!request_sent) self.qpack_encode.abandonStream(stream_id);
-        try request_options.writeDynamic(
-            &encoded,
-            self.quic_client.endpoint.allocator,
-            self.control.settings.peer,
-            stream_id,
-            &self.qpack_encode,
-        );
-        try sendProtectedQpackEncoderInstructions(
+        try sendProtectedMessage(
             &self.quic_client.endpoint,
             self.quic_client.peer,
             self.config,
+            &self.stream_send_scratch,
+            stream_id,
+            request_options,
+            self.control.settings.peer,
             &self.qpack_encode,
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
             &self.next_packet_number,
             &self.protected_send,
         );
-        var send_state = quic.stream_state.SendState.init(stream_id);
-        var frames: std.ArrayList(quic.Frame) = .empty;
-        defer frames.deinit(self.quic_client.endpoint.allocator);
-        try send_state.appendFrames(&frames, self.quic_client.endpoint.allocator, encoded.items, self.config.max_stream_frame_data, true);
-        try sendProtectedFrames(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config.send_keys,
-            self.config.peer_connection_id,
-            &self.next_packet_number,
-            frames.items,
-            self.config.max_frames_per_packet,
-            &self.protected_send,
-        );
-        request_sent = true;
         return stream_id;
     }
 
@@ -5906,10 +5866,9 @@ pub const ProtectedClient = struct {
             &self.protected_send,
             client_control_stream_id,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.quic_client.endpoint.allocator);
+        self.stream_send_scratch.reset();
         const streaming = try request_options.writeStreamingHeadDynamic(
-            &encoded,
+            &self.stream_send_scratch.encoded,
             self.quic_client.endpoint.allocator,
             self.control.settings.peer,
             stream_id,
@@ -5921,7 +5880,7 @@ pub const ProtectedClient = struct {
             &self.quic_client.endpoint,
             self.quic_client.peer,
             self.config,
-            encoded.items,
+            &self.stream_send_scratch,
             stream_id,
             streaming.expected_length,
             streaming.body_allowed,
@@ -6022,6 +5981,7 @@ pub const ProtectedClient = struct {
             &self.qpack_encode,
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
+            &self.stream_send_scratch,
         );
     }
 
@@ -9443,6 +9403,124 @@ fn sendConnectionResponseSequence(
     message_sent = true;
 }
 
+fn sendProtectedMessage(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    request: http3.Request,
+    peer_settings: http3.Settings,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+) Error!void {
+    scratch.reset();
+    var message_sent = false;
+    errdefer if (!message_sent) qpack.abandonStream(stream_id);
+    try request.writeDynamic(
+        &scratch.encoded,
+        endpoint.allocator,
+        peer_settings,
+        stream_id,
+        qpack,
+    );
+    try sendProtectedQpackEncoderInstructions(
+        endpoint,
+        to,
+        config,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        next_packet_number,
+        protected_send,
+    );
+
+    var send_state = quic.stream_state.SendState.init(stream_id);
+    try send_state.appendFrames(
+        &scratch.frames,
+        endpoint.allocator,
+        scratch.encoded.items,
+        config.max_stream_frame_data,
+        true,
+    );
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        scratch.frames.items,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    message_sent = true;
+}
+
+fn sendProtectedResponseSequence(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    informational: []const http3.InformationalResponse,
+    response: http3.Response,
+    peer_settings: http3.Settings,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+) Error!void {
+    scratch.reset();
+    // A field section can acquire dynamic-table references before any network
+    // I/O. Release those references when encoder- or response-stream sending
+    // fails; unreferenced speculative inserts remain useful for later sends.
+    var message_sent = false;
+    errdefer if (!message_sent) qpack.abandonStream(stream_id);
+    try http3.writeResponseSequenceDynamic(
+        &scratch.encoded,
+        endpoint.allocator,
+        informational,
+        response,
+        peer_settings,
+        stream_id,
+        qpack,
+    );
+    try sendProtectedQpackEncoderInstructions(
+        endpoint,
+        to,
+        config,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        next_packet_number,
+        protected_send,
+    );
+
+    var send_state = quic.stream_state.SendState.init(stream_id);
+    try send_state.appendFrames(
+        &scratch.frames,
+        endpoint.allocator,
+        scratch.encoded.items,
+        config.max_stream_frame_data,
+        true,
+    );
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        scratch.frames.items,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    message_sent = true;
+}
+
 fn encodePushMessages(
     allocator: std.mem.Allocator,
     peer_settings: http3.Settings,
@@ -9698,7 +9776,7 @@ fn sendProtectedStreamingHead(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
     config: ProtectedConfig,
-    encoded: []const u8,
+    scratch: *StreamMessageSendScratch,
     stream_id: u62,
     expected_length: ?usize,
     body_allowed: bool,
@@ -9723,12 +9801,10 @@ fn sendProtectedStreamingHead(
         protected_send,
     );
     var send = quic.stream_state.SendState.init(stream_id);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
     try send.appendFrames(
-        &frames,
+        &scratch.frames,
         endpoint.allocator,
-        encoded,
+        scratch.encoded.items,
         config.max_stream_frame_data,
         !body_allowed or
             (expected_length != null and expected_length.? == 0),
@@ -9739,7 +9815,7 @@ fn sendProtectedStreamingHead(
         config.send_keys,
         config.peer_connection_id,
         next_packet_number,
-        frames.items,
+        scratch.frames.items,
         config.max_frames_per_packet,
         protected_send,
     );
@@ -10143,16 +10219,16 @@ fn sendProtectedTrailers(
     qpack: *QpackEncodeState,
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
+    scratch: *StreamMessageSendScratch,
 ) Error!void {
     const entry = try bodies.prepareTrailers(stream_id);
     const previous = entry.*;
     errdefer entry.* = previous;
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(endpoint.allocator);
+    scratch.reset();
     const pending_sections_len = qpack.pending_sections.items.len;
     errdefer qpack.rollbackPendingSections(pending_sections_len);
     try http3.writeTrailersDynamic(
-        &encoded,
+        &scratch.encoded,
         endpoint.allocator,
         trailers,
         peer_settings,
@@ -10163,7 +10239,7 @@ fn sendProtectedTrailers(
         const next_offset = std.math.add(
             u64,
             entry.send.next_offset,
-            encoded.items.len,
+            scratch.encoded.items.len,
         ) catch return error.InvalidFrameLength;
         if (next_offset > limit) return error.FlowControlBlocked;
     }
@@ -10177,12 +10253,10 @@ fn sendProtectedTrailers(
         next_packet_number,
         protected_send,
     );
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(endpoint.allocator);
     try entry.send.appendFrames(
-        &frames,
+        &scratch.frames,
         endpoint.allocator,
-        encoded.items,
+        scratch.encoded.items,
         config.max_stream_frame_data,
         true,
     );
@@ -10192,7 +10266,7 @@ fn sendProtectedTrailers(
         config.send_keys,
         config.peer_connection_id,
         next_packet_number,
-        frames.items,
+        scratch.frames.items,
         config.max_frames_per_packet,
         protected_send,
     );
@@ -16535,12 +16609,31 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 "ok",
                 request.request.trailers[0].value,
             );
+            // Give the head and trailer encodings one deliberately shared
+            // backing allocation so this test detects either helper falling
+            // back to private temporary lists.
+            try server_ptr.stream_send_scratch.encoded.ensureTotalCapacity(
+                server_ptr.quic_server.endpoint.allocator,
+                256,
+            );
+            try server_ptr.stream_send_scratch.frames.ensureTotalCapacity(
+                server_ptr.quic_server.endpoint.allocator,
+                32,
+            );
             try server_ptr.startResponse(
                 request.from,
                 request.stream_id,
                 .{ .status = 200 },
                 "response-chunks".len,
             );
+            const head_encoded_capacity =
+                server_ptr.stream_send_scratch.encoded.capacity;
+            const head_frame_capacity =
+                server_ptr.stream_send_scratch.frames.capacity;
+            const head_encoded_ptr = server_ptr.stream_send_scratch.encoded
+                .allocatedSlice().ptr;
+            const head_frame_ptr = server_ptr.stream_send_scratch.frames
+                .allocatedSlice().ptr;
             try server_ptr.sendResponseBody(
                 request.from,
                 request.stream_id,
@@ -16562,10 +16655,42 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 "chunks",
                 false,
             );
+            const response_entry = server_ptr.outbound_bodies.find(
+                request.stream_id,
+            ).?;
+            response_entry.flow_limit = response_entry.send.next_offset;
+            try std.testing.expectError(
+                error.FlowControlBlocked,
+                server_ptr.finishResponseTrailers(
+                    request.from,
+                    request.stream_id,
+                    &.{.{
+                        .name = "x-response-checksum",
+                        .value = "ok",
+                    }},
+                ),
+            );
+            response_entry.flow_limit = null;
             try server_ptr.finishResponseTrailers(
                 request.from,
                 request.stream_id,
                 &.{.{ .name = "x-response-checksum", .value = "ok" }},
+            );
+            try std.testing.expectEqual(
+                head_encoded_capacity,
+                server_ptr.stream_send_scratch.encoded.capacity,
+            );
+            try std.testing.expectEqual(
+                head_frame_capacity,
+                server_ptr.stream_send_scratch.frames.capacity,
+            );
+            try std.testing.expectEqual(
+                head_encoded_ptr,
+                server_ptr.stream_send_scratch.encoded.allocatedSlice().ptr,
+            );
+            try std.testing.expectEqual(
+                head_frame_ptr,
+                server_ptr.stream_send_scratch.frames.allocatedSlice().ptr,
             );
             try std.testing.expectEqual(
                 @as(usize, 0),
@@ -16595,6 +16720,8 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     );
     defer client.deinit();
 
+    try client.stream_send_scratch.encoded.ensureTotalCapacity(allocator, 256);
+    try client.stream_send_scratch.frames.ensureTotalCapacity(allocator, 32);
     const stream_id = try client.startRequest(
         .{
             .method = "POST",
@@ -16603,15 +16730,47 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
         },
         "request-chunks".len,
     );
+    const head_encoded_capacity = client.stream_send_scratch.encoded.capacity;
+    const head_frame_capacity = client.stream_send_scratch.frames.capacity;
+    const head_encoded_ptr = client.stream_send_scratch.encoded
+        .allocatedSlice().ptr;
+    const head_frame_ptr = client.stream_send_scratch.frames
+        .allocatedSlice().ptr;
     try client.sendRequestBody(stream_id, "request-", false);
     try std.testing.expectError(
         error.InvalidContentLength,
         client.sendRequestBody(stream_id, "short", true),
     );
     try client.sendRequestBody(stream_id, "chunks", false);
+    const request_entry = client.outbound_bodies.find(stream_id).?;
+    request_entry.flow_limit = request_entry.send.next_offset;
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        client.finishRequestTrailers(
+            stream_id,
+            &.{.{ .name = "x-request-checksum", .value = "ok" }},
+        ),
+    );
+    request_entry.flow_limit = null;
     try client.finishRequestTrailers(
         stream_id,
         &.{.{ .name = "x-request-checksum", .value = "ok" }},
+    );
+    try std.testing.expectEqual(
+        head_encoded_capacity,
+        client.stream_send_scratch.encoded.capacity,
+    );
+    try std.testing.expectEqual(
+        head_frame_capacity,
+        client.stream_send_scratch.frames.capacity,
+    );
+    try std.testing.expectEqual(
+        head_encoded_ptr,
+        client.stream_send_scratch.encoded.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(
+        head_frame_ptr,
+        client.stream_send_scratch.frames.allocatedSlice().ptr,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -17185,6 +17344,10 @@ test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
         }
 
         fn runFallible(server_ptr: *ProtectedServer) !void {
+            var encoded_capacity: usize = 0;
+            var frame_capacity: usize = 0;
+            var encoded_ptr: [*]u8 = undefined;
+            var frame_ptr: [*]quic.Frame = undefined;
             for (0..3) |exchange| {
                 var request = try server_ptr.receiveRequest();
                 defer request.deinit(
@@ -17239,6 +17402,37 @@ test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
                         .body = "ok",
                     },
                 );
+                if (exchange == 0) {
+                    encoded_capacity =
+                        server_ptr.stream_send_scratch.encoded.capacity;
+                    frame_capacity =
+                        server_ptr.stream_send_scratch.frames.capacity;
+                    try std.testing.expect(encoded_capacity != 0);
+                    try std.testing.expect(frame_capacity != 0);
+                    encoded_ptr = server_ptr.stream_send_scratch.encoded
+                        .allocatedSlice().ptr;
+                    frame_ptr = server_ptr.stream_send_scratch.frames
+                        .allocatedSlice().ptr;
+                } else {
+                    try std.testing.expectEqual(
+                        encoded_capacity,
+                        server_ptr.stream_send_scratch.encoded.capacity,
+                    );
+                    try std.testing.expectEqual(
+                        frame_capacity,
+                        server_ptr.stream_send_scratch.frames.capacity,
+                    );
+                    try std.testing.expectEqual(
+                        encoded_ptr,
+                        server_ptr.stream_send_scratch.encoded
+                            .allocatedSlice().ptr,
+                    );
+                    try std.testing.expectEqual(
+                        frame_ptr,
+                        server_ptr.stream_send_scratch.frames
+                            .allocatedSlice().ptr,
+                    );
+                }
                 if (exchange != 0) {
                     try std.testing.expect(
                         server_ptr.qpack_encode.pending_sections.items.len != 0,
@@ -17275,7 +17469,11 @@ test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
     );
     defer client.deinit();
 
-    for (0..3) |_| {
+    var encoded_capacity: usize = 0;
+    var frame_capacity: usize = 0;
+    var encoded_ptr: [*]u8 = undefined;
+    var frame_ptr: [*]quic.Frame = undefined;
+    for (0..3) |exchange| {
         var response = try client.request(.{
             .method = "GET",
             .path = "/protected-dynamic",
@@ -17297,6 +17495,33 @@ test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
             "repeated-response-value",
             repeated_value orelse return error.TestUnexpectedResult,
         );
+        if (exchange == 0) {
+            encoded_capacity = client.stream_send_scratch.encoded.capacity;
+            frame_capacity = client.stream_send_scratch.frames.capacity;
+            try std.testing.expect(encoded_capacity != 0);
+            try std.testing.expect(frame_capacity != 0);
+            encoded_ptr = client.stream_send_scratch.encoded
+                .allocatedSlice().ptr;
+            frame_ptr = client.stream_send_scratch.frames
+                .allocatedSlice().ptr;
+        } else {
+            try std.testing.expectEqual(
+                encoded_capacity,
+                client.stream_send_scratch.encoded.capacity,
+            );
+            try std.testing.expectEqual(
+                frame_capacity,
+                client.stream_send_scratch.frames.capacity,
+            );
+            try std.testing.expectEqual(
+                encoded_ptr,
+                client.stream_send_scratch.encoded.allocatedSlice().ptr,
+            );
+            try std.testing.expectEqual(
+                frame_ptr,
+                client.stream_send_scratch.frames.allocatedSlice().ptr,
+            );
+        }
     }
 
     thread.join();
