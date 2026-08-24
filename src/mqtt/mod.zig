@@ -1912,39 +1912,109 @@ pub fn writeConnectPacket(
     protocol: ProtocolVersion,
     options: ConnectPacketOptions,
 ) Error!void {
+    const original_len = list.items.len;
+    errdefer list.items.len = original_len;
     try validateConnectClientId(options.client_id, options.clean_start);
     const flags = connectFlags(options);
     try validateConnectFlags(protocol, flags);
-
-    var variable: std.ArrayList(u8) = .empty;
-    defer variable.deinit(allocator);
-    try writeUtf8(&variable, allocator, "MQTT");
-    try variable.append(allocator, protocol.byte());
-    try variable.append(allocator, flags);
-    try wire.appendInt(&variable, allocator, u16, options.keep_alive_seconds, .big);
-    if (protocol == .v5) {
+    const connect_properties_len = if (protocol == .v5) blk: {
         try validatePropertiesFor(.connect, options.properties);
-        try writeProperties(&variable, allocator, options.properties);
+        break :blk try propertiesEncodedLen(options.properties);
     } else if (options.properties.len != 0) {
         return error.InvalidProperty;
+    } else 0;
+    try validateMqttUtf8String(options.client_id);
+    var remaining_len: usize = 10; // protocol name, level, flags, Keep Alive
+    if (protocol == .v5) {
+        remaining_len = try addEncodedComponent(
+            remaining_len,
+            remainingLengthEncodedLen(connect_properties_len) +
+                connect_properties_len,
+        );
     }
-    try writeUtf8(&variable, allocator, options.client_id);
+    remaining_len = try addEncodedComponent(
+        remaining_len,
+        try encodedLengthPrefixedLen(options.client_id, true),
+    );
+    var will_properties_len: usize = 0;
     if (options.will) |will| {
         try validateTopicName(will.topic);
         if (protocol == .v5) {
             try validatePropertiesFor(.will, will.properties);
             try validatePayloadFormat(will.properties, will.payload);
-            try writeProperties(&variable, allocator, will.properties);
+            will_properties_len = try propertiesEncodedLen(will.properties);
+            remaining_len = try addEncodedComponent(
+                remaining_len,
+                remainingLengthEncodedLen(will_properties_len) +
+                    will_properties_len,
+            );
         } else if (will.properties.len != 0) {
             return error.InvalidProperty;
         }
-        try writeUtf8(&variable, allocator, will.topic);
-        try writeBinary(&variable, allocator, will.payload);
+        remaining_len = try addEncodedComponent(
+            remaining_len,
+            try encodedLengthPrefixedLen(will.topic, true),
+        );
+        remaining_len = try addEncodedComponent(
+            remaining_len,
+            try encodedLengthPrefixedLen(will.payload, false),
+        );
     }
-    if (options.username) |username| try writeUtf8(&variable, allocator, username);
-    if (options.password) |password| try writeBinary(&variable, allocator, password);
-    try (FixedHeader{ .packet_type = .connect, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-    try list.appendSlice(allocator, variable.items);
+    if (options.username) |username| {
+        try validateMqttUtf8String(username);
+        remaining_len = try addEncodedComponent(
+            remaining_len,
+            try encodedLengthPrefixedLen(username, true),
+        );
+    }
+    if (options.password) |password| {
+        remaining_len = try addEncodedComponent(
+            remaining_len,
+            try encodedLengthPrefixedLen(password, false),
+        );
+    }
+    if (remaining_len > 268_435_455) return error.RemainingLengthTooLarge;
+    const encoded_len = try addEncodedComponent(
+        1 + remainingLengthEncodedLen(remaining_len),
+        remaining_len,
+    );
+    try list.ensureUnusedCapacity(allocator, encoded_len);
+    list.appendAssumeCapacity(@as(u8, @intFromEnum(PacketType.connect)) << 4);
+    encodeRemainingLengthAssumeCapacity(list, remaining_len);
+    appendLengthPrefixedAssumeCapacity(list, "MQTT");
+    list.appendAssumeCapacity(protocol.byte());
+    list.appendAssumeCapacity(flags);
+    appendIntAssumeCapacity(list, u16, options.keep_alive_seconds);
+    if (protocol == .v5) {
+        writePropertiesAssumeCapacity(
+            list,
+            options.properties,
+            connect_properties_len,
+        );
+    }
+    appendLengthPrefixedAssumeCapacity(list, options.client_id);
+    if (options.will) |will| {
+        if (protocol == .v5) {
+            writePropertiesAssumeCapacity(
+                list,
+                will.properties,
+                will_properties_len,
+            );
+        }
+        appendLengthPrefixedAssumeCapacity(list, will.topic);
+        appendLengthPrefixedAssumeCapacity(list, will.payload);
+    }
+    if (options.username) |username| {
+        appendLengthPrefixedAssumeCapacity(list, username);
+    }
+    if (options.password) |password| {
+        appendLengthPrefixedAssumeCapacity(list, password);
+    }
+}
+
+fn addEncodedComponent(total: usize, component: usize) Error!usize {
+    return std.math.add(usize, total, component) catch
+        return error.IntegerOverflow;
 }
 
 fn connectFlags(options: ConnectPacketOptions) u8 {
@@ -2168,6 +2238,52 @@ test "MQTT property writer reuses exact output capacity" {
         }),
     );
     try std.testing.expectEqual(preserved_len, encoded.items.len);
+}
+
+test "MQTT CONNECT direct encoding reuses exact output capacity" {
+    const allocator = std.testing.allocator;
+    const connect_properties = [_]Property{
+        .{ .two_byte = .{ .id = .receive_maximum, .value = 10 } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "client", .value = "netz" } },
+    };
+    const will_properties = [_]Property{
+        .{ .four_byte = .{ .id = .will_delay_interval, .value = 5 } },
+        .{ .utf8 = .{ .id = .content_type, .value = "text/plain" } },
+    };
+    const options = ConnectPacketOptions{
+        .client_id = "direct-client",
+        .clean_start = false,
+        .keep_alive_seconds = 45,
+        .properties = &connect_properties,
+        .will = .{
+            .topic = "status/direct-client",
+            .payload = "offline",
+            .qos = .at_least_once,
+            .retain = true,
+            .properties = @constCast(&will_properties),
+        },
+        .username = "user",
+        .password = "password",
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeConnectPacket(&encoded, allocator, .v5, options);
+    const expected = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(expected);
+    encoded.clearRetainingCapacity();
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try writeConnectPacket(&encoded, no_alloc.allocator(), .v5, options);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, expected, encoded.items);
+    var parsed = try Connect.parse(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("direct-client", parsed.client_id);
+    try std.testing.expectEqualStrings("offline", parsed.will.?.payload);
+    try std.testing.expectEqualStrings("user", parsed.username.?);
+    try std.testing.expectEqualStrings("password", parsed.password.?);
 }
 
 test "MQTT Assigned Client Identifier lookup" {

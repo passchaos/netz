@@ -165,6 +165,9 @@ path for CONNECT, ACK, SUBSCRIBE and the other control packets. Neither layer
 allocates temporary variable-header or property buffers; failing-allocator
 codec and socket tests prove warmed writes are allocation-free while parsing
 verifies exact wire parity and invalid input leaves prior output unchanged.
+CONNECT itself now applies the same direct path across MQTT 3.1.1/5 Client ID,
+Will properties/topic/payload and username/password instead of assembling and
+copying a whole temporary variable payload.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
