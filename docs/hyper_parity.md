@@ -591,7 +591,12 @@ output. Failing-allocator tests cover the allocation-free non-indexed rejection
 path, while a second block proves indexed state survives an oversized first
 block. Incremental literals also interpret all six name-index bits correctly;
 the high index bit is no longer confused with the Never Indexed marker from
-the separate four-bit representation.
+the separate four-bit representation. HPACK dynamic-table entries and decoded
+dynamic indexed fields now each keep name/value bytes in one contiguous
+allocation; eviction, clear, clone and allocation-failure tests cover the
+single-owner invariant while the public field slices remain unchanged. A
+warmed-table regression verifies each additional insertion needs one string
+allocation rather than two.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

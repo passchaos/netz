@@ -930,11 +930,11 @@ pub const Hpack = struct {
         /// only freeing the slice so these allocations are released.
         name_storage: ?[]u8 = null,
         value_storage: ?[]u8 = null,
-        /// Optional allocation shared by every field in one owned decoded
-        /// header block. Runtime-owned blocks set this only on element zero;
-        /// the individual name/value slices then point into the same storage.
-        /// This keeps the public field views unchanged while allowing one free
-        /// instead of two frees per header.
+        /// Allocation shared by name/value. Runtime-owned header lists use it
+        /// only on element zero for one whole-block allocation; dynamic-table
+        /// entries and decoded dynamic indexed fields use one block per field.
+        /// In every form this keeps the public slices unchanged while avoiding
+        /// separate name and value allocations.
         block_storage: ?[]u8 = null,
     };
 
@@ -959,8 +959,7 @@ pub const Hpack = struct {
 
         pub fn clear(self: *DynamicTable, allocator: std.mem.Allocator) void {
             for (self.entries.items[self.head..]) |item| {
-                allocator.free(item.name);
-                allocator.free(item.value);
+                allocator.free(item.block_storage.?);
             }
             self.entries.clearRetainingCapacity();
             self.latest_name.clearRetainingCapacity();
@@ -1011,19 +1010,22 @@ pub const Hpack = struct {
             errdefer if (!exact_slot.found_existing) {
                 _ = self.latest_exact.remove(exact_key);
             };
-            const name_copy = try allocator.dupe(u8, name);
-            errdefer allocator.free(name_copy);
-            const value_copy = try allocator.dupe(u8, value);
-            errdefer allocator.free(value_copy);
+            const owned = try ownedHeaderField(
+                allocator,
+                name,
+                value,
+                false,
+            );
+            errdefer allocator.free(owned.block_storage.?);
 
             const physical_index = self.entries.items.len;
-            self.entries.appendAssumeCapacity(.{
-                .name = name_copy,
-                .value = value_copy,
-            });
-            name_slot.key_ptr.* = name_copy;
+            self.entries.appendAssumeCapacity(owned);
+            name_slot.key_ptr.* = owned.name;
             name_slot.value_ptr.* = physical_index;
-            exact_slot.key_ptr.* = .{ .name = name_copy, .value = value_copy };
+            exact_slot.key_ptr.* = .{
+                .name = owned.name,
+                .value = owned.value,
+            };
             exact_slot.value_ptr.* = physical_index;
             self.used += size;
             self.evictToLimit(allocator);
@@ -1054,8 +1056,7 @@ pub const Hpack = struct {
                 const removed = &self.entries.items[self.head];
                 self.used -= entrySize(removed.name, removed.value);
                 self.removeLatestIndexes(removed.*, self.head);
-                allocator.free(removed.name);
-                allocator.free(removed.value);
+                allocator.free(removed.block_storage.?);
                 self.head += 1;
             }
             self.compactIfNeeded();
@@ -1968,10 +1969,34 @@ pub const Hpack = struct {
     fn indexedHeaderOwned(allocator: std.mem.Allocator, dynamic_table: *DynamicTable, index: u64) Error!HeaderField {
         const entry = try indexedHeader(dynamic_table, index);
         if (index <= static_table.len) return entry;
-        const name = try allocator.dupe(u8, entry.name);
-        errdefer allocator.free(name);
-        const value = try allocator.dupe(u8, entry.value);
-        return .{ .name = name, .value = value, .name_storage = name, .value_storage = value };
+        return ownedHeaderField(
+            allocator,
+            entry.name,
+            entry.value,
+            entry.never_index,
+        );
+    }
+
+    fn ownedHeaderField(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        value: []const u8,
+        never_index: bool,
+    ) !HeaderField {
+        const string_len = std.math.add(
+            usize,
+            name.len,
+            value.len,
+        ) catch return error.OutOfMemory;
+        const strings = try allocator.alloc(u8, string_len);
+        @memcpy(strings[0..name.len], name);
+        @memcpy(strings[name.len..], value);
+        return .{
+            .name = strings[0..name.len],
+            .value = strings[name.len..],
+            .never_index = never_index,
+            .block_storage = strings,
+        };
     }
 
     fn indexedNameOwned(allocator: std.mem.Allocator, dynamic_table: *DynamicTable, index: u64) Error!DecodedString {
@@ -2643,9 +2668,109 @@ test "HTTP/2 HPACK dynamic table keeps newest-index order without shifts" {
     try std.testing.expectEqual(@as(usize, 2), table.entries.items.len);
     try std.testing.expectEqualStrings("x-c", table.get(0).?.name);
     try std.testing.expectEqualStrings("x-b", table.get(1).?.name);
+    for (table.entries.items) |entry| {
+        const storage = entry.block_storage orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(storage.ptr, entry.name.ptr);
+        try std.testing.expectEqual(
+            storage.ptr + entry.name.len,
+            entry.value.ptr,
+        );
+        try std.testing.expectEqual(
+            storage.len,
+            entry.name.len + entry.value.len,
+        );
+    }
     try std.testing.expectEqual(@as(?u64, Hpack.static_table.len + 1), table.findIndex("x-c", "3"));
     try std.testing.expectEqual(@as(?u64, Hpack.static_table.len + 2), table.findNameIndex("x-b"));
     try std.testing.expect(table.findNameIndex("x-a") == null);
+}
+
+test "HTTP/2 HPACK dynamic insertion uses one string allocation" {
+    const allocator = std.testing.allocator;
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var table = Hpack.DynamicTable{};
+    defer table.deinit(tracked);
+    table.setLimit(tracked, 512);
+
+    // Warm all container capacities, then clear only logical state so the next
+    // insertion isolates ownership of its name/value bytes.
+    for (0..8) |index| {
+        var value_buffer: [16]u8 = undefined;
+        const value = try std.fmt.bufPrint(
+            &value_buffer,
+            "value-{d}",
+            .{index},
+        );
+        try table.add(tracked, "x-field", value);
+    }
+    table.clear(tracked);
+    const before = tracking.allocations;
+    try table.add(tracked, "x-field", "value");
+    try std.testing.expectEqual(before + 1, tracking.allocations);
+
+    const entry = table.get(0).?;
+    const storage = entry.block_storage orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(storage.ptr, entry.name.ptr);
+    try std.testing.expectEqual(
+        storage.ptr + entry.name.len,
+        entry.value.ptr,
+    );
+    try std.testing.expectEqual(
+        storage.len,
+        entry.name.len + entry.value.len,
+    );
+}
+
+fn checkHpackContiguousDynamicStorage(allocator: std.mem.Allocator) !void {
+    var table = Hpack.DynamicTable{};
+    defer table.deinit(allocator);
+    table.setLimit(allocator, 96);
+    try table.add(allocator, "x-one", "one");
+    try table.add(allocator, "x-two", "two");
+    try table.add(allocator, "x-three", "three");
+    try std.testing.expect(table.findIndex("x-one", "one") == null);
+    try std.testing.expect(table.findIndex("x-three", "three") != null);
+
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeBlock(&block, allocator, &.{.{
+        .name = "x-output",
+        .value = "value",
+    }});
+    var scratch: [1]Hpack.HeaderField = undefined;
+    const first = try decoder.decodeBlockInto(allocator, block.items, &scratch);
+    Hpack.freeDecodedFieldStorages(allocator, first);
+    block.clearRetainingCapacity();
+    try encoder.encodeBlock(&block, allocator, &.{.{
+        .name = "x-output",
+        .value = "value",
+    }});
+    const second = try decoder.decodeBlockInto(allocator, block.items, &scratch);
+    defer Hpack.freeDecodedFieldStorages(allocator, second);
+    const storage = second[0].block_storage orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(second[0].name_storage == null);
+    try std.testing.expect(second[0].value_storage == null);
+    try std.testing.expectEqual(storage.ptr, second[0].name.ptr);
+    try std.testing.expectEqual(
+        storage.ptr + second[0].name.len,
+        second[0].value.ptr,
+    );
+}
+
+test "HTTP/2 HPACK contiguous dynamic storage is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkHpackContiguousDynamicStorage,
+        .{},
+    );
 }
 
 test "HTTP/2 HPACK dynamic lookup indexes survive eviction and clear" {
