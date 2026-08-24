@@ -1335,7 +1335,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubAck(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.puback, packet_id, reason_code, &.{});
+        try self.writeAckPacketNoProperties(.puback, packet_id, reason_code);
         self.completeIncomingPublish(.puback, packet_id);
     }
 
@@ -1413,7 +1413,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.pubrec, packet_id, reason_code, &.{});
+        try self.writeAckPacketNoProperties(.pubrec, packet_id, reason_code);
         self.completeIncomingPubRec(packet_id, reason_code);
     }
 
@@ -1422,7 +1422,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubRel(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.pubrel, packet_id, reason_code, &.{});
+        try self.writeAckPacketNoProperties(.pubrel, packet_id, reason_code);
     }
 
     pub fn readPubRel(self: *Connection) Error!OwnedAck {
@@ -1463,7 +1463,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.pubcomp, packet_id, reason_code, &.{});
+        try self.writeAckPacketNoProperties(.pubcomp, packet_id, reason_code);
         self.completeIncomingPublish(.pubcomp, packet_id);
     }
 
@@ -1490,9 +1490,23 @@ pub const Connection = struct {
         self.completeIncomingPublish(.pubcomp, packet_id);
     }
 
+    fn writeAckPacketNoProperties(
+        self: *Connection,
+        packet_type: mqtt.PacketType,
+        packet_id: u16,
+        reason_code: u8,
+    ) Error!void {
+        var encoded: [mqtt.AckPacket.no_properties_max_len]u8 = undefined;
+        try self.writePacket(try mqtt.AckPacket.writeNoPropertiesInto(
+            &encoded,
+            self.protocol,
+            packet_type,
+            packet_id,
+            reason_code,
+        ));
+    }
+
     fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
         var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
         defer filtered_properties.deinit(self.allocator);
         const outgoing_properties = try self.outgoingProblemProperties(
@@ -1500,6 +1514,19 @@ pub const Connection = struct {
             packet_type,
             properties,
         );
+        // Request Problem Information can remove every caller-supplied
+        // diagnostic property. Route that result through the same bounded
+        // encoder as the ordinary ACK methods instead of allocating an empty
+        // general-purpose output buffer.
+        if (outgoing_properties.len == 0) {
+            return self.writeAckPacketNoProperties(
+                packet_type,
+                packet_id,
+                reason_code,
+            );
+        }
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
         try mqtt.AckPacket.write(
             &encoded,
             self.allocator,
@@ -3513,6 +3540,73 @@ test "MQTT runtime PING writes use fixed caller storage" {
     );
     try std.testing.expectEqual(received.len, n);
     try mqtt.validatePing(&received, true);
+}
+
+test "MQTT runtime property-free acknowledgements use fixed caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+    };
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = fail_first.allocator();
+
+    // Exercise both MQTT 5 wire lengths: success omits Reason Code and
+    // Property Length, while a negative acknowledgement carries the reason.
+    try connection.writePubAck(0x1234, 0);
+    try connection.writePubRec(0x5678, 0x80);
+    try connection.writePubRel(0x9abc, 0);
+    try connection.writePubComp(0xdef0, 0x92);
+    connection.peer_requested_problem_information = false;
+    try connection.writePubAckWithProperties(0x2468, 0x80, &.{
+        .{ .utf8 = .{
+            .id = .reason_string,
+            .value = "suppressed",
+        } },
+    });
+    try std.testing.expect(!fail_first.has_induced_failure);
+
+    const expected = [_]u8{
+        0x40, 0x02, 0x12, 0x34,
+        0x50, 0x03, 0x56, 0x78,
+        0x80, 0x62, 0x02, 0x9a,
+        0xbc, 0x70, 0x03, 0xde,
+        0xf0, 0x92, 0x40, 0x03,
+        0x24, 0x68, 0x80,
+    };
+    var received: [expected.len]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < received.len) {
+        var buffers = [_][]u8{received[offset..]};
+        const n = try io.vtable.netRead(
+            io.userdata,
+            server_stream.socket.handle,
+            &buffers,
+        );
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+    try std.testing.expectEqualSlices(u8, &expected, &received);
 }
 
 test "MQTT connection enforces incoming receive maximum" {

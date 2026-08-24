@@ -182,9 +182,18 @@ runs PINGRESP through a fail-first connection allocator and validates the peer
 bytes, while codec tests prove PINGREQ/PINGRESP wire parity. This is a stricter
 allocation boundary than the audited rumqtt codecs' `BytesMut` writer path,
 without changing their equivalent two-byte MQTT wire representation. The
+common property-free PUBACK/PUBREC/PUBREL/PUBCOMP path likewise encodes the
+complete four- or five-byte packet into caller storage and sends it directly.
+It preserves MQTT 5's shortest success form, validates negative reason codes,
+and leaves arbitrary diagnostic properties on the general property-capable
+codec path. If Request Problem Information filtering removes every diagnostic
+property, the result also returns to the fixed path. A real TCP
+fail-first-allocator test covers all four packet types and both wire lengths;
+unlike the audited rumqttd writers, this hot path does not depend on spare
+`BytesMut` capacity. The
 Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
-green. A CPU-0-pinned WebSocket QoS 1 regression run measured 10.819 us per
-1-KiB PUBLISH/PUBACK and 92,429 operations/s; this checks the shared transport
+green. A CPU-0-pinned WebSocket QoS 1 regression run measured 10.842 us per
+1-KiB PUBLISH/PUBACK and 92,225 operations/s; this checks the shared transport
 rather than isolating PING throughput.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are

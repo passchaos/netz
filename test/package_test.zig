@@ -707,6 +707,14 @@ test "public modules are reachable" {
         "readSessionPubRel",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "accepted"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.AckPacket,
+        "writeNoPropertiesInto",
+    ));
+    try std.testing.expectEqual(
+        @as(usize, 5),
+        netz.mqtt.AckPacket.no_properties_max_len,
+    );
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubAckWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRecWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRec"));

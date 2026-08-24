@@ -1351,6 +1351,45 @@ pub const AckPacket = struct {
         }
     }
 
+    /// Largest complete PUBACK/PUBREC/PUBREL/PUBCOMP packet that has no
+    /// properties. MQTT 3.1.1 and an MQTT 5 success use four bytes; an MQTT 5
+    /// non-success reason adds one byte.
+    pub const no_properties_max_len: usize = 5;
+
+    /// Encode a property-free acknowledgement directly into caller storage.
+    ///
+    /// QoS acknowledgements dominate broker control traffic. Keeping this
+    /// bounded form independent of ArrayList lets a runtime put it on the
+    /// stack while the general `write` path remains available for arbitrary
+    /// Reason String and User Property values.
+    pub fn writeNoPropertiesInto(
+        storage: *[no_properties_max_len]u8,
+        protocol: ProtocolVersion,
+        packet_type: PacketType,
+        packet_id: u16,
+        reason_code: u8,
+    ) Error![]u8 {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        switch (packet_type) {
+            .puback, .pubrec, .pubrel, .pubcomp => {},
+            else => return error.InvalidPacketType,
+        }
+        if (protocol == .v3_1_1) {
+            if (reason_code != 0) return error.InvalidReasonCode;
+        } else {
+            try validateAckReasonCode(packet_type, reason_code);
+        }
+
+        const include_reason = protocol == .v5 and reason_code != 0;
+        const remaining_len: u8 = if (include_reason) 3 else 2;
+        storage[0] = (@as(u8, @intFromEnum(packet_type)) << 4) |
+            packet_type.defaultFlags();
+        storage[1] = remaining_len;
+        std.mem.writeInt(u16, storage[2..4], packet_id, .big);
+        if (include_reason) storage[4] = reason_code;
+        return storage[0 .. 2 + @as(usize, remaining_len)];
+    }
+
     pub fn accepted(self: AckPacket) bool {
         return self.reason_code < 0x80;
     }
@@ -3118,6 +3157,80 @@ test "MQTT connack ack and ping controls" {
     defer puback_bytes.deinit(allocator);
     try AckPacket.write(&puback_bytes, allocator, .v5, .puback, 42, 0x10, &.{});
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x40, 0x03, 0x00, 0x2a, 0x10 }, puback_bytes.items);
+    var direct_ack: [AckPacket.no_properties_max_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        puback_bytes.items,
+        try AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v5,
+            .puback,
+            42,
+            0x10,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x40, 0x02, 0x00, 0x2a },
+        try AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v5,
+            .puback,
+            42,
+            0,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x62, 0x02, 0x12, 0x34 },
+        try AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v3_1_1,
+            .pubrel,
+            0x1234,
+            0,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketIdentifier,
+        AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v5,
+            .puback,
+            0,
+            0,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v3_1_1,
+            .puback,
+            42,
+            0x80,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v5,
+            .pubrel,
+            42,
+            0x10,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        AckPacket.writeNoPropertiesInto(
+            &direct_ack,
+            .v5,
+            .suback,
+            42,
+            0,
+        ),
+    );
     var puback = try AckPacket.parse(allocator, .v5, puback_bytes.items);
     defer puback.deinit(allocator);
     try std.testing.expectEqual(PacketType.puback, puback.packet_type);
