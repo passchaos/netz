@@ -735,6 +735,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubComp"));
     try std.testing.expect(@hasDecl(netz.mqtt, "Unsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt, "UnsubAck"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.SubAck,
+        "writeNoPropertiesInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.SubAck,
+        "noPropertiesWireLen",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.UnsubAck,
+        "writeNoPropertiesInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.UnsubAck,
+        "noPropertiesWireLen",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "unsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readUnsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writeUnsubAck"));

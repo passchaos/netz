@@ -114,6 +114,21 @@ pub fn encodeRemainingLength(list: *std.ArrayList(u8), allocator: std.mem.Alloca
     }
 }
 
+fn encodeRemainingLengthInto(out: []u8, value: usize) Error!usize {
+    if (value > 268_435_455) return error.RemainingLengthTooLarge;
+    const required = remainingLengthEncodedLen(value);
+    if (out.len < required) return error.BufferTooShort;
+    var remaining = value;
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var encoded: u8 = @intCast(remaining % 128);
+        remaining /= 128;
+        if (remaining != 0) encoded |= 0x80;
+        out[index] = encoded;
+        if (remaining == 0) return index + 1;
+    }
+}
+
 pub fn decodeRemainingLength(bytes: []const u8) Error!struct { value: usize, len: usize } {
     var multiplier: usize = 1;
     var value: usize = 0;
@@ -1639,6 +1654,62 @@ pub const SubAck = struct {
         }
         list.appendSliceAssumeCapacity(reason_codes);
     }
+
+    /// Encode a property-free SUBACK into caller storage. Call
+    /// `noPropertiesWireLen` to obtain the exact required size first.
+    pub fn writeNoPropertiesInto(
+        out: []u8,
+        protocol: ProtocolVersion,
+        packet_id: u16,
+        reason_codes: []const u8,
+    ) Error![]u8 {
+        const total_len = try noPropertiesWireLen(
+            protocol,
+            packet_id,
+            reason_codes,
+        );
+        if (out.len < total_len) return error.BufferTooShort;
+
+        const property_length: usize = @intFromBool(protocol == .v5);
+        const remaining_len = 2 + property_length + reason_codes.len;
+        const header_len = 1 + remainingLengthEncodedLen(remaining_len);
+        out[0] = @as(u8, @intFromEnum(PacketType.suback)) << 4;
+        const encoded_len = try encodeRemainingLengthInto(
+            out[1..header_len],
+            remaining_len,
+        );
+        std.debug.assert(encoded_len + 1 == header_len);
+        std.mem.writeInt(u16, out[header_len..][0..2], packet_id, .big);
+        var cursor = header_len + 2;
+        if (protocol == .v5) {
+            out[cursor] = 0;
+            cursor += 1;
+        }
+        @memcpy(out[cursor..][0..reason_codes.len], reason_codes);
+        return out[0..total_len];
+    }
+
+    pub fn noPropertiesWireLen(
+        protocol: ProtocolVersion,
+        packet_id: u16,
+        reason_codes: []const u8,
+    ) Error!usize {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        if (reason_codes.len == 0) return error.InvalidReasonCode;
+        for (reason_codes) |code| try validateSubAckReason(protocol, code);
+        const property_length: usize = @intFromBool(protocol == .v5);
+        const remaining_len = std.math.add(
+            usize,
+            2 + property_length,
+            reason_codes.len,
+        ) catch return error.RemainingLengthTooLarge;
+        if (remaining_len > 268_435_455) {
+            return error.RemainingLengthTooLarge;
+        }
+        const header_len = 1 + remainingLengthEncodedLen(remaining_len);
+        return std.math.add(usize, header_len, remaining_len) catch
+            return error.RemainingLengthTooLarge;
+    }
 };
 
 pub const Unsubscribe = struct {
@@ -1802,6 +1873,71 @@ pub const UnsubAck = struct {
             writePropertiesAssumeCapacity(list, properties, properties_len);
             list.appendSliceAssumeCapacity(reason_codes);
         }
+    }
+
+    /// Encode a property-free UNSUBACK into caller storage. MQTT 3.1.1 has no
+    /// per-filter reasons; MQTT 5 requires at least one validated reason.
+    pub fn writeNoPropertiesInto(
+        out: []u8,
+        protocol: ProtocolVersion,
+        packet_id: u16,
+        reason_codes: []const u8,
+    ) Error![]u8 {
+        const total_len = try noPropertiesWireLen(
+            protocol,
+            packet_id,
+            reason_codes,
+        );
+        if (out.len < total_len) return error.BufferTooShort;
+
+        const reason_length = if (protocol == .v5) reason_codes.len else 0;
+        const property_length: usize = @intFromBool(protocol == .v5);
+        const remaining_len = 2 + property_length + reason_length;
+        const header_len = 1 + remainingLengthEncodedLen(remaining_len);
+        out[0] = @as(u8, @intFromEnum(PacketType.unsuback)) << 4;
+        const encoded_len = try encodeRemainingLengthInto(
+            out[1..header_len],
+            remaining_len,
+        );
+        std.debug.assert(encoded_len + 1 == header_len);
+        std.mem.writeInt(u16, out[header_len..][0..2], packet_id, .big);
+        if (protocol == .v5) {
+            out[header_len + 2] = 0;
+            @memcpy(out[header_len + 3 ..][0..reason_codes.len], reason_codes);
+        }
+        return out[0..total_len];
+    }
+
+    pub fn noPropertiesWireLen(
+        protocol: ProtocolVersion,
+        packet_id: u16,
+        reason_codes: []const u8,
+    ) Error!usize {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        switch (protocol) {
+            .v3_1_1 => if (reason_codes.len != 0 and
+                !(reason_codes.len == 1 and reason_codes[0] == 0))
+            {
+                return error.InvalidReasonCode;
+            },
+            .v5 => {
+                if (reason_codes.len == 0) return error.InvalidReasonCode;
+                for (reason_codes) |code| try validateUnsubAckReason(code);
+            },
+        }
+        const property_length: usize = @intFromBool(protocol == .v5);
+        const reason_length = if (protocol == .v5) reason_codes.len else 0;
+        const remaining_len = std.math.add(
+            usize,
+            2 + property_length,
+            reason_length,
+        ) catch return error.RemainingLengthTooLarge;
+        if (remaining_len > 268_435_455) {
+            return error.RemainingLengthTooLarge;
+        }
+        const header_len = 1 + remainingLengthEncodedLen(remaining_len);
+        return std.math.add(usize, header_len, remaining_len) catch
+            return error.RemainingLengthTooLarge;
     }
 };
 
@@ -3501,13 +3637,76 @@ test "MQTT subscribe and suback controls" {
     defer suback.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 9), suback.packet_id);
     try std.testing.expectEqualSlices(u8, &reasons, suback.reason_codes);
+    var direct_suback: [256]u8 = undefined;
+    const direct_v5 = try SubAck.writeNoPropertiesInto(
+        &direct_suback,
+        .v5,
+        9,
+        &reasons,
+    );
+    try std.testing.expectEqualSlices(u8, suback_bytes.items, direct_v5);
+    try std.testing.expectEqual(
+        direct_v5.len,
+        try SubAck.noPropertiesWireLen(.v5, 9, &reasons),
+    );
 
     suback_bytes.clearRetainingCapacity();
     try SubAck.write(&suback_bytes, allocator, .v3_1_1, 9, &.{}, &.{0x80});
     suback.deinit(allocator);
     suback = try SubAck.parse(allocator, .v3_1_1, suback_bytes.items);
     try std.testing.expectEqualSlices(u8, &[_]u8{0x80}, suback.reason_codes);
+    try std.testing.expectEqualSlices(
+        u8,
+        suback_bytes.items,
+        try SubAck.writeNoPropertiesInto(
+            &direct_suback,
+            .v3_1_1,
+            9,
+            &.{0x80},
+        ),
+    );
     try std.testing.expectError(error.InvalidReasonCode, SubAck.write(&suback_bytes, allocator, .v3_1_1, 9, &.{}, &.{0x83}));
+    try std.testing.expectError(
+        error.BufferTooShort,
+        SubAck.writeNoPropertiesInto(
+            direct_suback[0 .. direct_v5.len - 1],
+            .v5,
+            9,
+            &reasons,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketIdentifier,
+        SubAck.noPropertiesWireLen(.v5, 0, &reasons),
+    );
+    var untouched_suback: [8]u8 = @splat(0xa5);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        SubAck.writeNoPropertiesInto(
+            &untouched_suback,
+            .v5,
+            1,
+            &.{0x03},
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa5} ** untouched_suback.len),
+        &untouched_suback,
+    );
+    var many_reasons: [126]u8 = @splat(0);
+    const direct_large = try SubAck.writeNoPropertiesInto(
+        &direct_suback,
+        .v5,
+        0x1234,
+        &many_reasons,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x90, 0x81, 0x01, 0x12, 0x34, 0x00 },
+        direct_large[0..6],
+    );
+    try std.testing.expectEqual(@as(usize, 132), direct_large.len);
 
     var invalid_suback: std.ArrayList(u8) = .empty;
     defer invalid_suback.deinit(allocator);
@@ -3550,6 +3749,18 @@ test "MQTT unsubscribe and unsuback controls" {
     defer unsuback.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 11), unsuback.packet_id);
     try std.testing.expectEqualSlices(u8, &reasons, unsuback.reason_codes);
+    var direct_unsuback: [256]u8 = undefined;
+    const direct_v5 = try UnsubAck.writeNoPropertiesInto(
+        &direct_unsuback,
+        .v5,
+        11,
+        &reasons,
+    );
+    try std.testing.expectEqualSlices(u8, unsuback_bytes.items, direct_v5);
+    try std.testing.expectEqual(
+        direct_v5.len,
+        try UnsubAck.noPropertiesWireLen(.v5, 11, &reasons),
+    );
 
     unsuback_bytes.clearRetainingCapacity();
     try UnsubAck.write(&unsuback_bytes, allocator, .v3_1_1, 12, &.{}, &.{});
@@ -3562,6 +3773,44 @@ test "MQTT unsubscribe and unsuback controls" {
     unsuback_bytes.clearRetainingCapacity();
     try UnsubAck.write(&unsuback_bytes, allocator, .v3_1_1, 13, &.{}, &.{0x00});
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xb0, 0x02, 0x00, 0x0d }, unsuback_bytes.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        unsuback_bytes.items,
+        try UnsubAck.writeNoPropertiesInto(
+            &direct_unsuback,
+            .v3_1_1,
+            13,
+            &.{0x00},
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        UnsubAck.noPropertiesWireLen(.v5, 1, &.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        UnsubAck.writeNoPropertiesInto(
+            &direct_unsuback,
+            .v3_1_1,
+            1,
+            &.{0x11},
+        ),
+    );
+    var untouched_unsuback: [8]u8 = @splat(0x5a);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        UnsubAck.writeNoPropertiesInto(
+            &untouched_unsuback,
+            .v5,
+            1,
+            &.{0x42},
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0x5a} ** untouched_unsuback.len),
+        &untouched_unsuback,
+    );
 
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);

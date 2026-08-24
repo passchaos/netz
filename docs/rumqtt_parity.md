@@ -192,8 +192,8 @@ fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
 Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
-green. A CPU-0-pinned WebSocket QoS 1 regression run measured 11.077 us per
-1-KiB PUBLISH/PUBACK and 90,274 operations/s; this checks the shared transport
+green. A CPU-0-pinned WebSocket QoS 1 regression run measured 11.351 us per
+1-KiB PUBLISH/PUBACK and 88,094 operations/s; this checks the shared transport
 rather than isolating PING throughput.
 Property-free DISCONNECT now follows the same design: normal shutdown uses its
 canonical two bytes and an MQTT 5 error reason uses three bytes, both from
@@ -223,6 +223,14 @@ then replays property-bearing CONNACK, PUBACK, SUBACK, UNSUBACK, DISCONNECT,
 and AUTH under a fail-first allocator, comparing every replay packet with its
 warmup bytes. PUBLISH continues to use the same packet scratch, while the fixed
 control encoders above bypass it entirely.
+Property-free SUBACK/UNSUBACK additionally expose exact-length caller-buffer
+encoders, including multi-byte Remaining Length. The runtime writes them into
+the retained packet scratch and avoids property encoding entirely. Validation
+happens before output mutation; tests cover short storage, MQTT 3.1.1's absent
+UNSUBACK reason list, MQTT 5 reason lists, and the 128-byte Remaining Length
+boundary. In contrast, the audited rumqttd SUBACK/UNSUBACK writers first
+collect mapped reason bytes into another `Vec<u8>` before copying them into
+`BytesMut`.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload

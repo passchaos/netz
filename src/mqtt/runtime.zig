@@ -1596,14 +1596,30 @@ pub const Connection = struct {
             properties,
         );
         self.write_scratch.clearRetainingCapacity();
-        try mqtt.SubAck.write(
-            &self.write_scratch,
-            self.allocator,
-            self.protocol,
-            packet_id,
-            outgoing_properties,
-            reason_codes,
-        );
+        if (outgoing_properties.len == 0) {
+            const required = try mqtt.SubAck.noPropertiesWireLen(
+                self.protocol,
+                packet_id,
+                reason_codes,
+            );
+            try self.write_scratch.resize(self.allocator, required);
+            const encoded = try mqtt.SubAck.writeNoPropertiesInto(
+                self.write_scratch.items,
+                self.protocol,
+                packet_id,
+                reason_codes,
+            );
+            self.write_scratch.shrinkRetainingCapacity(encoded.len);
+        } else {
+            try mqtt.SubAck.write(
+                &self.write_scratch,
+                self.allocator,
+                self.protocol,
+                packet_id,
+                outgoing_properties,
+                reason_codes,
+            );
+        }
         try self.writePacket(self.write_scratch.items);
     }
 
@@ -1645,14 +1661,30 @@ pub const Connection = struct {
             properties,
         );
         self.write_scratch.clearRetainingCapacity();
-        try mqtt.UnsubAck.write(
-            &self.write_scratch,
-            self.allocator,
-            self.protocol,
-            packet_id,
-            outgoing_properties,
-            reason_codes,
-        );
+        if (outgoing_properties.len == 0) {
+            const required = try mqtt.UnsubAck.noPropertiesWireLen(
+                self.protocol,
+                packet_id,
+                reason_codes,
+            );
+            try self.write_scratch.resize(self.allocator, required);
+            const encoded = try mqtt.UnsubAck.writeNoPropertiesInto(
+                self.write_scratch.items,
+                self.protocol,
+                packet_id,
+                reason_codes,
+            );
+            self.write_scratch.shrinkRetainingCapacity(encoded.len);
+        } else {
+            try mqtt.UnsubAck.write(
+                &self.write_scratch,
+                self.allocator,
+                self.protocol,
+                packet_id,
+                outgoing_properties,
+                reason_codes,
+            );
+        }
         try self.writePacket(self.write_scratch.items);
     }
 
