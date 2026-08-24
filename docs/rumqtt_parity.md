@@ -175,6 +175,17 @@ also write directly after one final reservation. Warmed mixed-property and
 multi-filter tests run these writers under a fail-first allocator. DISCONNECT
 and enhanced-authentication AUTH complete the same treatment, including their
 zero-length and reason-plus-properties MQTT 5 forms.
+PINGREQ and PINGRESP now expose an exact two-byte caller-buffer encoder, and
+the shared TCP/TLS/WebSocket runtime sends those bytes directly instead of
+constructing a fresh ArrayList for every keep-alive exchange. A real TCP test
+runs PINGRESP through a fail-first connection allocator and validates the peer
+bytes, while codec tests prove PINGREQ/PINGRESP wire parity. This is a stricter
+allocation boundary than the audited rumqtt codecs' `BytesMut` writer path,
+without changing their equivalent two-byte MQTT wire representation. The
+Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
+green. A CPU-0-pinned WebSocket QoS 1 regression run measured 10.819 us per
+1-KiB PUBLISH/PUBACK and 92,429 operations/s; this checks the shared transport
+rather than isolating PING throughput.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload

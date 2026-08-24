@@ -2019,9 +2019,22 @@ fn propertyId(property: Property) PropertyId {
     };
 }
 
+pub const ping_packet_len: usize = 2;
+
 pub fn writePing(list: *std.ArrayList(u8), allocator: std.mem.Allocator, response: bool) Error!void {
+    var storage: [ping_packet_len]u8 = undefined;
+    try list.appendSlice(allocator, writePingInto(&storage, response));
+}
+
+/// Encode the complete fixed-size PINGREQ or PINGRESP packet without an
+/// allocator. Both MQTT 3.1.1 and MQTT 5 use the same two-byte wire form.
+pub fn writePingInto(
+    storage: *[ping_packet_len]u8,
+    response: bool,
+) []u8 {
     const packet_type: PacketType = if (response) .pingresp else .pingreq;
-    try (FixedHeader{ .packet_type = packet_type, .flags = 0, .remaining_len = 0, .header_len = 0 }).write(list, allocator);
+    storage.* = .{ @as(u8, @intFromEnum(packet_type)) << 4, 0 };
+    return storage;
 }
 
 pub fn validatePing(packet: []const u8, response: bool) Error!void {
@@ -2576,6 +2589,17 @@ test "MQTT ping packets reject trailing bytes" {
     defer ping.deinit(std.testing.allocator);
     try writePing(&ping, std.testing.allocator, false);
     try validatePing(ping.items, false);
+    var direct: [ping_packet_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        ping.items,
+        writePingInto(&direct, false),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xd0, 0x00 },
+        writePingInto(&direct, true),
+    );
     try ping.append(std.testing.allocator, 0);
     try std.testing.expectError(error.InvalidPacketType, validatePing(ping.items, false));
 }

@@ -623,6 +623,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "LastWill"));
     try std.testing.expect(@hasDecl(netz.mqtt, "ConnectPacketOptions"));
     try std.testing.expect(@hasDecl(netz.mqtt, "writeConnectPacket"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "writePingInto"));
+    try std.testing.expectEqual(@as(usize, 2), netz.mqtt.ping_packet_len);
     try std.testing.expect(@hasField(netz.mqtt.Connect, "will"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "username"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "password"));

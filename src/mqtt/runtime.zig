@@ -1644,10 +1644,8 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try mqtt.writePing(&encoded, self.allocator, false);
-        try self.writePacket(encoded.items);
+        var encoded: [mqtt.ping_packet_len]u8 = undefined;
+        try self.writePacket(mqtt.writePingInto(&encoded, false));
         while (true) {
             // Do not consume the pending queue while waiting: those packets
             // predate this PING and re-queueing them would loop forever.
@@ -1682,10 +1680,8 @@ pub const Connection = struct {
     }
 
     pub fn writePingResp(self: *Connection) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try mqtt.writePing(&encoded, self.allocator, true);
-        try self.writePacket(encoded.items);
+        var encoded: [mqtt.ping_packet_len]u8 = undefined;
+        try self.writePacket(mqtt.writePingInto(&encoded, true));
     }
 
     pub fn disconnect(self: *Connection, reason_code: u8) Error!void {
@@ -3475,6 +3471,48 @@ test "MQTT runtime enforces incoming maximum packet size on full frame" {
         error.PacketTooLarge,
         transport.readPacket(allocator, 1),
     );
+}
+
+test "MQTT runtime PING writes use fixed caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+    };
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = fail_first.allocator();
+    try connection.writePingResp();
+    try std.testing.expect(!fail_first.has_induced_failure);
+
+    var received: [mqtt.ping_packet_len]u8 = undefined;
+    var buffers = [_][]u8{&received};
+    const n = try io.vtable.netRead(
+        io.userdata,
+        server_stream.socket.handle,
+        &buffers,
+    );
+    try std.testing.expectEqual(received.len, n);
+    try mqtt.validatePing(&received, true);
 }
 
 test "MQTT connection enforces incoming receive maximum" {
