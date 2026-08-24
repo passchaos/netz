@@ -1,7 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
-const hpack_huffman = @import("hpack_huffman.zig");
+const huffman_codec = @import("../internal/hpack_huffman.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const connection_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -1528,50 +1528,23 @@ pub const Hpack = struct {
     }
 
     pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-        return encodeHuffmanWithLen(allocator, value, try huffmanEncodedLen(value));
+        return huffman_codec.encodeHuffman(allocator, value);
     }
 
     pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-        try out.ensureTotalCapacity(allocator, encoded_len);
-
-        var bits: u64 = 0;
-        var bits_left: u6 = 40;
-        for (value) |byte| {
-            const entry = hpack_huffman.encode_table[byte];
-            bits |= @as(u64, entry.code) << @intCast(bits_left - entry.bits);
-            bits_left -= entry.bits;
-
-            while (bits_left <= 32) {
-                try out.append(allocator, @truncate(bits >> 32));
-                bits <<= 8;
-                bits_left += 8;
-            }
-        }
-
-        if (bits_left != 40) {
-            // RFC 7541 §5.2 pads the final octet with a prefix of the EOS code,
-            // which is all ones.  The EOS symbol itself is never emitted.
-            bits |= (@as(u64, 1) << bits_left) - 1;
-            try out.append(allocator, @truncate(bits >> 32));
-        }
-        std.debug.assert(out.items.len == encoded_len);
-        return out.toOwnedSlice(allocator);
+        return huffman_codec.encodeHuffmanWithLen(
+            allocator,
+            value,
+            encoded_len,
+        );
     }
 
     pub fn huffmanEncodedLen(value: []const u8) !usize {
-        var bit_len: usize = 0;
-        for (value) |byte| {
-            bit_len = std.math.add(usize, bit_len, hpack_huffman.encode_table[byte].bits) catch return error.IntegerOverflow;
-        }
-        return std.math.divCeil(usize, bit_len, 8) catch unreachable;
+        return huffman_codec.encodedLen(value);
     }
 
     pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
-        if (encoded.len == 0) return @constCast(&[_]u8{});
-        const decoded_len = try huffmanDecodedLen(encoded);
-        return decodeHuffmanWithLen(allocator, encoded, decoded_len);
+        return huffman_codec.decodeHuffman(allocator, encoded);
     }
 
     fn decodeHuffmanWithLen(
@@ -1579,81 +1552,15 @@ pub const Hpack = struct {
         encoded: []const u8,
         decoded_len: usize,
     ) ![]u8 {
-        if (encoded.len == 0) {
-            if (decoded_len != 0) return error.InvalidEncoding;
-            return @constCast(&[_]u8{});
-        }
-        const out = try allocator.alloc(u8, decoded_len);
-        errdefer allocator.free(out);
-        var out_index: usize = 0;
-
-        var node: u16 = huffman_root_node;
-        var pending_code: u32 = 0;
-        var pending_bits: u6 = 0;
-        for (encoded) |byte| {
-            var bit_index: u4 = 0;
-            while (bit_index < 8) : (bit_index += 1) {
-                const bit: u1 = @truncate((byte >> @intCast(7 - bit_index)) & 1);
-                pending_code = (pending_code << 1) | bit;
-                pending_bits += 1;
-                if (pending_bits > huffman_max_code_bits) return error.InvalidEncoding;
-
-                const next = huffman_decode_trie[node].child[bit] orelse return error.InvalidEncoding;
-                node = next;
-                if (huffman_decode_trie[node].symbol) |symbol| {
-                    if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
-                    out[out_index] = @intCast(symbol);
-                    out_index += 1;
-                    node = huffman_root_node;
-                    pending_code = 0;
-                    pending_bits = 0;
-                }
-            }
-        }
-
-        if (pending_bits != 0) {
-            // The only legal incomplete suffix is EOS-prefix padding of at most
-            // seven one bits (RFC 7541 §5.2).
-            if (pending_bits > 7) return error.InvalidEncoding;
-            const padding = (@as(u32, 1) << @as(u5, @intCast(pending_bits))) - 1;
-            if (pending_code != padding) return error.InvalidEncoding;
-        }
-        std.debug.assert(out_index == out.len);
-        return out;
+        return huffman_codec.decodeHuffmanWithLen(
+            allocator,
+            encoded,
+            decoded_len,
+        );
     }
 
     pub fn huffmanDecodedLen(encoded: []const u8) !usize {
-        if (encoded.len == 0) return 0;
-        var len: usize = 0;
-        var node: u16 = huffman_root_node;
-        var pending_code: u32 = 0;
-        var pending_bits: u6 = 0;
-        for (encoded) |byte| {
-            var bit_index: u4 = 0;
-            while (bit_index < 8) : (bit_index += 1) {
-                const bit: u1 = @truncate((byte >> @intCast(7 - bit_index)) & 1);
-                pending_code = (pending_code << 1) | bit;
-                pending_bits += 1;
-                if (pending_bits > huffman_max_code_bits) return error.InvalidEncoding;
-
-                const next = huffman_decode_trie[node].child[bit] orelse return error.InvalidEncoding;
-                node = next;
-                if (huffman_decode_trie[node].symbol) |symbol| {
-                    if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
-                    len = std.math.add(usize, len, 1) catch return error.IntegerOverflow;
-                    node = huffman_root_node;
-                    pending_code = 0;
-                    pending_bits = 0;
-                }
-            }
-        }
-
-        if (pending_bits != 0) {
-            if (pending_bits > 7) return error.InvalidEncoding;
-            const padding = (@as(u32, 1) << @as(u5, @intCast(pending_bits))) - 1;
-            if (pending_code != padding) return error.InvalidEncoding;
-        }
-        return len;
+        return huffman_codec.decodedLen(encoded);
     }
 
     fn decodeBlockWithDynamicTable(
@@ -1902,12 +1809,18 @@ pub const Hpack = struct {
             list.appendSliceAssumeCapacity(value);
             return;
         }
-        const huffman = try encodeHuffmanWithLen(allocator, value, huffman_len);
-        defer allocator.free(huffman);
-        std.debug.assert(huffman.len == huffman_len);
-        try list.ensureUnusedCapacity(allocator, integerEncodedLen(7, huffman.len) + huffman.len);
-        try encodeInteger(list, allocator, 7, 0x80, huffman.len);
-        list.appendSliceAssumeCapacity(huffman);
+        try list.ensureUnusedCapacity(allocator, integerEncodedLen(7, huffman_len) + huffman_len);
+        try encodeInteger(list, allocator, 7, 0x80, huffman_len);
+        // The final block already reserves this exact space, so materializing
+        // a temporary Huffman allocation only to copy it here wastes an
+        // allocation and a full encoded-byte pass on every compressed string.
+        const encoded_start = list.items.len;
+        huffman_codec.appendHuffmanAssumeCapacity(
+            list,
+            value,
+            huffman_len,
+        );
+        std.debug.assert(list.items.len == encoded_start + huffman_len);
     }
 
     const DecodedString = struct {
@@ -2033,45 +1946,6 @@ pub const Hpack = struct {
         const copy = try allocator.dupe(u8, name);
         return .{ .value = copy, .storage = copy };
     }
-
-    const huffman_root_node: u16 = 0;
-    const huffman_max_code_bits: u6 = 30;
-
-    const HuffmanDecodeNode = struct {
-        child: [2]?u16 = .{ null, null },
-        symbol: ?u16 = null,
-    };
-
-    const huffman_decode_trie = buildHuffmanDecodeTrie();
-
-    fn buildHuffmanDecodeTrie() [huffman_decode_node_count]HuffmanDecodeNode {
-        @setEvalBranchQuota(200_000);
-        var nodes = [_]HuffmanDecodeNode{.{}} ** huffman_decode_node_count;
-        var used: u16 = 1;
-
-        for (hpack_huffman.encode_table, 0..) |entry, symbol| {
-            var node: u16 = huffman_root_node;
-            var bit_index: u6 = 0;
-            while (bit_index < entry.bits) : (bit_index += 1) {
-                const shift: u5 = @intCast(entry.bits - 1 - bit_index);
-                const bit: u1 = @truncate((entry.code >> shift) & 1);
-                if (nodes[node].child[bit] == null) {
-                    nodes[node].child[bit] = used;
-                    used += 1;
-                }
-                node = nodes[node].child[bit].?;
-            }
-            nodes[node].symbol = @intCast(symbol);
-        }
-
-        return nodes;
-    }
-
-    const huffman_decode_node_count = blk: {
-        var count: usize = 1;
-        for (hpack_huffman.encode_table) |entry| count += entry.bits;
-        break :blk count;
-    };
 
     fn entrySize(name: []const u8, value: []const u8) usize {
         return name.len + value.len + 32;
@@ -2958,6 +2832,14 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     defer allocator.free(huffman);
     try std.testing.expectEqualSlices(u8, &.{ 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff }, huffman);
     try std.testing.expectEqual(huffman.len, try Hpack.huffmanEncodedLen("www.example.com"));
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        Hpack.encodeHuffmanWithLen(
+            allocator,
+            "www.example.com",
+            huffman.len - 1,
+        ),
+    );
     const decoded_huffman = try Hpack.decodeHuffman(allocator, huffman);
     defer allocator.free(decoded_huffman);
     try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
@@ -3034,6 +2916,28 @@ test "HTTP/2 HPACK retained encoder scratch reuses capacity" {
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(first_ptr, second.ptr);
     try std.testing.expectEqualSlices(u8, &.{0x89}, second);
+}
+
+test "HTTP/2 HPACK retained Huffman encode uses only warmed scratch" {
+    const allocator = std.testing.allocator;
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    const fields = [_]Hpack.HeaderField{
+        .{ .name = "authorization", .value = "compressible-value" },
+    };
+
+    const first = try encoder.encodeBlockRetained(allocator, &fields);
+    try std.testing.expect((first[2] & 0x80) != 0);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const second = try encoder.encodeBlockRetained(
+        no_alloc.allocator(),
+        &fields,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, first, second);
 }
 
 test "HTTP/2 HPACK encoder clone isolates transactional state" {

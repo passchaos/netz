@@ -1,6 +1,6 @@
 //! HPACK static Huffman code table from RFC 7541 Appendix B.
-//! The decoder in mod.zig intentionally uses this canonical table directly
-//! instead of a generated trie so the data remains auditable in-tree.
+//! The shared HTTP/2 HPACK and HTTP/3 QPACK codec generates its decode trie
+//! directly from this table so the canonical wire data remains auditable.
 
 pub const Entry = struct {
     bits: u6,

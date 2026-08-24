@@ -1,14 +1,22 @@
-//! Canonical Huffman coding shared by HPACK and QPACK.
+//! Canonical Huffman coding shared by HTTP/2 HPACK and HTTP/3 QPACK.
 
 const std = @import("std");
-const hpack_huffman = @import("../../http2/hpack_huffman.zig");
+const hpack_huffman = @import("hpack_huffman_table.zig");
 
 /// Encode an RFC 9204/HPACK canonical Huffman string.
 pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-    return encodeHuffmanWithLen(allocator, value, try encodedLen(value));
+    return encodeHuffmanExact(allocator, value, try encodedLen(value));
 }
 
 pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
+    // This entry point is public through HPACK, so reject a stale caller-
+    // supplied length rather than letting the unchecked writer overrun or
+    // leave part of its allocation uninitialized in release builds.
+    if (encoded_len != try encodedLen(value)) return error.InvalidEncoding;
+    return encodeHuffmanExact(allocator, value, encoded_len);
+}
+
+fn encodeHuffmanExact(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
     const out = try allocator.alloc(u8, encoded_len);
     errdefer allocator.free(out);
     encodeHuffmanInto(out, value);
@@ -20,6 +28,7 @@ pub fn appendHuffmanAssumeCapacity(
     value: []const u8,
     encoded_len: usize,
 ) void {
+    std.debug.assert(list.capacity - list.items.len >= encoded_len);
     const start_len = list.items.len;
     list.items.len = start_len + encoded_len;
     encodeHuffmanInto(list.items[start_len..], value);
@@ -45,8 +54,8 @@ fn encodeHuffmanInto(out: []u8, value: []const u8) void {
     }
 
     if (bits_left != 40) {
-        // QPACK reuses HPACK's canonical Huffman code (RFC 9204 §4.1.2),
-        // including EOS-prefix padding of the final octet.
+        // HPACK defines this canonical code in RFC 7541 §5.2. QPACK reuses it
+        // through RFC 9204 §4.1.2, including EOS-prefix final-octet padding.
         bits |= (@as(u64, 1) << bits_left) - 1;
         std.debug.assert(out_index < out.len);
         out[out_index] = @truncate(bits >> 32);
@@ -67,6 +76,18 @@ pub fn encodedLen(value: []const u8) !usize {
 pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     if (encoded.len == 0) return @constCast(&[_]u8{});
     const decoded_len = try decodedLen(encoded);
+    return decodeHuffmanWithLen(allocator, encoded, decoded_len);
+}
+
+pub fn decodeHuffmanWithLen(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+    decoded_len: usize,
+) ![]u8 {
+    if (encoded.len == 0) {
+        if (decoded_len != 0) return error.InvalidEncoding;
+        return @constCast(&[_]u8{});
+    }
     const out = try allocator.alloc(u8, decoded_len);
     errdefer allocator.free(out);
     try decodeHuffmanInto(out, encoded);
@@ -105,9 +126,8 @@ pub fn decodeHuffmanInto(out: []u8, encoded: []const u8) !void {
     }
 
     if (pending_bits != 0) {
-        // The only legal incomplete suffix is EOS-prefix padding of at
-        // most seven one bits.  QPACK inherits this exact Huffman coding
-        // from HPACK (RFC 9204 §4.1.2).
+        // The only legal incomplete suffix is EOS-prefix padding of at most
+        // seven one bits. Both compression formats share this exact rule.
         if (pending_bits > 7) return error.InvalidEncoding;
         const padding = (@as(u32, 1) << @as(u5, @intCast(pending_bits))) - 1;
         if (pending_code != padding) return error.InvalidEncoding;

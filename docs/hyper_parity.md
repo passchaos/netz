@@ -604,6 +604,13 @@ separately; three pinned ReleaseFast runs measured 277-282 ns/insert with
 reverse indexes and 46-50 ns/insert for the decoder's positional-only table.
 Allocation, eviction, clone and failure-path tests verify the no-index
 lifecycle while encoder lookup behavior remains unchanged.
+HPACK and QPACK now also share one canonical Huffman codec module. HPACK's
+encoder writes compressed string bytes directly into its already-reserved
+header-block output instead of allocating a temporary encoded slice and then
+copying it. A warmed retained-scratch regression uses a failing allocator to
+prove compressed never-indexed fields need no transient allocation. Three
+pinned ReleaseFast HPACK runs measured 261-265 ns for stateful encode-only,
+down from 316-319 ns immediately before this change.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

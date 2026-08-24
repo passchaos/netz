@@ -1034,7 +1034,7 @@ fn scanMaybeHuffman(
     };
 }
 
-const huffman_codec = @import("huffman.zig");
+const huffman_codec = @import("../../internal/hpack_huffman.zig");
 pub const encodeHuffman = huffman_codec.encodeHuffman;
 pub const decodeHuffman = huffman_codec.decodeHuffman;
 pub const decodeHuffmanInto = huffman_codec.decodeHuffmanInto;
