@@ -498,6 +498,45 @@ pub const Endpoint = struct {
         return true;
     }
 
+    /// Send a stateless reset for an unknown-CID short-header datagram.
+    ///
+    /// The response is always smaller than the triggering packet and capped at
+    /// 1200 bytes. This both follows RFC 9000's loop-avoidance requirement and
+    /// keeps attacker-triggered endpoint work allocation-free.
+    pub fn sendStatelessResetForConnectionId(
+        self: *Endpoint,
+        to: net.IpAddress,
+        triggering_datagram: []const u8,
+        static_key: [quic.stateless_reset.static_key_len]u8,
+        connection_id: []const u8,
+    ) Error!bool {
+        if (connection_id.len == 0 or
+            connection_id.len > quic.connection_router.max_connection_id_len)
+        {
+            return error.InvalidConnectionId;
+        }
+        const response_len = quic.stateless_reset.responseLen(
+            triggering_datagram,
+            self.limits.max_datagram_size,
+        ) orelse return false;
+        var storage: [quic.stateless_reset.max_response_len]u8 = undefined;
+        const response = quic.stateless_reset.encodeForConnectionIdInto(
+            &storage,
+            self.io,
+            response_len,
+            static_key,
+            connection_id,
+        ) catch |err| switch (err) {
+            error.InvalidLength, error.InvalidHeaderForm => unreachable,
+            error.BufferTooShort => return error.BufferTooShort,
+            error.Canceled => return error.Canceled,
+            error.EntropyUnavailable => return error.EntropyUnavailable,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try self.sendBytes(to, response);
+        return true;
+    }
+
     pub fn receive(self: *Endpoint) Error!OwnedDatagram {
         var raw = try self.receiveBytes();
         errdefer raw.deinit(self.allocator);
@@ -1931,6 +1970,75 @@ test "QUIC UDP endpoint sends common Version Negotiation without allocation" {
     try std.testing.expectEqualSlices(u8, "cli", parsed.destination_connection_id);
     try std.testing.expectEqualSlices(u8, "srv", parsed.source_connection_id);
     try std.testing.expectEqualSlices(u32, &supported_versions, parsed.versions);
+}
+
+test "QUIC UDP endpoint sends bounded stateless reset without allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+
+    const reset_key = [_]u8{0x42} ** quic.stateless_reset.static_key_len;
+    const retired_cid = "retired-cid";
+    const expected_token = quic.stateless_reset.tokenForConnectionId(
+        reset_key,
+        retired_cid,
+    );
+    const trigger = [_]u8{0x40} ** 64;
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const original_allocator = server.endpoint.allocator;
+    server.endpoint.allocator = fail_first.allocator();
+    defer server.endpoint.allocator = original_allocator;
+    try std.testing.expect(try server.endpoint.sendStatelessResetForConnectionId(
+        client.address(),
+        &trigger,
+        reset_key,
+        retired_cid,
+    ));
+    try std.testing.expect(!fail_first.has_induced_failure);
+
+    var response = try client.endpoint.receiveBytes();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(trigger.len - 1, response.bytes.len);
+    try std.testing.expect(response.bytes.len < trigger.len);
+    try std.testing.expect(quic.stateless_reset.matches(
+        response.bytes,
+        expected_token,
+    ));
+    try std.testing.expect(!try server.endpoint.sendStatelessResetForConnectionId(
+        client.address(),
+        &([_]u8{0x40} ** quic.stateless_reset.min_datagram_len),
+        reset_key,
+        retired_cid,
+    ));
+    try std.testing.expectError(
+        error.InvalidConnectionId,
+        server.endpoint.sendStatelessResetForConnectionId(
+            client.address(),
+            &trigger,
+            reset_key,
+            &.{},
+        ),
+    );
 }
 
 test "QUIC UDP endpoint receives many datagrams with std.Io async" {

@@ -1100,6 +1100,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.LocalPool, "issueQuicLb"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
+    try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "encodeInto"));
+    try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "encodeForConnectionIdInto"));
+    try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "sendStatelessResetForConnectionId"));
     try std.testing.expectEqual(netz.quic.varint.max_value, netz.quic.protection.max_packet_number);
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLenForPayload"));

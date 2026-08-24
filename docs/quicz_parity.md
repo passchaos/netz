@@ -128,6 +128,17 @@ change, including QUIC v1/v2, forced Retry, flow control, resets, cancellation
 retransmission, key update, migration, NAT rebinding, and peer close. Those
 gates do not themselves send an unsupported-version trigger, so the dedicated
 real-UDP Version Negotiation test remains the direct evidence for this path.
+Stateless Reset generation now has the same caller-buffer boundary. The public
+codec validates before modifying output, and the endpoint derives the token,
+fills unpredictable bytes, caps responses at 1200 bytes, requires a valid
+short-header trigger, and always sends a packet shorter than the trigger from
+fixed stack storage. A real UDP failing-allocator test verifies token matching,
+the anti-amplification length rule, short-trigger suppression, and rejection of
+invalid retired CIDs. This complements the existing receive-side rule that only
+tests reset tokens after packet authentication fails. The quic-go and s2n-quic
+transport matrices, plus the local application-close executable, remain green;
+these are regression gates, while the socket-backed failing-allocator test is
+the direct evidence for reset emission.
 
 The old values share a host and aggregate transfer shape but not a controlled
 CPU layout. A fresh CPU-0-pinned quicz run produced 15.97/16.12 MB/s because
