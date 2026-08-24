@@ -2387,26 +2387,23 @@ pub const H2Connection = struct {
             try self.tunnel.writeParts(header, payload, false);
             return;
         }
-        self.send_frame_buffer.clearRetainingCapacity();
-        const required = std.math.add(
-            usize,
-            websocket.max_frame_header_len,
-            payload.len,
-        ) catch return error.PayloadTooLarge;
-        const encoded = try self.send_frame_buffer.addManyAsSlice(
-            self.allocator,
-            required,
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        const header = try websocket.writeFrameHeaderInto(
+            &header_storage,
+            opcode,
+            payload,
+            .{
+                .fin = fin,
+                .mask_key = mask_key,
+                .rsv1 = options.rsv1,
+            },
         );
-        const frame = try websocket.writeFrameInto(encoded, opcode, payload, .{
-            .fin = fin,
-            .mask_key = mask_key,
-            .rsv1 = options.rsv1,
-        });
-        self.send_frame_buffer.shrinkRetainingCapacity(frame.len);
-        // RFC 8441 maps the WebSocket byte stream onto an HTTP/2 stream.  Once
-        // a Close frame is sent, this endpoint has no more WebSocket bytes to
-        // write, so carry END_STREAM with the DATA frame that contains Close.
-        try self.tunnel.write(frame, opcode == .close);
+        try writeMaskedTunnelPayload(
+            &self.tunnel,
+            header,
+            payload,
+            mask_key.?,
+        );
     }
 
     fn writeCompressedFragmentsLocked(
@@ -3303,6 +3300,36 @@ fn writeMaskedPayloadParts(
         }
     }
     if (header_pending) try transport.writeAll(header);
+}
+
+fn writeMaskedTunnelPayload(
+    tunnel: *http2_runtime.Tunnel,
+    header: []const u8,
+    payload: []const u8,
+    mask_key: [4]u8,
+) Error!void {
+    if (payload.len == 0) {
+        try tunnel.write(header, false);
+        return;
+    }
+
+    var scratch: [masked_write_scratch_len]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const count = @min(scratch.len, payload.len - offset);
+        try websocket.applyMaskCopy(
+            scratch[0..count],
+            payload[offset..][0..count],
+            mask_key,
+            offset,
+        );
+        if (offset == 0) {
+            try tunnel.writeParts(header, scratch[0..count], false);
+        } else {
+            try tunnel.write(scratch[0..count], false);
+        }
+        offset += count;
+    }
 }
 
 test "WebSocket client handshake accepts split Connection and rejects duplicate critical headers" {
@@ -4525,14 +4552,15 @@ test "WebSocket over HTTP/2 control sends do not retain frame scratch" {
     if (shared.err) |err| return err;
 }
 
-test "WebSocket over HTTP/2 server borrows application payload across flow control" {
+test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
     const allocator = std.testing.allocator;
-    const payload = "borrowed-rfc8441-payload-" ** 16;
+    const payload = "borrowed-rfc8441-payload-" ** 700;
     const h2_limits: http2_runtime.Limits = .{
-        // A 32-byte stream window makes the server wait for several peer
-        // WINDOW_UPDATE frames. The first 32-byte credit burst also places the
-        // four-byte WebSocket header and payload join inside one DATA frame.
-        .initial_window_size = 32,
+        // An 8-KiB stream window makes each sender wait for several peer
+        // WINDOW_UPDATE frames. It also places the WebSocket header/payload
+        // join inside the first DATA frame, while a message larger than the
+        // 16-KiB masking buffer verifies continuity across stack chunks.
+        .initial_window_size = 8 * 1024,
         .max_body_bytes = payload.len + websocket.max_frame_header_len,
         .enable_connect_protocol = true,
     };
@@ -4572,6 +4600,10 @@ test "WebSocket over HTTP/2 server borrows application payload across flow contr
             });
             defer ws.close();
 
+            var request = try ws.receiveMessage();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.binary, request.opcode);
+            try std.testing.expectEqualStrings(payload, request.payload);
             try ws.sendBinary(payload);
             try std.testing.expectEqual(
                 @as(usize, 0),
@@ -4603,6 +4635,11 @@ test "WebSocket over HTTP/2 server borrows application payload across flow contr
     });
     defer client.close();
 
+    try client.sendBinary(payload);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.send_frame_buffer.capacity,
+    );
     var message = try client.receiveMessage();
     defer message.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);

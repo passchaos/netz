@@ -798,12 +798,15 @@ keep-alive, cancellation and GOAWAY gate remains green.
    header and borrowed application payload through a two-slice HTTP/2 tunnel
    write. The tunnel treats both slices as one flow-controlled byte sequence,
    allowing DATA frame and window boundaries to cross the join without a
-   payload-sized concatenation. A constrained 32-byte stream-window test forces
-   repeated WINDOW_UPDATE progress and confirms that the H2 WebSocket adapter
-   retains no frame scratch after sending. The existing bidirectional Hyper
-   RFC 8441 process gate remains the external interoperability check. Five
-   CPU-0 4-KiB echo samples measured 31.396-33.298 us/roundtrip (32.150 us
-   mean, 31.892 us median, 2.01% relative standard deviation); this overlaps
-   the prior range and is not presented as a latency improvement. The full
+   payload-sized concatenation. A constrained 8-KiB stream-window test sends
+   more than 16 KiB, forcing repeated WINDOW_UPDATE and client masking cycles,
+   and confirms that the H2 WebSocket adapter
+   retains no frame scratch after sending in either direction; client masking
+   uses a bounded 16-KiB stack buffer. The existing bidirectional Hyper RFC 8441
+   process gate remains the external interoperability check. Five CPU-0 4-KiB
+   echo samples after both directions adopted the bounded path measured
+   30.952-32.594 us/roundtrip (31.563 us mean, 31.434 us median, 1.78% relative
+   standard deviation); this overlaps the prior range and is not presented as
+   a latency improvement. The full
    1,601-test suite, 147-case h2spec strict gate, and bidirectional Hyper h2c/TLS
    request, cancellation, keep-alive and GOAWAY matrix remain green.

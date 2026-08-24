@@ -156,17 +156,21 @@ RFC 8441 server application frames now keep their RFC 6455 header on the stack
 and pass it with the borrowed payload to `Tunnel.writeParts`. HTTP/2 applies
 DATA frame sizing and connection/stream flow control across that logical join,
 including a DATA frame that contains the end of the WebSocket header and the
-start of its payload, without retaining a payload-sized `send_frame_buffer`. A
-32-byte-window regression forces multiple WINDOW_UPDATE cycles and verifies the
-complete message plus zero retained frame scratch. Client frames still require
-mutable masking storage and keep the existing bounded connection scratch path.
-Five CPU-0 4-KiB regression samples after this change measured 31.396-33.298
-us/roundtrip (32.150 us mean, 31.892 us median, 2.01% relative standard
-deviation, 234.62-248.83 logical MiB/s). The range overlaps the earlier
-31.105-31.955 us sample, so it is recorded as no demonstrated steady-state
+start of its payload, without retaining a payload-sized `send_frame_buffer`. An
+8-KiB-window regression sends more than 16 KiB to force multiple WINDOW_UPDATE
+and client masking cycles, then verifies the complete message plus zero retained
+frame scratch. Client frames still require
+masking, but now stream through the same bounded 16-KiB stack scratch used by
+HTTP/1 WebSocket instead of retaining the complete masked frame. The
+constrained-window regression verifies zero retained frame scratch in both
+directions.
+Five CPU-0 4-KiB regression samples with both directions using the bounded
+paths measured 30.952-32.594 us/roundtrip (31.563 us mean, 31.434 us median,
+1.78% relative standard deviation, 239.69-252.40 logical MiB/s). The range
+overlaps the earlier samples, so it is recorded as no demonstrated steady-state
 speedup; the proven improvement is eliminating payload-sized retained scratch
-on the unmasked server send path. The full 1,601-test suite and the bidirectional
-Hyper RFC 8441 gate remain green.
+on both directions of the ordinary single-frame path. The full 1,601-test suite
+and the bidirectional Hyper RFC 8441 gate remain green.
 
 The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw
@@ -394,8 +398,9 @@ peer response. Both TCP/WSS and RFC 8441 close senders encode the bounded
 the shutdown boundary. RFC 8441 now uses that fixed-buffer path for every Ping,
 Pong and Close frame, including automatic Pong and Close replies. A fresh H2
 tunnel no longer allocates or retains `send_frame_buffer` capacity merely to
-exchange control traffic; the reusable growable buffer remains for application
-and compressed messages. A real h2c test checks a client Ping, server Pong and
+exchange control traffic. Ordinary single-frame application writes now use
+borrowed server payloads or bounded client masking; the reusable growable buffer
+remains for fragmented compressed batches. A real h2c test checks a client Ping, server Pong and
 bidirectional Close while both sides retain zero send-frame scratch. A
 CPU-0-pinned 4-KiB echo run after this change measured 33.075 us/roundtrip and
 236.20 logical MiB/s; this is a regression sample rather than a new
