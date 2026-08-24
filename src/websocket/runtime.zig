@@ -511,7 +511,17 @@ fn appendTransportBytesPrecise(
         buffer.items.len,
         bytes.len,
     ) catch return error.OutOfMemory;
-    try buffer.ensureTotalCapacityPrecise(allocator, required);
+    if (required > buffer.capacity) {
+        // Socket reads frequently split one frame into a tiny header prefix and
+        // a payload suffix. Exact growth for each piece minimizes retained
+        // memory but needlessly reallocates twice. Round only within a bounded
+        // 256-byte slab: common small continuations reuse capacity while a 4
+        // KiB frame retains at most 255 bytes of slack rather than ArrayList's
+        // roughly 1.5x geometric over-allocation.
+        const slab: usize = 256;
+        const rounded = std.mem.alignForward(usize, required, slab);
+        try buffer.ensureTotalCapacityPrecise(allocator, rounded);
+    }
     buffer.appendSliceAssumeCapacity(bytes);
 }
 
@@ -4682,7 +4692,7 @@ test "WebSocket incoming message finalization frees failed payloads" {
     }, 1024));
 }
 
-test "WebSocket TCP receive storage grows to the exact delivered size" {
+test "WebSocket TCP receive storage uses bounded slab growth" {
     const allocator = std.testing.allocator;
     var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(allocator);
@@ -4690,17 +4700,40 @@ test "WebSocket TCP receive storage grows to the exact delivered size" {
     const first = [_]u8{0xaa} ** 4104;
     try appendTransportBytesPrecise(&buffer, allocator, &first);
     try std.testing.expectEqual(first.len, buffer.items.len);
-    try std.testing.expectEqual(first.len, buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 4352), buffer.capacity);
 
     buffer.clearRetainingCapacity();
     const small = [_]u8{0xbb} ** 7;
     try appendTransportBytesPrecise(&buffer, allocator, &small);
-    try std.testing.expectEqual(first.len, buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 4352), buffer.capacity);
 
     const extra = [_]u8{0xcc} ** 4098;
     try appendTransportBytesPrecise(&buffer, allocator, &extra);
     try std.testing.expectEqual(small.len + extra.len, buffer.items.len);
-    try std.testing.expectEqual(small.len + extra.len, buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 4352), buffer.capacity);
+
+    buffer.clearRetainingCapacity();
+    const large = [_]u8{0xdd} ** 20_001;
+    try appendTransportBytesPrecise(&buffer, allocator, &large);
+    try std.testing.expectEqual(large.len, buffer.items.len);
+    try std.testing.expect(buffer.capacity - large.len < 256);
+}
+
+fn checkWebSocketBoundedSlabGrowth(allocator: std.mem.Allocator) !void {
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+    try appendTransportBytesPrecise(&buffer, allocator, "header");
+    try appendTransportBytesPrecise(&buffer, allocator, "payload");
+    try std.testing.expectEqualStrings("headerpayload", buffer.items);
+    try std.testing.expect(buffer.capacity - buffer.items.len < 256);
+}
+
+test "WebSocket bounded slab growth is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkWebSocketBoundedSlabGrowth,
+        .{},
+    );
 }
 
 test "WebSocket runtimes reject duplicate close sends" {

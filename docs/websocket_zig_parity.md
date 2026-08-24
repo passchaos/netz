@@ -386,7 +386,13 @@ peer response.
    Netz therefore retained 12.6% less at peak and 14.4% less at report time at
    twice the earlier concurrency. It made 2,823 allocation calls versus 595,
    preserving the explicit trade-off: exact growth lowers resident memory but
-   intentionally performs more small allocator operations. Three matched
+   intentionally performs more small allocator operations. Receive growth now
+   rounds only to a bounded 256-byte slab. This coalesces the common split
+   frame-header/payload reads while retaining at most 255 bytes of slack per
+   connection, instead of returning to ArrayList's geometric over-allocation.
+   A 64-connection mixed smoke kept the same 1,095 allocation count but lowered
+   peak live bytes from 652,544 with a 512-byte slab prototype to 619,520; it
+   also reduced exact-growth event sizes from the earlier audit. Three matched
    256-connection runs were likewise byte-stable: netz used 2,290,692 peak and
    1,150,464 final live bytes versus websocket.zig's 2,528,794 peak and
    1,286,588 final bytes, reductions of 9.4% and 10.6% at the maximum supported
