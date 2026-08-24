@@ -351,7 +351,15 @@ CONNECT. This is stricter shutdown liveness than the audited websocket.zig
 close helper, which writes Close and closes the socket without waiting for a
 peer response. Both TCP/WSS and RFC 8441 close senders encode the bounded
 125-byte control payload in stack storage, avoiding a transient allocation at
-the shutdown boundary.
+the shutdown boundary. RFC 8441 now uses that fixed-buffer path for every Ping,
+Pong and Close frame, including automatic Pong and Close replies. A fresh H2
+tunnel no longer allocates or retains `send_frame_buffer` capacity merely to
+exchange control traffic; the reusable growable buffer remains for application
+and compressed messages. A real h2c test checks a client Ping, server Pong and
+bidirectional Close while both sides retain zero send-frame scratch. A
+CPU-0-pinned 4-KiB echo run after this change measured 33.075 us/roundtrip and
+236.20 logical MiB/s; this is a regression sample rather than a new
+cross-library comparison.
 
 ## Remaining evidence before a broad completion claim
 

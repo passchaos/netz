@@ -2250,6 +2250,27 @@ pub const H2Connection = struct {
             try std.Io.randomSecure(self.tunnel.connection.io, &key);
             break :blk key;
         } else null;
+        if (opcode.isControl()) {
+            // Control payloads are capped at 125 bytes by RFC 6455, so keep
+            // their complete frame on the stack. Besides avoiding first-use
+            // growth of send_frame_buffer, this prevents a large preceding
+            // application message from making tiny Ping/Pong/Close writes
+            // retain that larger allocation.
+            var encoded_storage: [websocket.max_frame_header_len + 125]u8 =
+                undefined;
+            const frame = try websocket.writeFrameInto(
+                &encoded_storage,
+                opcode,
+                payload,
+                .{
+                    .fin = fin,
+                    .mask_key = mask_key,
+                    .rsv1 = options.rsv1,
+                },
+            );
+            try self.tunnel.write(frame, opcode == .close);
+            return;
+        }
         self.send_frame_buffer.clearRetainingCapacity();
         const required = std.math.add(
             usize,
@@ -4208,6 +4229,78 @@ test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
     try std.testing.expectEqualStrings("h2-auto?", pong.payload);
     try ws_client.sendClose(.normal_closure, "bye");
     var close = try ws_client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP/2 control sends do not retain frame scratch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096, .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+        fn runFallible(server_ptr: *http2_runtime.Server) !void {
+            var h2 = try server_ptr.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
+                .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+            });
+            defer ws.close();
+            var ping = try ws.receiveFrame();
+            defer ping.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
+            try ws.sendPong(ping.payload);
+            try std.testing.expectEqual(@as(usize, 0), ws.send_frame_buffer.capacity);
+            var close = try ws.receiveFrameAuto();
+            defer close.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+            try std.testing.expectEqual(@as(usize, 0), ws.send_frame_buffer.capacity);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var h2_client = try http2_runtime.Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer h2_client.close();
+    var client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/control-stack",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendPing("stack");
+    try std.testing.expectEqual(@as(usize, 0), client.send_frame_buffer.capacity);
+    var pong = try client.receiveFrame();
+    defer pong.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
+    try std.testing.expectEqualStrings("stack", pong.payload);
+    try client.sendClose(.normal_closure, "bye");
+    try std.testing.expectEqual(@as(usize, 0), client.send_frame_buffer.capacity);
+    var close = try client.receiveFrame();
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
 
