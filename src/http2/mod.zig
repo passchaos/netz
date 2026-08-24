@@ -674,6 +674,7 @@ pub const ErrorCode = enum(u32) {
 };
 
 pub const PingPayload = struct {
+    pub const encoded_len = FrameHeader.encoded_len + 8;
     data: [8]u8,
 
     pub fn parse(frame: Frame) Error!PingPayload {
@@ -685,15 +686,27 @@ pub const PingPayload = struct {
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, data: [8]u8, ack: bool) Error!void {
         const start = list.items.len;
-        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 8);
-        list.items.len = start + FrameHeader.encoded_len + 8;
+        try list.ensureUnusedCapacity(allocator, encoded_len);
+        list.items.len += encoded_len;
+        _ = writeInto(list.items[start..][0..encoded_len], data, ack);
+    }
+
+    /// Encodes the complete frame into caller-owned storage. The returned
+    /// slice aliases `storage`, allowing control-plane sends to avoid a
+    /// temporary growable buffer.
+    pub fn writeInto(
+        storage: *[encoded_len]u8,
+        data: [8]u8,
+        ack: bool,
+    ) []const u8 {
         (FrameHeader{
             .length = 8,
             .frame_type = .ping,
             .flags = if (ack) 0x1 else 0,
             .stream_id = 0,
-        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
-        @memcpy(list.items[start + FrameHeader.encoded_len ..][0..8], &data);
+        }).writeInto(storage[0..FrameHeader.encoded_len]);
+        @memcpy(storage[FrameHeader.encoded_len..][0..8], &data);
+        return storage;
     }
 };
 
@@ -768,6 +781,7 @@ pub const GoAwayPayload = struct {
 };
 
 pub const WindowUpdatePayload = struct {
+    pub const encoded_len = FrameHeader.encoded_len + 4;
     stream_id: u31,
     increment: u31,
 
@@ -782,15 +796,32 @@ pub const WindowUpdatePayload = struct {
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, increment: u31) Error!void {
         if (increment == 0) return error.InvalidFrameSize;
         const start = list.items.len;
-        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 4);
-        list.items.len = start + FrameHeader.encoded_len + 4;
+        try list.ensureUnusedCapacity(allocator, encoded_len);
+        list.items.len += encoded_len;
+        _ = writeInto(list.items[start..][0..encoded_len], stream_id, increment) catch unreachable;
+    }
+
+    /// Encodes the complete frame into caller-owned storage. The returned
+    /// slice aliases `storage`; an invalid zero increment leaves it untouched.
+    pub fn writeInto(
+        storage: *[encoded_len]u8,
+        stream_id: u31,
+        increment: u31,
+    ) Error![]const u8 {
+        if (increment == 0) return error.InvalidFrameSize;
         (FrameHeader{
             .length = 4,
             .frame_type = .window_update,
             .flags = 0,
             .stream_id = stream_id,
-        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
-        std.mem.writeInt(u32, list.items[start + FrameHeader.encoded_len ..][0..4], @as(u32, increment), .big);
+        }).writeInto(storage[0..FrameHeader.encoded_len]);
+        std.mem.writeInt(
+            u32,
+            storage[FrameHeader.encoded_len..][0..4],
+            @as(u32, increment),
+            .big,
+        );
+        return storage;
     }
 };
 
@@ -2783,6 +2814,12 @@ test "HTTP/2 ping and goaway payload helpers" {
     try std.testing.expectEqual(@as(u8, 1), ping_frame.header.flags);
     const ping = try PingPayload.parse(ping_frame);
     try std.testing.expectEqualSlices(u8, &ping_data, &ping.data);
+    var ping_storage: [PingPayload.encoded_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        ping_bytes.items,
+        PingPayload.writeInto(&ping_storage, ping_data, true),
+    );
 
     var goaway_bytes: std.ArrayList(u8) = .empty;
     defer goaway_bytes.deinit(allocator);
@@ -2835,6 +2872,16 @@ test "HTTP/2 window update payload helper" {
     try std.testing.expectEqual(@as(u31, 3), update.stream_id);
     try std.testing.expectEqual(@as(u31, 1024), update.increment);
     try std.testing.expectError(error.InvalidFrameSize, WindowUpdatePayload.write(&encoded, allocator, 0, 0));
+    var storage: [WindowUpdatePayload.encoded_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        encoded.items,
+        try WindowUpdatePayload.writeInto(&storage, 3, 1024),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        WindowUpdatePayload.writeInto(&storage, 0, 0),
+    );
 }
 
 test "HTTP/2 RST_STREAM payload helper" {

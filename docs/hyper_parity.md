@@ -631,6 +631,19 @@ encoders: the fixed 13-byte RST_STREAM always stays on the stack, and common
 GOAWAY debug strings use a bounded 256-byte stack path with an exact heap
 fallback only for larger diagnostics. The public helpers retain ArrayList
 compatibility while wire-parity and short-buffer tests cover the direct form.
+The remaining fixed control helpers expose the same allocation-free boundary:
+PING encodes its complete 17-byte frame and WINDOW_UPDATE its complete 13-byte
+frame into exact caller-owned arrays. Their compatibility writers still grow
+the destination only once and encode directly into its final storage, while
+wire-parity tests and the zero-window-increment rejection cover the new API.
+The runtime already wrote these two frame types as a stack header plus borrowed
+payload, so it deliberately keeps that scatter/gather path rather than copying
+them into a second contiguous buffer. A pinned full h2c benchmark after this
+API addition measured 10.120 us for consecutive empty requests, 22.990 us for
+100-KiB requests, and 27.482 us per ten-request empty batch; these are a
+regression sample, not a claim that this helper-only addition accelerates the
+runtime. h2spec strict remains 147/147, and the bidirectional Hyper h2c/TLS
+keep-alive, cancellation and GOAWAY gate remains green.
 
 ## Remaining evidence
 
