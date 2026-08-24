@@ -637,47 +637,17 @@ pub fn topicAliasMaximum(properties: []const Property) ?u16 {
 }
 
 pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, properties: []const Property) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-
-    for (properties, 0..) |property, index| {
-        try validateProperty(property);
-        try validatePropertyNotDuplicate(property, properties[0..index]);
-        switch (property) {
-            .byte => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try encoded.append(allocator, p.value);
-            },
-            .two_byte => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try wire.appendInt(&encoded, allocator, u16, p.value, .big);
-            },
-            .four_byte => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try wire.appendInt(&encoded, allocator, u32, p.value, .big);
-            },
-            .varint => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try encodeRemainingLength(&encoded, allocator, p.value);
-            },
-            .binary => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try writeBinary(&encoded, allocator, p.value);
-            },
-            .utf8 => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try writeUtf8(&encoded, allocator, p.value);
-            },
-            .utf8_pair => |p| {
-                try encoded.append(allocator, @intFromEnum(p.id));
-                try writeUtf8(&encoded, allocator, p.key);
-                try writeUtf8(&encoded, allocator, p.value);
-            },
-        }
-    }
-
-    try encodeRemainingLength(list, allocator, encoded.items.len);
-    try list.appendSlice(allocator, encoded.items);
+    const original_len = list.items.len;
+    errdefer list.items.len = original_len;
+    const encoded_len = try propertiesEncodedLen(properties);
+    if (encoded_len > 268_435_455) return error.RemainingLengthTooLarge;
+    const wire_len = std.math.add(
+        usize,
+        remainingLengthEncodedLen(encoded_len),
+        encoded_len,
+    ) catch return error.IntegerOverflow;
+    try list.ensureUnusedCapacity(allocator, wire_len);
+    writePropertiesAssumeCapacity(list, properties, encoded_len);
 }
 
 fn propertyEncodedLen(property: Property) Error!usize {
@@ -2154,6 +2124,48 @@ test "MQTT PUBLISH direct encoding is allocation-free with exact capacity" {
                 .value = "bad\x00value",
             } }} },
         ),
+    );
+    try std.testing.expectEqual(preserved_len, encoded.items.len);
+}
+
+test "MQTT property writer reuses exact output capacity" {
+    const allocator = std.testing.allocator;
+    const properties = [_]Property{
+        .{ .byte = .{ .id = .payload_format_indicator, .value = 1 } },
+        .{ .two_byte = .{ .id = .topic_alias, .value = 7 } },
+        .{ .four_byte = .{ .id = .message_expiry_interval, .value = 9 } },
+        .{ .varint = .{ .id = .subscription_identifier, .value = 300 } },
+        .{ .binary = .{ .id = .correlation_data, .value = "bytes" } },
+        .{ .utf8 = .{ .id = .content_type, .value = "text/plain" } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "key", .value = "value" } },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeProperties(&encoded, allocator, &properties);
+    const expected = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(expected);
+    encoded.clearRetainingCapacity();
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try writeProperties(&encoded, no_alloc.allocator(), &properties);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, expected, encoded.items);
+    var cursor = wire.Cursor.init(encoded.items);
+    const decoded = try parseProperties(allocator, &cursor);
+    defer allocator.free(decoded);
+    try std.testing.expectEqual(properties.len, decoded.len);
+    try std.testing.expect(cursor.eof());
+
+    const preserved_len = encoded.items.len;
+    try std.testing.expectError(
+        error.InvalidProperty,
+        writeProperties(&encoded, allocator, &.{
+            .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
+            .{ .two_byte = .{ .id = .topic_alias, .value = 2 } },
+        }),
     );
     try std.testing.expectEqual(preserved_len, encoded.items.len);
 }

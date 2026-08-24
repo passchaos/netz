@@ -160,9 +160,11 @@ The broker hot path now retains each connection's encoded PUBLISH output
 buffer after first use. The codec prevalidates every property, computes the
 complete Remaining Length, reserves once, and writes fixed header, topic,
 Packet Identifier, every MQTT 5 property type and payload directly into that
-retained output. It no longer allocates temporary variable-header or property
-buffers; failing-allocator codec and socket tests prove warmed writes are
-allocation-free while parsing verifies exact wire parity.
+retained output. The shared property writer uses the same exact-length direct
+path for CONNECT, ACK, SUBSCRIBE and the other control packets. Neither layer
+allocates temporary variable-header or property buffers; failing-allocator
+codec and socket tests prove warmed writes are allocation-free while parsing
+verifies exact wire parity and invalid input leaves prior output unchanged.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
