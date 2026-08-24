@@ -619,6 +619,20 @@ block. Offset-based plans keep slices valid while scratch grows, and bounded
 decode still consumes incremental-indexing fields after an output limit so the
 connection table stays synchronized. Three pinned runs measured the new owned
 path at 1,246-1,253 ns for this seven-field benchmark.
+HTTP/2 receive paths now decode the overwhelmingly common END_HEADERS block
+directly from the buffered frame instead of first copying it into a temporary
+ArrayList. Fragmented HEADERS and PUSH_PROMISE sequences retain one assembly
+buffer per connection because each continuation read invalidates the previous
+frame borrow; consecutive fragmented round trips verify stable capacity and
+backing storage. A focused single-frame test verifies that this scratch remains
+entirely unallocated. The full 1,594-test suite, strict h2spec 147/147 run,
+bidirectional Hyper h2c/TLS gate, and h2 Push/1xx gate remain green. Five
+CPU-0 runs of the matched h2c matrix measured 9.555-9.920 us for consecutive
+empty requests, 10.051-10.498 us for 10-byte requests, 22.744-22.921 us for
+100-KiB requests, 25.630-25.815 us per ten-request empty batch, 1.658-1.707 ms
+for the ten-stream request-body batch, and 1.685-1.703 ms for the ten-stream
+1-MiB response batch. These are current regression ranges; the dated matched
+Hyper comparison above remains the cross-stack evidence.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

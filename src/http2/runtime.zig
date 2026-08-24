@@ -1275,6 +1275,10 @@ pub const Connection = struct {
     response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
+    /// Reassembles only fragmented HEADERS/PUSH_PROMISE blocks. A single-frame
+    /// block is decoded directly from frame-reader storage, avoiding this copy
+    /// on the common path while retaining capacity for later continuations.
+    header_block_scratch: std.ArrayList(u8) = .empty,
     write_batch: std.ArrayList(u8) = .empty,
     batch_data_headers: std.ArrayList(
         [http2.FrameHeader.encoded_len]u8,
@@ -1359,6 +1363,7 @@ pub const Connection = struct {
         self.alternative_service_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
+        self.header_block_scratch.deinit(self.allocator);
         self.write_batch.deinit(self.allocator);
         self.batch_data_headers.deinit(self.allocator);
         self.batch_data_parts.deinit(self.allocator);
@@ -6500,33 +6505,40 @@ pub const Connection = struct {
         frame: http2.Frame,
     ) Error!void {
         const promise = try self.validatePushPromiseForClientStream(frame);
-        var block: std.ArrayList(u8) = .empty;
-        defer block.deinit(self.allocator);
-        try block.appendSlice(self.allocator, promise.header_block);
         var flags = frame.header.flags;
-        var continuation_count: usize = 0;
-        const max_continuations = self.maxContinuationFrames();
-        while ((flags & flag_end_headers) == 0) {
-            var continuation = try self.readOwnedFrame();
-            defer continuation.deinit(self.allocator);
-            if (continuation.frame.header.frame_type != .continuation or
-                continuation.frame.header.stream_id != promise.stream_id)
-            {
-                return error.UnexpectedFrame;
-            }
-            continuation_count += 1;
-            if (continuation_count > max_continuations) {
-                return error.MessageTooLarge;
-            }
-            try block.appendSlice(
+        const block = if ((flags & flag_end_headers) != 0)
+            promise.header_block
+        else blk: {
+            self.header_block_scratch.clearRetainingCapacity();
+            try self.header_block_scratch.appendSlice(
                 self.allocator,
-                continuation.frame.payload,
+                promise.header_block,
             );
-            flags = continuation.frame.header.flags;
-        }
+            var continuation_count: usize = 0;
+            const max_continuations = self.maxContinuationFrames();
+            while ((flags & flag_end_headers) == 0) {
+                var continuation = try self.readOwnedFrame();
+                defer continuation.deinit(self.allocator);
+                if (continuation.frame.header.frame_type != .continuation or
+                    continuation.frame.header.stream_id != promise.stream_id)
+                {
+                    return error.UnexpectedFrame;
+                }
+                continuation_count += 1;
+                if (continuation_count > max_continuations) {
+                    return error.MessageTooLarge;
+                }
+                try self.header_block_scratch.appendSlice(
+                    self.allocator,
+                    continuation.frame.payload,
+                );
+                flags = continuation.frame.header.flags;
+            }
+            break :blk self.header_block_scratch.items;
+        };
         const headers = try decodeOwnedHeaders(
             self.allocator,
-            block.items,
+            block,
             self.limits,
             &self.hpack_decoder,
         );
@@ -6942,29 +6954,52 @@ pub const Connection = struct {
         if (first_headers.priority) |priority| {
             if (priority.stream_dependency == first.header.stream_id) return error.InvalidFrame;
         }
-        var block: std.ArrayList(u8) = .empty;
-        defer block.deinit(self.allocator);
-        try block.appendSlice(self.allocator, first_headers.header_block);
-        if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
-
         var flags = first.header.flags;
-        var continuation_count: usize = 0;
-        const max_continuations = self.maxContinuationFrames();
-        while ((flags & flag_end_headers) == 0) {
-            var frame = try self.readOwnedFrame();
-            defer frame.deinit(self.allocator);
-            if (frame.frame.header.frame_type != .continuation or frame.frame.header.stream_id != first.header.stream_id) {
-                return error.UnexpectedFrame;
+        const block = if ((flags & flag_end_headers) != 0)
+            first_headers.header_block
+        else blk: {
+            self.header_block_scratch.clearRetainingCapacity();
+            try self.header_block_scratch.appendSlice(
+                self.allocator,
+                first_headers.header_block,
+            );
+            if (self.header_block_scratch.items.len >
+                self.limits.max_frame_payload *
+                    @as(usize, self.limits.max_header_fields + 1))
+            {
+                return error.MessageTooLarge;
             }
-            continuation_count += 1;
-            if (continuation_count > max_continuations) return error.MessageTooLarge;
-            try block.appendSlice(self.allocator, frame.frame.payload);
-            if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
-            flags = frame.frame.header.flags;
-        }
+            var continuation_count: usize = 0;
+            const max_continuations = self.maxContinuationFrames();
+            while ((flags & flag_end_headers) == 0) {
+                var frame = try self.readOwnedFrame();
+                defer frame.deinit(self.allocator);
+                if (frame.frame.header.frame_type != .continuation or
+                    frame.frame.header.stream_id != first.header.stream_id)
+                {
+                    return error.UnexpectedFrame;
+                }
+                continuation_count += 1;
+                if (continuation_count > max_continuations) {
+                    return error.MessageTooLarge;
+                }
+                try self.header_block_scratch.appendSlice(
+                    self.allocator,
+                    frame.frame.payload,
+                );
+                if (self.header_block_scratch.items.len >
+                    self.limits.max_frame_payload *
+                        @as(usize, self.limits.max_header_fields + 1))
+                {
+                    return error.MessageTooLarge;
+                }
+                flags = frame.frame.header.flags;
+            }
+            break :blk self.header_block_scratch.items;
+        };
         return decodeOwnedHeaders(
             self.allocator,
-            block.items,
+            block,
             self.limits,
             &self.hpack_decoder,
         );
@@ -11132,6 +11167,10 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("/continuation", request.path);
             try std.testing.expectEqualStrings(expected, findHeader(request.headers, "x-long").?);
+            const scratch_capacity = connection.header_block_scratch.capacity;
+            const scratch_ptr = connection.header_block_scratch
+                .allocatedSlice().ptr;
+            try std.testing.expect(scratch_capacity != 0);
 
             try connection.writeResponse(request.stream_id, .{
                 .status = 200,
@@ -11140,6 +11179,28 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
                     .{ .name = "x-long-response", .value = expected },
                 },
                 .body = "ok",
+            });
+
+            var second = try connection.readRequest();
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings(
+                "/continuation-two",
+                second.path,
+            );
+            try std.testing.expectEqualStrings(
+                expected,
+                findHeader(second.headers, "x-long").?,
+            );
+            try std.testing.expectEqual(
+                scratch_capacity,
+                connection.header_block_scratch.capacity,
+            );
+            try std.testing.expectEqual(
+                scratch_ptr,
+                connection.header_block_scratch.allocatedSlice().ptr,
+            );
+            try connection.writeResponse(second.stream_id, .{
+                .status = 204,
             });
         }
     };
@@ -11161,12 +11222,59 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
     });
     defer response.deinit(allocator);
 
-    thread.join();
-    if (shared.err) |err| return err;
-
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
     try std.testing.expectEqualStrings(long_header_value, findHeader(response.headers, "x-long-response").?);
+
+    var second = try client.request(.{
+        .method = "GET",
+        .path = "/continuation-two",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "x-long", .value = long_header_value }},
+    });
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), second.status);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 single-frame HEADERS bypass continuation scratch" {
+    const allocator = std.testing.allocator;
+    var encoder = http2.Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/single" },
+        .{ .name = ":scheme", .value = "http" },
+    });
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.hpack_decoder.deinit(allocator);
+        connection.header_block_scratch.deinit(allocator);
+    }
+    const headers = try connection.readHeaderBlock(.{
+        .header = .{
+            .length = @intCast(block.items.len),
+            .frame_type = .headers,
+            .flags = flag_end_headers | flag_end_stream,
+            .stream_id = 1,
+        },
+        .payload = block.items,
+    });
+    defer freeHeaders(allocator, headers);
+    try std.testing.expectEqualStrings("/single", findHeader(headers, ":path").?);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.header_block_scratch.capacity,
+    );
 }
 
 test "HTTP/2 runtime bounds CONTINUATION frame chains" {
