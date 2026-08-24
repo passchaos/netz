@@ -192,8 +192,8 @@ fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
 Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
-green. A CPU-0-pinned WebSocket QoS 1 regression run measured 10.833 us per
-1-KiB PUBLISH/PUBACK and 92,304 operations/s; this checks the shared transport
+green. A CPU-0-pinned WebSocket QoS 1 regression run measured 11.077 us per
+1-KiB PUBLISH/PUBACK and 90,274 operations/s; this checks the shared transport
 rather than isolating PING throughput.
 Property-free DISCONNECT now follows the same design: normal shutdown uses its
 canonical two bytes and an MQTT 5 error reason uses three bytes, both from
@@ -215,6 +215,14 @@ for connection refusals that should remain reportable under allocator
 pressure. A fail-first TCP test sends exact MQTT 5 and 3.1.1 refusal packets.
 Accepted MQTT 5 sessions retain the general encoder whenever negotiated
 capabilities need to be advertised.
+All variable-size runtime control writers now share the connection's retained
+packet buffer rather than allocating and freeing a temporary list per send. A
+second retained property-list scratch covers generated CONNACK capabilities
+and Request Problem Information filtering. A real TCP regression warms and
+then replays property-bearing CONNACK, PUBACK, SUBACK, UNSUBACK, DISCONNECT,
+and AUTH under a fail-first allocator, comparing every replay packet with its
+warmup bytes. PUBLISH continues to use the same packet scratch, while the fixed
+control encoders above bypass it entirely.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload

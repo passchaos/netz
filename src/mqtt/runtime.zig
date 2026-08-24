@@ -695,7 +695,15 @@ pub const Connection = struct {
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     assigned_client_id: ?[]u8 = null,
     authentication: auth_runtime.State = .{},
+    /// Shared packet-output storage. MQTT writes are synchronous and a
+    /// Connection permits only one writer at a time, so control packets and
+    /// PUBLISH can safely reuse one allocation instead of maintaining a
+    /// separate growable buffer per operation.
     write_scratch: std.ArrayList(u8) = .empty,
+    /// Scratch for synthesized or filtered properties used only while the
+    /// corresponding packet is encoded. Property values remain borrowed from
+    /// the caller or connection state and are never retained here.
+    write_property_scratch: std.ArrayList(mqtt.Property) = .empty,
     pending_ping_packets: std.ArrayList(OwnedPacket) = .empty,
     pending_ping_packet_head: usize = 0,
     /// One packet already removed from the wire is retained after a queue-cap
@@ -811,6 +819,7 @@ pub const Connection = struct {
         }
         self.authentication.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
+        self.write_property_scratch.deinit(self.allocator);
         for (self.pending_ping_packets.items[self.pending_ping_packet_head..]) |*packet| {
             packet.deinit(self.allocator);
         }
@@ -923,18 +932,16 @@ pub const Connection = struct {
         // allocator before that move so deferred temporary cleanup never reads
         // the deliberately undefined moved-from connection.
         const allocator = self.allocator;
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(allocator);
-        var connect_properties: std.ArrayList(mqtt.Property) = .empty;
-        defer connect_properties.deinit(allocator);
-        try connect_properties.appendSlice(
+        self.write_scratch.clearRetainingCapacity();
+        self.write_property_scratch.clearRetainingCapacity();
+        try self.write_property_scratch.appendSlice(
             allocator,
             options.properties,
         );
         if (options.protocol == .v5 and
             mqtt.receiveMaximum(options.properties) == null)
         {
-            try connect_properties.append(
+            try self.write_property_scratch.append(
                 allocator,
                 .{ .two_byte = .{
                     .id = .receive_maximum,
@@ -946,7 +953,7 @@ pub const Connection = struct {
             mqtt.maximumPacketSize(options.properties) == null and
             options.limits.max_packet_size <= std.math.maxInt(u32))
         {
-            try connect_properties.append(
+            try self.write_property_scratch.append(
                 allocator,
                 .{ .four_byte = .{
                     .id = .maximum_packet_size,
@@ -956,27 +963,27 @@ pub const Connection = struct {
         }
         if (options.protocol == .v5) {
             try appendTopicAliasMaximumSetting(
-                &connect_properties,
+                &self.write_property_scratch,
                 allocator,
                 options.properties,
                 options.topic_alias_maximum,
             );
             self.max_incoming_inflight =
-                mqtt.receiveMaximum(connect_properties.items) orelse
+                mqtt.receiveMaximum(self.write_property_scratch.items) orelse
                 self.max_incoming_inflight;
             self.incoming_topic_alias_maximum =
-                mqtt.topicAliasMaximum(connect_properties.items) orelse
+                mqtt.topicAliasMaximum(self.write_property_scratch.items) orelse
                 self.incoming_topic_alias_maximum;
         }
         try mqtt.writeConnectPacket(
-            &encoded,
+            &self.write_scratch,
             allocator,
             options.protocol,
             .{
                 .client_id = options.client_id,
                 .clean_start = options.clean_start,
                 .keep_alive_seconds = options.keep_alive_seconds,
-                .properties = connect_properties.items,
+                .properties = self.write_property_scratch.items,
                 .will = options.will,
                 .username = options.username,
                 .password = options.password,
@@ -984,9 +991,9 @@ pub const Connection = struct {
         );
         try self.authentication.beginConnect(
             allocator,
-            connect_properties.items,
+            self.write_property_scratch.items,
         );
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
         const auth_handler = options.authentication;
         var auth_rounds: usize = 0;
         const connect_deadline = if (options.connect_timeout) |timeout| blk: {
@@ -1115,25 +1122,27 @@ pub const Connection = struct {
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
-        var properties: std.ArrayList(mqtt.Property) = .empty;
-        defer properties.deinit(self.allocator);
-        try properties.appendSlice(self.allocator, options.properties);
+        self.write_property_scratch.clearRetainingCapacity();
+        try self.write_property_scratch.appendSlice(
+            self.allocator,
+            options.properties,
+        );
         // Negotiated capabilities describe an accepted connection. On a
         // refusal, preserve only caller-supplied diagnostic properties so a
         // bare error CONNACK stays byte-compatible with common brokers.
         const accepted = options.reason_code == 0;
         if (accepted and self.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
-            try properties.append(self.allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
+            try self.write_property_scratch.append(self.allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
         }
         if (accepted and self.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and self.limits.max_packet_size <= std.math.maxInt(u32)) {
-            try properties.append(self.allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(self.limits.max_packet_size) } });
+            try self.write_property_scratch.append(self.allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(self.limits.max_packet_size) } });
         }
         if (accepted and self.protocol == .v5) {
-            try appendTopicAliasMaximumSetting(&properties, self.allocator, options.properties, options.topic_alias_maximum);
+            try appendTopicAliasMaximumSetting(&self.write_property_scratch, self.allocator, options.properties, options.topic_alias_maximum);
         }
         if (accepted and self.protocol == .v5 and mqtt.serverKeepAlive(options.properties) == null) {
             if (options.server_keep_alive_seconds) |keep_alive| {
-                try properties.append(self.allocator, .{ .two_byte = .{ .id = .server_keep_alive, .value = keep_alive } });
+                try self.write_property_scratch.append(self.allocator, .{ .two_byte = .{ .id = .server_keep_alive, .value = keep_alive } });
             }
         }
         if (accepted and self.protocol == .v5 and mqtt.maximumQoS(options.properties) == null) {
@@ -1142,26 +1151,25 @@ pub const Connection = struct {
                 // or QoS 1.  QoS 2 support is the default, so do not encode the
                 // property when the configured maximum is exactly_once.
                 if (maximum_qos != .exactly_once) {
-                    try properties.append(self.allocator, .{ .byte = .{ .id = .maximum_qos, .value = @intFromEnum(maximum_qos) } });
+                    try self.write_property_scratch.append(self.allocator, .{ .byte = .{ .id = .maximum_qos, .value = @intFromEnum(maximum_qos) } });
                 }
             }
         }
         if (accepted and self.protocol == .v5 and mqtt.retainAvailable(options.properties) == null and !options.retain_available) {
-            try properties.append(self.allocator, .{ .byte = .{ .id = .retain_available, .value = 0 } });
+            try self.write_property_scratch.append(self.allocator, .{ .byte = .{ .id = .retain_available, .value = 0 } });
         }
         if (accepted and self.protocol == .v5 and mqtt.wildcardSubscriptionAvailable(options.properties) == null and !options.wildcard_subscription_available) {
-            try properties.append(self.allocator, .{ .byte = .{ .id = .wildcard_subscription_available, .value = 0 } });
+            try self.write_property_scratch.append(self.allocator, .{ .byte = .{ .id = .wildcard_subscription_available, .value = 0 } });
         }
         if (accepted and self.protocol == .v5 and mqtt.subscriptionIdentifierAvailable(options.properties) == null and !options.subscription_identifier_available) {
-            try properties.append(self.allocator, .{ .byte = .{ .id = .subscription_identifier_available, .value = 0 } });
+            try self.write_property_scratch.append(self.allocator, .{ .byte = .{ .id = .subscription_identifier_available, .value = 0 } });
         }
         if (accepted and self.protocol == .v5 and mqtt.sharedSubscriptionAvailable(options.properties) == null and !options.shared_subscription_available) {
-            try properties.append(self.allocator, .{ .byte = .{ .id = .shared_subscription_available, .value = 0 } });
+            try self.write_property_scratch.append(self.allocator, .{ .byte = .{ .id = .shared_subscription_available, .value = 0 } });
         }
         var fixed_storage: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        const bytes = if (properties.items.len == 0)
+        self.write_scratch.clearRetainingCapacity();
+        const bytes = if (self.write_property_scratch.items.len == 0)
             try mqtt.ConnAck.writeNoPropertiesInto(
                 &fixed_storage,
                 self.protocol,
@@ -1170,14 +1178,14 @@ pub const Connection = struct {
             )
         else blk: {
             try mqtt.ConnAck.write(
-                &encoded,
+                &self.write_scratch,
                 self.allocator,
                 self.protocol,
                 options.session_present,
                 options.reason_code,
-                properties.items,
+                self.write_property_scratch.items,
             );
-            break :blk encoded.items;
+            break :blk self.write_scratch.items;
         };
         try self.writePacket(bytes);
         self.local_maximum_qos = options.maximum_qos orelse .exactly_once;
@@ -1188,15 +1196,15 @@ pub const Connection = struct {
             // broker enforces inactivity rather than merely advertising the
             // value to the client.
             self.keep_alive_seconds = mqtt.serverKeepAlive(
-                properties.items,
+                self.write_property_scratch.items,
             ) orelse self.keep_alive_seconds;
-            self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
-            self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(properties.items) orelse self.incoming_topic_alias_maximum;
-            self.local_maximum_qos = mqtt.maximumQoS(properties.items) orelse self.local_maximum_qos;
-            self.local_retain_available = mqtt.retainAvailable(properties.items) orelse self.local_retain_available;
-            self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(properties.items) orelse options.wildcard_subscription_available;
-            self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(properties.items) orelse options.subscription_identifier_available;
-            self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(properties.items) orelse options.shared_subscription_available;
+            self.max_incoming_inflight = mqtt.receiveMaximum(self.write_property_scratch.items) orelse self.max_incoming_inflight;
+            self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(self.write_property_scratch.items) orelse self.incoming_topic_alias_maximum;
+            self.local_maximum_qos = mqtt.maximumQoS(self.write_property_scratch.items) orelse self.local_maximum_qos;
+            self.local_retain_available = mqtt.retainAvailable(self.write_property_scratch.items) orelse self.local_retain_available;
+            self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(self.write_property_scratch.items) orelse options.wildcard_subscription_available;
+            self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(self.write_property_scratch.items) orelse options.subscription_identifier_available;
+            self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(self.write_property_scratch.items) orelse options.shared_subscription_available;
         }
     }
 
@@ -1525,10 +1533,9 @@ pub const Connection = struct {
     }
 
     fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
-        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
-        defer filtered_properties.deinit(self.allocator);
+        self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
-            &filtered_properties,
+            &self.write_property_scratch,
             packet_type,
             properties,
         );
@@ -1543,10 +1550,9 @@ pub const Connection = struct {
                 reason_code,
             );
         }
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
+        self.write_scratch.clearRetainingCapacity();
         try mqtt.AckPacket.write(
-            &encoded,
+            &self.write_scratch,
             self.allocator,
             self.protocol,
             packet_type,
@@ -1554,16 +1560,15 @@ pub const Connection = struct {
             reason_code,
             outgoing_properties,
         );
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
     }
 
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
         try self.validateOutgoingSubscribe(subscriptions, options.properties);
         const packet_id = self.nextPacketId();
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try mqtt.Subscribe.write(&encoded, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
-        try self.writePacket(encoded.items);
+        self.write_scratch.clearRetainingCapacity();
+        try mqtt.Subscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
+        try self.writePacket(self.write_scratch.items);
 
         var suback = try self.readSubAck();
         errdefer suback.deinit(self.allocator);
@@ -1584,24 +1589,22 @@ pub const Connection = struct {
     }
 
     pub fn writeSubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
-        defer filtered_properties.deinit(self.allocator);
+        self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
-            &filtered_properties,
+            &self.write_property_scratch,
             .suback,
             properties,
         );
+        self.write_scratch.clearRetainingCapacity();
         try mqtt.SubAck.write(
-            &encoded,
+            &self.write_scratch,
             self.allocator,
             self.protocol,
             packet_id,
             outgoing_properties,
             reason_codes,
         );
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
     }
 
     pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
@@ -1615,10 +1618,9 @@ pub const Connection = struct {
 
     pub fn unsubscribe(self: *Connection, topic_filters: []const []const u8, options: UnsubscribeOptions) Error!OwnedUnsubAck {
         const packet_id = self.nextPacketId();
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try mqtt.Unsubscribe.write(&encoded, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
-        try self.writePacket(encoded.items);
+        self.write_scratch.clearRetainingCapacity();
+        try mqtt.Unsubscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
+        try self.writePacket(self.write_scratch.items);
 
         var unsuback = try self.readUnsubAck();
         errdefer unsuback.deinit(self.allocator);
@@ -1636,24 +1638,22 @@ pub const Connection = struct {
     }
 
     pub fn writeUnsubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
-        defer filtered_properties.deinit(self.allocator);
+        self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
-            &filtered_properties,
+            &self.write_property_scratch,
             .unsuback,
             properties,
         );
+        self.write_scratch.clearRetainingCapacity();
         try mqtt.UnsubAck.write(
-            &encoded,
+            &self.write_scratch,
             self.allocator,
             self.protocol,
             packet_id,
             outgoing_properties,
             reason_codes,
         );
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
     }
 
     pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
@@ -1748,16 +1748,15 @@ pub const Connection = struct {
                 ),
             );
         }
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
+        self.write_scratch.clearRetainingCapacity();
         try mqtt.Disconnect.write(
-            &encoded,
+            &self.write_scratch,
             self.allocator,
             self.protocol,
             reason_code,
             properties,
         );
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
     }
 
     pub fn readDisconnect(self: *Connection) Error!OwnedDisconnect {
@@ -1770,10 +1769,9 @@ pub const Connection = struct {
     }
 
     pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
-        var filtered_properties: std.ArrayList(mqtt.Property) = .empty;
-        defer filtered_properties.deinit(self.allocator);
+        self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
-            &filtered_properties,
+            &self.write_property_scratch,
             .auth,
             properties,
         );
@@ -1785,16 +1783,15 @@ pub const Connection = struct {
                 reason_code,
             ));
         }
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
+        self.write_scratch.clearRetainingCapacity();
         try mqtt.Auth.write(
-            &encoded,
+            &self.write_scratch,
             self.allocator,
             self.protocol,
             reason_code,
             outgoing_properties,
         );
-        try self.writePacket(encoded.items);
+        try self.writePacket(self.write_scratch.items);
     }
 
     /// Apply the CONNECT Request Problem Information preference to outbound
@@ -3503,6 +3500,143 @@ test "MQTT publish encoding reuses connection scratch" {
         connection.write_scratch.allocatedSlice().ptr,
     );
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "MQTT variable control writes reuse connection scratch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+    };
+    defer connection.write_scratch.deinit(allocator);
+    defer connection.write_property_scratch.deinit(allocator);
+    var peer = PacketTransport.initTcp(io, server_stream);
+
+    const diagnostic_properties = [_]mqtt.Property{
+        .{ .utf8 = .{
+            .id = .reason_string,
+            .value = "diagnostic reason",
+        } },
+        .{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "trace",
+            .value = "control-writer",
+        } },
+    };
+    const disconnect_properties = [_]mqtt.Property{
+        .{ .utf8 = .{
+            .id = .server_reference,
+            .value = "mqtt.example.test",
+        } },
+    };
+    const auth_properties = [_]mqtt.Property{
+        .{ .utf8 = .{
+            .id = .authentication_method,
+            .value = "SCRAM-SHA-256",
+        } },
+        .{ .binary = .{
+            .id = .authentication_data,
+            .value = "server-final",
+        } },
+    };
+    const suback_reasons = [_]u8{ 0x00, 0x01 };
+    const unsuback_reasons = [_]u8{ 0x00, 0x11 };
+
+    // First pass establishes the maximum output/property capacities used by
+    // this sequence. Owned peer packets remain the byte-for-byte oracle for
+    // the second pass, independent of codec implementation details.
+    try connection.writeConnAck(.{});
+    var expected_connack = try peer.readPacket(allocator, 4096);
+    defer expected_connack.deinit(allocator);
+    try connection.writePubAckWithProperties(
+        1,
+        0x80,
+        &diagnostic_properties,
+    );
+    var expected_puback = try peer.readPacket(allocator, 4096);
+    defer expected_puback.deinit(allocator);
+    try connection.writeSubAck(
+        2,
+        &suback_reasons,
+        &diagnostic_properties,
+    );
+    var expected_suback = try peer.readPacket(allocator, 4096);
+    defer expected_suback.deinit(allocator);
+    try connection.writeUnsubAck(
+        3,
+        &unsuback_reasons,
+        &diagnostic_properties,
+    );
+    var expected_unsuback = try peer.readPacket(allocator, 4096);
+    defer expected_unsuback.deinit(allocator);
+    try connection.writeDisconnectWithProperties(
+        0x9c,
+        &disconnect_properties,
+    );
+    var expected_disconnect = try peer.readPacket(allocator, 4096);
+    defer expected_disconnect.deinit(allocator);
+    try connection.writeAuth(0x18, &auth_properties);
+    var expected_auth = try peer.readPacket(allocator, 4096);
+    defer expected_auth.deinit(allocator);
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = failing.allocator();
+    try connection.writeConnAck(.{});
+    try connection.writePubAckWithProperties(
+        1,
+        0x80,
+        &diagnostic_properties,
+    );
+    try connection.writeSubAck(
+        2,
+        &suback_reasons,
+        &diagnostic_properties,
+    );
+    try connection.writeUnsubAck(
+        3,
+        &unsuback_reasons,
+        &diagnostic_properties,
+    );
+    try connection.writeDisconnectWithProperties(
+        0x9c,
+        &disconnect_properties,
+    );
+    try connection.writeAuth(0x18, &auth_properties);
+    try std.testing.expect(!failing.has_induced_failure);
+
+    const expected_packets = [_][]const u8{
+        expected_connack.bytes,
+        expected_puback.bytes,
+        expected_suback.bytes,
+        expected_unsuback.bytes,
+        expected_disconnect.bytes,
+        expected_auth.bytes,
+    };
+    for (expected_packets) |expected| {
+        var actual = try peer.readPacket(allocator, 4096);
+        defer actual.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, expected, actual.bytes);
+    }
 }
 
 test "MQTT runtime enforces incoming maximum packet size on full frame" {
