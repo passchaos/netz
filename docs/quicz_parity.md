@@ -114,6 +114,21 @@ and is conservatively 1.08-1.45x faster across all four scenarios without unit
 normalization. Its loss mode reports exact injected and transport-observed loss
 and can wrap the full run in allocator telemetry.
 
+The server's Version Negotiation hot path also avoids allocator churn from
+unauthenticated UDP triggers. The packet codec exposes exact validated sizing
+and caller-buffer encoding; the endpoint writes the common response into a
+256-byte stack buffer and allocates exactly once only for unusually large
+advertised version lists. The owning compatibility API now allocates the exact
+result directly instead of growing an ArrayList and converting it to another
+allocation. A failing-allocator UDP test proves the common two-version response
+is sent and parsed without heap use, while wire-parity and short-buffer tests
+cover the public direct encoder.
+The full quic-go and s2n-quic transport matrices remain green after this
+change, including QUIC v1/v2, forced Retry, flow control, resets, cancellation
+retransmission, key update, migration, NAT rebinding, and peer close. Those
+gates do not themselves send an unsupported-version trigger, so the dedicated
+real-UDP Version Negotiation test remains the direct evidence for this path.
+
 The old values share a host and aggregate transfer shape but not a controlled
 CPU layout. A fresh CPU-0-pinned quicz run produced 15.97/16.12 MB/s because
 both same-process endpoints contend for one CPU; a matching netz raw probe was

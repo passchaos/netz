@@ -235,6 +235,20 @@ pub fn writeVersionNegotiationPacket(
     allocator: std.mem.Allocator,
     options: VersionNegotiationPacketOptions,
 ) Error!void {
+    const total_len = try versionNegotiationPacketLen(options);
+    const start = list.items.len;
+    try list.ensureUnusedCapacity(allocator, total_len);
+    list.items.len += total_len;
+    _ = writeVersionNegotiationPacketInto(
+        list.items[start..][0..total_len],
+        options,
+    ) catch unreachable;
+}
+
+/// Return the exact wire length after validating every packet field.
+pub fn versionNegotiationPacketLen(
+    options: VersionNegotiationPacketOptions,
+) Error!usize {
     if ((options.first_byte & 0x80) == 0) return error.InvalidVersionNegotiation;
     try validatePacketConnectionIdLen(options.destination_connection_id.len);
     try validatePacketConnectionIdLen(options.source_connection_id.len);
@@ -248,14 +262,38 @@ pub fn writeVersionNegotiationPacket(
     total_len = try addWireLen(total_len, options.destination_connection_id.len);
     total_len = try addWireLen(total_len, options.source_connection_id.len);
     total_len = try addWireLen(total_len, versions_len);
-    try list.ensureUnusedCapacity(allocator, total_len);
-    list.appendAssumeCapacity(options.first_byte);
-    appendU32AssumeCapacity(list, Version.negotiation.wireValue());
-    list.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
-    list.appendSliceAssumeCapacity(options.destination_connection_id);
-    list.appendAssumeCapacity(@intCast(options.source_connection_id.len));
-    list.appendSliceAssumeCapacity(options.source_connection_id);
-    for (options.versions) |version| appendU32AssumeCapacity(list, version);
+    return total_len;
+}
+
+/// Encode a complete Version Negotiation packet into caller-owned storage.
+/// All fields and the destination size are validated before the first byte is
+/// written, so callers may safely retry with a larger buffer after failure.
+pub fn writeVersionNegotiationPacketInto(
+    storage: []u8,
+    options: VersionNegotiationPacketOptions,
+) Error![]const u8 {
+    const total_len = try versionNegotiationPacketLen(options);
+    if (storage.len < total_len) return error.BufferTooShort;
+
+    var offset: usize = 0;
+    storage[offset] = options.first_byte;
+    offset += 1;
+    std.mem.writeInt(u32, storage[offset..][0..4], Version.negotiation.wireValue(), .big);
+    offset += 4;
+    storage[offset] = @intCast(options.destination_connection_id.len);
+    offset += 1;
+    @memcpy(storage[offset..][0..options.destination_connection_id.len], options.destination_connection_id);
+    offset += options.destination_connection_id.len;
+    storage[offset] = @intCast(options.source_connection_id.len);
+    offset += 1;
+    @memcpy(storage[offset..][0..options.source_connection_id.len], options.source_connection_id);
+    offset += options.source_connection_id.len;
+    for (options.versions) |version| {
+        std.mem.writeInt(u32, storage[offset..][0..4], version, .big);
+        offset += 4;
+    }
+    std.debug.assert(offset == total_len);
+    return storage[0..total_len];
 }
 
 pub fn parseRetryPacket(bytes: []const u8) Error!RetryPacket {
@@ -2601,6 +2639,42 @@ test "QUIC version negotiation packet roundtrip" {
     try std.testing.expectEqualSlices(u8, &dcid, parsed.destination_connection_id);
     try std.testing.expectEqualSlices(u8, &scid, parsed.source_connection_id);
     try std.testing.expectEqualSlices(u32, &versions, parsed.versions);
+
+    const options: VersionNegotiationPacketOptions = .{
+        .first_byte = 0xf0,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .versions = &versions,
+    };
+    var direct_storage: [64]u8 = undefined;
+    const direct = try writeVersionNegotiationPacketInto(
+        &direct_storage,
+        options,
+    );
+    try std.testing.expectEqual(
+        encoded.items.len,
+        try versionNegotiationPacketLen(options),
+    );
+    try std.testing.expectEqualSlices(u8, encoded.items, direct);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        writeVersionNegotiationPacketInto(
+            direct_storage[0 .. direct.len - 1],
+            options,
+        ),
+    );
+    var no_alloc_list = std.ArrayList(u8).initBuffer(&direct_storage);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try writeVersionNegotiationPacket(
+        &no_alloc_list,
+        no_alloc.allocator(),
+        options,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, encoded.items, no_alloc_list.items);
 
     try std.testing.expectError(error.InvalidVersionNegotiation, writeVersionNegotiationPacket(&encoded, allocator, .{
         .destination_connection_id = &dcid,
