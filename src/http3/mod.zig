@@ -2865,14 +2865,39 @@ fn writeHeadersFrameDynamic(
     stream_id: u64,
     encoder: anytype,
 ) Error!void {
-    var block: std.ArrayList(u8) = .empty;
-    defer block.deinit(allocator);
-    try encoder.encodeFieldSection(&block, stream_id, fields);
-    try (Frame{
-        .frame_type = FrameType.headers,
-        .payload = block.items,
-        .consumed = 0,
-    }).write(list, allocator);
+    const original_len = list.items.len;
+    errdefer list.shrinkRetainingCapacity(original_len);
+    // QPACK exposes an append-oriented encoder. Reserve the maximum two-varint
+    // HTTP/3 frame header before encoding the block, then close the gap once
+    // its exact size is known. This keeps one reusable allocation and avoids a
+    // second temporary ArrayList for every dynamic HEADERS section.
+    const max_header_len: usize = 16;
+    try list.ensureUnusedCapacity(allocator, max_header_len);
+    const payload_start = original_len + max_header_len;
+    list.items.len = payload_start;
+    try encoder.encodeFieldSection(list, stream_id, fields);
+    const payload_len = list.items.len - payload_start;
+    var header_storage: [max_header_len]u8 = undefined;
+    var header = std.ArrayList(u8).initBuffer(&header_storage);
+    var fixed = std.heap.FixedBufferAllocator.init(&header_storage);
+    try writeFrameHeader(
+        &header,
+        fixed.allocator(),
+        FrameType.headers,
+        payload_len,
+    );
+    std.debug.assert(header.items.len <= max_header_len);
+    const gap = max_header_len - header.items.len;
+    std.mem.copyForwards(
+        u8,
+        list.items[original_len + header.items.len .. original_len + header.items.len + payload_len],
+        list.items[payload_start..],
+    );
+    @memcpy(
+        list.items[original_len..][0..header.items.len],
+        header.items,
+    );
+    list.items.len -= gap;
 }
 
 pub fn writeTrailersDynamic(

@@ -68,6 +68,31 @@ const server_qpack_encoder_stream_id: u62 = 7;
 const server_qpack_decoder_stream_id: u62 = 11;
 const first_server_push_stream_id: u62 = 15;
 
+/// Reusable storage for one HTTP/3 request-stream send operation.
+///
+/// The HTTP/3 session APIs serialize writes through `*Session`; QUIC copies
+/// protected payloads into connection-owned recovery storage before returning.
+/// Consequently both the encoded message bytes and their borrowing STREAM
+/// frame descriptors may be cleared for the next call as soon as send returns.
+const StreamMessageSendScratch = struct {
+    encoded: std.ArrayList(u8) = .empty,
+    frames: std.ArrayList(quic.Frame) = .empty,
+
+    fn reset(self: *StreamMessageSendScratch) void {
+        self.encoded.clearRetainingCapacity();
+        self.frames.clearRetainingCapacity();
+    }
+
+    fn deinit(
+        self: *StreamMessageSendScratch,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.frames.deinit(allocator);
+        self.encoded.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const UriEndpoint = struct {
     allocator: std.mem.Allocator,
     host_storage: []u8,
@@ -2508,6 +2533,7 @@ pub const HandshakeServerSession = struct {
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
+    stream_send_scratch: StreamMessageSendScratch = .{},
     sent_push_ids: std.ArrayList(u64) = .empty,
     peer_promised_push_ids: std.ArrayList(u64) = .empty,
     next_push_stream_id: u62 = first_server_push_stream_id,
@@ -2550,6 +2576,9 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.stream_send_scratch.deinit(
+            self.established.connection.endpoint.allocator,
+        );
         self.outbound_bodies.deinit();
         self.sent_push_ids.deinit(
             self.established.connection.endpoint.allocator,
@@ -2809,12 +2838,9 @@ pub const HandshakeServerSession = struct {
             self.options,
             server_control_stream_id,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(
-            self.established.connection.endpoint.allocator,
-        );
+        self.stream_send_scratch.reset();
         const streaming = try response.writeStreamingHeadDynamic(
-            &encoded,
+            &self.stream_send_scratch.encoded,
             self.established.connection.endpoint.allocator,
             self.control.settings.peer,
             stream_id,
@@ -2824,7 +2850,7 @@ pub const HandshakeServerSession = struct {
         errdefer self.qpack_encode.abandonStream(stream_id);
         try sendConnectionStreamingHead(
             &self.established.connection,
-            encoded.items,
+            &self.stream_send_scratch,
             stream_id,
             streaming.expected_length,
             streaming.body_allowed,
@@ -3181,6 +3207,7 @@ pub const HandshakeServerSession = struct {
         try sendConnectionTrailers(
             &self.established.connection,
             &self.outbound_bodies,
+            &self.stream_send_scratch,
             stream_id,
             trailers,
             self.control.settings.peer,
@@ -3272,6 +3299,7 @@ pub const HandshakeServerSession = struct {
         );
         try sendConnectionResponseSequence(
             &self.established.connection,
+            &self.stream_send_scratch,
             stream_id,
             informational,
             response,
@@ -3455,6 +3483,7 @@ pub const HandshakeClient = struct {
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
+    stream_send_scratch: StreamMessageSendScratch = .{},
     next_stream_id: u62 = 0,
 
     /// Reserve one client-initiated bidirectional stream ID.
@@ -3753,6 +3782,7 @@ pub const HandshakeClient = struct {
     }
 
     pub fn deinit(self: *HandshakeClient) void {
+        self.stream_send_scratch.deinit(self.allocator);
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
         self.push_streams.deinit();
@@ -3811,6 +3841,7 @@ pub const HandshakeClient = struct {
         );
         try sendConnectionMessage(
             &self.established.connection,
+            &self.stream_send_scratch,
             stream_id,
             request_options,
             self.options,
@@ -3846,10 +3877,9 @@ pub const HandshakeClient = struct {
             self.options,
             client_control_stream_id,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
+        self.stream_send_scratch.reset();
         const streaming = try request_options.writeStreamingHeadDynamic(
-            &encoded,
+            &self.stream_send_scratch.encoded,
             self.allocator,
             self.control.settings.peer,
             stream_id,
@@ -3859,7 +3889,7 @@ pub const HandshakeClient = struct {
         errdefer self.qpack_encode.abandonStream(stream_id);
         try sendConnectionStreamingHead(
             &self.established.connection,
-            encoded.items,
+            &self.stream_send_scratch,
             stream_id,
             streaming.expected_length,
             streaming.body_allowed,
@@ -4017,6 +4047,7 @@ pub const HandshakeClient = struct {
         try sendConnectionTrailers(
             &self.established.connection,
             &self.outbound_bodies,
+            &self.stream_send_scratch,
             stream_id,
             trailers,
             self.control.settings.peer,
@@ -9321,6 +9352,7 @@ fn frameFieldSectionPayload(
 
 fn sendConnectionMessage(
     connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
     stream_id: u62,
     request: http3.Request,
     options: HandshakeSessionOptions,
@@ -9329,12 +9361,11 @@ fn sendConnectionMessage(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
 ) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(connection.endpoint.allocator);
+    scratch.reset();
     var message_sent = false;
     errdefer if (!message_sent) qpack.abandonStream(stream_id);
     try request.writeDynamic(
-        &encoded,
+        &scratch.encoded,
         connection.endpoint.allocator,
         peer_settings,
         stream_id,
@@ -9349,15 +9380,24 @@ fn sendConnectionMessage(
     );
 
     var send_state = quic.stream_state.SendState.init(stream_id);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
-    try send_state.appendFrames(&frames, connection.endpoint.allocator, encoded.items, options.max_stream_frame_data, true);
-    try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
+    try send_state.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        options.max_stream_frame_data,
+        true,
+    );
+    try sendConnectionFrames(
+        connection,
+        scratch.frames.items,
+        options.max_frames_per_packet,
+    );
     message_sent = true;
 }
 
 fn sendConnectionResponseSequence(
     connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
     stream_id: u62,
     informational: []const http3.InformationalResponse,
     response: http3.Response,
@@ -9367,12 +9407,11 @@ fn sendConnectionResponseSequence(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
 ) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(connection.endpoint.allocator);
+    scratch.reset();
     var message_sent = false;
     errdefer if (!message_sent) qpack.abandonStream(stream_id);
     try http3.writeResponseSequenceDynamic(
-        &encoded,
+        &scratch.encoded,
         connection.endpoint.allocator,
         informational,
         response,
@@ -9389,10 +9428,18 @@ fn sendConnectionResponseSequence(
     );
 
     var send_state = quic.stream_state.SendState.init(stream_id);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
-    try send_state.appendFrames(&frames, connection.endpoint.allocator, encoded.items, options.max_stream_frame_data, true);
-    try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
+    try send_state.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        options.max_stream_frame_data,
+        true,
+    );
+    try sendConnectionFrames(
+        connection,
+        scratch.frames.items,
+        options.max_frames_per_packet,
+    );
     message_sent = true;
 }
 
@@ -9602,7 +9649,7 @@ fn sendProtectedPush(
 
 fn sendConnectionStreamingHead(
     connection: *quic.one_rtt.Connection,
-    encoded: []const u8,
+    scratch: *StreamMessageSendScratch,
     stream_id: u62,
     expected_length: ?usize,
     body_allowed: bool,
@@ -9623,19 +9670,17 @@ fn sendConnectionStreamingHead(
         options,
     );
     var send = quic.stream_state.SendState.init(stream_id);
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
     try send.appendFrames(
-        &frames,
+        &scratch.frames,
         connection.endpoint.allocator,
-        encoded,
+        scratch.encoded.items,
         options.max_stream_frame_data,
         !body_allowed or
             (expected_length != null and expected_length.? == 0),
     );
     try sendConnectionFrames(
         connection,
-        frames.items,
+        scratch.frames.items,
         options.max_frames_per_packet,
     );
     if (retain_body_state) {
@@ -10040,6 +10085,7 @@ fn sendProtectedBodyChunk(
 fn sendConnectionTrailers(
     connection: *quic.one_rtt.Connection,
     bodies: *OutboundBodySet,
+    scratch: *StreamMessageSendScratch,
     stream_id: u62,
     trailers: []const http3.Qpack.HeaderField,
     peer_settings: http3.Settings,
@@ -10051,12 +10097,11 @@ fn sendConnectionTrailers(
     const entry = try bodies.prepareTrailers(stream_id);
     const previous = entry.*;
     errdefer entry.* = previous;
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(connection.endpoint.allocator);
+    scratch.reset();
     const pending_sections_len = qpack.pending_sections.items.len;
     errdefer qpack.rollbackPendingSections(pending_sections_len);
     try http3.writeTrailersDynamic(
-        &encoded,
+        &scratch.encoded,
         connection.endpoint.allocator,
         trailers,
         peer_settings,
@@ -10070,18 +10115,16 @@ fn sendConnectionTrailers(
         qpack_encoder_prefix_sent,
         options,
     );
-    var frames: std.ArrayList(quic.Frame) = .empty;
-    defer frames.deinit(connection.endpoint.allocator);
     try entry.send.appendFrames(
-        &frames,
+        &scratch.frames,
         connection.endpoint.allocator,
-        encoded.items,
+        scratch.encoded.items,
         options.max_stream_frame_data,
         true,
     );
     try sendConnectionFrames(
         connection,
-        frames.items,
+        scratch.frames.items,
         options.max_frames_per_packet,
     );
     _ = bodies.finish(stream_id);
@@ -14321,6 +14364,58 @@ test "HTTP/3 dynamic writer is leak-free under allocation failure" {
     );
 }
 
+test "HTTP/3 dynamic HEADERS reuse one output allocation" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 0, 4096);
+    defer encoder.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const fields = [_]http3.Qpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/scratch" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.test" },
+    };
+
+    try encoder.encodeFieldSection(&output, 0, &fields);
+    const required_capacity = output.items.len + 16;
+    output.clearRetainingCapacity();
+    try output.ensureTotalCapacity(allocator, required_capacity);
+    const reusable_capacity = output.capacity;
+    output.clearRetainingCapacity();
+
+    var fail_after_output = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    encoder.allocator = fail_after_output.allocator();
+    try (http3.Request{
+        .method = "GET",
+        .path = "/scratch",
+        .authority = "example.test",
+    }).writeDynamic(
+        &output,
+        fail_after_output.allocator(),
+        .{},
+        4,
+        &encoder,
+    );
+    try std.testing.expect(!fail_after_output.has_induced_failure);
+    try std.testing.expectEqual(reusable_capacity, output.capacity);
+    const frame = try http3.Frame.parse(output.items);
+    try std.testing.expectEqual(http3.FrameType.headers, frame.frame_type);
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    const decoded = try http3.Qpack.decodeDynamicBlock(
+        allocator,
+        frame.payload,
+        table,
+    );
+    defer http3.Qpack.freeDecodedFields(allocator, decoded.fields);
+    try std.testing.expectEqual(@as(usize, 4), decoded.fields.len);
+    try std.testing.expectEqualStrings("/scratch", decoded.fields[1].value);
+}
+
 test "HTTP/3 runtime rejects closed critical streams" {
     const allocator = std.testing.allocator;
 
@@ -17877,6 +17972,7 @@ test "HTTP/3 handshake server rejects requests beyond local GOAWAY" {
     );
     try sendConnectionMessage(
         &client.established.connection,
+        &client.stream_send_scratch,
         0,
         .{ .method = "GET", .path = "/rejected", .authority = "localhost" },
         client.options,
@@ -20252,6 +20348,10 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
         fn runFallible(server_ptr: *HandshakeServer) !void {
             var session = try server_ptr.accept();
             defer session.deinit();
+            var encoded_capacity: usize = 0;
+            var frame_capacity: usize = 0;
+            var encoded_ptr: [*]u8 = undefined;
+            var frame_ptr: [*]quic.Frame = undefined;
 
             for (0..3) |exchange| {
                 var request = try session.receiveRequest();
@@ -20301,6 +20401,37 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
                     }},
                     .body = "ok",
                 });
+                if (exchange == 0) {
+                    encoded_capacity =
+                        session.stream_send_scratch.encoded.capacity;
+                    frame_capacity =
+                        session.stream_send_scratch.frames.capacity;
+                    try std.testing.expect(encoded_capacity != 0);
+                    try std.testing.expect(frame_capacity != 0);
+                    encoded_ptr = session.stream_send_scratch.encoded
+                        .allocatedSlice().ptr;
+                    frame_ptr = session.stream_send_scratch.frames
+                        .allocatedSlice().ptr;
+                } else {
+                    try std.testing.expectEqual(
+                        encoded_capacity,
+                        session.stream_send_scratch.encoded.capacity,
+                    );
+                    try std.testing.expectEqual(
+                        frame_capacity,
+                        session.stream_send_scratch.frames.capacity,
+                    );
+                    try std.testing.expectEqual(
+                        encoded_ptr,
+                        session.stream_send_scratch.encoded
+                            .allocatedSlice().ptr,
+                    );
+                    try std.testing.expectEqual(
+                        frame_ptr,
+                        session.stream_send_scratch.frames
+                            .allocatedSlice().ptr,
+                    );
+                }
                 if (exchange != 0) {
                     try std.testing.expect(
                         session.qpack_encode.pending_sections.items.len != 0,
@@ -20349,7 +20480,11 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
     );
     defer client.deinit();
 
-    for (0..3) |_| {
+    var encoded_capacity: usize = 0;
+    var frame_capacity: usize = 0;
+    var encoded_ptr: [*]u8 = undefined;
+    var frame_ptr: [*]quic.Frame = undefined;
+    for (0..3) |exchange| {
         var response = try client.request(.{
             .method = "GET",
             .path = "/handshake-dynamic",
@@ -20371,6 +20506,33 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
             "repeated-response-value",
             repeated_value orelse return error.TestUnexpectedResult,
         );
+        if (exchange == 0) {
+            encoded_capacity = client.stream_send_scratch.encoded.capacity;
+            frame_capacity = client.stream_send_scratch.frames.capacity;
+            try std.testing.expect(encoded_capacity != 0);
+            try std.testing.expect(frame_capacity != 0);
+            encoded_ptr = client.stream_send_scratch.encoded
+                .allocatedSlice().ptr;
+            frame_ptr = client.stream_send_scratch.frames
+                .allocatedSlice().ptr;
+        } else {
+            try std.testing.expectEqual(
+                encoded_capacity,
+                client.stream_send_scratch.encoded.capacity,
+            );
+            try std.testing.expectEqual(
+                frame_capacity,
+                client.stream_send_scratch.frames.capacity,
+            );
+            try std.testing.expectEqual(
+                encoded_ptr,
+                client.stream_send_scratch.encoded.allocatedSlice().ptr,
+            );
+            try std.testing.expectEqual(
+                frame_ptr,
+                client.stream_send_scratch.frames.allocatedSlice().ptr,
+            );
+        }
     }
 
     thread.join();

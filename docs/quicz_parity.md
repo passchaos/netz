@@ -176,6 +176,19 @@ sample rather than an equal-wire quicz comparison. The bidirectional tquic
 GOAWAY/Retry matrix and the quic-go v1/v2 request, cancellation, and 1xx matrix
 remain green after the change. The audited quicz H3 layer has no RFC 9218
 PRIORITY_UPDATE support.
+Handshake-backed request, response, streaming-head, and trailer sends now keep
+one encoded-byte buffer and one borrowing STREAM-frame descriptor list per
+session. The buffers are cleared only after QUIC has copied protected recovery
+payloads, so subsequent streams reuse their capacity without extending caller
+payload lifetimes. Dynamic HEADERS encoding also reserves the maximum frame
+prefix inside the final output and closes that gap in place, eliminating the
+former temporary QPACK block allocation. A fail-first warmed encoding test and
+the three-exchange real-handshake dynamic-QPACK test verify output/frame
+storage reuse and unchanged acknowledgement state. The quic-go v1/v2 and tquic
+normal/Retry process matrices remain green. A CPU-0 1-MiB single-stream upload
+regression ran five iterations at 110.23 MiB/s mean with 2.31% standard
+deviation; this small transfer is a
+regression sample rather than an equal-wire quicz result.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
