@@ -6509,7 +6509,7 @@ pub const Connection = struct {
             );
             flags = continuation.frame.header.flags;
         }
-        const headers = try cloneDecodedHeaders(
+        const headers = try decodeOwnedHeaders(
             self.allocator,
             block.items,
             self.limits,
@@ -6947,7 +6947,7 @@ pub const Connection = struct {
             if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
             flags = frame.frame.header.flags;
         }
-        return cloneDecodedHeaders(
+        return decodeOwnedHeaders(
             self.allocator,
             block.items,
             self.limits,
@@ -8598,22 +8598,16 @@ fn writeInitialConnectionWindowTransport(
     );
 }
 
-fn cloneDecodedHeaders(
+fn decodeOwnedHeaders(
     allocator: std.mem.Allocator,
     block: []const u8,
     limits: Limits,
     decoder: *http2.Hpack.Decoder,
 ) Error![]http2.Hpack.HeaderField {
-    var stack_scratch: [32]http2.Hpack.HeaderField = undefined;
-    const scratch = if (limits.max_header_fields <= stack_scratch.len)
-        stack_scratch[0..limits.max_header_fields]
-    else
-        try allocator.alloc(http2.Hpack.HeaderField, limits.max_header_fields);
-    defer if (limits.max_header_fields > stack_scratch.len) allocator.free(scratch);
-    const decoded = decoder.decodeBlockIntoWithLimit(
+    return decoder.decodeBlockOwnedWithLimit(
         allocator,
         block,
-        scratch,
+        limits.max_header_fields,
         limits.max_header_list_size,
     ) catch |err| switch (err) {
         error.BufferTooShort,
@@ -8621,49 +8615,12 @@ fn cloneDecodedHeaders(
         => return error.MessageTooLarge,
         else => |e| return e,
     };
-    defer http2.Hpack.freeDecodedFieldStorages(allocator, decoded);
-    const cloned = try allocator.alloc(http2.Hpack.HeaderField, decoded.len);
-    errdefer allocator.free(cloned);
-    if (decoded.len == 0) return cloned;
-    var string_bytes: usize = 0;
-    for (decoded) |field| {
-        string_bytes = std.math.add(
-            usize,
-            string_bytes,
-            field.name.len,
-        ) catch return error.MessageTooLarge;
-        string_bytes = std.math.add(
-            usize,
-            string_bytes,
-            field.value.len,
-        ) catch return error.MessageTooLarge;
-    }
-    const string_storage = try allocator.alloc(u8, string_bytes);
-    errdefer allocator.free(string_storage);
-    var string_offset: usize = 0;
-    for (decoded, cloned, 0..) |field, *out, index| {
-        const name = string_storage[string_offset..][0..field.name.len];
-        @memcpy(name, field.name);
-        string_offset += name.len;
-        const value = string_storage[string_offset..][0..field.value.len];
-        @memcpy(value, field.value);
-        string_offset += value.len;
-        out.* = .{
-            .name = name,
-            .value = value,
-            .never_index = field.never_index,
-            .block_storage = if (index == 0) string_storage else null,
-        };
-    }
-    std.debug.assert(string_offset == string_storage.len);
-    return cloned;
 }
 
 fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField) void {
     if (headers.len != 0) {
-        if (headers[0].block_storage) |storage| {
-            allocator.free(storage);
-            allocator.free(headers);
+        if (headers[0].block_storage != null) {
+            http2.Hpack.freeOwnedFields(allocator, headers);
             return;
         }
     }
@@ -16691,7 +16648,7 @@ test "HTTP/2 runtime enforces header list size limits" {
     try http2.Hpack.encodeLiteralBlock(&block, allocator, &oversized);
     var decoder = http2.Hpack.Decoder{};
     defer decoder.deinit(allocator);
-    try std.testing.expectError(error.MessageTooLarge, cloneDecodedHeaders(allocator, block.items, .{
+    try std.testing.expectError(error.MessageTooLarge, decodeOwnedHeaders(allocator, block.items, .{
         .max_header_fields = 16,
         .max_header_list_size = 120,
     }, &decoder));
@@ -16713,7 +16670,7 @@ test "HTTP/2 runtime enforces header list size limits" {
     );
     try std.testing.expectError(
         error.MessageTooLarge,
-        cloneDecodedHeaders(
+        decodeOwnedHeaders(
             no_alloc.allocator(),
             no_alloc_block.items,
             .{
@@ -16744,19 +16701,19 @@ test "HTTP/2 runtime enforces header list size limits" {
     try std.testing.expectError(error.MessageTooLarge, connection.writeHeaders(1, &oversized, true));
 }
 
-test "HTTP/2 runtime clones decoded headers into one string allocation" {
+test "HTTP/2 runtime decodes owned headers into one string allocation" {
     const allocator = std.testing.allocator;
     const fields = [_]http2.Hpack.HeaderField{
         .{ .name = ":status", .value = "200" },
-        .{ .name = "x-first", .value = "one" },
-        .{ .name = "x-second", .value = "two" },
+        .{ .name = "x-first", .value = "one", .never_index = true },
+        .{ .name = "x-second", .value = "two", .never_index = true },
     };
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
     try http2.Hpack.encodeLiteralBlock(&block, allocator, &fields);
     var decoder = http2.Hpack.Decoder{};
     defer decoder.deinit(allocator);
-    const cloned = try cloneDecodedHeaders(
+    const cloned = try decodeOwnedHeaders(
         allocator,
         block.items,
         .{ .max_header_fields = 8 },
@@ -16776,6 +16733,21 @@ test "HTTP/2 runtime clones decoded headers into one string allocation" {
                 @intFromPtr(storage.ptr) + storage.len,
         );
     }
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    var tracked_decoder = http2.Hpack.Decoder{};
+    defer tracked_decoder.deinit(tracking.allocator());
+    const before = tracking.allocations;
+    const tracked_headers = try decodeOwnedHeaders(
+        tracking.allocator(),
+        block.items,
+        .{ .max_header_fields = 8 },
+        &tracked_decoder,
+    );
+    defer freeHeaders(tracking.allocator(), tracked_headers);
+    // The plan list stays on the stack; only the final field array and shared
+    // string block are allocated for a static/literal application result.
+    try std.testing.expectEqual(before + 2, tracking.allocations);
 }
 
 test "HTTP/2 runtime advertises configured initial SETTINGS" {

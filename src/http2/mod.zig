@@ -761,6 +761,8 @@ pub fn validateClientPreface(bytes: []const u8) Error!void {
 
 pub const Hpack = struct {
     pub const default_dynamic_table_size: usize = 4096;
+    const owned_plan_stack_fields: usize = 32;
+    const owned_string_stack_bytes: usize = 16 * 1024;
 
     pub const StaticEntry = struct {
         name: []const u8,
@@ -1203,6 +1205,27 @@ pub const Hpack = struct {
                 &self.dynamic_table,
                 self.max_dynamic_table_size,
                 storage,
+                max_header_list_size,
+            );
+        }
+
+        /// Decode into one owned field array plus one contiguous string block.
+        /// This is the application-ownership path used by the HTTP/2 runtime;
+        /// unlike `decodeBlockIntoWithLimit`, it never creates per-field output
+        /// allocations that a caller must immediately clone.
+        pub fn decodeBlockOwnedWithLimit(
+            self: *Decoder,
+            allocator: std.mem.Allocator,
+            block: []const u8,
+            max_header_fields: usize,
+            max_header_list_size: usize,
+        ) ![]HeaderField {
+            return decodeBlockOwnedWithDynamicTable(
+                allocator,
+                block,
+                &self.dynamic_table,
+                self.max_dynamic_table_size,
+                max_header_fields,
                 max_header_list_size,
             );
         }
@@ -1741,6 +1764,274 @@ pub const Hpack = struct {
         return storage[0..count];
     }
 
+    const OwnedFieldPlan = struct {
+        name_offset: usize,
+        name_len: usize,
+        value_offset: usize,
+        value_len: usize,
+        never_index: bool,
+    };
+
+    fn decodeBlockOwnedWithDynamicTable(
+        allocator: std.mem.Allocator,
+        block: []const u8,
+        dynamic_table: *DynamicTable,
+        max_dynamic_table_size: usize,
+        max_header_fields: usize,
+        max_header_list_size: usize,
+    ) ![]HeaderField {
+        var plan_fallback = std.heap.stackFallback(
+            owned_plan_stack_fields * @sizeOf(OwnedFieldPlan),
+            allocator,
+        );
+        const plan_allocator = plan_fallback.get();
+        var plans: std.ArrayList(OwnedFieldPlan) = .empty;
+        defer plans.deinit(plan_allocator);
+        // The default runtime header-list budget fits here, so building the
+        // final byte sequence normally stays stack-only. Larger configured
+        // sections fall back to the caller allocator, but still avoid one
+        // allocation per Huffman or dynamic field.
+        var string_fallback = std.heap.stackFallback(
+            owned_string_stack_bytes,
+            allocator,
+        );
+        const string_allocator = string_fallback.get();
+        var strings: std.ArrayList(u8) = .empty;
+        defer strings.deinit(string_allocator);
+
+        var cursor = wire.Cursor.init(block);
+        var saw_header = false;
+        var header_list_size: usize = 0;
+        var header_list_too_large = false;
+        var output_too_small = false;
+        while (!cursor.eof()) {
+            const first = try cursor.readByte();
+            if ((first & 0x80) != 0) {
+                saw_header = true;
+                const field = try indexedHeader(
+                    dynamic_table,
+                    try decodeInteger(first, &cursor, 7),
+                );
+                if (!chargeHeaderListSize(
+                    &header_list_size,
+                    max_header_list_size,
+                    field.name.len,
+                    field.value.len,
+                )) header_list_too_large = true;
+                if (!header_list_too_large and !output_too_small and
+                    plans.items.len >= max_header_fields)
+                {
+                    output_too_small = true;
+                }
+                if (header_list_too_large or output_too_small) continue;
+                try appendOwnedFieldPlan(
+                    &plans,
+                    plan_allocator,
+                    &strings,
+                    string_allocator,
+                    .{
+                        .raw = field.name,
+                        .huffman = false,
+                        .decoded_len = field.name.len,
+                    },
+                    .{
+                        .raw = field.value,
+                        .huffman = false,
+                        .decoded_len = field.value.len,
+                    },
+                    field.never_index,
+                );
+                continue;
+            }
+
+            if ((first & 0xe0) == 0x20) {
+                if (saw_header) return error.InvalidEncoding;
+                const new_size = std.math.cast(
+                    usize,
+                    try decodeInteger(first, &cursor, 5),
+                ) orelse return error.IntegerOverflow;
+                if (new_size > max_dynamic_table_size) {
+                    return error.InvalidEncoding;
+                }
+                dynamic_table.setLimit(allocator, new_size);
+                continue;
+            }
+
+            saw_header = true;
+            const indexed_literal = (first & 0x40) != 0;
+            const name_index = if (indexed_literal)
+                try decodeInteger(first, &cursor, 6)
+            else
+                try decodeInteger(first, &cursor, 4);
+            const literal_name = if (name_index == 0)
+                try scanString(&cursor)
+            else
+                null;
+            const indexed_name = if (literal_name == null)
+                try indexedName(dynamic_table, name_index)
+            else
+                null;
+            const name_plan = literal_name orelse EncodedString{
+                .raw = indexed_name.?,
+                .huffman = false,
+                .decoded_len = indexed_name.?.len,
+            };
+            const value_plan = try scanString(&cursor);
+            if (!chargeHeaderListSize(
+                &header_list_size,
+                max_header_list_size,
+                name_plan.decoded_len,
+                value_plan.decoded_len,
+            )) header_list_too_large = true;
+            if (!header_list_too_large and !output_too_small and
+                plans.items.len >= max_header_fields)
+            {
+                output_too_small = true;
+            }
+            const retain = !header_list_too_large and !output_too_small;
+
+            if (retain) {
+                const plan_index = plans.items.len;
+                try appendOwnedFieldPlan(
+                    &plans,
+                    plan_allocator,
+                    &strings,
+                    string_allocator,
+                    name_plan,
+                    value_plan,
+                    !indexed_literal and (first & 0x10) != 0,
+                );
+                if (indexed_literal) {
+                    const plan = plans.items[plan_index];
+                    try dynamic_table.add(
+                        allocator,
+                        strings.items[plan.name_offset..][0..plan.name_len],
+                        strings.items[plan.value_offset..][0..plan.value_len],
+                    );
+                }
+                continue;
+            }
+            if (!indexed_literal) continue;
+
+            // Incremental indexing remains mandatory after an output bound is
+            // crossed. Decode at most one field through stack-first scratch;
+            // the table immediately copies it into persistent storage.
+            if (!entryFitsTable(
+                dynamic_table.size_limit,
+                name_plan.decoded_len,
+                value_plan.decoded_len,
+            )) {
+                // RFC 7541 §4.4 only requires clearing the table for an entry
+                // larger than its limit. Scanning already validated Huffman,
+                // so no potentially huge temporary decode is necessary.
+                dynamic_table.clear(allocator);
+                continue;
+            }
+            const temporary_len = try addOwnedStringBytes(
+                0,
+                name_plan.decoded_len,
+                value_plan.decoded_len,
+            );
+            var temporary_fallback = std.heap.stackFallback(
+                default_dynamic_table_size,
+                allocator,
+            );
+            const temporary_allocator = temporary_fallback.get();
+            const temporary = try temporary_allocator.alloc(u8, temporary_len);
+            const name = temporary[0..name_plan.decoded_len];
+            try name_plan.decodeInto(name);
+            const value = temporary[name.len..][0..value_plan.decoded_len];
+            try value_plan.decodeInto(value);
+            try dynamic_table.add(allocator, name, value);
+        }
+
+        if (header_list_too_large) return error.HeaderListTooLarge;
+        if (output_too_small) return error.BufferTooShort;
+        const fields = try allocator.alloc(HeaderField, plans.items.len);
+        errdefer allocator.free(fields);
+        if (fields.len == 0) return fields;
+        const owned_strings = try allocator.dupe(u8, strings.items);
+        for (plans.items, fields, 0..) |plan, *field, index| {
+            field.* = .{
+                .name = owned_strings[plan.name_offset..][0..plan.name_len],
+                .value = owned_strings[plan.value_offset..][0..plan.value_len],
+                .never_index = plan.never_index,
+                .block_storage = if (index == 0) owned_strings else null,
+            };
+        }
+        return fields;
+    }
+
+    fn appendOwnedFieldPlan(
+        plans: *std.ArrayList(OwnedFieldPlan),
+        plan_allocator: std.mem.Allocator,
+        strings: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        name: EncodedString,
+        value: EncodedString,
+        never_index: bool,
+    ) !void {
+        try plans.ensureUnusedCapacity(plan_allocator, 1);
+        const additional = try addOwnedStringBytes(
+            0,
+            name.decoded_len,
+            value.decoded_len,
+        );
+        try strings.ensureUnusedCapacity(allocator, additional);
+        const original_len = strings.items.len;
+        errdefer strings.items.len = original_len;
+        const name_offset = strings.items.len;
+        try name.appendDecodedAssumeCapacity(strings);
+        const value_offset = strings.items.len;
+        try value.appendDecodedAssumeCapacity(strings);
+        plans.appendAssumeCapacity(.{
+            .name_offset = name_offset,
+            .name_len = name.decoded_len,
+            .value_offset = value_offset,
+            .value_len = value.decoded_len,
+            .never_index = never_index,
+        });
+    }
+
+    /// Release fields returned by `decodeBlockOwnedWithLimit`. The field slice
+    /// and its shared string block are the only two caller-owned allocations.
+    pub fn freeOwnedFields(
+        allocator: std.mem.Allocator,
+        fields: []HeaderField,
+    ) void {
+        if (fields.len != 0) {
+            if (fields[0].block_storage) |strings| {
+                allocator.free(strings);
+            }
+        }
+        allocator.free(fields);
+    }
+
+    fn addOwnedStringBytes(
+        current: usize,
+        name_len: usize,
+        value_len: usize,
+    ) Error!usize {
+        return std.math.add(
+            usize,
+            std.math.add(usize, current, name_len) catch
+                return error.IntegerOverflow,
+            value_len,
+        ) catch return error.IntegerOverflow;
+    }
+
+    fn entryFitsTable(
+        limit: usize,
+        name_len: usize,
+        value_len: usize,
+    ) bool {
+        if (name_len > limit) return false;
+        var remaining = limit - name_len;
+        if (value_len > remaining) return false;
+        remaining -= value_len;
+        return remaining >= 32;
+    }
+
     fn encodeInteger(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
@@ -1832,6 +2123,27 @@ pub const Hpack = struct {
         raw: []const u8,
         huffman: bool,
         decoded_len: usize,
+
+        fn decodeInto(self: EncodedString, output: []u8) !void {
+            if (output.len != self.decoded_len) return error.InvalidEncoding;
+            if (self.huffman) {
+                return huffman_codec.decodeHuffmanInto(output, self.raw);
+            }
+            @memcpy(output, self.raw);
+        }
+
+        fn appendDecodedAssumeCapacity(
+            self: EncodedString,
+            output: *std.ArrayList(u8),
+        ) !void {
+            std.debug.assert(
+                output.capacity - output.items.len >= self.decoded_len,
+            );
+            const start = output.items.len;
+            output.items.len += self.decoded_len;
+            errdefer output.items.len = start;
+            try self.decodeInto(output.items[start..]);
+        }
 
         fn decode(
             self: EncodedString,
@@ -3068,6 +3380,142 @@ test "HTTP/2 HPACK oversized block preserves incremental indexing state" {
     try std.testing.expectEqual(@as(usize, 2), decoded.len);
     try std.testing.expectEqualStrings("x-indexed", decoded[0].name);
     try std.testing.expectEqualStrings("compressible-value", decoded[0].value);
+}
+
+fn checkHpackOwnedDecode(allocator: std.mem.Allocator) !void {
+    const fields = [_]Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "x-compressible-name", .value = "compressible-value" },
+        .{ .name = "authorization", .value = "sensitive-value" },
+    };
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeBlock(&block, allocator, &fields);
+
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    const first = try decoder.decodeBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        8,
+        1024,
+    );
+    defer Hpack.freeOwnedFields(allocator, first);
+    try std.testing.expectEqual(fields.len, first.len);
+    try std.testing.expect(first[0].block_storage != null);
+    try std.testing.expect(first[1].block_storage == null);
+    try std.testing.expectEqualStrings("x-compressible-name", first[1].name);
+    try std.testing.expectEqualStrings("compressible-value", first[1].value);
+    try std.testing.expect(first[2].never_index);
+
+    block.clearRetainingCapacity();
+    try encoder.encodeBlock(&block, allocator, &fields);
+    const second = try decoder.decodeBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        8,
+        1024,
+    );
+    defer Hpack.freeOwnedFields(allocator, second);
+    try std.testing.expectEqualStrings("x-compressible-name", second[1].name);
+    try std.testing.expectEqualStrings("compressible-value", second[1].value);
+}
+
+test "HTTP/2 HPACK owned decode uses one string block and is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkHpackOwnedDecode,
+        .{},
+    );
+}
+
+test "HTTP/2 HPACK owned decode preserves table state after output limits" {
+    const allocator = std.testing.allocator;
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    const fields = [_]Hpack.HeaderField{
+        .{ .name = "x-first", .value = "compressible-value" },
+        .{ .name = "x-second", .value = "another-compressible-value" },
+    };
+    try encoder.encodeBlock(&block, allocator, &fields);
+    try std.testing.expectError(
+        error.HeaderListTooLarge,
+        decoder.decodeBlockOwnedWithLimit(
+            allocator,
+            block.items,
+            8,
+            1,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        decoder.dynamic_table.entryCount(),
+    );
+
+    block.clearRetainingCapacity();
+    try encoder.encodeBlock(&block, allocator, &fields);
+    const decoded = try decoder.decodeBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        8,
+        1024,
+    );
+    defer Hpack.freeOwnedFields(allocator, decoded);
+    try std.testing.expectEqualStrings("compressible-value", decoded[0].value);
+    try std.testing.expectEqualStrings("another-compressible-value", decoded[1].value);
+}
+
+fn checkHpackOwnedDecodeScratchFallback(
+    allocator: std.mem.Allocator,
+) !void {
+    const field_count = Hpack.owned_plan_stack_fields + 1;
+    const large_value = [_]u8{'a'} ** (Hpack.owned_string_stack_bytes + 1);
+    var fields: [field_count]Hpack.HeaderField = undefined;
+    for (&fields, 0..) |*field, index| {
+        const value: []const u8 = if (index == 0)
+            &large_value
+        else
+            "v";
+        field.* = .{
+            .name = "authorization",
+            .value = value,
+            .never_index = true,
+        };
+    }
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeBlock(&block, allocator, &fields);
+
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    const decoded = try decoder.decodeBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        field_count,
+        32 * 1024,
+    );
+    defer Hpack.freeOwnedFields(allocator, decoded);
+    try std.testing.expectEqual(@as(usize, field_count), decoded.len);
+    try std.testing.expectEqual(
+        Hpack.owned_string_stack_bytes + 1,
+        decoded[0].value.len,
+    );
+}
+
+test "HTTP/2 HPACK owned decode scratch fallback is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkHpackOwnedDecodeScratchFallback,
+        .{},
+    );
 }
 
 test "HTTP/2 HPACK incremental name index does not set never-indexed" {

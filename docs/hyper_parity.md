@@ -611,6 +611,14 @@ copying it. A warmed retained-scratch regression uses a failing allocator to
 prove compressed never-indexed fields need no transient allocation. Three
 pinned ReleaseFast HPACK runs measured 261-265 ns for stateful encode-only,
 down from 316-319 ns immediately before this change.
+The runtime owning decode path now materializes names and values directly into
+one stack-staged byte sequence, then performs exactly two output allocations:
+the field descriptors and their shared contiguous string block. It no longer
+allocates per Huffman/dynamic field and then clones every field into that final
+block. Offset-based plans keep slices valid while scratch grows, and bounded
+decode still consumes incremental-indexing fields after an output limit so the
+connection table stays synchronized. Three pinned runs measured the new owned
+path at 1,246-1,253 ns for this seven-field benchmark.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

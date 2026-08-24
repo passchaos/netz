@@ -67,6 +67,22 @@ pub fn main() !void {
     }
     const decode_into_ns = nowNs(io) -| decode_into_start;
 
+    var decode_owned_decoder = netz.http2.Hpack.Decoder{};
+    defer decode_owned_decoder.deinit(allocator);
+    const decode_owned_start = nowNs(io);
+    var decode_owned_total: usize = 0;
+    for (0..iterations) |_| {
+        const decoded = try decode_owned_decoder.decodeBlockOwnedWithLimit(
+            allocator,
+            decode_block.items,
+            headers.len,
+            std.math.maxInt(usize),
+        );
+        decode_owned_total += decoded.len;
+        netz.http2.Hpack.freeOwnedFields(allocator, decoded);
+    }
+    const decode_owned_ns = nowNs(io) -| decode_owned_start;
+
     var roundtrip_encoder = netz.http2.Hpack.Encoder{};
     defer roundtrip_encoder.deinit(allocator);
     var roundtrip_decoder = netz.http2.Hpack.Decoder{};
@@ -102,6 +118,7 @@ pub fn main() !void {
         \\  stateful encode-only total bytes: {d}, ns/op: {d}
         \\  stateful decode-only fields: {d}, ns/op: {d}
         \\  stateful decode-into fields: {d}, ns/op: {d}
+        \\  stateful decode-owned fields: {d}, ns/op: {d}
         \\  stateful total bytes: {d}, ns/op: {d}
         \\  stateless total bytes: {d}, ns/op: {d}
         \\  stateful speedup: {d}.{d:0>2}x
@@ -116,6 +133,8 @@ pub fn main() !void {
         decode_ns / iterations,
         decode_into_total,
         decode_into_ns / iterations,
+        decode_owned_total,
+        decode_owned_ns / iterations,
         stateful_total,
         stateful_ns / iterations,
         stateless_total,
