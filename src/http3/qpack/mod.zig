@@ -30,6 +30,10 @@ pub const HeaderField = struct {
     /// that component borrows static-table or encoded field-section bytes.
     name_storage: ?[]u8 = null,
     value_storage: ?[]u8 = null,
+    /// Optional allocation shared by every name/value in a finalized HTTP/3
+    /// field section. Only element zero owns this slice; per-field decoder
+    /// storage remains represented by `name_storage`/`value_storage`.
+    block_storage: ?[]u8 = null,
 };
 
 const dynamic = @import("dynamic_table.zig");
@@ -924,6 +928,7 @@ fn freeFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
     for (fields) |field| {
         if (field.name_storage) |storage| allocator.free(storage);
         if (field.value_storage) |storage| allocator.free(storage);
+        if (field.block_storage) |storage| allocator.free(storage);
     }
 }
 
