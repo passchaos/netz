@@ -2457,16 +2457,157 @@ fn validateConnectClientId(client_id: []const u8, clean_start: bool) Error!void 
     if (client_id.len == 0 and !clean_start) return error.InvalidClientId;
 }
 
+pub const PublishWriteOptions = struct {
+    qos: QoS = .at_most_once,
+    retain: bool = false,
+    dup: bool = false,
+    packet_id: ?u16 = null,
+    properties: []const Property = &.{},
+};
+
+pub const PublishWireLengths = struct {
+    prefix: usize,
+    total: usize,
+};
+
 pub fn writePublish(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     protocol: ProtocolVersion,
     topic: []const u8,
     payload: []const u8,
-    options: struct { qos: QoS = .at_most_once, retain: bool = false, dup: bool = false, packet_id: ?u16 = null, properties: []const Property = &.{} },
+    options: PublishWriteOptions,
 ) !void {
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
+    const lengths = try publishWireLengths(
+        protocol,
+        topic,
+        payload,
+        options,
+    );
+    try list.ensureUnusedCapacity(allocator, lengths.total);
+    writePublishPrefixAssumeCapacity(
+        list,
+        protocol,
+        topic,
+        options,
+        payload.len,
+    );
+    list.appendSliceAssumeCapacity(payload);
+}
+
+test "MQTT PUBLISH prefix matches complete packet encoding" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        protocol: ProtocolVersion,
+        topic: []const u8,
+        payload: []const u8,
+        options: PublishWriteOptions,
+    }{
+        .{
+            .protocol = .v3_1_1,
+            .topic = "sensors/temperature",
+            .payload = "small",
+            .options = .{},
+        },
+        .{
+            .protocol = .v5,
+            .topic = "sensors/temperature",
+            .payload = &([_]u8{0xa5} ** 256),
+            .options = .{
+                .qos = .at_least_once,
+                .retain = true,
+                .dup = true,
+                .packet_id = 42,
+                .properties = &.{
+                    .{ .two_byte = .{
+                        .id = .topic_alias,
+                        .value = 2,
+                    } },
+                    .{ .utf8_pair = .{
+                        .id = .user_property,
+                        .key = "source",
+                        .value = "prefix-test",
+                    } },
+                },
+            },
+        },
+    };
+    for (cases) |case| {
+        var complete: std.ArrayList(u8) = .empty;
+        defer complete.deinit(allocator);
+        try writePublish(
+            &complete,
+            allocator,
+            case.protocol,
+            case.topic,
+            case.payload,
+            case.options,
+        );
+        var prefix: std.ArrayList(u8) = .empty;
+        defer prefix.deinit(allocator);
+        const lengths = try writePublishPrefix(
+            &prefix,
+            allocator,
+            case.protocol,
+            case.topic,
+            case.payload,
+            case.options,
+        );
+        try std.testing.expectEqual(prefix.items.len, lengths.prefix);
+        try std.testing.expectEqual(complete.items.len, lengths.total);
+        try std.testing.expectEqualSlices(
+            u8,
+            complete.items[0..prefix.items.len],
+            prefix.items,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            case.payload,
+            complete.items[prefix.items.len..],
+        );
+    }
+}
+
+/// Encode the MQTT fixed and variable PUBLISH headers without copying payload.
+///
+/// The returned total length includes `payload`; stream transports can submit
+/// `list.items` and `payload` with scatter/gather I/O while WebSocket callers
+/// can append the payload to preserve one-message masking semantics.
+pub fn writePublishPrefix(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    protocol: ProtocolVersion,
+    topic: []const u8,
+    payload: []const u8,
+    options: PublishWriteOptions,
+) !PublishWireLengths {
+    const original_len = list.items.len;
+    errdefer list.items.len = original_len;
+    const lengths = try publishWireLengths(
+        protocol,
+        topic,
+        payload,
+        options,
+    );
+    try list.ensureUnusedCapacity(allocator, lengths.prefix);
+    writePublishPrefixAssumeCapacity(
+        list,
+        protocol,
+        topic,
+        options,
+        payload.len,
+    );
+    return lengths;
+}
+
+fn publishWireLengths(
+    protocol: ProtocolVersion,
+    topic: []const u8,
+    payload: []const u8,
+    options: PublishWriteOptions,
+) Error!PublishWireLengths {
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
@@ -2484,9 +2625,6 @@ pub fn writePublish(
         // collisions with their in-flight window.
         return error.InvalidPacketIdentifier;
     }
-    const flags: u4 = (if (options.dup) @as(u4, 0x8) else 0) |
-        (@as(u4, @intFromEnum(options.qos)) << 1) |
-        (if (options.retain) @as(u4, 0x1) else 0);
     const properties_len = if (protocol == .v5) blk: {
         try validatePropertiesFor(.publish, options.properties);
         break :blk try propertiesEncodedLen(options.properties);
@@ -2511,12 +2649,39 @@ pub fn writePublish(
         payload.len,
     ) catch return error.IntegerOverflow;
     if (remaining_len > 268_435_455) return error.RemainingLengthTooLarge;
-    const encoded_len = std.math.add(
+    const prefix_len = std.math.add(
         usize,
         1 + remainingLengthEncodedLen(remaining_len),
-        remaining_len,
+        std.math.add(usize, variable_len, properties_wire_len) catch
+            return error.IntegerOverflow,
     ) catch return error.IntegerOverflow;
-    try list.ensureUnusedCapacity(allocator, encoded_len);
+    const total_len = std.math.add(usize, prefix_len, payload.len) catch
+        return error.IntegerOverflow;
+    return .{ .prefix = prefix_len, .total = total_len };
+}
+
+fn writePublishPrefixAssumeCapacity(
+    list: *std.ArrayList(u8),
+    protocol: ProtocolVersion,
+    topic: []const u8,
+    options: PublishWriteOptions,
+    remaining_payload_len: usize,
+) void {
+    const variable_len = 2 + topic.len +
+        if (options.qos == .at_most_once) @as(usize, 0) else 2;
+    const properties_len = if (protocol == .v5)
+        propertiesEncodedLen(options.properties) catch unreachable
+    else
+        0;
+    const properties_wire_len = if (protocol == .v5)
+        remainingLengthEncodedLen(properties_len) + properties_len
+    else
+        0;
+    const remaining_len = variable_len + properties_wire_len +
+        remaining_payload_len;
+    const flags: u4 = (if (options.dup) @as(u4, 0x8) else 0) |
+        (@as(u4, @intFromEnum(options.qos)) << 1) |
+        (if (options.retain) @as(u4, 0x1) else 0);
     list.appendAssumeCapacity(
         (@as(u8, @intFromEnum(PacketType.publish)) << 4) | flags,
     );
@@ -2528,7 +2693,6 @@ pub fn writePublish(
     if (protocol == .v5) {
         writePropertiesAssumeCapacity(list, options.properties, properties_len);
     }
-    list.appendSliceAssumeCapacity(payload);
 }
 
 test "MQTT remaining length roundtrip" {

@@ -1231,14 +1231,44 @@ pub const Connection = struct {
         errdefer if (packet_id) |id| self.releaseOutgoingPublish(id, options.qos);
 
         self.write_scratch.clearRetainingCapacity();
-        try mqtt.writePublish(&self.write_scratch, self.allocator, self.protocol, topic, payload, .{
+        const write_options: mqtt.PublishWriteOptions = .{
             .qos = options.qos,
             .retain = options.retain,
             .dup = options.dup,
             .packet_id = packet_id,
             .properties = options.properties,
-        });
-        try self.writePacket(self.write_scratch.items);
+        };
+        const lengths = try mqtt.writePublishPrefix(
+            &self.write_scratch,
+            self.allocator,
+            self.protocol,
+            topic,
+            payload,
+            write_options,
+        );
+        try self.authentication.ensurePacketAllowed(.publish);
+        if (lengths.total > self.peer_max_packet_size) {
+            return error.OutgoingPacketTooLarge;
+        }
+        if (self.transport.supportsBorrowedPacketPayload()) {
+            const wrote_parts = try self.transport.writePacketParts(
+                self.write_scratch.items,
+                payload,
+            );
+            std.debug.assert(wrote_parts);
+        } else {
+            // WebSocket needs one complete binary message and client-side
+            // in-place masking, so retain the contiguous compatibility path.
+            try mqtt.writePublish(
+                &self.write_scratch,
+                self.allocator,
+                self.protocol,
+                topic,
+                payload,
+                write_options,
+            );
+            try self.writePacket(self.write_scratch.items);
+        }
         try self.rememberOutgoingTopicAlias(topic, options.properties);
         return packet_id;
     }
@@ -3486,6 +3516,42 @@ test "MQTT connection enforces negotiated maximum packet size" {
     try std.testing.expectError(error.OutgoingPacketTooLarge, connection.publish("limited/topic", "payload too large", .{}));
 }
 
+test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
+    var connection = Connection{
+        .allocator = std.testing.allocator,
+        .transport = .{ .tcp = undefined },
+        .protocol = .v5,
+        .peer_max_packet_size = 8,
+    };
+    defer connection.write_scratch.deinit(std.testing.allocator);
+
+    try std.testing.expectError(
+        error.OutgoingPacketTooLarge,
+        connection.writePublish("too/large", "payload", .{
+            .qos = .at_least_once,
+        }),
+    );
+    try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.outgoing_qos1.count(),
+    );
+
+    connection.peer_max_packet_size = std.math.maxInt(usize);
+    connection.authentication.phase = .reauthenticating;
+    try std.testing.expectError(
+        error.AuthenticationInProgress,
+        connection.writePublish("auth/blocked", "payload", .{
+            .qos = .at_least_once,
+        }),
+    );
+    try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.outgoing_qos1.count(),
+    );
+}
+
 test "MQTT publish encoding reuses connection scratch" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -3510,28 +3576,49 @@ test "MQTT publish encoding reuses connection scratch" {
     };
     defer connection.write_scratch.deinit(allocator);
 
-    _ = try connection.writePublish("scratch/topic", "payload", .{});
+    const payload = [_]u8{0xa5} ** 1024;
+    _ = try connection.writePublish("scratch/topic", &payload, .{});
     const storage = connection.write_scratch.allocatedSlice().ptr;
-    var drain: [128]u8 = undefined;
-    var buffers = [_][]u8{&drain};
-    _ = try io.vtable.netRead(
-        io.userdata,
-        server_stream.socket.handle,
-        &buffers,
+    const prefix_capacity = connection.write_scratch.capacity;
+    try std.testing.expect(connection.write_scratch.items.len < payload.len);
+    var peer = PacketTransport.initTcp(io, server_stream);
+    var first = try peer.readPacket(allocator, 2048);
+    defer first.deinit(allocator);
+    var first_publish = try mqtt.Publish.parse(
+        allocator,
+        .v5,
+        first.bytes,
     );
+    defer first_publish.deinit(allocator);
+    try std.testing.expectEqualStrings("scratch/topic", first_publish.topic);
+    try std.testing.expectEqualSlices(u8, &payload, first_publish.payload);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
-    // The codec precomputes the complete wire length and writes directly into
-    // retained connection scratch, so no temporary variable/property buffer
-    // is needed after warmup.
+    // TCP writes the retained MQTT prefix and borrowed application payload as
+    // one vectored stream operation. The payload therefore does not determine
+    // scratch capacity and warm sends need no allocation.
     failing.fail_index = failing.alloc_index;
     connection.allocator = failing.allocator();
-    _ = try connection.writePublish("scratch/topic", "payload", .{});
+    _ = try connection.writePublish("scratch/topic", &payload, .{});
     try std.testing.expectEqual(
         storage,
         connection.write_scratch.allocatedSlice().ptr,
     );
+    try std.testing.expectEqual(
+        prefix_capacity,
+        connection.write_scratch.capacity,
+    );
+    try std.testing.expect(connection.write_scratch.items.len < payload.len);
     try std.testing.expect(!failing.has_induced_failure);
+    var second = try peer.readPacket(allocator, 2048);
+    defer second.deinit(allocator);
+    var second_publish = try mqtt.Publish.parse(
+        allocator,
+        .v5,
+        second.bytes,
+    );
+    defer second_publish.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &payload, second_publish.payload);
 }
 
 test "MQTT variable control writes reuse connection scratch" {

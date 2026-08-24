@@ -1,5 +1,6 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
+const stream_io = @import("../../internal/stream_io.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
 const tls_stream = @import("../../tls/mod.zig").stream;
@@ -141,6 +142,47 @@ pub const Transport = union(enum) {
             else
                 try ws.connection.sendBinary(bytes),
         }
+    }
+
+    /// Write a packet prefix and borrowed application payload as one logical
+    /// transport operation. Stream transports can use scatter/gather without
+    /// copying the payload. WebSocket must preserve one MQTT packet per binary
+    /// message and client masking is in-place, so it intentionally reports that
+    /// the caller should use the contiguous compatibility path instead.
+    pub fn writePacketParts(
+        self: *Transport,
+        prefix: []const u8,
+        payload: []const u8,
+    ) Error!bool {
+        switch (self.*) {
+            .tcp => |tcp| try stream_io.writeAllParts(
+                tcp.io,
+                tcp.stream,
+                prefix,
+                payload,
+            ),
+            .tls => |connection| try connection.writeAllParts(
+                prefix,
+                payload,
+            ),
+            .tls_vail => |connection| try connection.writeAllParts(
+                prefix,
+                payload,
+            ),
+            .tls_server => |connection| try connection.writeAllParts(
+                prefix,
+                payload,
+            ),
+            .websocket => return false,
+        }
+        return true;
+    }
+
+    pub fn supportsBorrowedPacketPayload(self: Transport) bool {
+        return switch (self) {
+            .tcp, .tls, .tls_vail, .tls_server => true,
+            .websocket => false,
+        };
     }
 
     pub fn readPacket(
