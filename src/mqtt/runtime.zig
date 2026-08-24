@@ -3433,10 +3433,10 @@ test "MQTT publish encoding reuses connection scratch" {
     );
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
-    // The stateless codec still needs one temporary variable-header buffer.
-    // Permit that allocation but fail a second one: retained connection output
-    // must not allocate again after warmup.
-    failing.fail_index = failing.alloc_index + 1;
+    // The codec precomputes the complete wire length and writes directly into
+    // retained connection scratch, so no temporary variable/property buffer
+    // is needed after warmup.
+    failing.fail_index = failing.alloc_index;
     connection.allocator = failing.allocator();
     _ = try connection.writePublish("scratch/topic", "payload", .{});
     try std.testing.expectEqual(

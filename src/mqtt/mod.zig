@@ -680,6 +680,143 @@ pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, p
     try list.appendSlice(allocator, encoded.items);
 }
 
+fn propertyEncodedLen(property: Property) Error!usize {
+    try validateProperty(property);
+    return switch (property) {
+        .byte => 2,
+        .two_byte => 3,
+        .four_byte => 5,
+        .varint => |p| blk: {
+            if (p.value > 268_435_455) {
+                return error.RemainingLengthTooLarge;
+            }
+            break :blk std.math.add(
+                usize,
+                1,
+                remainingLengthEncodedLen(p.value),
+            ) catch return error.IntegerOverflow;
+        },
+        .binary => |p| std.math.add(
+            usize,
+            1,
+            try encodedLengthPrefixedLen(p.value, false),
+        ) catch return error.IntegerOverflow,
+        .utf8 => |p| blk: {
+            try validateMqttUtf8String(p.value);
+            break :blk std.math.add(
+                usize,
+                1,
+                try encodedLengthPrefixedLen(p.value, true),
+            ) catch return error.IntegerOverflow;
+        },
+        .utf8_pair => |p| blk: {
+            try validateMqttUtf8String(p.key);
+            try validateMqttUtf8String(p.value);
+            break :blk std.math.add(
+                usize,
+                1,
+                std.math.add(
+                    usize,
+                    try encodedLengthPrefixedLen(p.key, true),
+                    try encodedLengthPrefixedLen(p.value, true),
+                ) catch return error.IntegerOverflow,
+            ) catch return error.IntegerOverflow;
+        },
+    };
+}
+
+fn encodedLengthPrefixedLen(
+    value: []const u8,
+    utf8: bool,
+) Error!usize {
+    if (value.len > std.math.maxInt(u16)) {
+        return if (utf8) error.InvalidUtf8 else error.InvalidProperty;
+    }
+    return std.math.add(usize, 2, value.len) catch return error.IntegerOverflow;
+}
+
+fn propertiesEncodedLen(properties: []const Property) Error!usize {
+    var len: usize = 0;
+    for (properties, 0..) |property, index| {
+        try validatePropertyNotDuplicate(property, properties[0..index]);
+        len = std.math.add(usize, len, try propertyEncodedLen(property)) catch
+            return error.IntegerOverflow;
+    }
+    return len;
+}
+
+fn writePropertiesAssumeCapacity(
+    list: *std.ArrayList(u8),
+    properties: []const Property,
+    encoded_len: usize,
+) void {
+    encodeRemainingLengthAssumeCapacity(list, encoded_len);
+    for (properties) |property| switch (property) {
+        .byte => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            list.appendAssumeCapacity(p.value);
+        },
+        .two_byte => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            appendIntAssumeCapacity(list, u16, p.value);
+        },
+        .four_byte => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            appendIntAssumeCapacity(list, u32, p.value);
+        },
+        .varint => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            encodeRemainingLengthAssumeCapacity(list, p.value);
+        },
+        .binary => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            appendLengthPrefixedAssumeCapacity(list, p.value);
+        },
+        .utf8 => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            appendLengthPrefixedAssumeCapacity(list, p.value);
+        },
+        .utf8_pair => |p| {
+            list.appendAssumeCapacity(@intFromEnum(p.id));
+            appendLengthPrefixedAssumeCapacity(list, p.key);
+            appendLengthPrefixedAssumeCapacity(list, p.value);
+        },
+    };
+}
+
+fn encodeRemainingLengthAssumeCapacity(
+    list: *std.ArrayList(u8),
+    value: usize,
+) void {
+    std.debug.assert(value <= 268_435_455);
+    var remaining = value;
+    while (true) {
+        var encoded: u8 = @intCast(remaining % 128);
+        remaining /= 128;
+        if (remaining != 0) encoded |= 0x80;
+        list.appendAssumeCapacity(encoded);
+        if (remaining == 0) break;
+    }
+}
+
+fn appendIntAssumeCapacity(
+    list: *std.ArrayList(u8),
+    comptime T: type,
+    value: T,
+) void {
+    const start = list.items.len;
+    list.items.len += @sizeOf(T);
+    std.mem.writeInt(T, list.items[start..][0..@sizeOf(T)], value, .big);
+}
+
+fn appendLengthPrefixedAssumeCapacity(
+    list: *std.ArrayList(u8),
+    value: []const u8,
+) void {
+    appendIntAssumeCapacity(list, u16, @intCast(value.len));
+    list.appendSliceAssumeCapacity(value);
+}
+
 fn validateProperty(property: Property) Error!void {
     if (!propertyHasExpectedWireType(property)) return error.InvalidProperty;
 
@@ -1867,6 +2004,8 @@ pub fn writePublish(
     payload: []const u8,
     options: struct { qos: QoS = .at_most_once, retain: bool = false, dup: bool = false, packet_id: ?u16 = null, properties: []const Property = &.{} },
 ) !void {
+    const original_len = list.items.len;
+    errdefer list.items.len = original_len;
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
@@ -1884,21 +2023,51 @@ pub fn writePublish(
         // collisions with their in-flight window.
         return error.InvalidPacketIdentifier;
     }
-    var variable: std.ArrayList(u8) = .empty;
-    defer variable.deinit(allocator);
-    try writeUtf8(&variable, allocator, topic);
-    if (options.qos != .at_most_once) try wire.appendInt(&variable, allocator, u16, options.packet_id.?, .big);
-    if (protocol == .v5) {
-        try validatePropertiesFor(.publish, options.properties);
-        try writeProperties(&variable, allocator, options.properties);
-    }
-    try variable.appendSlice(allocator, payload);
-
     const flags: u4 = (if (options.dup) @as(u4, 0x8) else 0) |
         (@as(u4, @intFromEnum(options.qos)) << 1) |
         (if (options.retain) @as(u4, 0x1) else 0);
-    try (FixedHeader{ .packet_type = .publish, .flags = flags, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
-    try list.appendSlice(allocator, variable.items);
+    const properties_len = if (protocol == .v5) blk: {
+        try validatePropertiesFor(.publish, options.properties);
+        break :blk try propertiesEncodedLen(options.properties);
+    } else 0;
+    const variable_len = std.math.add(
+        usize,
+        try encodedLengthPrefixedLen(topic, true),
+        if (options.qos == .at_most_once) 0 else 2,
+    ) catch return error.IntegerOverflow;
+    const properties_wire_len = if (protocol == .v5)
+        std.math.add(
+            usize,
+            remainingLengthEncodedLen(properties_len),
+            properties_len,
+        ) catch return error.IntegerOverflow
+    else
+        0;
+    const remaining_len = std.math.add(
+        usize,
+        std.math.add(usize, variable_len, properties_wire_len) catch
+            return error.IntegerOverflow,
+        payload.len,
+    ) catch return error.IntegerOverflow;
+    if (remaining_len > 268_435_455) return error.RemainingLengthTooLarge;
+    const encoded_len = std.math.add(
+        usize,
+        1 + remainingLengthEncodedLen(remaining_len),
+        remaining_len,
+    ) catch return error.IntegerOverflow;
+    try list.ensureUnusedCapacity(allocator, encoded_len);
+    list.appendAssumeCapacity(
+        (@as(u8, @intFromEnum(PacketType.publish)) << 4) | flags,
+    );
+    encodeRemainingLengthAssumeCapacity(list, remaining_len);
+    appendLengthPrefixedAssumeCapacity(list, topic);
+    if (options.qos != .at_most_once) {
+        appendIntAssumeCapacity(list, u16, options.packet_id.?);
+    }
+    if (protocol == .v5) {
+        writePropertiesAssumeCapacity(list, options.properties, properties_len);
+    }
+    list.appendSliceAssumeCapacity(payload);
 }
 
 test "MQTT remaining length roundtrip" {
@@ -1914,6 +2083,79 @@ test "MQTT remaining length roundtrip" {
     }
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0x80, 0x00 }));
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0xff, 0x00 }));
+}
+
+test "MQTT PUBLISH direct encoding is allocation-free with exact capacity" {
+    const allocator = std.testing.allocator;
+    const properties = [_]Property{
+        .{ .byte = .{ .id = .payload_format_indicator, .value = 1 } },
+        .{ .four_byte = .{ .id = .message_expiry_interval, .value = 30 } },
+        .{ .varint = .{ .id = .subscription_identifier, .value = 321 } },
+        .{ .binary = .{ .id = .correlation_data, .value = "id" } },
+        .{ .utf8 = .{ .id = .content_type, .value = "text/plain" } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writePublish(
+        &encoded,
+        allocator,
+        .v5,
+        "direct/topic",
+        "payload",
+        .{
+            .qos = .at_least_once,
+            .retain = true,
+            .packet_id = 7,
+            .properties = &properties,
+        },
+    );
+    const expected = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(expected);
+    encoded.clearRetainingCapacity();
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try writePublish(
+        &encoded,
+        no_alloc.allocator(),
+        .v5,
+        "direct/topic",
+        "payload",
+        .{
+            .qos = .at_least_once,
+            .retain = true,
+            .packet_id = 7,
+            .properties = &properties,
+        },
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, expected, encoded.items);
+    var parsed = try Publish.parse(allocator, .v5, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("direct/topic", parsed.topic);
+    try std.testing.expectEqualStrings("payload", parsed.payload);
+    try std.testing.expectEqual(@as(?u16, 7), parsed.packet_id);
+    try std.testing.expectEqual(properties.len, parsed.properties.len);
+
+    const preserved_len = encoded.items.len;
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        writePublish(
+            &encoded,
+            allocator,
+            .v5,
+            "direct/topic",
+            "payload",
+            .{ .properties = &.{.{ .utf8 = .{
+                .id = .content_type,
+                .value = "bad\x00value",
+            } }} },
+        ),
+    );
+    try std.testing.expectEqual(preserved_len, encoded.items.len);
 }
 
 test "MQTT Assigned Client Identifier lookup" {

@@ -157,9 +157,12 @@ persistence, offline sessions, Will integration, tail latency, memory use, or
 broader conformance.
 
 The broker hot path now retains each connection's encoded PUBLISH output
-buffer after first use; repeated delivery allocates only the stateless codec's
-temporary variable section rather than a second output buffer. A failing-
-allocator socket test proves that no second allocation occurs after warmup.
+buffer after first use. The codec prevalidates every property, computes the
+complete Remaining Length, reserves once, and writes fixed header, topic,
+Packet Identifier, every MQTT 5 property type and payload directly into that
+retained output. It no longer allocates temporary variable-header or property
+buffers; failing-allocator codec and socket tests prove warmed writes are
+allocation-free while parsing verifies exact wire parity.
 Plan flushing also removed quadratic prefix searches for overlapping
 subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
