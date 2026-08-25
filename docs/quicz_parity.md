@@ -156,6 +156,8 @@ probe-sized temporary list on every search step. Recovery still takes stable
 ownership before the socket write. A real UDP regression sends and retires one
 probe, then re-arms the same size under an allocator that rejects all new
 allocations; the second exact-size probe succeeds with stable scratch pointers.
+The full 1,608-test suite and both quic-go and s2n-quic transport matrices
+remain green after the change.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
 fills unpredictable bytes, caps responses at 1200 bytes, requires a valid

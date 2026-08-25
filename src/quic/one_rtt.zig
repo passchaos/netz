@@ -2461,11 +2461,8 @@ pub const Connection = struct {
             target_payload_len,
         );
         self.send_frame_buffer.items.len = target_payload_len;
+        @memset(self.send_frame_buffer.items, 0);
         self.send_frame_buffer.items[0] = @intFromEnum(quic.FrameType.ping);
-        @memset(
-            self.send_frame_buffer.items[1..],
-            @intFromEnum(quic.FrameType.padding),
-        );
         const payload = self.send_frame_buffer.items;
 
         try self.congestion.reserve(payload.len);
