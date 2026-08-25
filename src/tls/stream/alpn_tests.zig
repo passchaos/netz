@@ -28,6 +28,12 @@ test "TLS stream negotiates ALPN and exchanges application data" {
         certificate: *const [tls_testing.certificate_der_len]u8,
         key_pair: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
         exporter: [32]u8 = undefined,
+        key_updates: @import("record_stream.zig").KeyUpdateCounts =
+            .{
+                .sent = 0,
+                .received = 0,
+                .awaiting_peer_response = false,
+            },
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -76,6 +82,10 @@ test "TLS stream negotiates ALPN and exchanges application data" {
                 shared.err = err;
                 return;
             };
+            connection.updateTrafficKeys(true) catch |err| {
+                shared.err = err;
+                return;
+            };
             var request: [4]u8 = undefined;
             var offset: usize = 0;
             while (offset < request.len) {
@@ -95,7 +105,32 @@ test "TLS stream negotiates ALPN and exchanges application data" {
             }
             connection.writeAll("pong") catch |err| {
                 shared.err = err;
+                return;
             };
+            var updated_request: [4]u8 = undefined;
+            offset = 0;
+            while (offset < updated_request.len) {
+                const count = connection.read(
+                    updated_request[offset..],
+                ) catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                if (count == 0) {
+                    shared.err = error.ConnectionClosed;
+                    return;
+                }
+                offset += count;
+            }
+            if (!std.mem.eql(u8, &updated_request, "done")) {
+                shared.err = error.InvalidPayload;
+                return;
+            }
+            connection.writeAll("okay") catch |err| {
+                shared.err = err;
+                return;
+            };
+            shared.key_updates = connection.keyUpdateCounts();
         }
     };
 
@@ -137,6 +172,8 @@ test "TLS stream negotiates ALPN and exchanges application data" {
         "shared-context",
         &client_exporter,
     );
+    // The server's update requests a reciprocal update. The client processes
+    // it transparently before returning the next application bytes.
     try connection.writeAllSlices(&.{ "pi", "", "ng" });
     var response: [4]u8 = undefined;
     var offset: usize = 0;
@@ -146,6 +183,15 @@ test "TLS stream negotiates ALPN and exchanges application data" {
         offset += count;
     }
     try std.testing.expectEqualStrings("pong", &response);
+    try connection.updateTrafficKeys(false);
+    try connection.writeAll("done");
+    offset = 0;
+    while (offset < response.len) {
+        const count = try connection.read(response[offset..]);
+        if (count == 0) return error.ConnectionClosed;
+        offset += count;
+    }
+    try std.testing.expectEqualStrings("okay", &response);
 
     thread.join();
     joined = true;
@@ -155,6 +201,20 @@ test "TLS stream negotiates ALPN and exchanges application data" {
         &shared.exporter,
         &client_exporter,
     );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        connection.keyUpdateCounts().received,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        connection.keyUpdateCounts().sent,
+    );
+    try std.testing.expect(
+        !connection.keyUpdateCounts().awaiting_peer_response,
+    );
+    try std.testing.expectEqual(@as(u64, 1), shared.key_updates.sent);
+    try std.testing.expectEqual(@as(u64, 2), shared.key_updates.received);
+    try std.testing.expect(!shared.key_updates.awaiting_peer_response);
 }
 
 test "TLS stream rejects ALPN without a shared protocol" {

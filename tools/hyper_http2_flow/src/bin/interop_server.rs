@@ -22,6 +22,7 @@ use hyper::header::{HeaderMap, HeaderValue};
 use hyper::server::conn::http2 as server_http2;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
@@ -63,11 +64,22 @@ fn main() {
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let io = match tls_paths {
             Some((cert, key)) => {
-                let tls = TlsAcceptor::from(tls_server_config(&cert, &key))
+                let mut tls = TlsAcceptor::from(tls_server_config(&cert, &key))
                     .accept(stream)
                     .await
                     .expect("accept TLS with h2 ALPN");
                 assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                // Exercise rustls's production TLS 1.3 KeyUpdate encoder, not
+                // merely a netz-to-netz vector. Its public API requests a
+                // reciprocal update; flushing before Hyper starts preserves
+                // record order ahead of the HTTP/2 connection bytes.
+                tls.get_mut()
+                    .1
+                    .refresh_traffic_keys()
+                    .expect("queue rustls KeyUpdate");
+                tls.flush().await.expect("flush rustls KeyUpdate");
+                println!("rustls server sent TLS KeyUpdate request");
+                io::stdout().flush().expect("flush KeyUpdate marker");
                 MaybeTls::Server(tls)
             }
             None => MaybeTls::Clear(stream),

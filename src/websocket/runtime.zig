@@ -41,6 +41,7 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     MessageTooLarge,
     TimedReadUnsupported,
     ExporterUnavailable,
+    TlsKeyUpdateUnavailable,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
 
 pub const Limits = struct {
@@ -1124,6 +1125,36 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Start a TLS 1.3 application traffic-key update for vail-backed WSS.
+    /// The connection send mutex keeps this control record ordered with every
+    /// WebSocket frame writer.
+    pub fn updateTrafficKeys(
+        self: *Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        if (self.tls_server_conn) |connection| {
+            return connection.updateTrafficKeys(request_peer_update);
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.updateTrafficKeys(request_peer_update);
+        }
+        return error.TlsKeyUpdateUnavailable;
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) ?tls_stream.KeyUpdateCounts {
+        if (self.tls_server_conn) |connection| {
+            return connection.keyUpdateCounts();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.keyUpdateCounts();
+        }
+        return null;
+    }
+
     /// Export RFC 8446 channel-bound keying material for vail-backed WSS.
     pub fn exportKeyingMaterial(
         self: *const Connection,
@@ -2065,6 +2096,23 @@ pub const H2Connection = struct {
         self.compression_send.deinit(self.allocator);
         self.compression_receive.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// RFC 8441 runs over the parent HTTP/2 connection, so TLS traffic-key
+    /// control belongs to that shared transport rather than this logical
+    /// WebSocket stream. Cleartext h2c reports the same explicit unavailable
+    /// error as the ordinary WebSocket adapter.
+    pub fn updateTrafficKeys(
+        self: *H2Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        try self.tunnel.connection.updateTrafficKeys(request_peer_update);
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const H2Connection,
+    ) ?tls_stream.KeyUpdateCounts {
+        return self.tunnel.connection.keyUpdateCounts();
     }
 
     pub fn sendText(self: *H2Connection, text: []const u8) Error!void {

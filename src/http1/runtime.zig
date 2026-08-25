@@ -33,6 +33,7 @@ pub const Error = http1.Error || tls_stream.Error || error{
     InvalidWriterState,
     TimedReadUnsupported,
     TooManyInformationalResponses,
+    PostHandshakeTlsUnavailable,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
 
 fn setTcpNoDelay(stream: net.Stream) Error!void {
@@ -240,6 +241,14 @@ test "HTTP/1 TLS server exchanges persistent requests" {
             var connection = try shared.server.accept();
             defer connection.close();
             try std.testing.expect(connection.peerCertificates() == null);
+            try std.testing.expectEqual(
+                tls_stream.CipherSuite.aes_128_gcm_sha256,
+                connection.negotiatedCipherSuite().?,
+            );
+            try std.testing.expectEqual(
+                tls_stream.TranscriptHash.sha256,
+                connection.negotiatedTranscriptHash().?,
+            );
             for (0..2) |index| {
                 var request = try connection.readRequest(.{});
                 defer request.deinit(allocator);
@@ -251,7 +260,11 @@ test "HTTP/1 TLS server exchanges persistent requests" {
                     .body = if (index == 0) "one" else "two",
                     .request_method = request.request.method,
                 });
+                if (index == 0) try connection.updateTrafficKeys(false);
             }
+            const updates = connection.keyUpdateCounts().?;
+            try std.testing.expectEqual(@as(u64, 1), updates.sent);
+            try std.testing.expectEqual(@as(u64, 0), updates.received);
         }
     };
 
@@ -1887,6 +1900,49 @@ pub const Connection = struct {
         return tls_connection.peerCertificates();
     }
 
+    /// Return authenticated TLS 1.3 negotiation metadata for HTTPS server
+    /// connections. Cleartext connections return null.
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) ?tls_stream.CipherSuite {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) ?tls_stream.TranscriptHash {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.negotiatedTranscriptHash();
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        const connection = self.tls_server_conn orelse
+            return error.PostHandshakeTlsUnavailable;
+        try connection.exportKeyingMaterial(label, context, out);
+    }
+
+    pub fn updateTrafficKeys(
+        self: *Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        const connection = self.tls_server_conn orelse
+            return error.PostHandshakeTlsUnavailable;
+        try connection.updateTrafficKeys(request_peer_update);
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) ?tls_stream.KeyUpdateCounts {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.keyUpdateCounts();
+    }
+
     pub fn close(self: *Connection) void {
         self.inbuf.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
@@ -2346,6 +2402,24 @@ pub const Tunnel = struct {
             return n;
         }
         return self.transport().read(buffer);
+    }
+
+    /// Preserve post-handshake TLS control for server-side CONNECT/Upgrade
+    /// tunnels after the HTTP parser relinquishes ownership of the stream.
+    pub fn updateTrafficKeys(
+        self: *Tunnel,
+        request_peer_update: bool,
+    ) Error!void {
+        const connection = self.tls_server_conn orelse
+            return error.PostHandshakeTlsUnavailable;
+        try connection.updateTrafficKeys(request_peer_update);
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Tunnel,
+    ) ?tls_stream.KeyUpdateCounts {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.keyUpdateCounts();
     }
 };
 

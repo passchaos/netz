@@ -93,8 +93,15 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
                 "mqtt-alpn",
                 accepted.connect.connect.client_id,
             );
+            try accepted.connection.updateTrafficKeys(true);
+            try accepted.connection.readPingReq();
+            try accepted.connection.writePingResp();
             var disconnect = try accepted.connection.readDisconnect();
             defer disconnect.deinit(server_ptr.allocator);
+            const updates = accepted.connection.keyUpdateCounts().?;
+            try std.testing.expectEqual(@as(u64, 1), updates.sent);
+            try std.testing.expectEqual(@as(u64, 1), updates.received);
+            try std.testing.expect(!updates.awaiting_peer_response);
         }
     };
 
@@ -149,6 +156,11 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
         tls_stream.TranscriptHash.sha256,
         client.negotiatedTranscriptHash().?,
     );
+    try client.ping();
+    const updates = client.keyUpdateCounts().?;
+    try std.testing.expectEqual(@as(u64, 1), updates.sent);
+    try std.testing.expectEqual(@as(u64, 1), updates.received);
+    try std.testing.expect(!updates.awaiting_peer_response);
     try client.disconnect(0);
 
     thread.join();

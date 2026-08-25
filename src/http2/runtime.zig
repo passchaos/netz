@@ -202,6 +202,31 @@ const RuntimeTransport = union(enum) {
             .tls_server => |connection| connection.deinit(),
         }
     }
+
+    fn updateTrafficKeys(
+        self: RuntimeTransport,
+        request_peer_update: bool,
+    ) Error!void {
+        return switch (self) {
+            .tls_client => |connection| connection.updateTrafficKeys(
+                request_peer_update,
+            ),
+            .tls_server => |connection| connection.updateTrafficKeys(
+                request_peer_update,
+            ),
+            .tcp => error.PostHandshakeTlsUnavailable,
+        };
+    }
+
+    fn keyUpdateCounts(
+        self: *const RuntimeTransport,
+    ) ?tls_stream.KeyUpdateCounts {
+        return switch (self.*) {
+            .tls_client => |connection| connection.keyUpdateCounts(),
+            .tls_server => |connection| connection.keyUpdateCounts(),
+            .tcp => null,
+        };
+    }
 };
 
 fn tcpTransport(io: std.Io, stream: net.Stream) RuntimeTransport {
@@ -1454,6 +1479,25 @@ pub const Connection = struct {
             .tls_server => |connection| connection.negotiatedTranscriptHash(),
             .tcp => null,
         };
+    }
+
+    /// Start a TLS 1.3 application traffic-key update. The transport serializes
+    /// the KeyUpdate handshake message with all HTTP/2 writes and rotates only
+    /// after the old-key record has reached the socket.
+    pub fn updateTrafficKeys(
+        self: *Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        const transport = self.transport orelse
+            return error.PostHandshakeTlsUnavailable;
+        try transport.updateTrafficKeys(request_peer_update);
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) ?tls_stream.KeyUpdateCounts {
+        const transport = self.transport orelse return null;
+        return transport.keyUpdateCounts();
     }
 
     /// Export RFC 8446 channel-bound keying material for TLS connections.

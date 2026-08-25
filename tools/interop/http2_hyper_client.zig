@@ -94,6 +94,19 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidResponse;
     }
+    if (tls_enabled) {
+        const updates = connection.keyUpdateCounts() orelse
+            return error.MissingKeyUpdate;
+        if (updates.received != 1 or updates.sent != 1 or
+            updates.awaiting_peer_response)
+        {
+            return error.InvalidKeyUpdateCount;
+        }
+        std.debug.print(
+            "netz HTTP/2 client interoperated with rustls KeyUpdate: received=1 sent=1 next_request=true\n",
+            .{},
+        );
+    }
 
     std.debug.print(
         "netz HTTP/2 client interoperated with Hyper: transport={s} alpn={s} status=201 body=14 trailers=1\n",

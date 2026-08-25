@@ -71,6 +71,8 @@ pub const PeerCertificateChain = struct {
 pub const TrafficKeys = struct {
     read: tls_record.Keys,
     write: tls_record.Keys,
+    read_traffic_secret: vail.tls.secret.Secret,
+    write_traffic_secret: vail.tls.secret.Secret,
     cipher_suite: vail.tls.cipher_suite.Suite,
     peer_certificate_chain: ?PeerCertificateChain = null,
     selected_alpn: ?[]const u8 = null,
@@ -79,6 +81,8 @@ pub const TrafficKeys = struct {
     pub fn deinit(self: *TrafficKeys) void {
         self.read.deinit();
         self.write.deinit();
+        self.read_traffic_secret.deinit();
+        self.write_traffic_secret.deinit();
         if (self.peer_certificate_chain) |*chain| chain.deinit();
         self.exporter_master_secret.deinit();
         self.* = undefined;
@@ -247,6 +251,8 @@ pub fn perform(
             handshake.selection.suite,
             application.server_traffic_secret,
         ),
+        .read_traffic_secret = application.client_traffic_secret,
+        .write_traffic_secret = application.server_traffic_secret,
         .cipher_suite = handshake.selection.suite,
         .peer_certificate_chain = peer_certificate_chain,
         .selected_alpn = handshake.selection.alpn_protocol,

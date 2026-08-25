@@ -54,6 +54,10 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
                 shared.err = error.InvalidCipherSuite;
                 return;
             }
+            connection.updateTrafficKeys(true) catch |err| {
+                shared.err = err;
+                return;
+            };
             var request = connection.readRequest() catch |err| {
                 shared.err = err;
                 return;
@@ -70,7 +74,29 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
                 .body = "secure h2",
             }) catch |err| {
                 shared.err = err;
+                return;
             };
+            var after_update = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer after_update.deinit(shared.server.allocator);
+            if (!std.mem.eql(u8, after_update.path, "/after-update")) {
+                shared.err = error.InvalidRequest;
+                return;
+            }
+            connection.writeResponse(after_update.stream_id, .{
+                .body = "rotated h2",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            const updates = connection.keyUpdateCounts().?;
+            if (updates.sent != 1 or updates.received != 1 or
+                updates.awaiting_peer_response)
+            {
+                shared.err = error.InvalidKeyUpdateCount;
+            }
         }
     };
 
@@ -105,6 +131,13 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("secure h2", response.body);
+    var after_update = try client.request(.{ .path = "/after-update" });
+    defer after_update.deinit(allocator);
+    try std.testing.expectEqualStrings("rotated h2", after_update.body);
+    const updates = client.keyUpdateCounts().?;
+    try std.testing.expectEqual(@as(u64, 1), updates.sent);
+    try std.testing.expectEqual(@as(u64, 1), updates.received);
+    try std.testing.expect(!updates.awaiting_peer_response);
 
     thread.join();
     joined = true;

@@ -36,6 +36,7 @@ pub const Error = packet_transport.Error || error{
     RedirectLoop,
     RedirectRejected,
     ExporterUnavailable,
+    TlsKeyUpdateUnavailable,
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -1054,6 +1055,20 @@ pub const Connection = struct {
         self: *const Connection,
     ) ?tls_stream.TranscriptHash {
         return self.transport.negotiatedTranscriptHash();
+    }
+
+    /// Start a TLS 1.3 application traffic-key update for native TLS or WSS.
+    pub fn updateTrafficKeys(
+        self: *Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        return self.transport.updateTrafficKeys(request_peer_update);
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) ?tls_stream.KeyUpdateCounts {
+        return self.transport.keyUpdateCounts();
     }
 
     /// Export RFC 8446 channel-bound keying material from vail-backed native

@@ -273,7 +273,12 @@ pub const Connection = struct {
             .allocator = allocator,
             .io = io,
             .stream = stream,
-            .records = .init(read_keys, write_keys),
+            .records = .init(
+                read_keys,
+                write_keys,
+                verified.application.server_traffic_secret,
+                verified.application.client_traffic_secret,
+            ),
             .selected_alpn = selected_alpn,
             .peer_certificate_chain = peer_certificate_chain,
             .cipher_suite = verified.cipher_suite,
@@ -391,6 +396,23 @@ pub const Connection = struct {
             context,
             out,
         );
+    }
+
+    pub fn updateTrafficKeys(
+        self: *Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        try self.records.updateTrafficKeys(
+            self.io,
+            self.stream,
+            request_peer_update,
+        );
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) record_stream.KeyUpdateCounts {
+        return self.records.keyUpdateCounts();
     }
 
     pub fn read(self: *Connection, out: []u8) Error!usize {

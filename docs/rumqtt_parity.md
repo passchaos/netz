@@ -850,6 +850,9 @@ application authentication and channel binding, together with typed
 `negotiatedCipherSuite()` and `negotiatedTranscriptHash()` metadata for native
 TLS and vail-backed WSS. Unsupported cleartext and standard-library TLS paths
 return null instead of synthesizing negotiation state.
+The same transports expose explicit RFC 8446 application traffic-key rotation
+and sent/received update counters. Native MQTT TLS tests require a reciprocal
+update before PING/DISCONNECT, proving MQTT framing survives both new epochs.
 This covers rumqttc's configurable TLS ALPN surface and Mosquitto's
 client/bridge ALPN option while also giving server applications the negotiated
 identity directly. Empty ALPN lists preserve the existing standard-library TLS

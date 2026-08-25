@@ -26,8 +26,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 - Shared vail-backed TLS 1.3 stream client/server wrappers with optional/required
   client authentication, explicit ALPN offer/selection enforcement, owned
   negotiated-protocol metadata, authenticated cipher-suite/transcript-hash
-  introspection, and vectored plaintext writes that coalesce protocol slices
-  into bounded TLS records without a heap concatenation
+  introspection, RFC 8446 post-handshake KeyUpdate with reciprocal-update
+  handling and bounded peer control bursts, and vectored plaintext writes that
+  coalesce protocol slices into bounded TLS records without a heap concatenation
 - HTTP/2 frame headers with direct parse/preallocated writes and full-frame direct writes, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with exact-allocation/empty-payload parse fast paths, allocation-free/preallocated writes, empty-index membership and duplicate-entry skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with allocation-free/preallocated writes, identical replacement skips and per-target replacement, and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, preallocated prefix-integer writes, exact encode/decode output preallocation, retained runtime encode scratch, and preallocated empty/short/raw-preferred string write fast paths,
   pseudo-header and common-header static fast paths, internal empty-dynamic-table lookup skips, single-lookup
@@ -472,8 +473,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   serving, including optional/required client-certificate authentication,
   pluggable trust verification, verified peer-chain access on both native TLS
   endpoint roles and identity-enabled WSS clients, RFC 8446 exporter keying
-  material plus negotiated cipher-suite/hash metadata on vail-backed HTTP/2,
-  WebSocket, and MQTT connections, and opt-in native MQTT TLS ALPN negotiation
+  material plus negotiated cipher-suite/hash metadata on vail-backed HTTP/1
+  servers, HTTP/2, WebSocket, and MQTT connections, explicit application traffic-key rotation
+  plus update counters, and opt-in native MQTT TLS ALPN negotiation
   with the selected protocol exposed per
   connection, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with

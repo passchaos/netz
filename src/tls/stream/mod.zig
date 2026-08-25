@@ -10,6 +10,7 @@ pub const ServerOptions = @import("server_connection.zig").Options;
 /// Public TLS 1.3 negotiation metadata shared by every stream adapter.
 pub const CipherSuite = @import("vail").tls.cipher_suite.Suite;
 pub const TranscriptHash = @import("vail").tls.secret.Hash;
+pub const KeyUpdateCounts = @import("record_stream.zig").KeyUpdateCounts;
 pub const PeerCertificateChain =
     @import("server_handshake.zig").PeerCertificateChain;
 

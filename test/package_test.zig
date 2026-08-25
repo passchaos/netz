@@ -86,6 +86,7 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.tls.stream, "CipherSuite"));
     try std.testing.expect(@hasDecl(netz.tls.stream, "TranscriptHash"));
+    try std.testing.expect(@hasDecl(netz.tls.stream, "KeyUpdateCounts"));
     try std.testing.expect(@hasDecl(
         netz.tls.stream.ClientConnection,
         "negotiatedCipherSuite",
@@ -95,12 +96,28 @@ test "public modules are reachable" {
         "negotiatedTranscriptHash",
     ));
     try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "keyUpdateCounts",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.tls.stream.ServerConnection,
         "negotiatedCipherSuite",
     ));
     try std.testing.expect(@hasDecl(
         netz.tls.stream.ServerConnection,
         "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ServerConnection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ServerConnection,
+        "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(netz.tls, "testing"));
     try std.testing.expectEqualStrings("258EAFA5-E914-47DA-95CA-C5AB0DC85B11", netz.websocket.handshake_guid);
@@ -141,6 +158,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime.Connection, "acceptConnectTunnel"));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Connection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "keyUpdateCounts",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
         "readRequestBatchInto",
     ));
     try std.testing.expect(@hasDecl(
@@ -166,6 +207,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
@@ -257,6 +306,14 @@ test "public modules are reachable" {
         netz.websocket.runtime.Connection,
         "negotiatedTranscriptHash",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "keyUpdateCounts",
+    ));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "Message"));
@@ -267,6 +324,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "receiveMessageInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket,
@@ -1059,6 +1124,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

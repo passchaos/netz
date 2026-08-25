@@ -14,6 +14,7 @@ pub const Error = mqtt.Error || websocket_runtime.Error ||
     InvalidWebSocketMessage,
     PacketTooLarge,
     ExporterUnavailable,
+    TlsKeyUpdateUnavailable,
 } || net.Stream.Reader.Error || net.Stream.Writer.Error ||
     keep_alive_reader.Error;
 
@@ -107,6 +108,35 @@ pub const Transport = union(enum) {
             .tls_vail => |connection| connection.negotiatedTranscriptHash(),
             .tls_server => |connection| connection.negotiatedTranscriptHash(),
             .websocket => |*ws| ws.connection.negotiatedTranscriptHash(),
+            .tcp, .tls => null,
+        };
+    }
+
+    pub fn updateTrafficKeys(
+        self: *Transport,
+        request_peer_update: bool,
+    ) Error!void {
+        return switch (self.*) {
+            .tls_vail => |connection| connection.updateTrafficKeys(
+                request_peer_update,
+            ),
+            .tls_server => |connection| connection.updateTrafficKeys(
+                request_peer_update,
+            ),
+            .websocket => |*ws| ws.connection.updateTrafficKeys(
+                request_peer_update,
+            ),
+            .tcp, .tls => error.TlsKeyUpdateUnavailable,
+        };
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Transport,
+    ) ?tls_stream.KeyUpdateCounts {
+        return switch (self.*) {
+            .tls_vail => |connection| connection.keyUpdateCounts(),
+            .tls_server => |connection| connection.keyUpdateCounts(),
+            .websocket => |*ws| ws.connection.keyUpdateCounts(),
             .tcp, .tls => null,
         };
     }

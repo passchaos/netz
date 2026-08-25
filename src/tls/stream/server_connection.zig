@@ -55,12 +55,19 @@ pub const Connection = struct {
             .allocator = allocator,
             .io = io,
             .stream = stream,
-            .records = .init(keys.read, keys.write),
+            .records = .init(
+                keys.read,
+                keys.write,
+                keys.read_traffic_secret,
+                keys.write_traffic_secret,
+            ),
             .peer_certificate_chain = keys.peer_certificate_chain,
             .selected_alpn = selected_alpn,
             .cipher_suite = keys.cipher_suite,
             .exporter_master_secret = keys.exporter_master_secret,
         };
+        keys.read_traffic_secret = undefined;
+        keys.write_traffic_secret = undefined;
         keys.exporter_master_secret = undefined;
         return connection;
     }
@@ -120,6 +127,23 @@ pub const Connection = struct {
             context,
             out,
         );
+    }
+
+    pub fn updateTrafficKeys(
+        self: *Connection,
+        request_peer_update: bool,
+    ) Error!void {
+        try self.records.updateTrafficKeys(
+            self.io,
+            self.stream,
+            request_peer_update,
+        );
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) record_stream.KeyUpdateCounts {
+        return self.records.keyUpdateCounts();
     }
 
     /// Read decrypted application bytes with stream semantics.

@@ -191,6 +191,12 @@ grep -Fq \
 grep -Fq \
   'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true' \
   "$work/tls-hyper-server.log"
+grep -Fq \
+  'rustls server sent TLS KeyUpdate request' \
+  "$work/tls-hyper-server.log"
+grep -Fq \
+  'netz HTTP/2 client interoperated with rustls KeyUpdate: received=1 sent=1 next_request=true' \
+  "$work/tls-netz-client.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper TLS HTTP/2 server -> netz client interop passed'
 
@@ -224,6 +230,9 @@ grep -Fq \
   "$work/tls-netz-server.log"
 grep -Fq \
   'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=9 new_request_refused=true' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'netz HTTP/2 server interoperated with rustls KeyUpdate: sent=1 received=1 next_request=true' \
   "$work/tls-netz-server.log"
 cat "$work/tls-hyper-client.log"
 cat "$work/tls-netz-server.log"

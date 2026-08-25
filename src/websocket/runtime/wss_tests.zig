@@ -69,6 +69,7 @@ test "WSS server completes verified WebSocket echo" {
             defer message.deinit(shared.server.allocator);
             connection.sendBinary(message.payload) catch |err| {
                 shared.err = err;
+                return;
             };
         }
     };
@@ -108,6 +109,10 @@ test "WSS server completes verified WebSocket echo" {
     try std.testing.expect(client.peerCertificates() == null);
     try std.testing.expect(client.negotiatedCipherSuite() == null);
     try std.testing.expect(client.negotiatedTranscriptHash() == null);
+    try std.testing.expectError(
+        error.TlsKeyUpdateUnavailable,
+        client.updateTrafficKeys(false),
+    );
     try client.sendBinary("encrypted websocket");
     var echoed = try client.receiveMessage();
     defer echoed.deinit(allocator);
@@ -315,6 +320,10 @@ test "WSS public client identity completes mTLS echo" {
                 shared.err = error.InvalidCipherSuite;
                 return;
             }
+            connection.updateTrafficKeys(true) catch |err| {
+                shared.err = err;
+                return;
+            };
             var message = connection.receiveMessage() catch |err| {
                 shared.err = err;
                 return;
@@ -322,7 +331,27 @@ test "WSS public client identity completes mTLS echo" {
             defer message.deinit(shared.server.allocator);
             connection.sendBinary(message.payload) catch |err| {
                 shared.err = err;
+                return;
             };
+            var after_update = connection.receiveMessage() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer after_update.deinit(shared.server.allocator);
+            if (!std.mem.eql(u8, after_update.payload, "rotated websocket")) {
+                shared.err = error.InvalidPayload;
+                return;
+            }
+            connection.sendBinary(after_update.payload) catch |err| {
+                shared.err = err;
+                return;
+            };
+            const updates = connection.keyUpdateCounts().?;
+            if (updates.sent != 1 or updates.received != 1 or
+                updates.awaiting_peer_response)
+            {
+                shared.err = error.InvalidKeyUpdateCount;
+            }
         }
     };
     var shared = Shared{
@@ -390,6 +419,17 @@ test "WSS public client identity completes mTLS echo" {
         "authenticated websocket",
         echoed.payload,
     );
+    try client.sendBinary("rotated websocket");
+    var rotated_echo = try client.receiveMessage();
+    defer rotated_echo.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "rotated websocket",
+        rotated_echo.payload,
+    );
+    const updates = client.keyUpdateCounts().?;
+    try std.testing.expectEqual(@as(u64, 1), updates.sent);
+    try std.testing.expectEqual(@as(u64, 1), updates.received);
+    try std.testing.expect(!updates.awaiting_peer_response);
 
     thread.join();
     joined = true;

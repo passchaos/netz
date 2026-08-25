@@ -556,6 +556,11 @@ connection credit while a more urgent stream has no stream credit.
 | HTTP/2 parallel x10 × 1-MiB responses | 1.663-1.671 ms/batch pinned | 2.957-3.035 ms/batch pinned |
 | HTTP/2 parallel x10 × 1-MiB responses, 8-KiB stream window | 7.367-7.447 ms/batch pinned | 10.192-10.379 ms/batch pinned |
 
+Native HTTP/1 TLS server connections expose their authenticated peer chain,
+negotiated cipher suite/hash, RFC 8446 exporter, explicit KeyUpdate and update
+counters. Server-side CONNECT/Upgrade tunnels preserve KeyUpdate access after
+the HTTP parser hands off the encrypted byte stream.
+
 RFC 9218 scheduling now selects urgency and the lowest-ID exclusive
 non-incremental stream in one candidate scan rather than two. The priority-aware
 10-stream/1-MiB/8-KiB-window benchmark measured 7.79–7.96 ms/batch and
@@ -725,7 +730,14 @@ keep-alive, cancellation and GOAWAY gate remains green.
    TLS endpoint roles expose RFC 8446 exporter keying material for channel
    binding and typed `negotiatedCipherSuite()` /
    `negotiatedTranscriptHash()` metadata for authentication policy and
-   diagnostics. Passing `--tls` to
+   diagnostics. `updateTrafficKeys(request_peer_update)` sends RFC 8446
+   KeyUpdate under the current epoch, rotates afterward, transparently handles
+   fragmented peer updates, performs requested reciprocal updates, and exposes
+   sent/received counters; the encrypted HTTP/2 test exchanges a request after
+   both directions rotate. The bidirectional Hyper TLS gate independently uses
+   rustls's production `refresh_traffic_keys()` API in each peer direction,
+   requires netz to observe/respond exactly once, and continues HTTP/2 traffic
+   on the rotated epochs. Passing `--tls` to
    the same h2spec command runs all 147 strict cases through TLS 1.3 and
    negotiated `h2` when h2spec is built with a current Go TLS stack that offers
    an X25519 key share.

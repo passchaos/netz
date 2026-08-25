@@ -66,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
     else
         try clear_server.accept();
     defer connection.close();
+    if (tls_enabled) try connection.updateTrafficKeys(true);
     var request = try connection.readRequest();
     defer request.deinit(allocator);
     if (!std.mem.eql(u8, request.method, "POST") or
@@ -124,6 +125,19 @@ pub fn main(init: std.process.Init) !void {
         .body = "netz-still-alive",
         .request_method = after_keep_alive.method,
     });
+    if (tls_enabled) {
+        const updates = connection.keyUpdateCounts() orelse
+            return error.MissingKeyUpdate;
+        if (updates.sent != 1 or updates.received != 1 or
+            updates.awaiting_peer_response)
+        {
+            return error.InvalidKeyUpdateCount;
+        }
+        std.debug.print(
+            "netz HTTP/2 server interoperated with rustls KeyUpdate: sent=1 received=1 next_request=true\n",
+            .{},
+        );
+    }
     std.debug.print(
         "netz HTTP/2 server remained usable after Hyper keep-alive: transport={s} next_request=true\n",
         .{if (tls_enabled) "tls" else "h2c"},

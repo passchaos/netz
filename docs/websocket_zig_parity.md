@@ -398,6 +398,12 @@ the same `peerCertificates()` API. Both vail-backed endpoint roles expose TLS
 exporter keying material for channel binding plus typed negotiated cipher-suite
 and transcript-hash metadata. Cleartext and Zig standard-library TLS paths
 return null rather than claiming unavailable negotiation details.
+Vail-backed WSS additionally exposes RFC 8446 application traffic-key updates
+and counters. A client/server mTLS test requests a reciprocal update and then
+exchanges a complete WebSocket message under the rotated epochs.
+RFC 8441 connections forward the same API to their shared parent HTTP/2 TLS
+connection, so an application cannot accidentally rotate only one logical
+WebSocket stream.
 
 Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
 reads plus `closeWithTimeout`. A close step sends Close at most once, consumes
