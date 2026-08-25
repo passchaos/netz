@@ -88,6 +88,16 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
                 shared.err = err;
                 return;
             };
+            const peer = established.peerCertificates() orelse {
+                shared.err = error.TestUnexpectedResult;
+                established.deinit();
+                return;
+            };
+            if (peer.len != 1 or
+                !std.mem.eql(u8, peer[0], &shared.client_public))
+            {
+                shared.err = error.TestUnexpectedResult;
+            }
             established.deinit();
         }
     };
@@ -118,6 +128,12 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
             },
         },
     );
+    const peer = established.peerCertificates() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), peer.len);
+    try std.testing.expectEqualSlices(u8, &server_public, peer[0]);
+    // The retained chain must not borrow the server's caller-owned input.
+    try std.testing.expect(@intFromPtr(peer[0].ptr) != @intFromPtr(&server_public));
     established.deinit();
     thread.join();
     if (shared.err) |err| return err;

@@ -670,6 +670,18 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Return the authenticated peer certificate chain retained by the QUIC
+    /// handshake, or null for PSK/preconfigured sessions without peer identity.
+    pub fn peerCertificates(
+        self: *const AcceptedHandshakeSession,
+    ) ?[]const []const u8 {
+        return self.h3.established.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(self: AcceptedHandshakeSession) []const u8 {
+        return self.h3.established.alpn;
+    }
+
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
@@ -1156,6 +1168,16 @@ pub const HandshakeClientSession = struct {
             context,
             out,
         );
+    }
+
+    pub fn peerCertificates(
+        self: *const HandshakeClientSession,
+    ) ?[]const []const u8 {
+        return self.h3.established.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(self: HandshakeClientSession) []const u8 {
+        return self.h3.established.alpn;
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
@@ -1846,6 +1868,18 @@ pub const StatefulProtectedClientSession = struct {
             context,
             out,
         );
+    }
+
+    pub fn peerCertificates(
+        self: *const StatefulProtectedClientSession,
+    ) ?[]const []const u8 {
+        return self.session.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(
+        self: StatefulProtectedClientSession,
+    ) []const u8 {
+        return self.session.negotiatedAlpn();
     }
 
     pub fn openBidirectionalStream(

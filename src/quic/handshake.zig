@@ -274,6 +274,41 @@ pub const OneRttConfig = struct {
     }
 };
 
+/// Deeply owned peer certificate chain retained after QUIC/TLS establishment.
+/// Certificate bytes are immutable and remain valid until `deinit`.
+pub const PeerCertificateChain = struct {
+    allocator: std.mem.Allocator,
+    certificates: []const []const u8,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        certificates: []const []const u8,
+    ) Error!PeerCertificateChain {
+        var copies: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (copies.items) |certificate| allocator.free(certificate);
+            copies.deinit(allocator);
+        }
+        try copies.ensureTotalCapacity(allocator, certificates.len);
+        for (certificates) |certificate| {
+            const copy = try allocator.dupe(u8, certificate);
+            copies.appendAssumeCapacity(copy);
+        }
+        return .{
+            .allocator = allocator,
+            .certificates = try copies.toOwnedSlice(allocator),
+        };
+    }
+
+    pub fn deinit(self: *PeerCertificateChain) void {
+        for (self.certificates) |certificate| {
+            self.allocator.free(certificate);
+        }
+        self.allocator.free(self.certificates);
+        self.* = undefined;
+    }
+};
+
 pub const EstablishedConnection = struct {
     connection: quic.one_rtt.Connection,
     local_connection_id: []u8,
@@ -293,6 +328,7 @@ pub const EstablishedConnection = struct {
     /// server Finished. Both peers derive the same value. Externally installed
     /// 1-RTT state may omit it when no TLS transcript is available.
     exporter_master_secret: ?quic.tls.secret.Secret,
+    peer_certificate_chain: ?PeerCertificateChain,
     peer_transport_parameters: quic.resumption.Snapshot,
     post_handshake_send_crypto_offset: u64 = 0,
     post_handshake_receive_crypto_offset: u64 = 0,
@@ -349,11 +385,19 @@ pub const EstablishedConnection = struct {
         );
     }
 
+    pub fn peerCertificates(
+        self: *const EstablishedConnection,
+    ) ?[]const []const u8 {
+        const chain = self.peer_certificate_chain orelse return null;
+        return chain.certificates;
+    }
+
     pub fn deinit(self: *EstablishedConnection) void {
         const allocator = self.connection.endpoint.allocator;
         self.connection.deinit();
         if (self.resumption_master_secret) |*secret| secret.deinit();
         if (self.exporter_master_secret) |*secret| secret.deinit();
+        if (self.peer_certificate_chain) |*chain| chain.deinit();
         allocator.free(self.local_connection_id);
         allocator.free(self.peer_connection_id);
         allocator.free(self.alpn);
@@ -386,6 +430,9 @@ pub const PreconfiguredConnectionOptions = struct {
     /// closed while all QUIC application-data facilities remain available.
     resumption_master_secret: ?quic.tls.secret.Secret = null,
     exporter_master_secret: ?quic.tls.secret.Secret = null,
+    /// Authenticated certificate bytes supplied by the external negotiator.
+    /// The established connection deep-copies every entry.
+    peer_certificates: []const []const u8 = &.{},
 };
 
 pub fn establishPreconfigured(
@@ -434,6 +481,7 @@ pub fn establishPreconfigured(
         .not_offered,
         options.resumption_master_secret,
         options.exporter_master_secret,
+        options.peer_certificates,
     );
 }
 
@@ -488,9 +536,21 @@ test "preconfigured QUIC validates externally negotiated metadata" {
             // CID cannot be empty because short-header receive routing needs
             // a deterministic length on this endpoint.
             .peer_connection_id = &.{},
+            .peer_certificates = &.{"externally-authenticated-peer"},
         },
     );
     defer established.deinit();
+    const peer_certificates = established.peerCertificates() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), peer_certificates.len);
+    try std.testing.expectEqualStrings(
+        "externally-authenticated-peer",
+        peer_certificates[0],
+    );
+    try std.testing.expect(
+        @intFromPtr(peer_certificates[0].ptr) !=
+            @intFromPtr("externally-authenticated-peer".ptr),
+    );
     try std.testing.expectError(
         error.PostHandshakeTlsUnavailable,
         established.issueSessionTicket(threaded.io(), .{
@@ -1223,6 +1283,10 @@ fn connectAttempt(
                 quic.resumption.Snapshot.fromTransportParameters(.{}),
             peer_transport_parameters,
         );
+    var peer_certificate: ?quic.tls.auth.ParsedCertificate = null;
+    defer if (peer_certificate) |*certificate| {
+        certificate.deinit(endpoint.allocator);
+    };
     if (parsed_server.selected_psk) {
         if (server_flight.certificate != null or
             server_flight.certificate_verify != null)
@@ -1235,12 +1299,14 @@ fn connectAttempt(
         const certificate_verify_bytes =
             server_flight.certificate_verify orelse
             return error.InvalidHandshakeFlight;
-        var certificate = try quic.tls.auth.parseCertificate(
+        peer_certificate = try quic.tls.auth.parseCertificate(
             endpoint.allocator,
             certificate_bytes,
         );
-        defer certificate.deinit(endpoint.allocator);
-        try verifier.verifyTrust(options.server_name, certificate.entries);
+        try verifier.verifyTrust(
+            options.server_name,
+            peer_certificate.?.entries,
+        );
         const certificate_verify =
             try quic.tls.auth.parseCertificateVerify(
                 certificate_verify_bytes,
@@ -1255,7 +1321,7 @@ fn connectAttempt(
             },
         );
         try quic.tls.auth.verifyCertificateVerify(
-            certificate.entries[0],
+            peer_certificate.?.entries[0],
             certificate_verify,
             certificate_transcript_hash.bytes(),
         );
@@ -1445,6 +1511,7 @@ fn connectAttempt(
             application.master_secret,
             application_transcript_hash,
         ),
+        if (peer_certificate) |certificate| certificate.entries else &.{},
     );
     errdefer established.deinit();
     if (server_handshake.coalesced_one_rtt) |one_rtt| {
@@ -1983,14 +2050,20 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         client_handshake.crypto_data,
         options.client_auth != null,
     );
+    var peer_certificate: ?quic.tls.auth.ParsedCertificate = null;
+    defer if (peer_certificate) |*certificate| {
+        certificate.deinit(endpoint.allocator);
+    };
     if (options.client_auth) |client_auth| {
-        var certificate = try quic.tls.auth.parseCertificateWithContext(
+        peer_certificate = try quic.tls.auth.parseCertificateWithContext(
             endpoint.allocator,
             client_flight.certificate.?,
             &.{},
         );
-        defer certificate.deinit(endpoint.allocator);
-        try client_auth.verifier.verifyTrust(null, certificate.entries);
+        try client_auth.verifier.verifyTrust(
+            null,
+            peer_certificate.?.entries,
+        );
         const certificate_verify =
             try quic.tls.auth.parseCertificateVerify(
                 client_flight.certificate_verify.?,
@@ -2005,7 +2078,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             },
         );
         try quic.tls.auth.verifyCertificateVerifyForRole(
-            certificate.entries[0],
+            peer_certificate.?.entries[0],
             certificate_verify,
             client_certificate_transcript_hash.bytes(),
             .client,
@@ -2078,6 +2151,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 server_flight.items,
             }),
         ),
+        if (peer_certificate) |certificate| certificate.entries else &.{},
     );
     errdefer established.deinit();
     if (client_handshake.coalesced_one_rtt) |bytes| {
@@ -3018,6 +3092,7 @@ fn establishedConnection(
     early_data_status: quic.zero_rtt.handshake.Status,
     resumption_master_secret: ?quic.tls.secret.Secret,
     exporter_master_secret: ?quic.tls.secret.Secret,
+    peer_certificates: []const []const u8,
 ) Error!EstablishedConnection {
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);
@@ -3025,6 +3100,12 @@ fn establishedConnection(
     errdefer endpoint.allocator.free(peer_owned);
     const alpn_owned = try endpoint.allocator.dupe(u8, alpn);
     errdefer endpoint.allocator.free(alpn_owned);
+    var peer_certificate_chain: ?PeerCertificateChain =
+        if (peer_certificates.len == 0)
+            null
+        else
+            try .init(endpoint.allocator, peer_certificates);
+    errdefer if (peer_certificate_chain) |*chain| chain.deinit();
     var connection = try quic.one_rtt.Connection.init(endpoint, config.apply(
         version,
         peer,
@@ -3047,6 +3128,7 @@ fn establishedConnection(
         .early_data_status = early_data_status,
         .resumption_master_secret = resumption_master_secret,
         .exporter_master_secret = exporter_master_secret,
+        .peer_certificate_chain = peer_certificate_chain,
         .peer_transport_parameters = .fromTransportParameters(
             peer_transport_parameters,
         ),

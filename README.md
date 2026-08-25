@@ -579,9 +579,9 @@ session ID, current migration-aware peer address, address-validation status,
 and smoothed RTT, plus an explicit connection-level application-close API that
 does not conflate QUIC shutdown with a WebTransport Session close. Integrated
 TLS sessions additionally expose RFC 8446 exporter keying material, with
-matching client/server output and no per-call allocation. Their
-connection IDs, negotiated
-transport parameters,
+matching client/server output and no per-call allocation, plus negotiated ALPN
+and deeply owned authenticated peer certificate chains. Their connection IDs,
+negotiated transport parameters,
 ALPN, packet keys, and optional resumption master secret must all come from the
 same authenticated external negotiation; the API does not replace TLS or
 authenticate those inputs.
