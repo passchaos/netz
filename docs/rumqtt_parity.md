@@ -11,7 +11,7 @@ and equal-wire broker results are kept separate.
 
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
-| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
+| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
 | Application Message size policy | Independent payload-byte cap for live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto `message_size_limit`; rumqttd `max_payload_size` |
@@ -37,7 +37,7 @@ broker architecture or Mosquitto's full persistence plugin and protocol
 surface.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 129 raw scenarios
+deadline on every one of its finite broker processes, so all 130 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 
@@ -1280,12 +1280,18 @@ Two more cases port both clean and persistent branches of Mosquitto's
 prove the three-second Will is not published early, then requires the exact
 PUBLISH during the following bounded interval, proving the scheduled Will is
 not lost in either Session mode.
+An additional full-range Topic Alias case extends Mosquitto's small-alias wire
+vectors: a broker configured with Topic Alias Maximum 65,535 advertises that
+exact value, accepts alias 65,535 on a client PUBLISH, resolves a following
+empty Topic Name, and forwards both messages over the same connection. Sparse
+per-connection tables allocate only the aliases actually used rather than
+reserving 65,535 pointers for every client.
 The gate builds a finite netz broker,
 imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets. Four additional wire cases verify absent/zero/one Request Response
 Information plus both the default-enabled diagnostic path and Request Problem
 Information suppression while preserving an exact negative PUBACK reason; all
-129 scenarios pass. This is deliberately described as a selected
+130 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.

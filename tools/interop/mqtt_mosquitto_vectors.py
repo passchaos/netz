@@ -3446,6 +3446,113 @@ def incoming_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def maximum_topic_alias_value(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # MQTT-5.0 §3.1.2.11.3 allows the complete non-zero u16 alias range. This
+    # complements Mosquitto's alias vectors by exercising 65,535 rather than a
+    # small table index, catching implementations that silently cap the
+    # advertised capability below the wire type's range.
+    topic = "02/topic/alias/maximum"
+    maximum = 65_535
+    maximum_property = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.TOPIC_ALIAS_MAXIMUM, maximum
+    )
+    alias_property = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.TOPIC_ALIAS, maximum
+    )
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=(f"--topic-alias-maximum={maximum}",),
+    ) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            subscriber.sendall(
+                mqtt_packets.gen_connect(
+                    "maximum-alias-subscriber",
+                    proto_ver=5,
+                    properties=maximum_property,
+                )
+            )
+            expect_packet(
+                subscriber,
+                expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    topic_alias_maximum=maximum,
+                ),
+                "maximum alias CONNACK",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_connect(
+                    "maximum-alias-publisher", proto_ver=5
+                )
+            )
+            expect_packet(
+                publisher,
+                expected_connack(
+                    mqtt_packets,
+                    mqtt5_props,
+                    topic_alias_maximum=maximum,
+                ),
+                "maximum alias publisher CONNACK",
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "maximum alias SUBACK",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload="first",
+                    proto_ver=5,
+                    properties=alias_property,
+                )
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic,
+                    qos=0,
+                    payload="first",
+                    proto_ver=5,
+                    properties=mqtt5_props.gen_uint16_prop(
+                        mqtt5_props.TOPIC_ALIAS, 1
+                    ),
+                ),
+                "maximum alias registered PUBLISH",
+            )
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    "",
+                    qos=0,
+                    payload="second",
+                    proto_ver=5,
+                    properties=alias_property,
+                )
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    "",
+                    qos=0,
+                    payload="second",
+                    proto_ver=5,
+                    properties=mqtt5_props.gen_uint16_prop(
+                        mqtt5_props.TOPIC_ALIAS, 1
+                    ),
+                ),
+                "maximum alias reused PUBLISH",
+            )
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def outgoing_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
     # Bounded port of Mosquitto 02-subpub-b2c-topic-alias.py. The subscriber
     # advertises two aliases; first delivery establishes alias 1 with the full
@@ -5328,6 +5435,7 @@ def main() -> None:
     outgoing_qos_upgrade(args.broker, mqtt_packets)
     incoming_topic_alias(args.broker, mqtt_packets, mqtt5_props)
     outgoing_topic_alias(args.broker, mqtt_packets, mqtt5_props)
+    maximum_topic_alias_value(args.broker, mqtt_packets, mqtt5_props)
     request_response_properties(args.broker, mqtt_packets, mqtt5_props)
     connect_information_preferences(
         args.broker, mqtt_packets, mqtt5_props
@@ -5387,7 +5495,7 @@ def main() -> None:
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 129 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 130 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

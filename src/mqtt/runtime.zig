@@ -5,6 +5,7 @@ const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
 const auth_runtime = @import("runtime/auth.zig");
+const topic_alias = @import("runtime/topic_alias.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
 
@@ -45,8 +46,6 @@ pub const Limits = struct {
 };
 
 const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
-const topic_alias_slots: usize = 16;
-
 const PacketTransport = packet_transport.Transport;
 
 pub const Server = struct {
@@ -97,7 +96,7 @@ pub const Server = struct {
             .protocol = options.protocol,
             .limits = self.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
+            .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
         stream_owned = false;
         // After construction, `connection` is the sole stream owner. Its
@@ -480,7 +479,7 @@ pub const Client = struct {
             .limits = options.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
+            .incoming_topic_alias_maximum = options.topic_alias_maximum,
             .peer_maximum_qos = options.peer_maximum_qos,
             .peer_retain_available = options.peer_retain_available,
         };
@@ -614,10 +613,6 @@ pub const ConnAckOptions = struct {
     shared_subscription_available: bool = true,
 };
 
-fn effectiveTopicAliasMaximum(configured: u16) u16 {
-    return @min(configured, @as(u16, @intCast(topic_alias_slots)));
-}
-
 fn negotiatedOutgoingInflightLimit(local_upper_limit: u16, peer_receive_maximum: u16) u16 {
     // MQTT 5 Receive Maximum is the peer's limit for QoS 1/2 PUBLISH packets
     // that we may have in flight.  Like rumqtt, keep the configured local
@@ -626,24 +621,17 @@ fn negotiatedOutgoingInflightLimit(local_upper_limit: u16, peer_receive_maximum:
     return @min(local_upper_limit, peer_receive_maximum);
 }
 
-fn validateTopicAliasMaximumFitsRuntime(properties: []const mqtt.Property) Error!void {
-    if (mqtt.topicAliasMaximum(properties)) |maximum| {
-        if (maximum > @as(u16, @intCast(topic_alias_slots))) return error.InvalidProperty;
-    }
-}
-
 fn appendTopicAliasMaximumSetting(
     properties: *std.ArrayList(mqtt.Property),
     allocator: std.mem.Allocator,
     explicit_properties: []const mqtt.Property,
     configured_maximum: u16,
 ) Error!void {
-    try validateTopicAliasMaximumFitsRuntime(explicit_properties);
     if (mqtt.topicAliasMaximum(explicit_properties) == null) {
         try properties.append(allocator, .{
             .two_byte = .{
                 .id = .topic_alias_maximum,
-                .value = effectiveTopicAliasMaximum(configured_maximum),
+                .value = configured_maximum,
             },
         });
     }
@@ -691,8 +679,8 @@ pub const Connection = struct {
     outgoing_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
     outgoing_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
     outgoing_qos2_pubrel: std.StaticBitSet(packet_identifier_slots) = .empty,
-    incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
-    outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
+    incoming_topic_aliases: topic_alias.Table = .{},
+    outgoing_topic_aliases: topic_alias.Table = .{},
     assigned_client_id: ?[]u8 = null,
     authentication: auth_runtime.State = .{},
     /// Shared packet-output storage. MQTT writes are synchronous and a
@@ -728,9 +716,7 @@ pub const Connection = struct {
             .protocol = protocol,
             .limits = limits,
             .max_outgoing_inflight = max_outgoing_inflight,
-            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
-                topic_alias_maximum,
-            ),
+            .incoming_topic_alias_maximum = topic_alias_maximum,
         };
     }
 
@@ -761,9 +747,7 @@ pub const Connection = struct {
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse
                 options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
-                options.topic_alias_maximum,
-            ),
+            .incoming_topic_alias_maximum = options.topic_alias_maximum,
             .peer_maximum_qos = options.peer_maximum_qos,
             .peer_retain_available = options.peer_retain_available,
         };
@@ -801,19 +785,13 @@ pub const Connection = struct {
             .protocol = protocol,
             .limits = limits,
             .max_outgoing_inflight = max_outgoing_inflight,
-            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
-                topic_alias_maximum,
-            ),
+            .incoming_topic_alias_maximum = topic_alias_maximum,
         };
     }
 
     pub fn close(self: *Connection) void {
-        for (self.incoming_topic_aliases) |maybe_topic| {
-            if (maybe_topic) |topic| self.allocator.free(topic);
-        }
-        for (self.outgoing_topic_aliases) |maybe_topic| {
-            if (maybe_topic) |topic| self.allocator.free(topic);
-        }
+        self.incoming_topic_aliases.deinit(self.allocator);
+        self.outgoing_topic_aliases.deinit(self.allocator);
         if (self.assigned_client_id) |client_id| {
             self.allocator.free(client_id);
         }
@@ -1280,31 +1258,22 @@ pub const Connection = struct {
         {
             return topic;
         }
-        const limit = @min(
-            @as(usize, self.peer_topic_alias_maximum),
-            self.outgoing_topic_aliases.len,
-        );
-        var empty_index: ?usize = null;
-        for (self.outgoing_topic_aliases[0..limit], 0..) |
-            maybe_stored,
-            index,
-        | {
-            if (maybe_stored) |stored| {
-                if (std.mem.eql(u8, stored, topic)) {
-                    try properties.append(self.allocator, .{ .two_byte = .{
-                        .id = .topic_alias,
-                        .value = @intCast(index + 1),
-                    } });
-                    return "";
-                }
-            } else if (empty_index == null) {
-                empty_index = index;
-            }
+        if (self.outgoing_topic_aliases.findTopic(
+            topic,
+            self.peer_topic_alias_maximum,
+        )) |alias| {
+            try properties.append(self.allocator, .{ .two_byte = .{
+                .id = .topic_alias,
+                .value = alias,
+            } });
+            return "";
         }
-        const index = empty_index orelse return topic;
+        const alias = self.outgoing_topic_aliases.firstUnused(
+            self.peer_topic_alias_maximum,
+        ) orelse return topic;
         try properties.append(self.allocator, .{ .two_byte = .{
             .id = .topic_alias,
-            .value = @intCast(index + 1),
+            .value = alias,
         } });
         return topic;
     }
@@ -2200,8 +2169,14 @@ pub const Connection = struct {
 
     fn validateOutgoingTopicAlias(self: *Connection, topic: []const u8, properties: []const mqtt.Property) Error!void {
         const alias = mqtt.topicAlias(properties) orelse return;
-        if (alias == 0 or alias > self.peer_topic_alias_maximum or alias > self.outgoing_topic_aliases.len) return error.InvalidProperty;
-        if (topic.len == 0 and self.outgoing_topic_aliases[alias - 1] == null) return error.InvalidTopic;
+        if (alias == 0 or alias > self.peer_topic_alias_maximum) {
+            return error.InvalidProperty;
+        }
+        if (topic.len == 0 and
+            !self.outgoing_topic_aliases.contains(alias))
+        {
+            return error.InvalidTopic;
+        }
     }
 
     fn prepareOutgoingTopicAliasCommit(
@@ -2211,13 +2186,11 @@ pub const Connection = struct {
     ) Error!void {
         const alias = mqtt.topicAlias(properties) orelse return;
         if (topic.len == 0) return;
-        const index = alias - 1;
-        if (self.outgoing_topic_aliases[index]) |old| {
-            if (std.mem.eql(u8, old, topic)) return;
-        }
-        const owned = try self.allocator.dupe(u8, topic);
-        if (self.outgoing_topic_aliases[index]) |old| self.allocator.free(old);
-        self.outgoing_topic_aliases[index] = owned;
+        try self.outgoing_topic_aliases.put(
+            self.allocator,
+            alias,
+            topic,
+        );
     }
 
     fn applyIncomingTopicAlias(self: *Connection, publish_packet: *mqtt.Publish) Error!void {
@@ -2225,15 +2198,20 @@ pub const Connection = struct {
             try mqtt.validateTopicName(publish_packet.topic);
             return;
         };
-        if (alias == 0 or alias > self.incoming_topic_alias_maximum or alias > self.incoming_topic_aliases.len) return error.TopicAliasInvalid;
-        const index = alias - 1;
+        if (alias == 0 or alias > self.incoming_topic_alias_maximum) {
+            return error.TopicAliasInvalid;
+        }
         if (publish_packet.topic.len != 0) {
             try mqtt.validateTopicName(publish_packet.topic);
-            if (self.incoming_topic_aliases[index]) |old| self.allocator.free(old);
-            self.incoming_topic_aliases[index] = try self.allocator.dupe(u8, publish_packet.topic);
+            try self.incoming_topic_aliases.put(
+                self.allocator,
+                alias,
+                publish_packet.topic,
+            );
             return;
         }
-        const stored = self.incoming_topic_aliases[index] orelse return error.InvalidTopic;
+        const stored = self.incoming_topic_aliases.get(alias) orelse
+            return error.InvalidTopic;
         publish_packet.topic = stored;
     }
 
@@ -3526,9 +3504,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
         .peer_topic_alias_maximum = 1,
     };
     defer connection.write_scratch.deinit(std.testing.allocator);
-    defer for (connection.outgoing_topic_aliases) |maybe_topic| {
-        if (maybe_topic) |topic| std.testing.allocator.free(topic);
-    };
+    defer connection.outgoing_topic_aliases.deinit(std.testing.allocator);
 
     try std.testing.expectError(
         error.OutgoingPacketTooLarge,
@@ -3538,8 +3514,8 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
         }),
     );
     try std.testing.expectEqual(
-        @as(?[]u8, null),
-        connection.outgoing_topic_aliases[0],
+        @as(?[]const u8, null),
+        connection.outgoing_topic_aliases.get(1),
     );
     try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
     try std.testing.expectEqual(
@@ -3562,7 +3538,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
     );
     try std.testing.expectEqualStrings(
         "existing/topic",
-        connection.outgoing_topic_aliases[0].?,
+        connection.outgoing_topic_aliases.get(1).?,
     );
     try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
     try std.testing.expectEqual(
@@ -4223,9 +4199,7 @@ test "MQTT connection rejects topic aliases beyond negotiated maximum" {
         .peer_topic_alias_maximum = 1,
         .incoming_topic_alias_maximum = 1,
     };
-    defer for (connection.outgoing_topic_aliases) |maybe_topic| {
-        if (maybe_topic) |topic| std.testing.allocator.free(topic);
-    };
+    defer connection.outgoing_topic_aliases.deinit(std.testing.allocator);
 
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{
         .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }},
@@ -4257,9 +4231,7 @@ test "MQTT connection automatically establishes and reuses outgoing aliases" {
         .protocol = .v5,
         .peer_topic_alias_maximum = 2,
     };
-    defer for (connection.outgoing_topic_aliases) |maybe_topic| {
-        if (maybe_topic) |topic| allocator.free(topic);
-    };
+    defer connection.outgoing_topic_aliases.deinit(allocator);
 
     var first_properties: std.ArrayList(mqtt.Property) = .empty;
     defer first_properties.deinit(allocator);
@@ -4299,17 +4271,63 @@ test "MQTT connection automatically establishes and reuses outgoing aliases" {
     ));
 }
 
-test "MQTT runtime caps advertised topic alias maximum to local storage" {
+test "MQTT connection supports aliases above the former fixed table" {
     const allocator = std.testing.allocator;
+    const maximum_alias = std.math.maxInt(u16);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .peer_topic_alias_maximum = maximum_alias,
+        .incoming_topic_alias_maximum = maximum_alias,
+    };
+    defer connection.outgoing_topic_aliases.deinit(allocator);
+    defer connection.incoming_topic_aliases.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u16, 0), effectiveTopicAliasMaximum(0));
-    try std.testing.expectEqual(@as(u16, 4), effectiveTopicAliasMaximum(4));
-    try std.testing.expectEqual(@as(u16, @intCast(topic_alias_slots)), effectiveTopicAliasMaximum(99));
+    const property = [_]mqtt.Property{.{ .two_byte = .{
+        .id = .topic_alias,
+        .value = maximum_alias,
+    } }};
+    try connection.validateOutgoingTopicAlias("large/alias", &property);
+    try connection.prepareOutgoingTopicAliasCommit(
+        "large/alias",
+        &property,
+    );
+    try connection.validateOutgoingTopicAlias("", &property);
+
+    var registered = mqtt.Publish{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "incoming/large/alias",
+        .packet_id = null,
+        .properties = @constCast(&property),
+        .payload = "first",
+    };
+    try connection.applyIncomingTopicAlias(&registered);
+    var reused = mqtt.Publish{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "",
+        .packet_id = null,
+        .properties = @constCast(&property),
+        .payload = "second",
+    };
+    try connection.applyIncomingTopicAlias(&reused);
+    try std.testing.expectEqualStrings("incoming/large/alias", reused.topic);
+}
+
+test "MQTT runtime advertises the configured topic alias maximum" {
+    const allocator = std.testing.allocator;
 
     var properties: std.ArrayList(mqtt.Property) = .empty;
     defer properties.deinit(allocator);
     try appendTopicAliasMaximumSetting(&properties, allocator, &.{}, 99);
-    try std.testing.expectEqual(@as(?u16, @intCast(topic_alias_slots)), mqtt.topicAliasMaximum(properties.items));
+    try std.testing.expectEqual(
+        @as(?u16, 99),
+        mqtt.topicAliasMaximum(properties.items),
+    );
 
     properties.clearRetainingCapacity();
     try appendTopicAliasMaximumSetting(&properties, allocator, &.{.{ .two_byte = .{
@@ -4318,10 +4336,17 @@ test "MQTT runtime caps advertised topic alias maximum to local storage" {
     } }}, 99);
     try std.testing.expectEqual(@as(usize, 0), properties.items.len);
 
-    try std.testing.expectError(error.InvalidProperty, appendTopicAliasMaximumSetting(&properties, allocator, &.{.{ .two_byte = .{
-        .id = .topic_alias_maximum,
-        .value = @as(u16, @intCast(topic_alias_slots + 1)),
-    } }}, 99));
+    properties.clearRetainingCapacity();
+    try appendTopicAliasMaximumSetting(
+        &properties,
+        allocator,
+        &.{},
+        std.math.maxInt(u16),
+    );
+    try std.testing.expectEqual(
+        @as(?u16, std.math.maxInt(u16)),
+        mqtt.topicAliasMaximum(properties.items),
+    );
 }
 
 test "MQTT connection enforces peer publish capabilities" {
