@@ -811,5 +811,16 @@ keep-alive, cancellation and GOAWAY gate remains green.
    us/roundtrip (31.394 us mean, 31.072 us median, 1.63% relative standard
    deviation); this overlaps the prior range and is not presented as
    a latency improvement. The full
-   1,602-test suite, 147-case h2spec strict gate, and bidirectional Hyper h2c/TLS
+   1,604-test suite, 147-case h2spec strict gate, and bidirectional Hyper h2c/TLS
    request, cancellation, keep-alive and GOAWAY matrix remain green.
+   Compressed fragmented RFC 8441 messages now use the same tunnel sequence:
+   server fragments remain borrowed, common client batches use fixed stack
+   storage, and oversized client fragments stream through bounded masking
+   chunks. This removes the H2 adapter's final payload-sized send-frame buffer
+   without giving up the common 16-frame coalescing behavior. Five CPU-0 runs
+   of that 4-KiB/16-fragment compressed workload measured 37.032-38.500
+   us/roundtrip (37.651 us mean, 37.372 us median, 1.55% relative standard
+   deviation). A 64-KiB bidirectional regression forces the oversized masking
+   fallback and disables the connection allocator after warmup on both peers.
+   Uncompressed fragmentation uses the same bounded batching strategy, with a
+   40-KiB bidirectional regression crossing the masking boundary.

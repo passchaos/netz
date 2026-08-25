@@ -140,6 +140,12 @@ fragmented gate took 98.55-137.68 us. The batch therefore reduces latency by
 2.2-3.2x while preserving every WebSocket frame boundary; its remaining
 15.1-16.0% cost versus one frame is the real framing/masking work. Each run
 verified checksum 51,000.
+After removing RFC 8441's payload-sized send-frame buffer, five CPU-0 runs of
+the same sixteen-slice compressed workload measured 37.032-38.500 us/roundtrip
+(37.651 us mean, 37.372 us median, 1.55% relative standard deviation,
+202.91-210.96 logical MiB/s). The common sixteen-frame case still uses one
+bounded stack batch, so the prior coalescing benefit is retained while the
+connection no longer owns a duplicate encoded-message allocation.
 The HTTP/2 Extended CONNECT, traditional CONNECT, and tunnel-response builders
 now stage their pseudo-headers and ordinary headers in 16-entry stack buffers,
 matching the ordinary HTTP/2 request/response path. Larger application header
@@ -156,7 +162,7 @@ RFC 8441 server application frames now keep their RFC 6455 header on the stack
 and pass it with the borrowed payload to `Tunnel.writeParts`. HTTP/2 applies
 DATA frame sizing and connection/stream flow control across that logical join,
 including a DATA frame that contains the end of the WebSocket header and the
-start of its payload, without retaining a payload-sized `send_frame_buffer`. An
+start of its payload, without retaining a payload-sized frame buffer. An
 8-KiB-window regression sends more than 16 KiB to force multiple WINDOW_UPDATE
 and client masking cycles, then verifies the complete message plus zero retained
 frame scratch. Client frames still require
@@ -172,7 +178,7 @@ Five CPU-0 4-KiB regression samples after adding H2 two-part writes measured
 standard deviation, 241.71-252.11 logical MiB/s). The range
 overlaps the earlier samples, so it is recorded as no demonstrated steady-state
 speedup; the proven improvement is eliminating payload-sized retained scratch
-on both directions of the ordinary single-frame path. The full 1,602-test suite
+on both directions of the ordinary single-frame path. The full 1,604-test suite
 and the bidirectional Hyper RFC 8441 gate remain green.
 
 The first compressed frame is copied once from the transport/caller frame
@@ -401,9 +407,14 @@ peer response. Both TCP/WSS and RFC 8441 close senders encode the bounded
 the shutdown boundary. RFC 8441 now uses that fixed-buffer path for every Ping,
 Pong and Close frame, including automatic Pong and Close replies. A fresh H2
 tunnel no longer allocates or retains `send_frame_buffer` capacity merely to
-exchange control traffic. Ordinary single-frame application writes now use
-borrowed server payloads or bounded client masking; the reusable growable buffer
-remains for fragmented compressed batches. A real h2c test checks a client Ping, server Pong and
+exchange control traffic. Ordinary and compressed-fragment application writes
+now use borrowed server payloads or bounded client masking, so the H2 adapter no
+longer owns a send-frame growable buffer. A bidirectional compressed-fragment
+regression, including a 64-KiB fail-after-warmup case, verifies message bytes,
+frame boundaries and no post-warmup caller allocation after removing that field.
+The same bounded batch/stream fallback handles uncompressed fragmentation; a
+40-KiB bidirectional test crosses the 16-KiB masking boundary. A
+real h2c test checks a client Ping, server Pong and
 bidirectional Close while both sides retain zero send-frame scratch. A
 CPU-0-pinned 4-KiB echo run after this change measured 33.075 us/roundtrip and
 236.20 logical MiB/s; this is a regression sample rather than a new

@@ -7208,7 +7208,11 @@ pub const Connection = struct {
             slices.len,
             2 * max_data_frames_per_write,
         ) catch return error.MessageTooLarge;
-        var wire_parts_stack: [16][]const u8 = undefined;
+        // Sixteen WebSocket fragments produce 32 logical slices. Allow their
+        // four DATA-frame headers and possible boundary splits to stay on the
+        // stack rather than trading a removed payload buffer for descriptor
+        // allocation on the common compressed-fragment batch.
+        var wire_parts_stack: [48][]const u8 = undefined;
         const wire_parts = if (wire_part_capacity <= wire_parts_stack.len)
             wire_parts_stack[0..wire_part_capacity]
         else
