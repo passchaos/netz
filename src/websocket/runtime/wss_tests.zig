@@ -1,6 +1,7 @@
 const std = @import("std");
 const websocket = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const tls_testing = @import("../../tls/testing.zig");
 
 test "WSS server completes verified WebSocket echo" {
@@ -54,6 +55,13 @@ test "WSS server completes verified WebSocket echo" {
                 shared.err = error.UnexpectedPeerCertificate;
                 return;
             }
+            if (connection.negotiatedCipherSuite() !=
+                .aes_128_gcm_sha256 or
+                connection.negotiatedTranscriptHash() != .sha256)
+            {
+                shared.err = error.InvalidCipherSuite;
+                return;
+            }
             var message = connection.receiveMessage() catch |err| {
                 shared.err = err;
                 return;
@@ -98,6 +106,8 @@ test "WSS server completes verified WebSocket echo" {
     // The standard-library client path cannot expose its authenticated chain;
     // vail-backed client-identity and ALPN paths do so below.
     try std.testing.expect(client.peerCertificates() == null);
+    try std.testing.expect(client.negotiatedCipherSuite() == null);
+    try std.testing.expect(client.negotiatedTranscriptHash() == null);
     try client.sendBinary("encrypted websocket");
     var echoed = try client.receiveMessage();
     defer echoed.deinit(allocator);
@@ -298,6 +308,13 @@ test "WSS public client identity completes mTLS echo" {
                 shared.err = error.InvalidPeerCertificate;
                 return;
             }
+            if (connection.negotiatedCipherSuite() !=
+                .aes_128_gcm_sha256 or
+                connection.negotiatedTranscriptHash() != .sha256)
+            {
+                shared.err = error.InvalidCipherSuite;
+                return;
+            }
             var message = connection.receiveMessage() catch |err| {
                 shared.err = err;
                 return;
@@ -357,6 +374,14 @@ test "WSS public client identity completes mTLS echo" {
         u8,
         &certificate_der,
         server_chain[0],
+    );
+    try std.testing.expectEqual(
+        tls_stream.CipherSuite.aes_128_gcm_sha256,
+        client.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        tls_stream.TranscriptHash.sha256,
+        client.negotiatedTranscriptHash().?,
     );
     try client.sendBinary("authenticated websocket");
     var echoed = try client.receiveMessage();

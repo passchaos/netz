@@ -48,7 +48,7 @@ test "TLS stream negotiates ALPN and exchanges application data" {
                             .key_pair = shared.key_pair,
                         } },
                     },
-                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .cipher_suites = &.{.aes_256_gcm_sha384},
                     .alpn_protocols = &.{ "h2", "http/1.1" },
                 },
             ) catch |err| {
@@ -59,6 +59,13 @@ test "TLS stream negotiates ALPN and exchanges application data" {
             defer connection.deinit();
             if (!std.mem.eql(u8, connection.selected_alpn.?, "h2")) {
                 shared.err = error.InvalidAlpn;
+                return;
+            }
+            if (connection.negotiatedCipherSuite() !=
+                .aes_256_gcm_sha384 or
+                connection.negotiatedTranscriptHash() != .sha384)
+            {
+                shared.err = error.InvalidCipherSuite;
                 return;
             }
             connection.exportKeyingMaterial(
@@ -111,11 +118,19 @@ test "TLS stream negotiates ALPN and exchanges application data" {
             .pinned_ecdsa_p256_public_key = public_key,
         },
         .alpn_protocols = &.{ "h2", "http/1.1" },
-        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .cipher_suites = &.{.aes_256_gcm_sha384},
     });
     stream_owned = false;
     defer connection.deinit();
     try std.testing.expectEqualStrings("h2", connection.selected_alpn.?);
+    try std.testing.expectEqual(
+        @TypeOf(connection.negotiatedCipherSuite()).aes_256_gcm_sha384,
+        connection.negotiatedCipherSuite(),
+    );
+    try std.testing.expectEqual(
+        @TypeOf(connection.negotiatedTranscriptHash()).sha384,
+        connection.negotiatedTranscriptHash(),
+    );
     var client_exporter: [32]u8 = undefined;
     try connection.exportKeyingMaterial(
         "EXPORTER-netz-stream-test",

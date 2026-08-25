@@ -84,6 +84,7 @@ pub const Connection = struct {
     records: record_stream.Stream,
     selected_alpn: ?[]u8 = null,
     peer_certificate_chain: [][]const u8 = &.{},
+    cipher_suite: vail.tls.cipher_suite.Suite,
     exporter_master_secret: vail.tls.secret.Secret,
 
     pub fn init(
@@ -275,6 +276,7 @@ pub const Connection = struct {
             .records = .init(read_keys, write_keys),
             .selected_alpn = selected_alpn,
             .peer_certificate_chain = peer_certificate_chain,
+            .cipher_suite = verified.cipher_suite,
             .exporter_master_secret = exporter_master_secret,
         };
         exporter_master_secret = undefined;
@@ -359,6 +361,21 @@ pub const Connection = struct {
     /// owned by this connection and remain valid until `deinit`.
     pub fn peerCertificates(self: *const Connection) []const []const u8 {
         return self.peer_certificate_chain;
+    }
+
+    /// Return the authenticated TLS 1.3 cipher suite negotiated with the
+    /// server. This value remains available for the connection lifetime.
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) vail.tls.cipher_suite.Suite {
+        return self.cipher_suite;
+    }
+
+    /// Return the transcript/HKDF hash implied by the negotiated suite.
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) vail.tls.secret.Hash {
+        return self.cipher_suite.hash();
     }
 
     /// Export TLS 1.3 channel-bound keying material (RFC 8446 section 7.5).

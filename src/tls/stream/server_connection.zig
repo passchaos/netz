@@ -6,6 +6,7 @@
 //! independent.
 
 const std = @import("std");
+const vail = @import("vail");
 const record_stream = @import("record_stream.zig");
 const server_handshake = @import("server_handshake.zig");
 
@@ -28,7 +29,8 @@ pub const Connection = struct {
     records: record_stream.Stream,
     peer_certificate_chain: ?server_handshake.PeerCertificateChain = null,
     selected_alpn: ?[]u8 = null,
-    exporter_master_secret: @import("vail").tls.secret.Secret,
+    cipher_suite: vail.tls.cipher_suite.Suite,
+    exporter_master_secret: vail.tls.secret.Secret,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -56,6 +58,7 @@ pub const Connection = struct {
             .records = .init(keys.read, keys.write),
             .peer_certificate_chain = keys.peer_certificate_chain,
             .selected_alpn = selected_alpn,
+            .cipher_suite = keys.cipher_suite,
             .exporter_master_secret = keys.exporter_master_secret,
         };
         keys.exporter_master_secret = undefined;
@@ -90,6 +93,20 @@ pub const Connection = struct {
         return self.selected_alpn;
     }
 
+    /// Return the authenticated TLS 1.3 cipher suite selected for the client.
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) vail.tls.cipher_suite.Suite {
+        return self.cipher_suite;
+    }
+
+    /// Return the transcript/HKDF hash implied by the negotiated suite.
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) vail.tls.secret.Hash {
+        return self.cipher_suite.hash();
+    }
+
     /// Export TLS 1.3 channel-bound keying material (RFC 8446 section 7.5).
     pub fn exportKeyingMaterial(
         self: *const Connection,
@@ -97,7 +114,7 @@ pub const Connection = struct {
         context: []const u8,
         out: []u8,
     ) Error!void {
-        try @import("vail").tls.key_schedule.exportKeyingMaterialFor(
+        try vail.tls.key_schedule.exportKeyingMaterialFor(
             self.exporter_master_secret,
             label,
             context,

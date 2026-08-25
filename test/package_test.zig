@@ -84,6 +84,24 @@ test "public modules are reachable" {
         netz.tls.stream,
         "ServerConnection",
     ));
+    try std.testing.expect(@hasDecl(netz.tls.stream, "CipherSuite"));
+    try std.testing.expect(@hasDecl(netz.tls.stream, "TranscriptHash"));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ServerConnection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ServerConnection,
+        "negotiatedTranscriptHash",
+    ));
     try std.testing.expect(@hasDecl(netz.tls, "testing"));
     try std.testing.expectEqualStrings("258EAFA5-E914-47DA-95CA-C5AB0DC85B11", netz.websocket.handshake_guid);
     try std.testing.expectEqual(@as(usize, 64 * 1024), (netz.http1.runtime.Limits{}).max_head_bytes);
@@ -140,6 +158,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "negotiatedTranscriptHash",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
@@ -222,6 +248,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
         "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "negotiatedTranscriptHash",
     ));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
@@ -1017,6 +1051,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "negotiatedTranscriptHash",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

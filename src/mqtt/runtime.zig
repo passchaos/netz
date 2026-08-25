@@ -1041,6 +1041,21 @@ pub const Connection = struct {
         return self.transport.negotiatedAlpn();
     }
 
+    /// Return authenticated TLS 1.3 cipher-suite metadata for native TLS or
+    /// vail-backed WSS. Other transports return null.
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) ?tls_stream.CipherSuite {
+        return self.transport.negotiatedCipherSuite();
+    }
+
+    /// Return the transcript/HKDF hash implied by the negotiated TLS suite.
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) ?tls_stream.TranscriptHash {
+        return self.transport.negotiatedTranscriptHash();
+    }
+
     /// Export RFC 8446 channel-bound keying material from vail-backed native
     /// TLS or WSS. Cleartext and standard-library TLS return
     /// `ExporterUnavailable` rather than silently producing unbound bytes.

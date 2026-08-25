@@ -395,7 +395,9 @@ allowed/denied request shape from `13-websocket-bad-origin.py`.
 Client-identity WSS connections also retain and expose the authenticated server
 certificate chain, while mTLS servers expose the verified client chain through
 the same `peerCertificates()` API. Both vail-backed endpoint roles expose TLS
-exporter keying material for channel binding.
+exporter keying material for channel binding plus typed negotiated cipher-suite
+and transcript-hash metadata. Cleartext and Zig standard-library TLS paths
+return null rather than claiming unavailable negotiation details.
 
 Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
 reads plus `closeWithTimeout`. A close step sends Close at most once, consumes

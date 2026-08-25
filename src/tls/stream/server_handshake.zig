@@ -71,6 +71,7 @@ pub const PeerCertificateChain = struct {
 pub const TrafficKeys = struct {
     read: tls_record.Keys,
     write: tls_record.Keys,
+    cipher_suite: vail.tls.cipher_suite.Suite,
     peer_certificate_chain: ?PeerCertificateChain = null,
     selected_alpn: ?[]const u8 = null,
     exporter_master_secret: vail.tls.secret.Secret,
@@ -246,6 +247,7 @@ pub fn perform(
             handshake.selection.suite,
             application.server_traffic_secret,
         ),
+        .cipher_suite = handshake.selection.suite,
         .peer_certificate_chain = peer_certificate_chain,
         .selected_alpn = handshake.selection.alpn_protocol,
         .exporter_master_secret = exporter_master_secret,

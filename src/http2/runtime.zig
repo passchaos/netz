@@ -1431,6 +1431,31 @@ pub const Connection = struct {
         };
     }
 
+    /// Return authenticated TLS 1.3 cipher-suite metadata when this HTTP/2
+    /// connection uses a vail-backed TLS transport.
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) ?tls_stream.CipherSuite {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_client => |connection| connection.negotiatedCipherSuite(),
+            .tls_server => |connection| connection.negotiatedCipherSuite(),
+            .tcp => null,
+        };
+    }
+
+    /// Return the transcript/HKDF hash selected by the TLS cipher suite.
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) ?tls_stream.TranscriptHash {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_client => |connection| connection.negotiatedTranscriptHash(),
+            .tls_server => |connection| connection.negotiatedTranscriptHash(),
+            .tcp => null,
+        };
+    }
+
     /// Export RFC 8446 channel-bound keying material for TLS connections.
     pub fn exportKeyingMaterial(
         self: *const Connection,

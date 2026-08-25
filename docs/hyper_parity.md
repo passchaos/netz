@@ -723,7 +723,9 @@ keep-alive, cancellation and GOAWAY gate remains green.
    peer chains are exposed on accepted server connections, and the vail-backed
    HTTP/2 client retains and exposes the authenticated server chain. Both vail
    TLS endpoint roles expose RFC 8446 exporter keying material for channel
-   binding. Passing `--tls` to
+   binding and typed `negotiatedCipherSuite()` /
+   `negotiatedTranscriptHash()` metadata for authentication policy and
+   diagnostics. Passing `--tls` to
    the same h2spec command runs all 147 strict cases through TLS 1.3 and
    negotiated `h2` when h2spec is built with a current Go TLS stack that offers
    an X25519 key share.

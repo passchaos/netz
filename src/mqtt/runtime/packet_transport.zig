@@ -89,6 +89,28 @@ pub const Transport = union(enum) {
         };
     }
 
+    pub fn negotiatedCipherSuite(
+        self: *const Transport,
+    ) ?tls_stream.CipherSuite {
+        return switch (self.*) {
+            .tls_vail => |connection| connection.negotiatedCipherSuite(),
+            .tls_server => |connection| connection.negotiatedCipherSuite(),
+            .websocket => |*ws| ws.connection.negotiatedCipherSuite(),
+            .tcp, .tls => null,
+        };
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const Transport,
+    ) ?tls_stream.TranscriptHash {
+        return switch (self.*) {
+            .tls_vail => |connection| connection.negotiatedTranscriptHash(),
+            .tls_server => |connection| connection.negotiatedTranscriptHash(),
+            .websocket => |*ws| ws.connection.negotiatedTranscriptHash(),
+            .tcp, .tls => null,
+        };
+    }
+
     pub fn exportKeyingMaterial(
         self: *const Transport,
         label: []const u8,

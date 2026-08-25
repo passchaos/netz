@@ -3,6 +3,7 @@ const mqtt = @import("mod.zig");
 const runtime = @import("runtime.zig");
 const mqtt_tls = @import("tls_runtime.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
+const tls_stream = @import("../tls/mod.zig").stream;
 const tls_test = @import("testing/tls13_server.zig");
 
 const max_packet_size: usize = 4096;
@@ -80,6 +81,14 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
             try std.testing.expect(
                 accepted.connection.peerCertificates() == null,
             );
+            try std.testing.expectEqual(
+                tls_stream.CipherSuite.aes_128_gcm_sha256,
+                accepted.connection.negotiatedCipherSuite().?,
+            );
+            try std.testing.expectEqual(
+                tls_stream.TranscriptHash.sha256,
+                accepted.connection.negotiatedTranscriptHash().?,
+            );
             try std.testing.expectEqualStrings(
                 "mqtt-alpn",
                 accepted.connect.connect.client_id,
@@ -131,6 +140,14 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
     try std.testing.expectEqualStrings(
         "mqtt",
         client.negotiatedAlpn().?,
+    );
+    try std.testing.expectEqual(
+        tls_stream.CipherSuite.aes_128_gcm_sha256,
+        client.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        tls_stream.TranscriptHash.sha256,
+        client.negotiatedTranscriptHash().?,
     );
     try client.disconnect(0);
 

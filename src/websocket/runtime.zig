@@ -1097,6 +1097,33 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Return authenticated TLS 1.3 cipher-suite metadata for vail-backed
+    /// WSS. Cleartext and Zig standard-library TLS transports return null.
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) ?tls_stream.CipherSuite {
+        if (self.tls_server_conn) |connection| {
+            return connection.negotiatedCipherSuite();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.negotiatedCipherSuite();
+        }
+        return null;
+    }
+
+    /// Return the transcript/HKDF hash implied by the negotiated WSS suite.
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) ?tls_stream.TranscriptHash {
+        if (self.tls_server_conn) |connection| {
+            return connection.negotiatedTranscriptHash();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.negotiatedTranscriptHash();
+        }
+        return null;
+    }
+
     /// Export RFC 8446 channel-bound keying material for vail-backed WSS.
     pub fn exportKeyingMaterial(
         self: *const Connection,
