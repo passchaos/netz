@@ -624,7 +624,7 @@ pub const Client = struct {
     ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
-        if (options.tls_identity) |identity| {
+        if (options.vail_tls orelse options.tls_identity) |identity| {
             const tls_conn = try tls_client_identity.init(
                 allocator,
                 io,
@@ -661,7 +661,9 @@ pub const Client = struct {
         address: net.IpAddress,
         options: ConnectOptions,
     ) Error!Connection {
-        if (options.tls_identity != null) return error.UnsupportedScheme;
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
         const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| return err;
         errdefer stream.close(io);
         return connectStream(allocator, io, stream, null, options);
@@ -674,7 +676,9 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
     ) Error!Connection {
-        if (options.tls_identity != null) return error.UnsupportedScheme;
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
         const host_name = try net.HostName.init(host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         errdefer stream.close(io);
@@ -701,7 +705,9 @@ pub const Client = struct {
         defer allocator.free(default_host);
         var connect_options = options;
         if (connect_options.host.len == 0) connect_options.host = default_host;
-        if (connect_options.tls_identity) |identity| {
+        if (connect_options.vail_tls orelse
+            connect_options.tls_identity) |identity|
+        {
             // The standard Zig 0.16 client cannot answer
             // CertificateRequest, so identities select the shared vail path.
             const tls_conn = try tls_client_identity.init(
@@ -754,7 +760,9 @@ pub const Client = struct {
         const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
         const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
         if (!is_ws and !is_wss) return error.UnsupportedScheme;
-        if (options.tls_identity != null and !is_wss) {
+        if ((options.tls_identity != null or options.vail_tls != null) and
+            !is_wss)
+        {
             // Client certificates are TLS credentials. Reject rather than
             // silently dropping them when this helper receives a ws:// URI.
             return error.UnsupportedScheme;
@@ -772,7 +780,7 @@ pub const Client = struct {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (is_wss) {
-            if (options.tls_identity) |identity| {
+            if (options.vail_tls orelse options.tls_identity) |identity| {
                 const tls_conn = try tls_client_identity.init(
                     allocator,
                     io,
@@ -814,7 +822,9 @@ pub const Client = struct {
         uri_text: []const u8,
         options: ConnectOptions,
     ) Error!Connection {
-        if (options.tls_identity != null) return error.UnsupportedScheme;
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.UnsupportedScheme;
         const target = try uriTargetAlloc(allocator, uri);
@@ -1013,9 +1023,13 @@ pub const ConnectOptions = struct {
     compression_threshold: usize = default_compression_threshold,
     tcp_nodelay: bool = true,
     limits: Limits = .{},
-    /// Configure a TLS 1.3 client identity for WSS. Cleartext connect helpers
-    /// reject this field instead of silently dropping credentials.
+    /// Backward-compatible mTLS shorthand. `vail_tls` takes precedence when
+    /// both are supplied.
     tls_identity: ?TlsClientIdentityOptions = null,
+    /// Select vail-backed WSS without requiring a client certificate. This
+    /// enables peer-chain, ALPN, exporter and KeyUpdate APIs for ordinary WSS.
+    /// Cleartext connect helpers reject this field.
+    vail_tls: ?TlsClientIdentityOptions = null,
 };
 
 pub const OwnedMessage = struct {

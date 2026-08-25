@@ -392,8 +392,9 @@ non-matching Origin is rejected before the successful handshake; leaving the
 list empty preserves native-client behavior. The MQTT adapter exposes the same
 policy for WS and WSS, and its Mosquitto-derived process gate ports the raw
 allowed/denied request shape from `13-websocket-bad-origin.py`.
-Client-identity WSS connections also retain and expose the authenticated server
-certificate chain, while mTLS servers expose the verified client chain through
+Any WSS client can opt into the vail transport to retain and expose the
+authenticated server certificate chain; a client certificate remains optional.
+mTLS servers expose the verified client chain through
 the same `peerCertificates()` API. Both vail-backed endpoint roles expose TLS
 exporter keying material for channel binding plus typed negotiated cipher-suite
 and transcript-hash metadata. Cleartext and Zig standard-library TLS paths
@@ -401,6 +402,8 @@ return null rather than claiming unavailable negotiation details.
 Vail-backed WSS additionally exposes RFC 8446 application traffic-key updates
 and counters. A client/server mTLS test requests a reciprocal update and then
 exchanges a complete WebSocket message under the rotated epochs.
+An ordinary-client test exercises the same metadata, exporter and reciprocal-
+update path without presenting a client certificate.
 RFC 8441 connections forward the complete peer-chain, ALPN, cipher/hash,
 exporter, KeyUpdate and counter API to their shared parent HTTP/2 TLS
 connection, so an application cannot accidentally inspect or rotate only one

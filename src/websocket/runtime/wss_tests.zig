@@ -126,6 +126,136 @@ test "WSS server completes verified WebSocket echo" {
     if (shared.err) |err| return err;
 }
 
+test "ordinary vail WSS client exposes TLS state and KeyUpdate" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = 4096,
+                .max_message_bytes = 4096,
+            },
+            .cipher_suites = &.{.aes_256_gcm_sha384},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        exporter: [32]u8 = undefined,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept(.{});
+            defer connection.close();
+            try connection.exportKeyingMaterial(
+                "EXPORTER-netz-wss",
+                "anonymous-client",
+                &shared.exporter,
+            );
+            try connection.updateTrafficKeys(true);
+            var message = try connection.receiveMessage();
+            defer message.deinit(allocator);
+            try std.testing.expectEqualStrings("vail wss", message.payload);
+            try connection.sendBinary(message.payload);
+            var second = try connection.receiveMessage();
+            defer second.deinit(allocator);
+            try std.testing.expectEqualStrings(
+                "vail wss after update",
+                second.payload,
+            );
+            try connection.sendBinary(second.payload);
+            const updates = connection.keyUpdateCounts().?;
+            try std.testing.expectEqual(@as(u64, 1), updates.sent);
+            try std.testing.expectEqual(@as(u64, 1), updates.received);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = 4096,
+                .max_message_bytes = 4096,
+            },
+            .vail_tls = .{
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .cipher_suites = &.{.aes_256_gcm_sha384},
+            },
+        },
+        .{},
+    );
+    defer client.close();
+    const chain = client.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqualSlices(u8, &certificate_der, chain[0]);
+    try std.testing.expectEqual(
+        tls_stream.CipherSuite.aes_256_gcm_sha384,
+        client.negotiatedCipherSuite().?,
+    );
+    var exporter: [32]u8 = undefined;
+    try client.exportKeyingMaterial(
+        "EXPORTER-netz-wss",
+        "anonymous-client",
+        &exporter,
+    );
+    try client.sendBinary("vail wss");
+    var echoed = try client.receiveMessage();
+    defer echoed.deinit(allocator);
+    try std.testing.expectEqualStrings("vail wss", echoed.payload);
+    try client.sendBinary("vail wss after update");
+    var second_echo = try client.receiveMessage();
+    defer second_echo.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "vail wss after update",
+        second_echo.payload,
+    );
+    try std.testing.expectEqualSlices(u8, &shared.exporter, &exporter);
+    const updates = client.keyUpdateCounts().?;
+    try std.testing.expectEqual(@as(u64, 1), updates.sent);
+    try std.testing.expectEqual(@as(u64, 1), updates.received);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WSS compression threshold propagates through TLS endpoints" {
     const allocator = std.testing.allocator;
     const below = "wss-below-threshold";

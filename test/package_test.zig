@@ -1258,6 +1258,10 @@ test "public modules are reachable" {
         netz.mqtt.websocket_runtime.ConnectOptions,
         "server_verifier",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
+        "use_vail_tls",
+    ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "TlsClientIdentityOptions",
@@ -1281,6 +1285,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.websocket.runtime.ConnectOptions,
         "tls_identity",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.ConnectOptions,
+        "vail_tls",
     ));
     try std.testing.expect(@hasDecl(
         netz.tls.stream.ClientConnection,

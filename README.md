@@ -477,8 +477,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   pluggable trust verification, verified peer-chain access on both native TLS
   endpoint roles and identity-enabled WSS clients, RFC 8446 exporter keying
   material plus negotiated cipher-suite/hash metadata on vail-backed HTTP/1
-  servers, HTTP/2, WebSocket, and MQTT connections, explicit application traffic-key rotation
-  plus update counters, and opt-in native MQTT TLS ALPN negotiation
+  servers, HTTP/2, WebSocket, and MQTT connections, including ordinary WSS
+  clients that opt into vail without presenting a certificate, explicit
+  application traffic-key rotation plus update counters, and opt-in native MQTT TLS ALPN negotiation
   with the selected protocol exposed per
   connection, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with

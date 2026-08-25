@@ -850,6 +850,9 @@ application authentication and channel binding, together with typed
 `negotiatedCipherSuite()` and `negotiatedTranscriptHash()` metadata for native
 TLS and vail-backed WSS. Unsupported cleartext and standard-library TLS paths
 return null instead of synthesizing negotiation state.
+MQTT-over-WebSocket can select the vail path independently of client identity,
+so ordinary WSS clients receive the same metadata and exporter/KeyUpdate
+surface instead of requiring mTLS as an accidental feature flag.
 The same transports expose explicit RFC 8446 application traffic-key rotation
 and sent/received update counters. Native MQTT TLS tests require a reciprocal
 update before PING/DISCONNECT, proving MQTT framing survives both new epochs.

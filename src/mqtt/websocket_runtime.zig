@@ -451,6 +451,9 @@ pub const ConnectOptions = struct {
     max_head_bytes: usize = 64 * 1024,
     tcp_nodelay: bool = true,
     tls: http1_runtime.TlsClientOptions = .{},
+    /// Select vail-backed WSS even without a client certificate, enabling
+    /// authenticated peer metadata, exporter and TLS KeyUpdate APIs.
+    use_vail_tls: bool = false,
     /// Select the vail-backed WSS client and answer CertificateRequest.
     client_identity: ?ClientIdentity = null,
     /// Optional pin/custom trust callback for the client-identity path.
@@ -487,9 +490,11 @@ fn websocketConnectOptions(
             options.mqtt.limits,
             options.max_head_bytes,
         ),
-        .tls_identity = if (options.client_identity) |identity|
+        .vail_tls = if (options.use_vail_tls or
+            options.client_identity != null or
+            options.server_verifier != null)
             .{
-                .identity = identity,
+                .identity = options.client_identity,
                 .server_verifier = options.server_verifier,
                 .cipher_suites = options.cipher_suites,
                 .max_server_handshake_size = options.max_server_handshake_size,
