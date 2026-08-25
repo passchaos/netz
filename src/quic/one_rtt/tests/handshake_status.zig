@@ -54,6 +54,72 @@ test "QUIC HANDSHAKE_DONE augmentation falls back transactionally" {
     try std.testing.expect(combined[capacity] == .handshake_done);
 }
 
+test "QUIC pending ACK augmentation uses stack storage for HTTP3 batches" {
+    const capacity = one_rtt.testing.pending_ack_test_stack_capacity;
+    const frames = [_]quic.Frame{.{ .ping = {} }} ** (capacity - 1);
+    const ack: quic.AckFrame = .{
+        .largest_acknowledged = 7,
+        .ack_delay = 0,
+        .first_ack_range = 3,
+    };
+    var stack: [capacity]quic.Frame = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const combined = try one_rtt.testing.appendPendingAckForTest(
+        failing.allocator(),
+        &stack,
+        &frames,
+        ack,
+    );
+    try std.testing.expectEqual(capacity, combined.len);
+    try std.testing.expectEqual(stack[0..].ptr, combined.ptr);
+    try std.testing.expect(combined[0] == .ping);
+    try std.testing.expect(combined[capacity - 1] == .ack);
+    try std.testing.expectEqual(
+        ack.largest_acknowledged,
+        combined[capacity - 1].ack.largest_acknowledged,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "QUIC pending ACK augmentation falls back transactionally" {
+    const capacity = one_rtt.testing.pending_ack_test_stack_capacity;
+    const frames = [_]quic.Frame{.{ .ping = {} }} ** capacity;
+    const ack: quic.AckFrame = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    var stack: [capacity]quic.Frame = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        one_rtt.testing.appendPendingAckForTest(
+            failing.allocator(),
+            &stack,
+            &frames,
+            ack,
+        ),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+
+    const combined = try one_rtt.testing.appendPendingAckForTest(
+        std.testing.allocator,
+        &stack,
+        &frames,
+        ack,
+    );
+    defer std.testing.allocator.free(combined);
+    try std.testing.expect(combined.ptr != stack[0..].ptr);
+    try std.testing.expectEqual(capacity + 1, combined.len);
+    try std.testing.expect(combined[capacity] == .ack);
+}
+
 test "QUIC first server 1-RTT send does not allocate frame augmentation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

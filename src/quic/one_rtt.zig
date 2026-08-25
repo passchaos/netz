@@ -596,6 +596,7 @@ const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_l
 // automatic HANDSHAKE_DONE augmentation for that common first-flight shape on
 // the stack while retaining an exact fallback for lower-level callers.
 const handshake_done_frame_stack_capacity: usize = 16;
+const pending_ack_frame_stack_capacity: usize = 16;
 
 fn appendPendingHandshakeDone(
     allocator: std.mem.Allocator,
@@ -610,6 +611,23 @@ fn appendPendingHandshakeDone(
         try allocator.alloc(quic.Frame, combined_len);
     @memcpy(combined[0..frames.len], frames);
     combined[frames.len] = .{ .handshake_done = {} };
+    return combined;
+}
+
+fn appendPendingAck(
+    allocator: std.mem.Allocator,
+    stack: *[pending_ack_frame_stack_capacity]quic.Frame,
+    frames: []const quic.Frame,
+    ack: quic.AckFrame,
+) Error![]quic.Frame {
+    const combined_len = std.math.add(usize, frames.len, 1) catch
+        return error.InvalidFrameLength;
+    const combined = if (combined_len <= stack.len)
+        stack[0..combined_len]
+    else
+        try allocator.alloc(quic.Frame, combined_len);
+    @memcpy(combined[0..frames.len], frames);
+    combined[frames.len] = .{ .ack = ack };
     return combined;
 }
 const timer_blocked_receive_backoff_ns: u64 = std.time.ns_per_ms;
@@ -3187,19 +3205,17 @@ pub const Connection = struct {
             &stack_ranges,
             &heap_ranges,
         );
-        const combined_len = std.math.add(usize, frames.len, 1) catch
-            return error.OutOfMemory;
-        var stack_frames: [8]quic.Frame = undefined;
-        const heap_frames = if (combined_len > stack_frames.len)
-            try self.endpoint.allocator.alloc(quic.Frame, combined_len)
-        else
-            null;
-        defer if (heap_frames) |allocated| {
-            self.endpoint.allocator.free(allocated);
+        var stack_frames: [pending_ack_frame_stack_capacity]quic.Frame =
+            undefined;
+        const combined = try appendPendingAck(
+            self.endpoint.allocator,
+            &stack_frames,
+            frames,
+            ack,
+        );
+        defer if (combined.ptr != stack_frames[0..].ptr) {
+            self.endpoint.allocator.free(combined);
         };
-        const combined = heap_frames orelse stack_frames[0..combined_len];
-        @memcpy(combined[0..frames.len], frames);
-        combined[frames.len] = .{ .ack = ack };
         try self.send(combined);
         self.ackDelaySent();
     }
@@ -7509,6 +7525,18 @@ pub const testing = struct {
             stack,
             frames,
         );
+    }
+
+    pub const pending_ack_test_stack_capacity =
+        pending_ack_frame_stack_capacity;
+
+    pub fn appendPendingAckForTest(
+        allocator: std.mem.Allocator,
+        stack: *[pending_ack_test_stack_capacity]quic.Frame,
+        frames: []const quic.Frame,
+        ack: quic.AckFrame,
+    ) Error![]quic.Frame {
+        return appendPendingAck(allocator, stack, frames, ack);
     }
 
     pub fn applyReceivedFrames(

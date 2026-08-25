@@ -150,13 +150,21 @@ temporary frame-array allocation. Five CPU-0, 100-connection, quicz-aligned
 handshake samples measured 2,035.4-2,072.3 connections/s (2,060.7 mean, 0.65%
 relative standard deviation) with p50 466.117-472.825 us. This is a regression
 sample, not a new cross-stack ratio.
+ACK piggybacking now uses the same 16-frame stack-first staging policy. This
+covers HTTP/3's default eight-frame application packet plus its cumulative ACK
+without the former ninth-frame heap fallback, and still allocates an exact
+array for unusually large low-level batches. Fail-first tests cover both sides
+of that threshold and preserve application-frame-before-ACK ordering. Five
+CPU-0 5,000-round echo regressions measured p50 12.759-12.985 us, p99
+16.989-21.891 us, and p99.9 25.249-34.553 us. These noisier samples are
+recorded without replacing the earlier matched quicz comparison.
 PMTU probe construction now uses the connection's pre-sized plaintext scratch
 for the canonical PING-plus-PADDING payload instead of allocating and freeing a
 probe-sized temporary list on every search step. Recovery still takes stable
 ownership before the socket write. A real UDP regression sends and retires one
 probe, then re-arms the same size under an allocator that rejects all new
 allocations; the second exact-size probe succeeds with stable scratch pointers.
-The full 1,608-test suite and both quic-go and s2n-quic transport matrices
+The full 1,610-test suite and both quic-go and s2n-quic transport matrices
 remain green after the change.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
