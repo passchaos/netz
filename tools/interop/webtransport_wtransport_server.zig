@@ -340,13 +340,13 @@ pub fn main(init: std.process.Init) !void {
     }
     // wtransport does not expose DRAIN as an application event, but its
     // CONNECT-stream driver must skip this registered capsule without losing
-    // framing. Sending CLOSE immediately after it makes exact close metadata
-    // observable proof that the preceding DRAIN was consumed correctly.
+    // framing. Follow it with a connection-level close to verify that netz
+    // keeps WT Session shutdown and QUIC shutdown as distinct APIs.
     try session.drain();
-    try session.close(77, "netz done");
+    try session.closeConnection(77, "netz done");
     try std.Io.sleep(io, .fromMilliseconds(100), .awake);
     std.debug.print(
-        "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close\n",
+        "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close\n",
         .{max_datagram_size},
     );
 }

@@ -27,6 +27,7 @@ pub const Limits = struct {
 // plus the protocol fields inserted by this adapter.
 const max_additional_connect_request_headers: usize = 57;
 const max_additional_connect_response_headers: usize = 62;
+pub const max_connection_close_reason: usize = 1024;
 
 pub const Server = struct {
     h3: http3.runtime.Server,
@@ -639,6 +640,23 @@ pub const AcceptedHandshakeSession = struct {
         return self.stats().smoothed_rtt_ns;
     }
 
+    /// Close the entire HTTP/3 connection with an application error. This is
+    /// intentionally distinct from `close`, which sends WT_CLOSE_SESSION on
+    /// the Extended CONNECT stream and leaves connection scope to HTTP/3.
+    pub fn closeConnection(
+        self: *AcceptedHandshakeSession,
+        error_code: u62,
+        reason: []const u8,
+    ) Error!void {
+        if (reason.len > max_connection_close_reason) {
+            return error.InvalidSessionState;
+        }
+        try self.h3.established.connection.closeApplication(
+            error_code,
+            reason,
+        );
+    }
+
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
@@ -1097,6 +1115,21 @@ pub const HandshakeClientSession = struct {
 
     pub fn rttNanos(self: HandshakeClientSession) ?u64 {
         return self.stats().smoothed_rtt_ns;
+    }
+
+    /// Close the entire QUIC connection, not only this WebTransport Session.
+    pub fn closeConnection(
+        self: *HandshakeClientSession,
+        error_code: u62,
+        reason: []const u8,
+    ) Error!void {
+        if (reason.len > max_connection_close_reason) {
+            return error.InvalidSessionState;
+        }
+        try self.h3.established.connection.closeApplication(
+            error_code,
+            reason,
+        );
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
@@ -1766,6 +1799,14 @@ pub const StatefulProtectedClientSession = struct {
 
     pub fn rttNanos(self: StatefulProtectedClientSession) ?u64 {
         return self.session.rttNanos();
+    }
+
+    pub fn closeConnection(
+        self: *StatefulProtectedClientSession,
+        error_code: u62,
+        reason: []const u8,
+    ) Error!void {
+        return self.session.closeConnection(error_code, reason);
     }
 
     pub fn openBidirectionalStream(
@@ -3420,4 +3461,5 @@ test {
     _ = @import("runtime/stream_tests.zig");
     _ = @import("runtime/session_control_tests.zig");
     _ = @import("runtime/admission_tests.zig");
+    _ = @import("runtime/connection_close_tests.zig");
 }

@@ -576,7 +576,9 @@ lifetime. `HandshakeClientSession.connectUri` additionally accepts one complete
 HTTPS URL and derives DNS targets, SNI, authority, and path/query with the same
 multi-address fallback as the HTTP/3 client. Stateful sessions also expose the
 session ID, current migration-aware peer address, address-validation status,
-and smoothed RTT. Their connection IDs, negotiated
+and smoothed RTT, plus an explicit connection-level application-close API that
+does not conflate QUIC shutdown with a WebTransport Session close. Their
+connection IDs, negotiated
 transport parameters,
 ALPN, packet keys, and optional resumption master secret must all come from the
 same authenticated external negotiation; the API does not replace TLS or
@@ -599,7 +601,7 @@ zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
 # Bidirectional wtransport interop for CONNECT admission metadata, DATAGRAM,
 # bidi/uni streams, mapped RESET_STREAM/STOP_SENDING codes, post-cancellation
-# reuse, and close.
+# reuse, Session drain, and connection-level close.
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
 # always enables strict mode and rejects empty, skipped, or failed test runs.

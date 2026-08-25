@@ -1521,6 +1521,18 @@ test "public modules are reachable" {
         "rttNanos",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "closeConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "closeConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "closeConnection",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedServer,
         "receiveSessionRequest",
     ));

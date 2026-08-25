@@ -78,7 +78,7 @@ grep -Fq \
 grep -Fq \
   'netz WebTransport interop accepted CONNECT with admission metadata' \
   "$work/server.log"
-grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
+grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close' \
   "$work/server.log"
 
 rust_log="$work/wtransport-server.log"
