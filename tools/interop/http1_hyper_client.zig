@@ -47,6 +47,16 @@ pub fn main(init: std.process.Init) !void {
         &ca_lock,
     );
     defer client.close();
+    if (tls_enabled) {
+        const chain = client.peerCertificates() orelse
+            return error.MissingPeerCertificate;
+        if (chain.len == 0 or
+            client.negotiatedCipherSuite() == null or
+            client.negotiatedTranscriptHash() == null)
+        {
+            return error.InvalidTlsMetadata;
+        }
+    }
 
     var writer = try client.startRequest(.{
         .method = .POST,
@@ -95,6 +105,19 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 client interoperated with Hyper: transport={s} status=201 body=14 trailers=1\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+    if (tls_enabled) {
+        const updates = client.keyUpdateCounts() orelse
+            return error.MissingKeyUpdate;
+        if (updates.received != 1 or updates.sent != 1 or
+            updates.awaiting_peer_response)
+        {
+            return error.InvalidKeyUpdateCount;
+        }
+        std.debug.print(
+            "netz HTTP/1 client interoperated with rustls KeyUpdate: received=1 sent=1 next_request=true\n",
+            .{},
+        );
+    }
 
     // Hyper's public `on_informational` API has a netz counterpart. Exercise
     // more than status skipping: validate both borrowed 103/102 header blocks
@@ -407,7 +430,7 @@ fn connect(
     ca_lock: *std.Io.RwLock,
 ) !netz.http1.runtime.Client {
     if (tls_enabled) {
-        return netz.http1.runtime.Client.connectTlsHost(
+        return netz.http1.runtime.Client.connectVailTlsHost(
             allocator,
             io,
             "localhost",

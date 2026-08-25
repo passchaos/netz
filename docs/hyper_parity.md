@@ -562,7 +562,10 @@ KeyUpdate and update counters. The client keeps the standard-library HTTPS
 path as its compatibility default and offers `connectVailTlsHost` /
 `requestUriVailTls` when those advanced features are required. CONNECT/Upgrade
 tunnels preserve the vail connection and KeyUpdate access after the HTTP parser
-hands off the encrypted byte stream.
+hands off the encrypted byte stream. The Hyper HTTP/1 process gate now runs its
+HTTPS client direction through that vail path: rustls sends a real reciprocal
+KeyUpdate before the response, netz verifies the server chain and negotiation
+metadata, responds exactly once, and completes the remaining HTTP/1 scenarios.
 
 RFC 9218 scheduling now selects urgency and the lowest-ID exclusive
 non-incremental stream in one candidate scan rather than two. The priority-aware

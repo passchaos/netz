@@ -198,6 +198,12 @@ grep -Fq \
 grep -Fq \
   'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19' \
   "$work/tls-hyper-server.log"
+grep -Fq \
+  'rustls HTTP/1 server sent TLS KeyUpdate request' \
+  "$work/tls-hyper-server.log"
+grep -Fq \
+  'netz HTTP/1 client interoperated with rustls KeyUpdate: received=1 sent=1 next_request=true' \
+  "$work/tls-netz-client.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper HTTPS server -> netz client interop passed'
 

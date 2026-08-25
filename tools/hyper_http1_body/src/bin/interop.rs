@@ -70,7 +70,16 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         connections.push(tokio::spawn(async move {
             let io = match tls_acceptor {
                 Some(acceptor) => {
-                    MaybeTls::Server(acceptor.accept(stream).await.expect("accept HTTPS"))
+                    let mut tls = acceptor.accept(stream).await.expect("accept HTTPS");
+                    if connection_index == 0 {
+                        tls.get_mut()
+                            .1
+                            .refresh_traffic_keys()
+                            .expect("queue rustls KeyUpdate");
+                        tls.flush().await.expect("flush rustls KeyUpdate");
+                        println!("rustls HTTP/1 server sent TLS KeyUpdate request");
+                    }
+                    MaybeTls::Server(tls)
                 }
                 None => MaybeTls::Clear(stream),
             };
