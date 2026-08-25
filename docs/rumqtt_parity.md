@@ -27,6 +27,7 @@ and equal-wire broker results are kept separate.
 | CONNECT and PING liveness | Optional absolute CONNECT/CONNACK packet deadline covers TCP, native TLS, WS and WSS; partial MQTT bytes, WebSocket message boundaries and control frames cannot renew it. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on the same transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
+| MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
 | Broker persistence | Atomic versioned snapshots plus an opt-in fsynced append journal for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
@@ -37,9 +38,28 @@ broker architecture or Mosquitto's full persistence plugin and protocol
 surface.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 131 raw scenarios
+deadline on every one of its finite broker processes, so all 132 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
+
+## Server Reference redirects
+
+MQTT 5 Server Reference handling now goes beyond the audited reference clients,
+which expose reason codes and property bytes but do not follow them. Netz binds
+the property to Use Another Server / Server Moved, accepts explicit MQTT,
+MQTTS, WS, and WSS URIs plus the common host:port form, canonicalizes host case
+and default ports for loop detection, and rejects credentials, query/fragment
+data, invalid hosts, zero ports, and TCP references containing paths.
+
+Following redirects is deliberately opt-in and bounded. A policy controls the
+maximum hop count, transport changes, and a per-hop authorization callback.
+The TCP, TLS, and WebSocket client families expose automatic CONNACK helpers;
+TLS/WSS reconnect through their normal URI paths so SNI and certificate host
+validation are derived again from the redirected authority. Runtime tests use
+two real TCP and two real WebSocket servers, while the Mosquitto-derived process
+gate verifies exact redirect CONNACK bytes. DISCONNECT references use the same
+parser and chain through takeDisconnectTarget, leaving application state replay
+and the reconnect decision explicit.
 
 ## Atomic broker snapshots
 
@@ -220,7 +240,7 @@ property, the result also returns to the fixed path. A real TCP
 fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
-Mosquitto-derived 131-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
+Mosquitto-derived 132-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
 green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
@@ -237,7 +257,7 @@ including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
-masked client and unmasked server messages assembled from two parts. The full 1,641-test suite, 131-scenario
+masked client and unmasked server messages assembled from two parts. The full 1,646-test suite, 132-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
@@ -1327,7 +1347,7 @@ imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets. Four additional wire cases verify absent/zero/one Request Response
 Information plus both the default-enabled diagnostic path and Request Problem
 Information suppression while preserving an exact negative PUBACK reason; all
-131 scenarios pass. This is deliberately described as a selected
+132 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1356,5 +1376,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 131 passing packet-vector scenarios do not cover
+   persistence semantics. The 132 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

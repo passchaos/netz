@@ -1,5 +1,6 @@
 const std = @import("std");
 const mqtt = @import("mod.zig");
+const redirect = @import("redirect.zig");
 const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
@@ -27,6 +28,11 @@ pub const Error = packet_transport.Error || error{
     OutgoingPacketTooLarge,
     PublishRefused,
     SubscriptionRefused,
+    InvalidServerReference,
+    UnsupportedRedirectScheme,
+    RedirectLimitExceeded,
+    RedirectLoop,
+    RedirectRejected,
 } || auth_runtime.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -195,6 +201,10 @@ pub const AcceptOptions = struct {
     session_present: bool = false,
     reason_code: u8 = 0,
     assigned_client_identifier: ?[]const u8 = null,
+    /// Optional MQTT 5 alternative authority. Redirecting clients consume it
+    /// only with Use Another Server / Server Moved; other reason codes may use
+    /// it as the protocol's informational hint.
+    server_reference: ?[]const u8 = null,
     /// Optional response-prefix hint returned only when an MQTT 5 client asks
     /// for Response Information in CONNECT. The string is borrowed through
     /// synchronous CONNACK encoding and must be valid MQTT UTF-8.
@@ -243,7 +253,7 @@ pub const PendingAcceptedClient = struct {
         options: AcceptOptions,
     ) Error!AcceptedClient {
         const resolved = try self.resolvedOptions(options);
-        var properties: [4]mqtt.Property = undefined;
+        var properties: [5]mqtt.Property = undefined;
         var property_count: usize = 0;
         if (self.connection.protocol == .v5 and
             resolved.assigned_client_identifier != null)
@@ -285,6 +295,13 @@ pub const PendingAcceptedClient = struct {
                 } };
                 property_count += 1;
             }
+        }
+        if (resolved.server_reference) |reference| {
+            properties[property_count] = .{ .utf8 = .{
+                .id = .server_reference,
+                .value = reference,
+            } };
+            property_count += 1;
         }
         try self.connection.writeConnAck(.{
             .session_present = resolved.session_present,
@@ -487,6 +504,75 @@ pub const Client = struct {
         errdefer connection.close();
 
         return connection.establishClient(options);
+    }
+
+    /// Follow MQTT 5 redirect CONNACKs for cleartext TCP.
+    ///
+    /// Redirects are disabled unless policy.max_redirects is non-zero. This
+    /// URI form provides a stable authority string for loop detection.
+    pub fn connectUriFollowingRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        policy: redirect.Policy,
+    ) Error!ConnectResult {
+        if (options.protocol != .v5) return error.UnsupportedRedirectScheme;
+        var chain = redirect.Chain.init(allocator, policy);
+        defer chain.deinit();
+        var current_uri = try allocator.dupe(u8, uri_text);
+        defer allocator.free(current_uri);
+        try chain.recordInitial(current_uri, .tcp);
+
+        while (true) {
+            var target = try redirect.parse(allocator, current_uri, .tcp);
+            defer target.deinit();
+            if (target.transport != .tcp) return error.UnsupportedRedirectScheme;
+            const uri = std.Uri.parse(target.uri) catch
+                return error.InvalidServerReference;
+            var endpoint = http1_runtime.uriEndpoint(
+                allocator,
+                uri,
+                redirect.Transport.tcp.defaultPort(),
+            ) catch return error.InvalidServerReference;
+            defer endpoint.deinit();
+            const address_stream = try endpoint.connect(io);
+            var stream_owned = true;
+            errdefer if (stream_owned) address_stream.close(io);
+            if (options.limits.tcp_nodelay) {
+                socket_options.setTcpNoDelay(address_stream) catch
+                    return error.SocketOptionFailed;
+            }
+            var connection = Connection{
+                .allocator = allocator,
+                .transport = .initTcp(io, address_stream),
+                .protocol = options.protocol,
+                .limits = options.limits,
+                .max_outgoing_inflight = options.max_outgoing_inflight,
+                .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
+                .incoming_topic_alias_maximum = options.topic_alias_maximum,
+                .peer_maximum_qos = options.peer_maximum_qos,
+                .peer_retain_available = options.peer_retain_available,
+            };
+            stream_owned = false;
+            errdefer connection.close();
+            var attempt = try connection.establishClient(options);
+            errdefer attempt.deinit(allocator);
+            if (attempt.accepted()) return attempt.requireAccepted();
+            const reference = (try redirect.referenceForConnAck(
+                attempt.connack.connack,
+            )) orelse return error.ConnectRefused;
+            var next = try chain.follow(
+                current_uri,
+                reference,
+                attempt.connack.connack.reason_code,
+            );
+            defer next.deinit();
+            attempt.deinit(allocator);
+            const owned = try allocator.dupe(u8, next.uri);
+            allocator.free(current_uri);
+            current_uri = owned;
+        }
     }
 };
 
@@ -3199,6 +3285,100 @@ test "MQTT client connectAttempt exposes refused CONNACK reason" {
     }));
     second_thread.join();
     if (second_shared.err) |err| return err;
+}
+
+test "MQTT client follows bounded Server Reference CONNACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var redirector = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer redirector.deinit();
+    var destination = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer destination.deinit();
+
+    const Shared = struct {
+        redirector: *Server,
+        destination: *Server,
+        reference: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.redirector.acceptPending(.{
+                .protocol = .v5,
+            });
+            defer first.deinit(self.redirector.allocator);
+            try first.connection.writeConnAck(.{
+                .reason_code = 0x9c,
+                .properties = &.{.{ .utf8 = .{
+                    .id = .server_reference,
+                    .value = self.reference,
+                } }},
+            });
+            var second = try self.destination.accept(.{ .protocol = .v5 });
+            defer second.deinit(self.destination.allocator);
+            try std.testing.expectEqualStrings(
+                "redirect-client",
+                second.connect.connect.client_id,
+            );
+            var disconnect = try second.connection.readDisconnect();
+            defer disconnect.deinit(self.destination.allocator);
+        }
+    };
+    const reference = try std.fmt.allocPrint(
+        allocator,
+        "127.0.0.1:{d}",
+        .{destination.address().ip4.port},
+    );
+    defer allocator.free(reference);
+    var shared = Shared{
+        .redirector = &redirector,
+        .destination = &destination,
+        .reference = reference,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const initial_uri = try std.fmt.allocPrint(
+        allocator,
+        "mqtt://127.0.0.1:{d}",
+        .{redirector.address().ip4.port},
+    );
+    defer allocator.free(initial_uri);
+    var result = try Client.connectUriFollowingRedirects(
+        allocator,
+        io,
+        initial_uri,
+        .{
+            .protocol = .v5,
+            .client_id = "redirect-client",
+            .limits = .{ .max_packet_size = 4096 },
+        },
+        .{ .max_redirects = 1 },
+    );
+    defer result.deinit(allocator);
+    try result.connection.disconnect(0);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "MQTT connection enforces outgoing inflight limit before writing" {

@@ -9,6 +9,7 @@ pub const router = @import("router.zig");
 pub const retained = @import("retained/mod.zig");
 pub const session = @import("session/mod.zig");
 pub const persistence = @import("persistence/mod.zig");
+pub const redirect = @import("redirect.zig");
 pub const will_scheduler = @import("will/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
@@ -495,6 +496,21 @@ pub fn responseInformation(
     for (properties) |property| {
         if (property == .utf8 and
             property.utf8.id == .response_information)
+        {
+            return property.utf8.value;
+        }
+    }
+    return null;
+}
+
+/// Return the MQTT 5 Server Reference carried by CONNACK or DISCONNECT.
+/// Packet validation guarantees at most one such property.
+pub fn serverReference(
+    properties: []const Property,
+) ?[]const u8 {
+    for (properties) |property| {
+        if (property == .utf8 and
+            property.utf8.id == .server_reference)
         {
             return property.utf8.value;
         }
@@ -4052,6 +4068,25 @@ test "MQTT disconnect control" {
     }).write(&invalid, allocator);
     try invalid.appendSlice(allocator, &.{ 0x05, 0x00 });
     try std.testing.expectError(error.InvalidReasonCode, Disconnect.parse(allocator, .v5, invalid.items));
+
+    const server_reference = [_]Property{.{ .utf8 = .{
+        .id = .server_reference,
+        .value = "mqtt://other.example:1883",
+    } }};
+    encoded.clearRetainingCapacity();
+    try Disconnect.write(
+        &encoded,
+        allocator,
+        .v5,
+        0x9c,
+        &server_reference,
+    );
+    disconnect.deinit(allocator);
+    disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
+    try std.testing.expectEqualStrings(
+        "mqtt://other.example:1883",
+        serverReference(disconnect.properties).?,
+    );
 }
 
 test "MQTT v5 AUTH control" {
@@ -4222,4 +4257,5 @@ test {
     _ = @import("websocket_runtime_tests.zig");
     _ = @import("websocket_keep_alive_tests.zig");
     _ = persistence.commit_log;
+    _ = redirect;
 }

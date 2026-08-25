@@ -464,6 +464,99 @@ test "MQTT WebSocket client connects through ws URI" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WebSocket client follows Server Reference CONNACK" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var redirector = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{ .max_packet_size = max_packet_size } },
+    );
+    defer redirector.deinit();
+    var destination = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{ .max_packet_size = max_packet_size } },
+    );
+    defer destination.deinit();
+
+    const Shared = struct {
+        redirector: *mqtt_ws.Server,
+        destination: *mqtt_ws.Server,
+        reference: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.redirector.accept(.{
+                .protocol = .v5,
+                .reason_code = 0x9d,
+                .server_reference = self.reference,
+            });
+            defer first.deinit(self.redirector.allocator);
+            var second = try self.destination.accept(.{ .protocol = .v5 });
+            defer second.deinit(self.destination.allocator);
+            try std.testing.expectEqualStrings(
+                "mqtt-ws-redirect",
+                second.connect.connect.client_id,
+            );
+            var disconnect = try second.connection.readDisconnect();
+            defer disconnect.deinit(self.destination.allocator);
+        }
+    };
+    const reference = try std.fmt.allocPrint(
+        allocator,
+        "ws://127.0.0.1:{d}/redirected-mqtt",
+        .{destination.address().ip4.port},
+    );
+    defer allocator.free(reference);
+    var shared = Shared{
+        .redirector = &redirector,
+        .destination = &destination,
+        .reference = reference,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const initial_uri = try std.fmt.allocPrint(
+        allocator,
+        "ws://127.0.0.1:{d}/mqtt",
+        .{redirector.address().ip4.port},
+    );
+    defer allocator.free(initial_uri);
+    var result = try mqtt_ws.Client.connectUriFollowingRedirects(
+        allocator,
+        io,
+        initial_uri,
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-ws-redirect",
+                .limits = .{ .max_packet_size = max_packet_size },
+            },
+            .max_head_bytes = max_packet_size,
+        },
+        .{ .max_redirects = 1 },
+    );
+    defer result.deinit(allocator);
+    try result.connection.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT WebSocket reader preserves MQTT byte stream across messages" {
     const allocator = std.testing.allocator;
 

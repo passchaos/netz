@@ -1,5 +1,6 @@
 const std = @import("std");
 const mqtt_runtime = @import("runtime.zig");
+const redirect = @import("redirect.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -354,6 +355,53 @@ pub const Client = struct {
             endpoint.tls_host,
             options,
         );
+    }
+
+    /// Follow MQTT 5 redirect CONNACKs while preserving TLS verification.
+    /// Each hop derives a fresh SNI/hostname identity from its Server
+    /// Reference; trust configuration and optional client identity are reused.
+    pub fn connectUriFollowingRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        policy: redirect.Policy,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        if (options.mqtt.protocol != .v5) {
+            return error.UnsupportedRedirectScheme;
+        }
+        var chain = redirect.Chain.init(allocator, policy);
+        defer chain.deinit();
+        var current_uri = try allocator.dupe(u8, uri_text);
+        defer allocator.free(current_uri);
+        try chain.recordInitial(current_uri, .tls);
+
+        while (true) {
+            var target = try redirect.parse(allocator, current_uri, .tls);
+            defer target.deinit();
+            if (target.transport != .tls) return error.UnsupportedRedirectScheme;
+            var attempt = try connectUriAttempt(
+                allocator,
+                io,
+                target.uri,
+                options,
+            );
+            errdefer attempt.deinit(allocator);
+            if (attempt.accepted()) return attempt.requireAccepted();
+            const reference = (try redirect.referenceForConnAck(
+                attempt.connack.connack,
+            )) orelse return error.ConnectRefused;
+            var next = try chain.follow(
+                current_uri,
+                reference,
+                attempt.connack.connack.reason_code,
+            );
+            defer next.deinit();
+            attempt.deinit(allocator);
+            const owned = try allocator.dupe(u8, next.uri);
+            allocator.free(current_uri);
+            current_uri = owned;
+        }
     }
 };
 

@@ -472,6 +472,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   an optional absolute CONNECT/CONNACK packet deadline shared by TCP, TLS, WS,
   and WSS without large-packet progress renewal, MQTT v5 Server Keep Alive,
   conditional Response Information, Request Problem Information filtering for server ACK/AUTH diagnostics, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
+  MQTT 5 Server Reference validation plus opt-in bounded, loop-detecting
+  CONNACK redirects for TCP/TLS/WS/WSS with per-hop authorization and fresh
+  TLS authority verification, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` request/response advertisement, and
   datagram mapping, session lifecycle/counter state, protected-runtime

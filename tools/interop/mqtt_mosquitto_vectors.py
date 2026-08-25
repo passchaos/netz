@@ -1171,6 +1171,59 @@ def no_matching_subscribers(executable: Path, mqtt_packets, mqtt5_rc) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def server_reference_connack(executable: Path, mqtt_packets, mqtt5_props) -> None:
+    # Mosquitto exposes Server Reference parsing but documents it as unused.
+    # Exercise netz's stricter reason/property binding on the process wire: a
+    # redirect reason includes exactly one reference and does not create a
+    # Session, while the same listener remains available to a later client.
+    reference = "mqtt://other.example:1883"
+    encoded_reference = mqtt5_props.gen_string_prop(
+        mqtt5_props.SERVER_REFERENCE, reference
+    )
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=(
+            "--connack-reason=156",
+            f"--server-reference={reference}",
+        ),
+    ) as broker:
+        with broker.connect() as redirected:
+            redirected.sendall(
+                mqtt_packets.gen_connect(
+                    "server-reference-client", proto_ver=5
+                )
+            )
+            expect_packet(
+                redirected,
+                mqtt_packets.gen_connack(
+                    flags=0,
+                    rc=156,
+                    proto_ver=5,
+                    properties=encoded_reference,
+                    property_helper=False,
+                ),
+                "Server Reference CONNACK",
+            )
+        with broker.connect() as second:
+            second.sendall(
+                mqtt_packets.gen_connect(
+                    "server-reference-second", proto_ver=5
+                )
+            )
+            expect_packet(
+                second,
+                mqtt_packets.gen_connack(
+                    flags=0,
+                    rc=156,
+                    proto_ver=5,
+                    properties=encoded_reference,
+                    property_helper=False,
+                ),
+                "second Server Reference CONNACK",
+            )
+
+
 def subscription_identifiers(executable: Path, mqtt_packets, mqtt5_props) -> None:
     with NetzBroker(executable) as broker:
         with broker.connect() as sock:
@@ -5464,6 +5517,7 @@ def main() -> None:
     import mqtt_packets  # type: ignore
 
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
+    server_reference_connack(args.broker, mqtt_packets, mqtt5_props)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
     multiple_subscription_identifiers(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_opts
@@ -5570,7 +5624,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 131 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 132 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

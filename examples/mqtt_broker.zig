@@ -22,6 +22,8 @@ const Config = struct {
     shared_subscription_available: bool = true,
     allow_zero_length_client_id: bool = true,
     response_information: ?[]const u8 = null,
+    connack_reason: u8 = 0,
+    server_reference: ?[]const u8 = null,
     problem_reason_string: ?[]const u8 = null,
     problem_user_property: ?[]const u8 = null,
     username: ?[]const u8 = null,
@@ -204,6 +206,8 @@ pub fn main(init: std.process.Init) !void {
                 .runtime = .{ .max_packet_size = config.max_packet_size },
             },
             .accept = .{
+                .reason_code = config.connack_reason,
+                .server_reference = config.server_reference,
                 .connect_timeout = if (config.connect_timeout_ms) |milliseconds|
                     .fromMilliseconds(milliseconds)
                 else
@@ -461,6 +465,24 @@ fn parseArgs(
         } else if (std.mem.startsWith(
             u8,
             arg,
+            "--connack-reason=",
+        )) {
+            config.connack_reason = try std.fmt.parseInt(
+                u8,
+                arg["--connack-reason=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--server-reference=",
+        )) {
+            const reference = arg["--server-reference=".len..];
+            if (reference.len == 0) return error.InvalidArgument;
+            config.server_reference = reference;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
             "--maximum-keep-alive=",
         )) {
             config.maximum_keep_alive_seconds = try std.fmt.parseInt(
@@ -656,6 +678,11 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     if ((config.username == null) != (config.password == null)) {
+        return error.InvalidArgument;
+    }
+    if ((config.server_reference == null) !=
+        (config.connack_reason != 0x9c and config.connack_reason != 0x9d))
+    {
         return error.InvalidArgument;
     }
     return config;
