@@ -27,6 +27,18 @@ pub const Candidate = struct {
     retransmission_count: usize,
 };
 
+/// Newly tracked recovery storage that the caller must initialize completely
+/// before invoking any other queue operation.
+///
+/// This is intentionally a narrow construction API for packet builders: the
+/// queue owns `payload` immediately, so any downstream failure must remove the
+/// packet with `forgetPacketNumber`. Encoding directly into these bytes avoids
+/// first materializing a plaintext packet and then copying it into recovery.
+pub const UninitializedPayload = struct {
+    group_id: u64,
+    payload: []u8,
+};
+
 pub const QueueStats = struct {
     pending_groups: usize,
     packet_number_copies: usize,
@@ -187,7 +199,26 @@ pub const Queue = struct {
         packet_number: u64,
         payload: []const u8,
     ) Error!u64 {
-        if (payload.len == 0) return error.EmptyPayload;
+        const tracked = try self.trackSentUninitialized(
+            packet_number,
+            payload.len,
+        );
+        @memcpy(tracked.payload, payload);
+        return tracked.group_id;
+    }
+
+    /// Track a packet and return its exact mutable recovery payload.
+    ///
+    /// The returned slice aliases queue-owned storage and remains stable until
+    /// the packet group is acknowledged, forgotten, or the queue is destroyed.
+    /// Callers must initialize every byte before exposing the queue to another
+    /// operation; use `trackSent` when the encoded payload already exists.
+    pub fn trackSentUninitialized(
+        self: *Queue,
+        packet_number: u64,
+        payload_len: usize,
+    ) Error!UninitializedPayload {
+        if (payload_len == 0) return error.EmptyPayload;
         const packet_slot = try self.packet_index.getOrPut(
             self.allocator,
             packet_number,
@@ -210,15 +241,14 @@ pub const Queue = struct {
 
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
         const payload_storage = self.payload_cache.acquire(
-            payload.len,
+            payload_len,
         ) catch return error.OutOfMemory;
         errdefer self.payload_cache.release(payload_storage);
-        @memcpy(payload_storage[0..payload.len], payload);
         const entry = PendingDatagram.initOwned(
             group_id,
             packet_number,
             payload_storage,
-            payload.len,
+            payload_len,
         );
         self.appendGroupAssumeCapacity(
             entry,
@@ -226,7 +256,10 @@ pub const Queue = struct {
             packet_slot.value_ptr,
         );
         self.next_group_id = next_group_id;
-        return group_id;
+        return .{
+            .group_id = group_id,
+            .payload = payload_storage[0..payload_len],
+        };
     }
 
     pub fn groupIdForPacketNumber(
@@ -569,6 +602,40 @@ test "QUIC recovery queue keeps initial packet number allocation-free" {
     try queue.recordRetransmission(0, 43);
     try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
     try std.testing.expect(queue.pending.items[0].retransmission_packet_numbers.capacity > 0);
+}
+
+test "QUIC recovery queue exposes stable uninitialized payload ownership" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    const tracked = try queue.trackSentUninitialized(7, 8);
+    @memcpy(tracked.payload, "direct!!");
+    try std.testing.expectEqual(@as(u64, 0), tracked.group_id);
+    try std.testing.expectEqualStrings(
+        "direct!!",
+        queue.packetNumberCandidate(7).?.payload,
+    );
+    // Candidate storage must alias the slice returned to the packet builder;
+    // this is what removes the encode-then-copy pass on hot batch sends.
+    try std.testing.expectEqual(
+        tracked.payload.ptr,
+        queue.packetNumberCandidate(7).?.payload.ptr,
+    );
+}
+
+test "QUIC recovery uninitialized tracking rejects empty payload transactionally" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    try std.testing.expectError(
+        error.EmptyPayload,
+        queue.trackSentUninitialized(7, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), queue.packet_index.count());
+    try std.testing.expectEqual(@as(usize, 0), queue.group_index.count());
 }
 
 test "QUIC recovery queue reuses payload buckets after ACK" {

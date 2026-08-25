@@ -1291,9 +1291,10 @@ pub const Connection = struct {
         }
         congestion_reserved = true;
 
+        var tracked_recovery_packets: [max_batch_packets]u64 = undefined;
         var tracked_recovery_count: usize = 0;
-        errdefer for (prepared[0..tracked_recovery_count]) |packet| {
-            _ = self.recovery.forgetPacketNumber(packet.packet_number);
+        errdefer for (tracked_recovery_packets[0..tracked_recovery_count]) |packet_number| {
+            _ = self.recovery.forgetPacketNumber(packet_number);
         };
         var tracked_sent_count: usize = 0;
         errdefer for (prepared[0..tracked_sent_count]) |packet| {
@@ -1329,16 +1330,38 @@ pub const Connection = struct {
             const packet_storage = self.send_packet_buffer.items[packet_offset..][0..packet.packet_len];
             const payload_offset = 1 + self.config.peer_connection_id.len + @as(usize, packet.packet_number_len);
             const payload = packet_storage[payload_offset..][0..packet.payload_len];
-            var payload_list = std.ArrayList(u8).initBuffer(payload);
-            for (packet.frames) |frame| {
-                try frame.writeAssumeCapacity(&payload_list);
-            }
-            std.debug.assert(payload_list.items.len == packet.payload_len);
-
-            if (packet.ack_eliciting) {
-                _ = try self.recovery.trackSent(packet.packet_number, payload);
-            }
-            tracked_recovery_count += 1;
+            const recovery_payload: ?[]const u8 = blk: {
+                if (packet.ack_eliciting) {
+                    // Encode once into stable recovery ownership, then copy
+                    // those bytes directly through AEAD into the protected
+                    // packet. The former order encoded into `payload` and
+                    // immediately copied it back out in `trackSent`.
+                    const tracked = try self.recovery
+                        .trackSentUninitialized(
+                        packet.packet_number,
+                        packet.payload_len,
+                    );
+                    tracked_recovery_packets[tracked_recovery_count] =
+                        packet.packet_number;
+                    tracked_recovery_count += 1;
+                    var payload_list = std.ArrayList(u8).initBuffer(
+                        tracked.payload,
+                    );
+                    for (packet.frames) |frame| {
+                        try frame.writeAssumeCapacity(&payload_list);
+                    }
+                    std.debug.assert(
+                        payload_list.items.len == packet.payload_len,
+                    );
+                    break :blk tracked.payload;
+                }
+                var payload_list = std.ArrayList(u8).initBuffer(payload);
+                for (packet.frames) |frame| {
+                    try frame.writeAssumeCapacity(&payload_list);
+                }
+                std.debug.assert(payload_list.items.len == packet.payload_len);
+                break :blk null;
+            };
             try self.sent.sentInFlightAt(
                 packet.packet_number,
                 packet.ack_eliciting,
@@ -1349,19 +1372,27 @@ pub const Connection = struct {
             );
             tracked_sent_count += 1;
 
-            const sealed = try quic.protection.sealShortPacketInPlace(
-                packet_storage,
-                self.send_key_phase.currentKeys(),
-                .{
-                    .destination_connection_id = self.config.peer_connection_id,
-                    .packet_number = packet.packet_number,
-                    .packet_number_len = packet.packet_number_len,
-                    .fixed_bit = self.nextFixedBit(),
-                    .spin_bit = self.nextSpinBit(),
-                    .key_phase = self.send_key_phase.currentKeyPhase(),
-                    .payload = payload,
-                },
-            );
+            const packet_options: quic.protection.ShortPacketOptions = .{
+                .destination_connection_id = self.config.peer_connection_id,
+                .packet_number = packet.packet_number,
+                .packet_number_len = packet.packet_number_len,
+                .fixed_bit = self.nextFixedBit(),
+                .spin_bit = self.nextSpinBit(),
+                .key_phase = self.send_key_phase.currentKeyPhase(),
+                .payload = recovery_payload orelse payload,
+            };
+            const sealed = if (recovery_payload != null)
+                try quic.protection.sealShortPacketInto(
+                    packet_storage,
+                    self.send_key_phase.currentKeys(),
+                    packet_options,
+                )
+            else
+                try quic.protection.sealShortPacketInPlace(
+                    packet_storage,
+                    self.send_key_phase.currentKeys(),
+                    packet_options,
+                );
             self.recordPacketEncrypted();
             protected_count += 1;
             datagrams[i] = sealed;
@@ -7631,6 +7662,16 @@ pub const testing = struct {
         datagram: quic.DatagramFrame,
     ) Error!void {
         return connection.validateDatagramFrame(datagram);
+    }
+
+    pub fn recoveryPayloadForPacket(
+        connection: *const Connection,
+        packet_number: u64,
+    ) ?[]const u8 {
+        const candidate = connection.recovery.packetNumberCandidate(
+            packet_number,
+        ) orelse return null;
+        return candidate.payload;
     }
 };
 

@@ -123,6 +123,77 @@ test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
     );
 }
 
+test "QUIC 1-RTT stateful batch keeps direct recovery payload bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local-recovery",
+        .peer_connection_id = "peer-recovery",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "stable batch bytes",
+        .fin = true,
+    } }};
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    try frames[0].write(&expected, allocator);
+
+    const packets = [_][]const quic.Frame{&frames};
+    const result = try connection.sendManyProgressAt(&packets, 1_000);
+    try std.testing.expectEqual(@as(usize, 1), result.sent_count);
+    try std.testing.expectEqual(@as(usize, 1), result.protected_count);
+    try std.testing.expectEqualSlices(
+        u8,
+        expected.items,
+        one_rtt.testing.recoveryPayloadForPacket(&connection, 0).?,
+    );
+
+    var raw = try receiver.receiveBytes();
+    defer raw.deinit(allocator);
+    var received = try one_rtt.openReceivedBytes(
+        &receiver,
+        raw.from,
+        raw.bytes,
+        keys,
+        "peer-recovery".len,
+        0,
+        8,
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "stable batch bytes",
+        received.frames[0].stream.data,
+    );
+}
+
 test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" {
     const allocator = std.testing.allocator;
 
