@@ -98,6 +98,27 @@ pub const Namespace = struct {
         };
     }
 
+    /// Rewrite only the Will Topic of an owned CONNECT parse tree. The packet
+    /// parser owns the original topic bytes indirectly through `packet`, while
+    /// this helper owns the replacement separately so callers can restore the
+    /// borrowed view before normal CONNECT teardown.
+    pub fn mapConnectWill(
+        self: Namespace,
+        allocator: std.mem.Allocator,
+        connect: *mqtt.Connect,
+    ) Error!?MappedWillTopic {
+        const will = &(connect.will orelse return null);
+        const previous = will.topic;
+        const mapped = try self.mapTopicAlloc(allocator, previous);
+        will.topic = mapped;
+        return .{
+            .allocator = allocator,
+            .will = will,
+            .previous = previous,
+            .mapped = mapped,
+        };
+    }
+
     /// Return the client-visible Topic Name for a canonical broker topic. A
     /// non-matching prefix is not silently exposed across listener namespaces.
     pub fn visibleTopic(
@@ -135,6 +156,21 @@ pub const Namespace = struct {
         @memcpy(result[0..self.prefix.len], self.prefix);
         @memcpy(result[self.prefix.len..], value);
         return result;
+    }
+};
+
+/// Scoped mutation for feeding a listener-normalized Will into existing
+/// Session/Will stores without changing `OwnedConnect`'s allocation model.
+pub const MappedWillTopic = struct {
+    allocator: std.mem.Allocator,
+    will: *mqtt.LastWill,
+    previous: []const u8,
+    mapped: []u8,
+
+    pub fn deinit(self: *MappedWillTopic) void {
+        self.will.topic = self.previous;
+        self.allocator.free(self.mapped);
+        self.* = undefined;
     }
 };
 
@@ -263,4 +299,26 @@ test "listener namespace can own transient configuration" {
     const mapped = try namespace.mapTopicAlloc(allocator, "value");
     defer allocator.free(mapped);
     try std.testing.expectEqualStrings("tenant/value", mapped);
+}
+
+test "listener namespace scopes an owned CONNECT Will rewrite" {
+    const allocator = std.testing.allocator;
+    const namespace = try Namespace.init("listener/");
+    var connect = mqtt.Connect{
+        .protocol = .v5,
+        .clean_start = true,
+        .keep_alive_seconds = 30,
+        .client_id = "client",
+        .will = .{
+            .topic = "status",
+            .payload = "offline",
+        },
+    };
+    var mapped = (try namespace.mapConnectWill(allocator, &connect)).?;
+    try std.testing.expectEqualStrings(
+        "listener/status",
+        connect.will.?.topic,
+    );
+    mapped.deinit();
+    try std.testing.expectEqualStrings("status", connect.will.?.topic);
 }

@@ -888,6 +888,10 @@ test "public modules are reachable" {
         "visibleTopic",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.listener_namespace.Namespace,
+        "mapConnectWill",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.proxy_protocol,
         "Metadata",
     ));
