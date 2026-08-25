@@ -21,7 +21,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   response with `Connection: close` and suppresses later requests, optional
   Host/default-port, CONNECT authority, and absolute-form authority synthesis, `http://`/`https://` URI helpers
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
-  with host verification plus OS/custom CA bundles, and a `std.Io.async`
+  with host verification plus OS/custom CA bundles, an opt-in vail HTTPS client
+  for mTLS/ALPN/peer-chain/exporter/KeyUpdate access, and a `std.Io.async`
   concurrent server helper
 - Shared vail-backed TLS 1.3 stream client/server wrappers with optional/required
   client authentication, explicit ALPN offer/selection enforcement, owned

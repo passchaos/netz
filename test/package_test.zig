@@ -141,6 +141,50 @@ test "public modules are reachable" {
         "requestStreamingWithInformational",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectVailTlsHost",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectVailTlsAddress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "requestUriVailTls",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "keyUpdateCounts",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "VailTlsClientOptions",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime.RequestWriter,
         "waitForContinueWithInformational",
     ));
@@ -179,6 +223,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Tunnel,
         "updateTrafficKeys",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
+        "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Connection,

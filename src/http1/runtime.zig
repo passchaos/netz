@@ -80,6 +80,22 @@ pub const TlsClientOptions = struct {
     allow_truncation_attacks: bool = false,
 };
 
+/// Opt-in vail TLS 1.3 client features that Zig's standard client does not
+/// expose: client authentication, ALPN, peer chains, exporters and KeyUpdate.
+/// Supplying this object selects the vail transport while preserving the same
+/// hostname/system-root defaults through `initVerified`.
+pub const VailTlsClientOptions = struct {
+    verify_host: bool = true,
+    ca_bundle: ?tls_stream.ClientCaBundle = null,
+    server_verifier: ?vail.tls.auth.ClientVerifier = null,
+    client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    alpn_protocols: []const []const u8 = &.{},
+    cipher_suites: []const tls_stream.CipherSuite =
+        &vail.tls.cipher_suite.default_preference,
+    max_server_handshake_size: usize = 256 * 1024,
+    handshake_timeout: ?std.Io.Duration = null,
+};
+
 /// Synchronous observer for HTTP/1 informational response heads.
 ///
 /// The head and its header slices borrow the connection's response buffer and
@@ -293,6 +309,162 @@ test "HTTP/1 TLS server exchanges persistent requests" {
     var second = try client.request(.{ .target = "/second" });
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 vail TLS client exposes mTLS metadata and key updates" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tls_testing = @import("../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .client_auth = .{ .verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            } },
+            .alpn_protocols = &.{"http/1.1"},
+            .cipher_suites = &.{.aes_256_gcm_sha384},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *TlsServer,
+        certificate: *const [tls_testing.certificate_der_len]u8,
+        exporter: [32]u8 = undefined,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            const chain = connection.peerCertificates() orelse
+                return error.MissingPeerCertificate;
+            try std.testing.expectEqual(@as(usize, 1), chain.len);
+            try std.testing.expectEqualSlices(
+                u8,
+                shared.certificate,
+                chain[0],
+            );
+            try std.testing.expectEqual(
+                tls_stream.CipherSuite.aes_256_gcm_sha384,
+                connection.negotiatedCipherSuite().?,
+            );
+            try std.testing.expectEqual(
+                tls_stream.TranscriptHash.sha384,
+                connection.negotiatedTranscriptHash().?,
+            );
+            try connection.exportKeyingMaterial(
+                "EXPORTER-netz-http1",
+                "context",
+                &shared.exporter,
+            );
+            try connection.updateTrafficKeys(true);
+            for (0..2) |index| {
+                var request = try connection.readRequest(.{});
+                defer request.deinit(allocator);
+                try std.testing.expectEqualStrings(
+                    if (index == 0) "/before" else "/after",
+                    request.request.target,
+                );
+                try connection.writeResponse(.{
+                    .body = if (index == 0) "one" else "two",
+                    .request_method = request.request.method,
+                });
+            }
+            const updates = connection.keyUpdateCounts().?;
+            try std.testing.expectEqual(@as(u64, 1), updates.sent);
+            try std.testing.expectEqual(@as(u64, 1), updates.received);
+            try std.testing.expect(!updates.awaiting_peer_response);
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .certificate = &certificate_der,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connectVailTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{},
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .client_identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"http/1.1"},
+            .cipher_suites = &.{.aes_256_gcm_sha384},
+        },
+    );
+    defer client.close();
+    const chain = client.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqualSlices(u8, &certificate_der, chain[0]);
+    try std.testing.expectEqualStrings(
+        "http/1.1",
+        client.negotiatedAlpn().?,
+    );
+    try std.testing.expectEqual(
+        tls_stream.CipherSuite.aes_256_gcm_sha384,
+        client.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        tls_stream.TranscriptHash.sha384,
+        client.negotiatedTranscriptHash().?,
+    );
+    var exporter: [32]u8 = undefined;
+    try client.exportKeyingMaterial(
+        "EXPORTER-netz-http1",
+        "context",
+        &exporter,
+    );
+    var first = try client.request(.{ .target = "/before" });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    var second = try client.request(.{ .target = "/after" });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+    try std.testing.expectEqualSlices(u8, &shared.exporter, &exporter);
+    const updates = client.keyUpdateCounts().?;
+    try std.testing.expectEqual(@as(u64, 1), updates.sent);
+    try std.testing.expectEqual(@as(u64, 1), updates.received);
+    try std.testing.expect(!updates.awaiting_peer_response);
 
     thread.join();
     joined = true;
@@ -627,6 +799,7 @@ fn readTlsClientTransportWithDeadline(
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
     tls_client: *TlsClientConnection,
+    tls_vail: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
     linux_io_uring: LinuxIoUringStream,
 
@@ -634,6 +807,7 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
             .tls_client => |conn| conn.read(buffer),
+            .tls_vail => |conn| conn.read(buffer),
             .tls_server => |conn| conn.read(buffer),
             .linux_io_uring => |transport| transport.read(buffer),
         };
@@ -652,6 +826,7 @@ const RuntimeTransport = union(enum) {
                 deadline,
             ) catch |err| return mapHttpTimedReadError(err),
             .tls_client => |conn| conn.readWithDeadline(buffer, deadline),
+            .tls_vail => |conn| conn.readWithDeadline(buffer, deadline),
             .tls_server => |conn| conn.readWithDeadline(buffer, deadline),
             // The raw io_uring adapter currently has no linked-timeout read.
             // Reject an explicitly configured deadline instead of silently
@@ -667,6 +842,7 @@ const RuntimeTransport = union(enum) {
         const io = switch (self) {
             .tcp => |tcp| tcp.io,
             .tls_client => |conn| conn.io,
+            .tls_vail => |conn| conn.io,
             .tls_server => |conn| conn.io,
             .linux_io_uring => return error.TimedReadUnsupported,
         };
@@ -677,6 +853,7 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls_client => |conn| conn.writeAll(bytes),
+            .tls_vail => |conn| conn.writeAll(bytes),
             .tls_server => |conn| conn.writeAll(bytes),
             .linux_io_uring => |transport| transport.writeAll(bytes),
         };
@@ -697,6 +874,7 @@ const RuntimeTransport = union(enum) {
                 body,
             ),
             .tls_client => |conn| conn.writeAllParts(header, body),
+            .tls_vail => |conn| conn.writeAllParts(header, body),
             .tls_server => |conn| conn.writeAllParts(header, body),
             // The raw io_uring adapter currently accepts one slice per SQE.
             // Two sends still avoid a body-sized temporary allocation.
@@ -718,6 +896,7 @@ const RuntimeTransport = union(enum) {
                 parts,
             ),
             .tls_client => |conn| conn.writeAllSlices(parts),
+            .tls_vail => |conn| conn.writeAllSlices(parts),
             .tls_server => |conn| conn.writeAllSlices(parts),
             // io_uring's adapter owns one buffer per send SQE. Preserve the
             // borrowed-slice behavior without allocating a concatenation.
@@ -725,6 +904,16 @@ const RuntimeTransport = union(enum) {
                 for (parts) |part| try transport.writeAll(part);
             },
         };
+    }
+
+    fn close(self: RuntimeTransport) void {
+        switch (self) {
+            .tcp => |tcp| tcp.stream.close(tcp.io),
+            .tls_client => |conn| conn.deinit(),
+            .tls_vail => |conn| conn.deinit(),
+            .tls_server => |conn| conn.deinit(),
+            .linux_io_uring => |transport| transport.close(),
+        }
     }
 };
 
@@ -1148,6 +1337,9 @@ pub const TlsListenOptions = struct {
     /// and body deadlines. Null preserves unbounded handshake behavior.
     tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    /// Optional ALPN selection. HTTP/1 accepts empty negotiation for legacy
+    /// HTTPS, while configured servers require a shared protocol.
+    alpn_protocols: []const []const u8 = &.{},
     tcp_nodelay: bool = true,
 };
 
@@ -1184,6 +1376,7 @@ pub const TlsServer = struct {
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
                 .client_auth = options.client_auth,
+                .alpn_protocols = options.alpn_protocols,
             },
             .tcp_nodelay = options.tcp_nodelay,
         };
@@ -1289,10 +1482,12 @@ pub const Client = struct {
     writer_state: body_writer.State = .{},
     default_host: ?[]u8 = null,
     tls_conn: ?*TlsClientConnection = null,
+    tls_vail_conn: ?*tls_stream.ClientConnection = null,
     response_head_deadline: ?std.Io.Clock.Timestamp = null,
     response_head_sequence_active: bool = false,
 
     fn transport(self: *Client) RuntimeTransport {
+        if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };
         if (self.tls_conn) |conn| return .{ .tls_client = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }
@@ -1359,16 +1554,161 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectVailTlsHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+    ) Error!Client {
+        const host_name = try net.HostName.init(host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        return connectVailTlsStream(
+            allocator,
+            io,
+            stream,
+            host,
+            port,
+            limits,
+            tls_options,
+        );
+    }
+
+    pub fn connectVailTlsAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+    ) Error!Client {
+        const stream = try address.connect(io, .{ .mode = .stream });
+        const port = switch (address) {
+            .ip4 => |ip4| ip4.port,
+            .ip6 => |ip6| ip6.port,
+        };
+        return connectVailTlsStream(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            port,
+            limits,
+            tls_options,
+        );
+    }
+
+    fn connectVailTlsStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+    ) Error!Client {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const tls_connection = try tls_stream.ClientConnection.initVerified(
+            allocator,
+            io,
+            stream,
+            .{
+                .server_name = tls_host,
+                .verify_host = tls_options.verify_host,
+                .ca_bundle = tls_options.ca_bundle,
+                .server_verifier = tls_options.server_verifier,
+                .client_identity = tls_options.client_identity,
+                .alpn_protocols = tls_options.alpn_protocols,
+                .cipher_suites = tls_options.cipher_suites,
+                .max_server_handshake_size = tls_options.max_server_handshake_size,
+                .handshake_timeout = tls_options.handshake_timeout,
+            },
+        );
+        stream_owned = false;
+        errdefer tls_connection.deinit();
+        const owned_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ tls_host, port },
+        );
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_host,
+            .tls_vail_conn = tls_connection,
+        };
+    }
+
     pub fn close(self: *Client) void {
         if (self.default_host) |host| self.allocator.free(host);
         self.inbuf.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
         if (self.tls_conn) |conn| {
             conn.deinit();
+        } else if (self.tls_vail_conn) |conn| {
+            conn.deinit();
         } else {
             self.stream.close(self.io);
         }
         self.* = undefined;
+    }
+
+    pub fn peerCertificates(
+        self: *const Client,
+    ) ?[]const []const u8 {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(self: *const Client) ?[]const u8 {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: *const Client,
+    ) ?tls_stream.CipherSuite {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const Client,
+    ) ?tls_stream.TranscriptHash {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.negotiatedTranscriptHash();
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const Client,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        const connection = self.tls_vail_conn orelse
+            return error.PostHandshakeTlsUnavailable;
+        try connection.exportKeyingMaterial(label, context, out);
+    }
+
+    pub fn updateTrafficKeys(
+        self: *Client,
+        request_peer_update: bool,
+    ) Error!void {
+        const connection = self.tls_vail_conn orelse
+            return error.PostHandshakeTlsUnavailable;
+        try connection.updateTrafficKeys(request_peer_update);
+    }
+
+    pub fn keyUpdateCounts(
+        self: *const Client,
+    ) ?tls_stream.KeyUpdateCounts {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.keyUpdateCounts();
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
@@ -1624,6 +1964,50 @@ pub const Client = struct {
         return client.request(options);
     }
 
+    /// One-shot HTTPS request through the vail TLS 1.3 client. Use this when
+    /// the caller needs mTLS, ALPN, peer identity, exporter, or KeyUpdate; for
+    /// persistent connections call `connectVailTlsHost` directly.
+    pub fn requestUriVailTls(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+    ) Error!OwnedResponse {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
+            return error.UnsupportedScheme;
+        }
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try uriEndpoint(allocator, uri, 443);
+        defer endpoint.deinit();
+        var client = switch (endpoint.target) {
+            .host => try connectVailTlsHost(
+                allocator,
+                io,
+                endpoint.tls_host,
+                uri.port orelse 443,
+                limits,
+                tls_options,
+            ),
+            .ip => |address| try connectVailTlsAddress(
+                allocator,
+                io,
+                address,
+                endpoint.tls_host,
+                limits,
+                tls_options,
+            ),
+        };
+        defer client.close();
+        var options = request_options;
+        options.target = target;
+        if (options.host == null) options.host = endpoint.authority;
+        return client.request(options);
+    }
+
     /// Linux-only HTTP/1 client path backed directly by `std.os.linux.IoUring`.
     ///
     /// Zig 0.16 exposes a `std.Io.Uring` backend, but its `std.Io.net` vtable
@@ -1714,6 +2098,7 @@ pub const Client = struct {
             .allocator = self.allocator,
             .stream = self.stream,
             .tls_conn = self.tls_conn,
+            .tls_vail_conn = self.tls_vail_conn,
             .inbuf = &self.inbuf,
         };
     }
@@ -1795,6 +2180,7 @@ pub const Client = struct {
             .allocator = self.allocator,
             .stream = self.stream,
             .tls_conn = self.tls_conn,
+            .tls_vail_conn = self.tls_vail_conn,
             .inbuf = &self.inbuf,
         };
     }
@@ -2381,10 +2767,12 @@ pub const Tunnel = struct {
     allocator: std.mem.Allocator,
     stream: net.Stream,
     tls_conn: ?*TlsClientConnection = null,
+    tls_vail_conn: ?*tls_stream.ClientConnection = null,
     tls_server_conn: ?*tls_stream.ServerConnection = null,
     inbuf: *std.ArrayList(u8),
 
     fn transport(self: *Tunnel) RuntimeTransport {
+        if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };
         if (self.tls_conn) |conn| return .{ .tls_client = conn };
         if (self.tls_server_conn) |conn| return .{ .tls_server = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
@@ -2410,7 +2798,8 @@ pub const Tunnel = struct {
         self: *Tunnel,
         request_peer_update: bool,
     ) Error!void {
-        const connection = self.tls_server_conn orelse
+        const connection = self.tls_vail_conn orelse
+            self.tls_server_conn orelse
             return error.PostHandshakeTlsUnavailable;
         try connection.updateTrafficKeys(request_peer_update);
     }
@@ -2418,7 +2807,8 @@ pub const Tunnel = struct {
     pub fn keyUpdateCounts(
         self: *const Tunnel,
     ) ?tls_stream.KeyUpdateCounts {
-        const connection = self.tls_server_conn orelse return null;
+        const connection = self.tls_vail_conn orelse
+            self.tls_server_conn orelse return null;
         return connection.keyUpdateCounts();
     }
 };

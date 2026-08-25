@@ -556,10 +556,13 @@ connection credit while a more urgent stream has no stream credit.
 | HTTP/2 parallel x10 × 1-MiB responses | 1.663-1.671 ms/batch pinned | 2.957-3.035 ms/batch pinned |
 | HTTP/2 parallel x10 × 1-MiB responses, 8-KiB stream window | 7.367-7.447 ms/batch pinned | 10.192-10.379 ms/batch pinned |
 
-Native HTTP/1 TLS server connections expose their authenticated peer chain,
-negotiated cipher suite/hash, RFC 8446 exporter, explicit KeyUpdate and update
-counters. Server-side CONNECT/Upgrade tunnels preserve KeyUpdate access after
-the HTTP parser hands off the encrypted byte stream.
+Native HTTP/1 vail TLS client and server connections expose their authenticated
+peer chain, negotiated ALPN/cipher suite/hash, RFC 8446 exporter, explicit
+KeyUpdate and update counters. The client keeps the standard-library HTTPS
+path as its compatibility default and offers `connectVailTlsHost` /
+`requestUriVailTls` when those advanced features are required. CONNECT/Upgrade
+tunnels preserve the vail connection and KeyUpdate access after the HTTP parser
+hands off the encrypted byte stream.
 
 RFC 9218 scheduling now selects urgency and the lowest-ID exclusive
 non-incremental stream in one candidate scan rather than two. The priority-aware
