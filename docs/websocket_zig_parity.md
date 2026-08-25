@@ -405,6 +405,12 @@ RFC 8441 connections forward the complete peer-chain, ALPN, cipher/hash,
 exporter, KeyUpdate and counter API to their shared parent HTTP/2 TLS
 connection, so an application cannot accidentally inspect or rotate only one
 logical WebSocket stream.
+`interop-websocket-hyper-h2` now runs both h2c and TLS modes. In TLS mode the
+audited Hyper fixture uses rustls to request KeyUpdate before RFC 8441 setup;
+netz verifies the server certificate, `h2` ALPN and typed suite/hash, derives an
+exporter through the WebSocket object, compares it byte-for-byte with rustls's
+independent output, returns exactly one update, and then
+completes fragmented text, Ping/Pong and bounded Close on the rotated keys.
 
 Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
 reads plus `closeWithTimeout`. A close step sends Close at most once, consumes

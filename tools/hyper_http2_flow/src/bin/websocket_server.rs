@@ -3,7 +3,10 @@
 
 use std::convert::Infallible;
 use std::env;
+use std::fs::File;
 use std::io::{self, Write};
+use std::path::Path;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http_body_util::Empty;
@@ -12,18 +15,24 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 #[path = "../tokiort.rs"]
 mod tokiort;
-use tokiort::{TokioExecutor, TokioIo};
+use tokiort::{MaybeTls, TokioExecutor, TokioIo};
 
 fn main() {
-    let port: u16 = env::args()
-        .nth(1)
+    let mut args = env::args().skip(1);
+    let port: u16 = args
+        .next()
         .expect("port argument")
         .parse()
         .expect("valid port");
     assert_ne!(port, 0);
+    let tls_paths = args
+        .next()
+        .map(|cert| (cert, args.next().expect("TLS private key argument")));
+    assert!(args.next().is_none(), "unexpected extra argument");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -38,17 +47,64 @@ fn main() {
 
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
+        let mut exporter = None;
+        let io = match tls_paths {
+            Some((cert, key)) => {
+                let mut tls = TlsAcceptor::from(tls_server_config(&cert, &key))
+                    .accept(stream)
+                    .await
+                    .expect("accept TLS with h2 ALPN");
+                assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                let mut bytes = [0; 32];
+                tls.get_ref()
+                    .1
+                    .export_keying_material(&mut bytes, b"EXPORTER-netz-rfc8441", Some(b"hyper"))
+                    .expect("derive rustls exporter");
+                exporter = Some(bytes);
+                tls.get_mut()
+                    .1
+                    .refresh_traffic_keys()
+                    .expect("queue rustls KeyUpdate");
+                tls.flush().await.expect("flush rustls KeyUpdate");
+                println!("rustls RFC 8441 server sent TLS KeyUpdate request");
+                MaybeTls::Server(tls)
+            }
+            None => MaybeTls::Clear(stream),
+        };
         let mut builder = server_http2::Builder::new(TokioExecutor);
         builder.enable_connect_protocol();
         builder
-            .serve_connection(TokioIo::new(stream), service_fn(handle))
+            .serve_connection(
+                TokioIo::new(io),
+                service_fn(move |request| handle(request, exporter)),
+            )
             .await
             .expect("serve netz RFC 8441 client");
     });
 }
 
+fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfig> {
+    let certs = rustls_pemfile::certs(&mut io::BufReader::new(
+        File::open(Path::new(cert_path)).expect("open TLS certificate"),
+    ))
+    .collect::<Result<Vec<_>, _>>()
+    .expect("parse TLS certificate");
+    let key = rustls_pemfile::private_key(&mut io::BufReader::new(
+        File::open(Path::new(key_path)).expect("open TLS private key"),
+    ))
+    .expect("parse TLS private key")
+    .expect("TLS private key");
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("certificate and private key match");
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Arc::new(config)
+}
+
 async fn handle(
     mut request: Request<hyper::body::Incoming>,
+    exporter: Option<[u8; 32]>,
 ) -> Result<Response<Empty<Bytes>>, Infallible> {
     assert_eq!(request.method(), Method::CONNECT);
     assert_eq!(request.version(), Version::HTTP_2);
@@ -81,6 +137,9 @@ async fn handle(
         assert!(third.fin);
         assert_eq!(third.payload, b"h2");
         write_frame(&mut stream, 0x1, b"hyper websocket h2").await;
+        if let Some(bytes) = exporter {
+            write_frame(&mut stream, 0x2, &bytes).await;
+        }
 
         let ping = read_frame(&mut stream, true).await;
         assert_eq!(ping.opcode, 0x9);

@@ -6,26 +6,56 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const tls_enabled = args.len == 3;
+    if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
+        return error.InvalidArgument;
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var h2 = try netz.http2.runtime.Client.connect(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(port) },
-        .{
-            .max_frame_payload = 4096,
-            .max_body_bytes = 4096,
-            .enable_connect_protocol = true,
-            .handshake_timeout = .fromSeconds(5),
-        },
-    );
+    const limits: netz.http2.runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .enable_connect_protocol = true,
+        .handshake_timeout = .fromSeconds(5),
+    };
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    var ca_lock: std.Io.RwLock = .init;
+    var exported: [32]u8 = undefined;
+    if (tls_enabled) {
+        try ca_bundle.addCertsFromFilePathAbsolute(
+            allocator,
+            io,
+            std.Io.Clock.real.now(io),
+            args[2],
+        );
+    }
+    var h2 = if (tls_enabled)
+        try netz.http2.runtime.Client.connectTlsHost(
+            allocator,
+            io,
+            "localhost",
+            port,
+            limits,
+            .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+        )
+    else
+        try netz.http2.runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+        );
     defer h2.close();
     var websocket = try netz.websocket.runtime.H2Client.open(
         allocator,
@@ -42,6 +72,29 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer websocket.close();
+    if (tls_enabled) {
+        const chain = websocket.peerCertificates() orelse
+            return error.MissingPeerCertificate;
+        if (chain.len == 0 or
+            !std.mem.eql(u8, websocket.negotiatedAlpn().?, "h2") or
+            websocket.negotiatedCipherSuite() == null or
+            websocket.negotiatedTranscriptHash() == null)
+        {
+            return error.InvalidTlsMetadata;
+        }
+        try websocket.exportKeyingMaterial(
+            "EXPORTER-netz-rfc8441",
+            "hyper",
+            &exported,
+        );
+    } else {
+        if (websocket.peerCertificates() != null or
+            websocket.negotiatedAlpn() != null or
+            websocket.keyUpdateCounts() != null)
+        {
+            return error.InvalidTlsMetadata;
+        }
+    }
 
     try websocket.sendFragmented(.text, &.{ "netz ", "websocket ", "h2" });
     var response = try websocket.receiveMessage();
@@ -50,6 +103,22 @@ pub fn main(init: std.process.Init) !void {
         !std.mem.eql(u8, response.payload, "hyper websocket h2"))
     {
         return error.UnexpectedWebSocketMessage;
+    }
+    if (tls_enabled) {
+        var peer_exporter = try websocket.receiveMessage();
+        defer peer_exporter.deinit(allocator);
+        if (peer_exporter.opcode != .binary or
+            !std.mem.eql(u8, peer_exporter.payload, &exported))
+        {
+            return error.InvalidExporter;
+        }
+        const updates = websocket.keyUpdateCounts() orelse
+            return error.MissingKeyUpdate;
+        if (updates.received != 1 or updates.sent != 1 or
+            updates.awaiting_peer_response)
+        {
+            return error.InvalidKeyUpdateCount;
+        }
     }
 
     try websocket.sendPing("ping");
@@ -75,7 +144,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz RFC 8441 client interoperated with Hyper: fragmented-text ping pong bounded-close\n",
-        .{},
+        "netz RFC 8441 client interoperated with Hyper: transport={s} fragmented-text ping pong bounded-close tls_metadata={s} key_update={s}\n",
+        .{
+            if (tls_enabled) "tls" else "h2c",
+            if (tls_enabled) "verified" else "n/a",
+            if (tls_enabled) "verified" else "n/a",
+        },
     );
 }
