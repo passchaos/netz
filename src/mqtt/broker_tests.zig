@@ -1030,6 +1030,7 @@ test "broker rejects non-positive system statistics interval" {
 }
 
 test {
+    _ = @import("broker/listener_tests.zig");
     _ = @import("broker/capability_tests.zig");
     _ = @import("broker/protocol_tests.zig");
     _ = @import("broker/qos2_tests.zig");
