@@ -1456,6 +1456,17 @@ pub const Connection = struct {
         };
     }
 
+    /// Return the ALPN selected by a vail-backed TLS transport. HTTP/2's TLS
+    /// constructors require `h2`, while cleartext h2c has no ALPN state.
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_client => |connection| connection.negotiatedAlpn(),
+            .tls_server => |connection| connection.negotiatedAlpn(),
+            .tcp => null,
+        };
+    }
+
     /// Return authenticated TLS 1.3 cipher-suite metadata when this HTTP/2
     /// connection uses a vail-backed TLS transport.
     pub fn negotiatedCipherSuite(

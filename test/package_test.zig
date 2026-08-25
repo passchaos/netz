@@ -254,6 +254,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
         "negotiatedTranscriptHash",
     ));
     try std.testing.expect(@hasDecl(
@@ -380,6 +384,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "keyUpdateCounts",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "exportKeyingMaterial",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket,

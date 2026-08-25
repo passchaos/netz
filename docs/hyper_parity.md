@@ -735,7 +735,7 @@ keep-alive, cancellation and GOAWAY gate remains green.
    HTTP/2 client retains and exposes the authenticated server chain. Both vail
    TLS endpoint roles expose RFC 8446 exporter keying material for channel
    binding and typed `negotiatedCipherSuite()` /
-   `negotiatedTranscriptHash()` metadata for authentication policy and
+   `negotiatedAlpn()` / `negotiatedTranscriptHash()` metadata for authentication policy and
    diagnostics. `updateTrafficKeys(request_peer_update)` sends RFC 8446
    KeyUpdate under the current epoch, rotates afterward, transparently handles
    fragmented peer updates, performs requested reciprocal updates, and exposes

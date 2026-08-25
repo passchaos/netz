@@ -47,6 +47,17 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
                 return;
             };
             defer connection.close();
+            if (!std.mem.eql(
+                u8,
+                connection.negotiatedAlpn() orelse {
+                    shared.err = error.InvalidAlpn;
+                    return;
+                },
+                "h2",
+            )) {
+                shared.err = error.InvalidAlpn;
+                return;
+            }
             if (connection.negotiatedCipherSuite() !=
                 .aes_128_gcm_sha256 or
                 connection.negotiatedTranscriptHash() != .sha256)
@@ -119,6 +130,10 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
         },
     );
     defer client.close();
+    try std.testing.expectEqualStrings(
+        "h2",
+        client.negotiatedAlpn().?,
+    );
     try std.testing.expectEqual(
         tls_stream.CipherSuite.aes_128_gcm_sha256,
         client.negotiatedCipherSuite().?,

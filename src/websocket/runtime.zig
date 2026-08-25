@@ -2098,6 +2098,44 @@ pub const H2Connection = struct {
         self.* = undefined;
     }
 
+    /// Return TLS identity and negotiation state for the shared HTTP/2
+    /// connection. These are connection-wide values, not per-WebSocket-stream
+    /// properties, and remain valid while the parent connection is alive.
+    pub fn peerCertificates(
+        self: *const H2Connection,
+    ) ?[]const []const u8 {
+        return self.tunnel.connection.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(self: *const H2Connection) ?[]const u8 {
+        return self.tunnel.connection.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: *const H2Connection,
+    ) ?tls_stream.CipherSuite {
+        return self.tunnel.connection.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const H2Connection,
+    ) ?tls_stream.TranscriptHash {
+        return self.tunnel.connection.negotiatedTranscriptHash();
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const H2Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try self.tunnel.connection.exportKeyingMaterial(
+            label,
+            context,
+            out,
+        );
+    }
+
     /// RFC 8441 runs over the parent HTTP/2 connection, so TLS traffic-key
     /// control belongs to that shared transport rather than this logical
     /// WebSocket stream. Cleartext h2c reports the same explicit unavailable
