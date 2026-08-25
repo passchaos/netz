@@ -62,7 +62,69 @@ pub const Limits = struct {
     /// Additionally require the SSL TLV to assert a verified certificate used
     /// on this connection or reused from the proxy's TLS Session.
     proxy_v2_require_client_certificate: bool = false,
+    /// Optional absolute budget for receiving the complete PROXY preface.
+    /// On raw MQTT TCP this is also capped by the CONNECT admission deadline.
+    proxy_header_timeout: ?std.Io.Duration = null,
 };
+
+pub fn proxyHeaderDeadline(
+    io: std.Io,
+    limits: Limits,
+) ?std.Io.Clock.Timestamp {
+    const timeout = limits.proxy_header_timeout orelse return null;
+    return .fromNow(io, .{ .raw = timeout, .clock = .awake });
+}
+
+pub fn validateProxyPolicy(limits: Limits) Error!void {
+    if ((limits.proxy_v2_require_tls or
+        limits.proxy_v2_require_client_certificate) and
+        limits.proxy_protocol != .v2)
+    {
+        return error.InvalidProperty;
+    }
+    if (limits.proxy_header_timeout) |timeout| {
+        if (timeout.nanoseconds <= 0 or limits.proxy_protocol == null) {
+            return error.InvalidProperty;
+        }
+    }
+}
+
+/// Consume and validate an optional trusted PROXY preface. Callers transfer
+/// the returned metadata into `Connection.attachProxyMetadata`.
+pub fn readProxyMetadata(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    outer_deadline: ?std.Io.Clock.Timestamp,
+) Error!?proxy_protocol.Metadata {
+    const version = limits.proxy_protocol orelse return null;
+    var metadata = try proxy_protocol.readWithDeadline(
+        allocator,
+        io,
+        stream,
+        version,
+        earliestClockDeadline(
+            outer_deadline,
+            proxyHeaderDeadline(io, limits),
+        ),
+    );
+    errdefer metadata.deinit();
+    const tls = metadata.tls;
+    if (limits.proxy_v2_require_tls and
+        (tls == null or !tls.?.client_ssl))
+    {
+        return error.InvalidHeader;
+    }
+    if (limits.proxy_v2_require_client_certificate and
+        (tls == null or !tls.?.client_ssl or !tls.?.verified or
+            (!tls.?.client_certificate_connection and
+                !tls.?.client_certificate_session)))
+    {
+        return error.InvalidHeader;
+    }
+    return metadata;
+}
 
 const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
 const PacketTransport = packet_transport.Transport;
@@ -74,12 +136,7 @@ pub const Server = struct {
     limits: Limits = .{},
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
-        if ((limits.proxy_v2_require_tls or
-            limits.proxy_v2_require_client_certificate) and
-            limits.proxy_protocol != .v2)
-        {
-            return error.InvalidProperty;
-        }
+        try validateProxyPolicy(limits);
         return .{
             .io = io,
             .allocator = allocator,
@@ -132,44 +189,23 @@ pub const Server = struct {
             socket_options.setTcpNoDelay(stream) catch
                 return error.SocketOptionFailed;
         }
-        var proxy_metadata: ?proxy_protocol.Metadata =
-            if (self.limits.proxy_protocol) |version|
-                try proxy_protocol.readWithDeadline(
-                    self.allocator,
-                    self.io,
-                    stream,
-                    version,
-                    connect_deadline,
-                )
-            else
-                null;
+        var proxy_metadata = try readProxyMetadata(
+            self.allocator,
+            self.io,
+            stream,
+            self.limits,
+            connect_deadline,
+        );
         errdefer if (proxy_metadata) |*metadata| metadata.deinit();
-        if (proxy_metadata) |metadata| {
-            const tls = metadata.tls;
-            if (self.limits.proxy_v2_require_tls and
-                (tls == null or !tls.?.client_ssl))
-            {
-                return error.InvalidHeader;
-            }
-            if (self.limits.proxy_v2_require_client_certificate and
-                (tls == null or !tls.?.client_ssl or !tls.?.verified or
-                    (!tls.?.client_certificate_connection and
-                        !tls.?.client_certificate_session)))
-            {
-                return error.InvalidHeader;
-            }
-        }
 
         var connection = Connection{
             .allocator = self.allocator,
-            .transport = if (proxy_metadata) |metadata|
-                .initTcpProxy(self.io, stream, metadata)
-            else
-                .initTcp(self.io, stream),
+            .transport = .initTcp(self.io, stream),
             .protocol = options.protocol,
             .limits = self.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
+            .proxy_metadata = proxy_metadata,
         };
         proxy_metadata = null;
         stream_owned = false;
@@ -778,6 +814,18 @@ fn negotiatedOutgoingInflightLimit(local_upper_limit: u16, peer_receive_maximum:
     return @min(local_upper_limit, peer_receive_maximum);
 }
 
+fn earliestClockDeadline(
+    a: ?std.Io.Clock.Timestamp,
+    b: ?std.Io.Clock.Timestamp,
+) ?std.Io.Clock.Timestamp {
+    const left = a orelse return b;
+    const right = b orelse return left;
+    return if (std.Io.Clock.Timestamp.compare(left, .lt, right))
+        left
+    else
+        right;
+}
+
 fn appendTopicAliasMaximumSetting(
     properties: *std.ArrayList(mqtt.Property),
     allocator: std.mem.Allocator,
@@ -855,6 +903,10 @@ pub const Connection = struct {
     /// or allocation failure. The next ordinary reader can recover it before
     /// another liveness probe is allowed to consume later bytes.
     pending_ping_overflow: ?OwnedPacket = null,
+    /// Owned metadata from an explicitly trusted PROXY protocol listener.
+    /// Keeping it beside rather than inside the transport allows the same
+    /// identity model to span raw TCP, TLS, WS, and WSS adapters.
+    proxy_metadata: ?proxy_protocol.Metadata = null,
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -962,6 +1014,7 @@ pub const Connection = struct {
         if (self.pending_ping_overflow) |*packet| {
             packet.deinit(self.allocator);
         }
+        if (self.proxy_metadata) |*metadata| metadata.deinit();
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -992,15 +1045,26 @@ pub const Connection = struct {
     pub fn proxyMetadata(
         self: *const Connection,
     ) ?*const proxy_protocol.Metadata {
-        return switch (self.transport) {
-            .tcp_proxy => |*tcp| &tcp.metadata,
-            else => null,
-        };
+        return if (self.proxy_metadata) |*metadata| metadata else null;
+    }
+
+    /// Transfer owned trusted-proxy metadata into this connection. This may be
+    /// called at most once, after the preface is consumed and before the
+    /// connection escapes its transport adapter.
+    pub fn attachProxyMetadata(
+        self: *Connection,
+        metadata: proxy_protocol.Metadata,
+    ) void {
+        std.debug.assert(self.proxy_metadata == null);
+        self.proxy_metadata = metadata;
     }
 
     /// Return the proxied source IP when available, otherwise the connected
     /// transport peer. PROXY UNKNOWN/LOCAL deliberately use the latter.
     pub fn remoteAddress(self: *const Connection) net.IpAddress {
+        if (self.proxy_metadata) |metadata| {
+            if (metadata.sourceAddress()) |address| return address;
+        }
         return self.transport.remoteAddress();
     }
 

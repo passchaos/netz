@@ -98,13 +98,28 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
 
     raw = socket.create_connection(("127.0.0.1", port), timeout=5)
     raw.settimeout(5)
-    if transport == "wss":
+    if transport == "proxy_ws":
+        raw.sendall(b"PROXY TCP4 192.0.2.5 127.0.0.1 6275 1883\r\n")
+    elif transport == "proxy_wss":
+        address = (
+            b"\xc0\x00\x02\x05"
+            + b"\x7f\x00\x00\x01"
+            + b"\x18\x83\x07\x5b"
+        )
+        raw.sendall(
+            b"\x0d\x0a\x0d\x0a\x00\x0d\x0aQUIT\x0a"
+            + b"\x21\x11"
+            + len(address).to_bytes(2, "big")
+            + address
+        )
+    secure = transport in ("wss", "proxy_wss")
+    if secure:
         context = ssl.create_default_context(cafile=str(cafile))
         context.minimum_version = ssl.TLSVersion.TLSv1_3
         context.maximum_version = ssl.TLSVersion.TLSv1_3
         raw = context.wrap_socket(raw, server_hostname="localhost")
     peer = websocket_wrapper(
-        raw, "localhost", port, transport == "wss", "/mqtt", None
+        raw, "localhost", port, secure, "/mqtt", None
     )
 
     try:
@@ -220,6 +235,20 @@ def main() -> None:
                     proto_ver,
                     cafile,
                 )
+        # The MQTT handshake is transport-version independent; one MQTT 5 case
+        # per carrier proves PROXY is consumed before HTTP Upgrade and before
+        # TLS, respectively.
+        for transport in ("proxy_ws", "proxy_wss"):
+            run_case(
+                args.server,
+                WebsocketWrapper,
+                do_send,
+                mqtt_packets,
+                mqtt5_props,
+                transport,
+                5,
+                cafile,
+            )
 
 
 if __name__ == "__main__":

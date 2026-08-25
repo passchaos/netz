@@ -50,6 +50,8 @@ Trusted reverse proxies can prepend HAProxy PROXY protocol metadata with
 `--proxy-protocol=1` or `--proxy-protocol=2`. For v2,
 `--proxy-v2-require-tls` and `--proxy-v2-require-client-certificate` reject
 connections whose SSL TLV lacks the corresponding authenticated edge state.
+`--proxy-header-timeout-ms=N` places one absolute deadline over the complete
+preface.
 Never expose such a listener directly to untrusted clients because PROXY
 metadata is an assertion made by the connecting peer.
 

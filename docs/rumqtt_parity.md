@@ -12,7 +12,7 @@ and equal-wire broker results are kept separate.
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
 | MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
-| Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
+| Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, TLS or WS/WSS Upgrade, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
 | Application Message size policy | Independent payload-byte cap for live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto `message_size_limit`; rumqttd `max_payload_size` |
@@ -47,6 +47,9 @@ TLS or a proxy-verified client certificate. These assertions are deliberately
 available only on explicitly configured trusted-proxy listeners. The broker's
 transport-aware CONNECT authorization callback receives them together with the
 effective source address and any directly verified mTLS certificate chain.
+The same parser precedes MQTT TCP, TLS, WS, and WSS application handshakes; an
+optional absolute header timeout prevents incomplete proxy prefaces from
+holding listener workers indefinitely.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
 deadline on every one of its finite broker processes, so all 134 raw scenarios

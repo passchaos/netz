@@ -31,6 +31,7 @@ pub const Server = struct {
         bind_address: net.IpAddress,
         options: ListenOptions,
     ) runtime.Error!Server {
+        try runtime.validateProxyPolicy(options.limits);
         return .{
             .allocator = allocator,
             .websocket_server = try .listen(
@@ -57,11 +58,32 @@ pub const Server = struct {
         self: *Server,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.AcceptedClient {
-        var ws = try self.websocket_server.accept(.{
-            .protocols = &.{mqtt_subprotocol},
-            .require_subprotocol = true,
-            .allowed_origins = self.allowed_origins,
-        });
+        const stream = try self.websocket_server.http.listener.accept(
+            self.websocket_server.http.io,
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.websocket_server.http.io);
+        var proxy_metadata = try runtime.readProxyMetadata(
+            self.allocator,
+            self.websocket_server.http.io,
+            stream,
+            self.limits,
+            null,
+        );
+        errdefer if (proxy_metadata) |*metadata| metadata.deinit();
+        const http_connection = try self.websocket_server.http.acceptStream(
+            stream,
+        );
+        stream_owned = false;
+        // acceptHttpConnection owns the HTTP connection on every return path.
+        var ws = try self.websocket_server.acceptHttpConnection(
+            http_connection,
+            .{
+                .protocols = &.{mqtt_subprotocol},
+                .require_subprotocol = true,
+                .allowed_origins = self.allowed_origins,
+            },
+        );
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
 
@@ -75,6 +97,10 @@ pub const Server = struct {
         );
         ws_owned = false;
         errdefer connection.close();
+        if (proxy_metadata) |metadata| {
+            connection.attachProxyMetadata(metadata);
+            proxy_metadata = null;
+        }
         return connection.accept(options);
     }
 };
@@ -103,6 +129,7 @@ pub const TlsServer = struct {
         bind_address: net.IpAddress,
         options: TlsListenOptions,
     ) runtime.Error!TlsServer {
+        try runtime.validateProxyPolicy(options.limits);
         return .{
             .allocator = allocator,
             .websocket_server = try .listen(
@@ -141,7 +168,22 @@ pub const TlsServer = struct {
         self: *TlsServer,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.AcceptedClient {
-        var ws = try self.websocket_server.accept(.{
+        const stream = try self.websocket_server.listener.accept(
+            self.websocket_server.io,
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.websocket_server.io);
+        var proxy_metadata = try runtime.readProxyMetadata(
+            self.allocator,
+            self.websocket_server.io,
+            stream,
+            self.limits,
+            null,
+        );
+        errdefer if (proxy_metadata) |*metadata| metadata.deinit();
+        // acceptStream owns the socket on both success and failure.
+        stream_owned = false;
+        var ws = try self.websocket_server.acceptStream(stream, .{
             .protocols = &.{mqtt_subprotocol},
             .require_subprotocol = true,
             .allowed_origins = self.allowed_origins,
@@ -159,6 +201,10 @@ pub const TlsServer = struct {
         );
         ws_owned = false;
         errdefer connection.close();
+        if (proxy_metadata) |metadata| {
+            connection.attachProxyMetadata(metadata);
+            proxy_metadata = null;
+        }
         return connection.accept(options);
     }
 

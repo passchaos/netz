@@ -37,6 +37,7 @@ pub const Server = struct {
         options: ListenOptions,
     ) mqtt_runtime.Error!Server {
         try options.identity.validate();
+        try mqtt_runtime.validateProxyPolicy(options.limits);
         return .{
             .allocator = allocator,
             .io = io,
@@ -74,6 +75,14 @@ pub const Server = struct {
         const stream = try self.listener.accept(self.io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
+        var proxy_metadata = try mqtt_runtime.readProxyMetadata(
+            self.allocator,
+            self.io,
+            stream,
+            self.limits,
+            null,
+        );
+        errdefer if (proxy_metadata) |*metadata| metadata.deinit();
         if (self.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
@@ -94,6 +103,10 @@ pub const Server = struct {
             options.topic_alias_maximum,
         );
         errdefer connection.close();
+        if (proxy_metadata) |metadata| {
+            connection.attachProxyMetadata(metadata);
+            proxy_metadata = null;
+        }
         return connection.accept(options);
     }
 

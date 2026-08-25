@@ -7,7 +7,7 @@ const tls_test = netz.tls.testing;
 const max_packet_size: usize = 128 * 1024;
 const expected_payload_len: usize = 36 * 1821;
 
-const Transport = enum { ws, wss, origin };
+const Transport = enum { ws, wss, proxy_ws, proxy_wss, origin };
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -35,13 +35,19 @@ pub fn main(init: std.process.Init) !void {
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", port);
 
     switch (transport) {
-        .ws, .origin => {
+        .ws, .proxy_ws, .origin => {
             var server = try netz.mqtt.websocket_runtime.Server.listen(
                 allocator,
                 io,
                 address,
                 .{
-                    .limits = .{ .max_packet_size = max_packet_size },
+                    .limits = .{
+                        .max_packet_size = max_packet_size,
+                        .proxy_protocol = if (transport == .proxy_ws)
+                            .v1
+                        else
+                            null,
+                    },
                     .max_head_bytes = 16 * 1024,
                     .allowed_origins = if (transport == .origin)
                         &.{"https://example.org"}
@@ -57,9 +63,14 @@ pub fn main(init: std.process.Init) !void {
                     server.accept(.{ .protocol = protocol }),
                 );
             }
-            try serveOne(&server, protocol, transport == .origin);
+            try serveOne(
+                &server,
+                protocol,
+                transport == .origin,
+                transport == .proxy_ws,
+            );
         },
-        .wss => {
+        .wss, .proxy_wss => {
             var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
             try std.base64.standard.Decoder.decode(
                 &certificate_der,
@@ -77,14 +88,25 @@ pub fn main(init: std.process.Init) !void {
                             .key_pair = key_pair,
                         } },
                     },
-                    .limits = .{ .max_packet_size = max_packet_size },
+                    .limits = .{
+                        .max_packet_size = max_packet_size,
+                        .proxy_protocol = if (transport == .proxy_wss)
+                            .v2
+                        else
+                            null,
+                    },
                     .max_head_bytes = 16 * 1024,
                     .cipher_suites = &.{.aes_128_gcm_sha256},
                 },
             );
             defer server.deinit();
             std.debug.print("netz MQTT WSS interop server listening\n", .{});
-            try serveOne(&server, protocol, false);
+            try serveOne(
+                &server,
+                protocol,
+                false,
+                transport == .proxy_wss,
+            );
         },
     }
 }
@@ -93,6 +115,7 @@ fn serveOne(
     server: anytype,
     protocol: netz.mqtt.ProtocolVersion,
     origin_mode: bool,
+    proxy_mode: bool,
 ) !void {
     var accepted = try server.accept(.{
         .protocol = protocol,
@@ -111,6 +134,21 @@ fn serveOne(
         expected_client_id,
         accepted.connect.connect.client_id,
     );
+    if (proxy_mode) {
+        const metadata = accepted.connection.proxyMetadata() orelse
+            return error.MissingProxyMetadata;
+        try std.testing.expectEqual(
+            @as(u16, 6275),
+            accepted.connection.remoteAddress().ip4.port,
+        );
+        try std.testing.expectEqual(
+            if (@TypeOf(server.*) == netz.mqtt.websocket_runtime.TlsServer)
+                netz.mqtt.proxy_protocol.Version.v2
+            else
+                netz.mqtt.proxy_protocol.Version.v1,
+            metadata.version,
+        );
+    }
     if (origin_mode) {
         var disconnect = try accepted.connection.readDisconnect();
         defer disconnect.deinit(server.allocator);

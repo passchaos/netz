@@ -200,7 +200,19 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server, options: AcceptOptions) Error!Connection {
-        var http_conn = try self.http.accept();
+        const http_conn = try self.http.accept();
+        return self.acceptHttpConnection(http_conn, options);
+    }
+
+    /// Upgrade an already accepted HTTP/1 connection. This lets protocol
+    /// adapters consume a trusted preface without duplicating WebSocket
+    /// handshake validation.
+    pub fn acceptHttpConnection(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+    ) Error!Connection {
+        var http_conn = http_connection;
         errdefer http_conn.close();
         if (self.limits.tcp_nodelay) {
             try socket_options.setTcpNoDelay(http_conn.stream);
@@ -302,6 +314,15 @@ pub const TlsServer = struct {
         options: AcceptOptions,
     ) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStream(stream, options);
+    }
+
+    /// Perform TLS and WebSocket handshakes on an already accepted stream.
+    pub fn acceptStream(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
@@ -567,6 +588,71 @@ pub const AcceptOptions = struct {
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
 
 pub const Client = struct {
+    /// Perform a cleartext WebSocket handshake on an already connected stream.
+    /// This is primarily for adapters that must emit a transport preface before
+    /// the HTTP Upgrade request. Ownership transfers on success.
+    pub fn connectAcceptedStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+    ) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        const connection = try connectStream(
+            allocator,
+            io,
+            stream,
+            null,
+            options,
+        );
+        stream_owned = false;
+        return connection;
+    }
+
+    /// Perform TLS and WebSocket handshakes on a connected stream after an
+    /// adapter has emitted a transport preface such as PROXY protocol.
+    pub fn connectAcceptedTlsStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (options.tls_identity) |identity| {
+            const tls_conn = try tls_client_identity.init(
+                allocator,
+                io,
+                stream,
+                server_name,
+                tls_options,
+                identity,
+            );
+            stream_owned = false;
+            errdefer tls_conn.deinit();
+            return connectVailStream(
+                allocator,
+                io,
+                stream,
+                tls_conn,
+                options,
+            );
+        }
+        const tls_conn = try http1_runtime.TlsClientConnection.init(
+            allocator,
+            io,
+            stream,
+            server_name,
+            tls_options,
+        );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        return connectStream(allocator, io, stream, tls_conn, options);
+    }
+
     pub fn connect(
         allocator: std.mem.Allocator,
         io: std.Io,

@@ -15,6 +15,7 @@ const Config = struct {
     proxy_protocol: ?netz.mqtt.proxy_protocol.Version = null,
     proxy_v2_require_tls: bool = false,
     proxy_v2_require_client_certificate: bool = false,
+    proxy_header_timeout_ms: ?u32 = null,
     maximum_qos: ?netz.mqtt.QoS = null,
     retain_available: bool = true,
     topic_alias_maximum: u16 = 16,
@@ -211,6 +212,10 @@ pub fn main(init: std.process.Init) !void {
                     .proxy_protocol = config.proxy_protocol,
                     .proxy_v2_require_tls = config.proxy_v2_require_tls,
                     .proxy_v2_require_client_certificate = config.proxy_v2_require_client_certificate,
+                    .proxy_header_timeout = if (config.proxy_header_timeout_ms) |milliseconds|
+                        .fromMilliseconds(milliseconds)
+                    else
+                        null,
                 },
             },
             .accept = .{
@@ -462,6 +467,19 @@ fn parseArgs(
             "--proxy-v2-require-client-certificate",
         )) {
             config.proxy_v2_require_client_certificate = true;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--proxy-header-timeout-ms=",
+        )) {
+            config.proxy_header_timeout_ms = try std.fmt.parseInt(
+                u32,
+                arg["--proxy-header-timeout-ms=".len..],
+                10,
+            );
+            if (config.proxy_header_timeout_ms.? == 0) {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.startsWith(
             u8,
             arg,

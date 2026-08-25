@@ -10,6 +10,25 @@ const tls_server_max_packet_size: usize = 32 * 1024;
 const large_payload_bytes: usize = 20 * 1024;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 
+fn writeStreamAll(
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    bytes: []const u8,
+) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const remainder = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[offset..],
+            &.{""},
+            0,
+        );
+        if (remainder == 0) return error.ConnectionClosed;
+        offset += remainder;
+    }
+}
+
 test "MQTT TLS negotiates configured ALPN without client authentication" {
     const allocator = std.testing.allocator;
 
@@ -263,6 +282,108 @@ test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     );
     try expectLargePayload(server_publish.publish.payload);
     try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TLS server consumes PROXY v2 before TLS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .proxy_protocol = .v2,
+                .proxy_header_timeout = .fromSeconds(1),
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            const metadata = accepted.connection.proxyMetadata() orelse {
+                shared.err = error.MissingProxyMetadata;
+                return;
+            };
+            const source = accepted.connection.remoteAddress();
+            if (metadata.version != .v2 or source != .ip4 or
+                source.ip4.port != 6275 or
+                !std.mem.eql(u8, &source.ip4.bytes, &.{ 192, 0, 2, 5 }))
+            {
+                shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                shared.err = err;
+                return;
+            };
+            disconnect.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    try writeStreamAll(io, stream, &(mqtt.proxy_protocol.v2_signature ++
+        [_]u8{ 0x21, 0x11, 0x00, 0x0c } ++
+        [_]u8{
+            192, 0, 2, 5, 127, 0, 0, 1, 0x18, 0x83, 0x07, 0x5b,
+        }));
+    const tls_connection = try @import("../tls/mod.zig").stream
+        .ClientConnection.initVerified(allocator, io, stream, .{
+        .server_name = "localhost",
+        .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        },
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+    });
+    stream_owned = false;
+    var connection = runtime.Connection.initVailTls(allocator, tls_connection, .{
+        .protocol = .v5,
+        .client_id = "proxy-before-tls",
+    });
+    var attempt = try connection.establishClient(.{
+        .protocol = .v5,
+        .client_id = "proxy-before-tls",
+    });
+    try std.testing.expect(attempt.accepted());
+    var accepted = try attempt.requireAccepted();
+    defer accepted.deinit(allocator);
+    try accepted.connection.disconnect(0);
 
     thread.join();
     joined = true;

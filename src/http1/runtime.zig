@@ -1057,6 +1057,15 @@ pub const Server = struct {
 
     pub fn accept(self: *Server) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStream(stream);
+    }
+
+    /// Adopt an already accepted cleartext stream. Protocol adapters can
+    /// consume trusted transport prefaces before handing ownership to HTTP/1.
+    pub fn acceptStream(
+        self: *Server,
+        stream: net.Stream,
+    ) Error!Connection {
         errdefer stream.close(self.io);
         if (self.limits.tcp_nodelay) {
             try setTcpNoDelay(stream);

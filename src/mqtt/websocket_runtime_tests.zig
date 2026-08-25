@@ -7,6 +7,25 @@ const tls_testing = @import("../tls/testing.zig");
 
 const max_packet_size: usize = 4096;
 
+fn writeStreamAll(
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    bytes: []const u8,
+) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const written = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[offset..],
+            &.{""},
+            0,
+        );
+        if (written == 0) return error.ConnectionClosed;
+        offset += written;
+    }
+}
+
 test "MQTT 5 WebSocket runtime negotiates mqtt and completes QoS 1 and 2" {
     const allocator = std.testing.allocator;
 
@@ -93,6 +112,107 @@ test "MQTT 5 WebSocket runtime negotiates mqtt and completes QoS 1 and 2" {
     try client.disconnect(0);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT WebSocket server consumes PROXY v1 before HTTP Upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_packet_size = max_packet_size,
+                .proxy_protocol = .v1,
+                .proxy_header_timeout = .fromSeconds(1),
+            },
+            .max_head_bytes = max_packet_size,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            const metadata = accepted.connection.proxyMetadata() orelse {
+                shared.err = error.MissingProxyMetadata;
+                return;
+            };
+            const source = accepted.connection.remoteAddress();
+            if (metadata.version != .v1 or source != .ip4 or
+                source.ip4.port != 6275 or
+                !std.mem.eql(u8, &source.ip4.bytes, &.{ 192, 0, 2, 5 }))
+            {
+                shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                shared.err = err;
+                return;
+            };
+            disconnect.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    try writeStreamAll(
+        io,
+        stream,
+        "PROXY TCP4 192.0.2.5 127.0.0.1 6275 1883\r\n",
+    );
+    const ws = try websocket_runtime.Client.connectAcceptedStream(
+        allocator,
+        io,
+        stream,
+        .{
+            .host = "localhost",
+            .target = "/mqtt",
+            .protocols = &.{"mqtt"},
+            .limits = .{
+                .max_head_bytes = max_packet_size,
+                .max_frame_bytes = max_packet_size,
+                .max_message_bytes = max_packet_size,
+            },
+        },
+    );
+    stream_owned = false;
+    var connection = runtime.Connection.initWebSocket(
+        allocator,
+        ws,
+        .v5,
+        .{ .max_packet_size = max_packet_size },
+        16,
+        16,
+    );
+    var attempt = try connection.establishClient(.{
+        .protocol = .v5,
+        .client_id = "proxy-websocket",
+    });
+    try std.testing.expect(attempt.accepted());
+    var accepted = try attempt.requireAccepted();
+    defer accepted.deinit(allocator);
+    try accepted.connection.disconnect(0);
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -201,6 +321,125 @@ test "MQTT WSS server negotiates mqtt and completes QoS 1" {
         "encrypted websocket mqtt",
         .{ .qos = .at_least_once },
     );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT WSS server consumes PROXY v2 before TLS and Upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try mqtt_ws.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_packet_size = max_packet_size,
+                .proxy_protocol = .v2,
+                .proxy_header_timeout = .fromSeconds(1),
+            },
+            .max_head_bytes = max_packet_size,
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            const metadata = accepted.connection.proxyMetadata() orelse {
+                shared.err = error.MissingProxyMetadata;
+                return;
+            };
+            if (metadata.version != .v2 or
+                accepted.connection.remoteAddress().ip4.port != 6275)
+            {
+                shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                shared.err = err;
+                return;
+            };
+            disconnect.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    try writeStreamAll(io, stream, &(mqtt.proxy_protocol.v2_signature ++
+        [_]u8{ 0x21, 0x11, 0x00, 0x0c } ++
+        [_]u8{
+            192, 0, 2, 5, 127, 0, 0, 1, 0x18, 0x83, 0x07, 0x5b,
+        }));
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const ws = try websocket_runtime.Client.connectAcceptedTlsStream(
+        allocator,
+        io,
+        stream,
+        "localhost",
+        .{
+            .host = "localhost",
+            .target = "/mqtt",
+            .protocols = &.{"mqtt"},
+            .limits = .{
+                .max_head_bytes = max_packet_size,
+                .max_frame_bytes = max_packet_size,
+                .max_message_bytes = max_packet_size,
+            },
+        },
+        .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    );
+    stream_owned = false;
+    var connection = runtime.Connection.initWebSocket(
+        allocator,
+        ws,
+        .v5,
+        .{ .max_packet_size = max_packet_size },
+        16,
+        16,
+    );
+    var attempt = try connection.establishClient(.{
+        .protocol = .v5,
+        .client_id = "proxy-wss",
+    });
+    try std.testing.expect(attempt.accepted());
+    var accepted = try attempt.requireAccepted();
+    defer accepted.deinit(allocator);
+    try accepted.connection.disconnect(0);
 
     thread.join();
     joined = true;

@@ -233,6 +233,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendBinaryInPlace"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendFragmented"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectAcceptedStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectAcceptedTlsStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Server,
+        "acceptStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Server,
+        "acceptHttpConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.TlsServer,
+        "acceptStream",
+    ));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_sent"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_received"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "selected_protocol"));
@@ -653,6 +673,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.runtime.Limits,
         "proxy_v2_require_client_certificate",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.Limits,
+        "proxy_header_timeout",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.mqtt, "broker"));

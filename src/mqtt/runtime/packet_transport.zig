@@ -1,6 +1,5 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
-const proxy_protocol = @import("../proxy_protocol.zig");
 const stream_io = @import("../../internal/stream_io.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
@@ -36,29 +35,9 @@ pub const Transport = union(enum) {
     tls_vail: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
     websocket: WebSocketTransport,
-    /// Direct TCP stream whose trusted PROXY preface has already been
-    /// consumed. Metadata is owned here so every Connection constructor gets
-    /// identical cleanup and address behavior.
-    tcp_proxy: struct {
-        io: std.Io,
-        stream: net.Stream,
-        metadata: proxy_protocol.Metadata,
-    },
 
     pub fn initTcp(io: std.Io, stream: net.Stream) Transport {
         return .{ .tcp = .{ .io = io, .stream = stream } };
-    }
-
-    pub fn initTcpProxy(
-        io: std.Io,
-        stream: net.Stream,
-        metadata: proxy_protocol.Metadata,
-    ) Transport {
-        return .{ .tcp_proxy = .{
-            .io = io,
-            .stream = stream,
-            .metadata = metadata,
-        } };
     }
 
     pub fn initWebSocket(
@@ -93,7 +72,7 @@ pub const Transport = union(enum) {
             .websocket => |*ws| ws.connection.peerCertificates(),
             // Client-side TLS peer inspection and non-TLS transports do not
             // expose a client-authenticated identity through this broker API.
-            .tcp, .tcp_proxy, .tls, .tls_vail => null,
+            .tcp, .tls, .tls_vail => null,
         };
     }
 
@@ -104,15 +83,13 @@ pub const Transport = union(enum) {
             // Zig's standard TLS client does not currently expose ALPN, and
             // MQTT-over-WebSocket negotiates its application protocol through
             // Sec-WebSocket-Protocol rather than the underlying TLS session.
-            .tcp, .tcp_proxy, .tls, .websocket => null,
+            .tcp, .tls, .websocket => null,
         };
     }
 
     pub fn remoteAddress(self: *const Transport) net.IpAddress {
         return switch (self.*) {
             .tcp => |tcp| tcp.stream.socket.address,
-            .tcp_proxy => |tcp| tcp.metadata.sourceAddress() orelse
-                tcp.stream.socket.address,
             .tls => |connection| connection.stream.socket.address,
             .tls_vail => |connection| connection.stream.socket.address,
             .tls_server => |connection| connection.stream.socket.address,
@@ -126,7 +103,6 @@ pub const Transport = union(enum) {
     ) std.Io.Clock.Timestamp {
         const io = switch (self) {
             .tcp => |tcp| tcp.io,
-            .tcp_proxy => |tcp| tcp.io,
             .tls => |connection| connection.io,
             .tls_vail => |connection| connection.io,
             .tls_server => |connection| connection.io,
@@ -144,10 +120,6 @@ pub const Transport = union(enum) {
     ) void {
         switch (self.*) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
-            .tcp_proxy => |*tcp| {
-                tcp.metadata.deinit();
-                tcp.stream.close(tcp.io);
-            },
             .tls => |connection| connection.deinit(),
             .tls_vail => |connection| connection.deinit(),
             .tls_server => |connection| connection.deinit(),
@@ -166,7 +138,6 @@ pub const Transport = union(enum) {
     pub fn shutdown(self: *Transport) Error!void {
         switch (self.*) {
             .tcp => |tcp| try tcp.stream.shutdown(tcp.io, .both),
-            .tcp_proxy => |tcp| try tcp.stream.shutdown(tcp.io, .both),
             // TLS/WebSocket transports currently expose only owning close
             // operations. Their protocol-specific servers coordinate shutdown
             // outside this raw packet transport.
@@ -180,7 +151,6 @@ pub const Transport = union(enum) {
     ) Error!void {
         switch (self.*) {
             .tcp => |tcp| try writeAll(tcp.io, tcp.stream, bytes),
-            .tcp_proxy => |tcp| try writeAll(tcp.io, tcp.stream, bytes),
             .tls => |connection| try connection.writeAll(bytes),
             .tls_vail => |connection| try connection.writeAll(bytes),
             .tls_server => |connection| try connection.writeAll(bytes),
@@ -206,12 +176,6 @@ pub const Transport = union(enum) {
     ) Error!void {
         switch (self.*) {
             .tcp => |tcp| try stream_io.writeAllParts(
-                tcp.io,
-                tcp.stream,
-                prefix,
-                payload,
-            ),
-            .tcp_proxy => |tcp| try stream_io.writeAllParts(
                 tcp.io,
                 tcp.stream,
                 prefix,
@@ -243,12 +207,6 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |tcp| readTcpPacket(
-                allocator,
-                tcp.io,
-                tcp.stream,
-                max_packet_size,
-            ),
-            .tcp_proxy => |tcp| readTcpPacket(
                 allocator,
                 tcp.io,
                 tcp.stream,
@@ -299,13 +257,6 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
             ),
-            .tcp_proxy => |tcp| readTcpPacketWithInactivityTimeout(
-                allocator,
-                tcp.io,
-                tcp.stream,
-                max_packet_size,
-                timeout,
-            ),
             .tls => |connection| readStreamPacketWithInactivityTimeout(
                 allocator,
                 connection,
@@ -344,13 +295,6 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |tcp| readTcpPacketWithDeadline(
-                allocator,
-                tcp.io,
-                tcp.stream,
-                max_packet_size,
-                deadline,
-            ),
-            .tcp_proxy => |tcp| readTcpPacketWithDeadline(
                 allocator,
                 tcp.io,
                 tcp.stream,
