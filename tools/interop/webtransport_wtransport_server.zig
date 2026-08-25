@@ -146,11 +146,34 @@ pub fn main(init: std.process.Init) !void {
         .{server.address()},
     );
 
-    var session = try server.accept();
-    defer session.deinit();
-    if (!std.mem.eql(u8, session.request.request.path, "/interop")) {
+    var pending = try server.receiveSessionRequest();
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
+    if (!std.mem.eql(u8, pending.path(), "/interop")) {
         return error.UnexpectedPath;
     }
+    if (!std.mem.eql(
+        u8,
+        pending.userAgent() orelse return error.UnexpectedHeader,
+        "netz-wtransport-gate",
+    )) return error.UnexpectedHeader;
+    const authorization = blk: {
+        for (pending.headers()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+                break :blk header.value;
+            }
+        }
+        return error.UnexpectedHeader;
+    };
+    if (!std.mem.eql(u8, authorization, "Bearer wtransport-interop")) {
+        return error.UnexpectedHeader;
+    }
+    var session = try pending.acceptWithHeaders(&.{.{
+        .name = "x-netz-admission",
+        .value = "accepted",
+    }});
+    pending_owned = false;
+    defer session.deinit();
     const max_datagram_size = session.maxDatagramSize();
     if (max_datagram_size == 0) return error.UnexpectedDatagramLimit;
     const oversized_datagram = try allocator.alloc(
@@ -163,7 +186,10 @@ pub fn main(init: std.process.Init) !void {
         error.DatagramTooLarge,
         session.sendDatagram(oversized_datagram),
     );
-    std.debug.print("netz WebTransport interop accepted CONNECT\n", .{});
+    std.debug.print(
+        "netz WebTransport interop accepted CONNECT with admission metadata\n",
+        .{},
+    );
 
     var datagram = try session.receiveDatagram();
     defer datagram.deinit(allocator);

@@ -68,12 +68,15 @@ server_pid=
 cat "$work/wtransport-client.log"
 cat "$work/server.log"
 grep -Fq \
-  'wtransport client interop passed: CONNECT DATAGRAM max_datagram_size=' \
+  'wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=' \
   "$work/wtransport-client.log"
 grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
   "$work/wtransport-client.log"
 grep -Fq \
   'netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
+  "$work/server.log"
+grep -Fq \
+  'netz WebTransport interop accepted CONNECT with admission metadata' \
   "$work/server.log"
 grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
   "$work/server.log"
@@ -112,12 +115,13 @@ server_pid=
 cat "$work/netz-client.log"
 cat "$rust_log"
 grep -Fq \
-  'netz WebTransport client interop passed: CONNECT DATAGRAM max_datagram_size=' \
+  'netz WebTransport client interop passed: CONNECT rejection=404 admission-headers=true DATAGRAM max_datagram_size=' \
   "$work/netz-client.log"
 grep -Fq 'oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close' \
   "$work/netz-client.log"
 grep -Fq \
-  'wtransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
+  'wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=' \
   "$rust_log"
+grep -Fq 'wtransport server rejected CONNECT with 404' "$rust_log"
 grep -Fq 'oversized_rejected=true bidi uni reset=73 stop=74 reuse=true' \
   "$rust_log"

@@ -1,6 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::time::Duration;
 use tokio::time::timeout;
+use wtransport::endpoint::ConnectOptions;
 use wtransport::error::{StreamReadError, StreamWriteError};
 use wtransport::{ClientConfig, Endpoint, Identity, ServerConfig, VarInt};
 
@@ -48,13 +49,20 @@ async fn main() -> Result<()> {
         .build();
     let endpoint = Endpoint::client(config)?;
     let url = format!("https://127.0.0.1:{port}/interop");
-    let connection = timeout(TIMEOUT, endpoint.connect(url))
+    let options = ConnectOptions::builder(url)
+        .add_header("authorization", "Bearer wtransport-interop")
+        .add_header("user-agent", "netz-wtransport-gate")
+        .build();
+    let connection = timeout(TIMEOUT, endpoint.connect(options))
         .await
         .context("CONNECT timed out")??;
     let max_datagram_size = connection
         .max_datagram_size()
         .context("peer did not negotiate DATAGRAM")?;
-    let oversized = vec![0xa5; max_datagram_size + 1];
+    // PMTU discovery can raise the advertised limit between this observation
+    // and send. Exceed the entire UDP payload range rather than relying on a
+    // racy one-byte-over-the-current-MTU probe.
+    let oversized = vec![0xa5; 65_536];
     ensure!(
         matches!(
             connection.send_datagram(&oversized),
@@ -172,7 +180,7 @@ async fn main() -> Result<()> {
     // capsule's framing; it then closes QUIC with H3_NO_ERROR.
     endpoint.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport client interop passed: CONNECT DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close");
+    println!("wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close");
     Ok(())
 }
 
@@ -185,16 +193,34 @@ async fn run_server() -> Result<()> {
     let endpoint = Endpoint::server(config)?;
     println!("WTRANSPORT_PORT={}", endpoint.local_addr()?.port());
 
+    let rejected = timeout(TIMEOUT, endpoint.accept())
+        .await
+        .context("rejected incoming QUIC connection timed out")?
+        .await?;
+    ensure!(rejected.path() == "/rejected", "unexpected rejection path");
+    rejected.not_found().await;
+    println!("wtransport server rejected CONNECT with 404");
+
     let request = timeout(TIMEOUT, endpoint.accept())
         .await
         .context("incoming QUIC connection timed out")?
         .await?;
     ensure!(request.path() == "/interop", "unexpected CONNECT path");
-    let connection = request.accept().await?;
+    ensure!(
+        request.headers().get("authorization").map(String::as_str) == Some("Bearer netz-interop"),
+        "unexpected authorization metadata"
+    );
+    ensure!(
+        request.headers().get("user-agent").map(String::as_str) == Some("netz-wtransport-client"),
+        "unexpected user-agent metadata"
+    );
+    let connection = request
+        .accept_with_headers([("x-wtransport-admission", "accepted")])
+        .await?;
     let max_datagram_size = connection
         .max_datagram_size()
         .context("peer did not negotiate DATAGRAM")?;
-    let oversized = vec![0xa5; max_datagram_size + 1];
+    let oversized = vec![0xa5; 65_536];
     ensure!(
         matches!(
             connection.send_datagram(&oversized),
@@ -295,7 +321,7 @@ async fn run_server() -> Result<()> {
     connection.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
     println!(
-        "wtransport server interop passed: CONNECT DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=73 stop=74 reuse=true"
+        "wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=73 stop=74 reuse=true"
     );
     Ok(())
 }

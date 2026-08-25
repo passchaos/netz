@@ -89,6 +89,29 @@ pub fn main(init: std.process.Init) !void {
     const original_dcid = [_]u8{ 0x77, 0x74, 0x63, 0x6c, 0x69, 0x00, 0x00, 0x01 };
     const client_cid = [_]u8{ 0x77, 0x74, 0x63, 0x6c, 0x69, 0x00, 0x00, 0x02 };
     var stop_loss = StopLoss{};
+    const rejected_original_dcid =
+        [_]u8{ 0x77, 0x74, 0x72, 0x65, 0x6a, 0x00, 0x00, 0x01 };
+    const rejected_client_cid =
+        [_]u8{ 0x77, 0x74, 0x72, 0x65, 0x6a, 0x00, 0x00, 0x02 };
+    try std.testing.expectError(
+        error.SessionRejected,
+        netz.webtransport.runtime.HandshakeClientSession.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(port) },
+            .{
+                .authority = "127.0.0.1",
+                .path = "/rejected",
+                .h3 = .{ .handshake = .{
+                    .original_destination_connection_id = &rejected_original_dcid,
+                    .local_connection_id = &rejected_client_cid,
+                    .server_name = "127.0.0.1",
+                    .max_crypto_buffer = 64 * 1024,
+                } },
+            },
+        ),
+    );
 
     var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
         allocator,
@@ -98,6 +121,16 @@ pub fn main(init: std.process.Init) !void {
         .{
             .authority = "127.0.0.1",
             .path = "/interop",
+            .headers = &.{
+                .{
+                    .name = "authorization",
+                    .value = "Bearer netz-interop",
+                },
+                .{
+                    .name = "user-agent",
+                    .value = "netz-wtransport-client",
+                },
+            },
             .limits = .{ .http3 = .{ .quic = .{
                 .max_datagram_size = 4096,
                 .max_frames_per_datagram = 16,
@@ -121,6 +154,12 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer client.deinit();
+    if (!std.mem.eql(
+        u8,
+        client.responseHeader("x-wtransport-admission") orelse
+            return error.UnexpectedHeader,
+        "accepted",
+    )) return error.UnexpectedHeader;
     const max_datagram_size = client.maxDatagramSize();
     if (max_datagram_size == 0) return error.UnexpectedDatagramLimit;
     const oversized_datagram = try allocator.alloc(
@@ -226,7 +265,7 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedConnectionClose,
     }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
+        "netz WebTransport client interop passed: CONNECT rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
         .{max_datagram_size},
     );
 }

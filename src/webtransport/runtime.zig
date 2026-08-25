@@ -12,6 +12,7 @@ const stream_batch = @import("runtime/stream_batch.zig");
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidConnect,
+    SessionRejected,
     MissingDatagram,
     InvalidSessionState,
 } || protected_control.Error;
@@ -20,6 +21,12 @@ pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
     max_session_streams: usize = 128,
 };
+
+// HTTP/3's request/response convenience encoders use a 64-field stack array.
+// Leave room for four request pseudo-fields or the response :status field,
+// plus the protocol fields inserted by this adapter.
+const max_additional_connect_request_headers: usize = 57;
+const max_additional_connect_response_headers: usize = 62;
 
 pub const Server = struct {
     h3: http3.runtime.Server,
@@ -226,8 +233,18 @@ pub const StatefulProtectedServer = struct {
     }
 
     /// Receive the first protected packet, bind the stateful QUIC connection
-    /// to its source address, and continue the normal HTTP/3/WT accept path.
+    /// to its source address, and accept the WebTransport request with the
+    /// default 200 response. Use `receiveSessionRequest` when admission policy
+    /// must inspect request metadata or customize/reject the response.
     pub fn accept(self: *StatefulProtectedServer) Error!AcceptedHandshakeSession {
+        var pending = try self.receiveSessionRequest();
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    pub fn receiveSessionRequest(
+        self: *StatefulProtectedServer,
+    ) Error!PendingHandshakeSession {
         var first = try self.endpoint.receiveBytes();
         defer first.deinit(self.endpoint.allocator);
         var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
@@ -242,7 +259,7 @@ pub const StatefulProtectedServer = struct {
             first.bytes,
             first.ecn,
         );
-        return acceptStatefulSession(&h3, self.limits);
+        return receiveStatefulSessionRequest(&h3, self.limits);
     }
 
     /// Accept one WebTransport session from an already authenticated peer.
@@ -252,6 +269,15 @@ pub const StatefulProtectedServer = struct {
         self: *StatefulProtectedServer,
         peer: net.IpAddress,
     ) Error!AcceptedHandshakeSession {
+        var pending = try self.receiveSessionRequestFrom(peer);
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    pub fn receiveSessionRequestFrom(
+        self: *StatefulProtectedServer,
+        peer: net.IpAddress,
+    ) Error!PendingHandshakeSession {
         var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
             &self.endpoint,
             peer,
@@ -259,7 +285,7 @@ pub const StatefulProtectedServer = struct {
             self.transport,
         );
         errdefer h3.deinit();
-        return acceptStatefulSession(&h3, self.limits);
+        return receiveStatefulSessionRequest(&h3, self.limits);
     }
 };
 
@@ -296,9 +322,20 @@ pub const HandshakeServer = struct {
     }
 
     pub fn accept(self: *HandshakeServer) Error!AcceptedHandshakeSession {
+        var pending = try self.receiveSessionRequest();
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    /// Receive and validate Extended CONNECT without deciding admission. The
+    /// caller can inspect authority/path/origin/custom headers, then call one
+    /// of `PendingHandshakeSession`'s accept or rejection methods.
+    pub fn receiveSessionRequest(
+        self: *HandshakeServer,
+    ) Error!PendingHandshakeSession {
         var session = try self.h3.accept();
         errdefer session.deinit();
-        return acceptStatefulSession(&session, self.limits);
+        return receiveStatefulSessionRequest(&session, self.limits);
     }
 };
 
@@ -405,6 +442,165 @@ pub const OwnedHandshakeConnectRequest = struct {
     ) void {
         self.request.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+/// A validated WebTransport CONNECT request awaiting application admission.
+///
+/// This value owns the HTTP/3 session and decoded request head. It must be
+/// consumed by `accept`, `acceptWithHeaders`, or `reject`, or explicitly
+/// destroyed with `deinit`. This two-phase shape lets authentication, routing,
+/// Origin policy, and load shedding run before a success response is sent.
+pub const PendingHandshakeSession = struct {
+    h3: http3.runtime.HandshakeServerSession,
+    request: OwnedHandshakeConnectRequest,
+    session_id: webtransport.SessionId,
+    limits: Limits,
+
+    pub fn deinit(self: *PendingHandshakeSession) void {
+        const allocator = self.h3.established.connection.endpoint.allocator;
+        self.request.deinit(allocator);
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn peerAddress(self: PendingHandshakeSession) net.IpAddress {
+        return self.h3.established.connection.peerAddress();
+    }
+
+    pub fn authority(self: PendingHandshakeSession) ?[]const u8 {
+        return self.request.request.authority;
+    }
+
+    pub fn path(self: PendingHandshakeSession) []const u8 {
+        return self.request.request.path;
+    }
+
+    pub fn origin(self: PendingHandshakeSession) ?[]const u8 {
+        return findHeader(self.request.request.headers, "origin");
+    }
+
+    pub fn userAgent(self: PendingHandshakeSession) ?[]const u8 {
+        return findHeader(self.request.request.headers, "user-agent");
+    }
+
+    pub fn headers(
+        self: PendingHandshakeSession,
+    ) []const http3.Qpack.HeaderField {
+        return self.request.request.headers;
+    }
+
+    pub fn accept(
+        self: *PendingHandshakeSession,
+    ) Error!AcceptedHandshakeSession {
+        return self.acceptWithHeaders(&.{});
+    }
+
+    pub fn acceptWithHeaders(
+        self: *PendingHandshakeSession,
+        additional_headers: []const http3.Qpack.HeaderField,
+    ) Error!AcceptedHandshakeSession {
+        try validateAdditionalConnectHeaders(additional_headers, .response);
+        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
+        response_headers[0] = http3.capsule.protocol_header;
+        @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
+        const all_headers = response_headers[0 .. additional_headers.len + 1];
+        var streams = try initHandshakeStreamRegistry(
+            self.h3.established.connection.endpoint.allocator,
+            self.session_id,
+            .server,
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+            self.limits.max_session_streams,
+            null,
+            null,
+        );
+        errdefer streams.deinit();
+        const control = try session_control.Control.init(self.session_id);
+        try self.h3.startResponse(
+            self.session_id.value,
+            connectResponseWithHeaders(all_headers),
+            null,
+        );
+        try self.h3.detachRequestStream(self.session_id.value);
+        const h3 = self.h3;
+        const request = self.request;
+        const session_id = self.session_id;
+        self.* = undefined;
+        return .{
+            .h3 = h3,
+            .request = request,
+            .session_id = session_id,
+            .streams = streams,
+            .control = control,
+        };
+    }
+
+    /// Reject the request with a final 3xx-5xx response and FIN. A redirect
+    /// Location or authentication challenge can be supplied through headers.
+    pub fn reject(
+        self: *PendingHandshakeSession,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedHandshakeSession {
+        if (status < 300 or status > 599) return error.InvalidStatus;
+        try validateAdditionalConnectHeaders(response_headers, .response);
+        try self.h3.sendResponse(self.session_id.value, .{
+            .status = status,
+            .headers = response_headers,
+        });
+        const h3 = self.h3;
+        const request = self.request;
+        const session_id = self.session_id;
+        self.* = undefined;
+        return .{
+            .h3 = h3,
+            .request = request,
+            .session_id = session_id,
+            .status = status,
+        };
+    }
+
+    pub fn forbidden(
+        self: *PendingHandshakeSession,
+    ) Error!RejectedHandshakeSession {
+        return self.reject(403, &.{});
+    }
+
+    pub fn notFound(
+        self: *PendingHandshakeSession,
+    ) Error!RejectedHandshakeSession {
+        return self.reject(404, &.{});
+    }
+
+    pub fn tooManyRequests(
+        self: *PendingHandshakeSession,
+    ) Error!RejectedHandshakeSession {
+        return self.reject(429, &.{});
+    }
+};
+
+/// Owns a rejected HTTP/3 connection after its final response was submitted.
+/// Keeping this value alive preserves QUIC recovery state, allowing event loops
+/// to service ACK/PTO progress instead of dropping the response immediately.
+pub const RejectedHandshakeSession = struct {
+    h3: http3.runtime.HandshakeServerSession,
+    request: OwnedHandshakeConnectRequest,
+    session_id: webtransport.SessionId,
+    status: u16,
+
+    pub fn deinit(self: *RejectedHandshakeSession) void {
+        const allocator = self.h3.established.connection.endpoint.allocator;
+        self.request.deinit(allocator);
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    /// Process one timer-aware QUIC receive. Applications that keep serving a
+    /// rejected connection can call this until their own shutdown policy says
+    /// it is safe to release retransmission state.
+    pub fn serviceTransport(self: *RejectedHandshakeSession) Error!void {
+        try self.h3.established.connection.servicePacketServicingTimers();
     }
 };
 
@@ -754,6 +950,9 @@ pub const ClientSession = struct {
 pub const HandshakeClientSession = struct {
     h3: http3.runtime.HandshakeClient,
     session_id: webtransport.SessionId,
+    /// Response metadata from the accepted Extended CONNECT. Header fields are
+    /// owned by this session and remain available until `deinit`.
+    response: http3.DecodedResponseHead,
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
 
@@ -764,6 +963,7 @@ pub const HandshakeClientSession = struct {
         server: net.IpAddress,
         options: HandshakeConnectOptions,
     ) Error!HandshakeClientSession {
+        try validateAdditionalConnectHeaders(options.headers, .request);
         var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportHandshakeClientOptions(options.h3));
         errdefer h3_client.deinit();
         return connectStatefulSession(
@@ -771,6 +971,7 @@ pub const HandshakeClientSession = struct {
             options.authority,
             options.path,
             options.origin,
+            options.headers,
             options.limits,
         );
     }
@@ -784,6 +985,7 @@ pub const HandshakeClientSession = struct {
         server: net.IpAddress,
         options: StatefulProtectedConnectOptions,
     ) Error!HandshakeClientSession {
+        try validateAdditionalConnectHeaders(options.headers, .request);
         const h3_options = webTransportHandshakeSessionOptions(options.h3);
         var h3_client = try http3.runtime.HandshakeClient.initPreconfigured(
             allocator,
@@ -800,14 +1002,23 @@ pub const HandshakeClientSession = struct {
             options.authority,
             options.path,
             options.origin,
+            options.headers,
             options.limits,
         );
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
+        self.response.deinit(self.h3.allocator);
         self.streams.deinit();
         self.h3.deinit();
         self.* = undefined;
+    }
+
+    pub fn responseHeader(
+        self: HandshakeClientSession,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.response.headers, name);
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
@@ -1364,6 +1575,9 @@ pub const HandshakeConnectOptions = struct {
     authority: []const u8,
     path: []const u8 = "/",
     origin: []const u8 = "/",
+    /// Additional regular CONNECT fields, for example Authorization or
+    /// User-Agent. Reserved WebTransport fields cannot be overridden.
+    headers: []const http3.Qpack.HeaderField = &.{},
     limits: Limits = .{},
     h3: http3.runtime.HandshakeClientOptions,
 };
@@ -1372,6 +1586,7 @@ pub const StatefulProtectedConnectOptions = struct {
     authority: []const u8,
     path: []const u8 = "/",
     origin: []const u8 = "/",
+    headers: []const http3.Qpack.HeaderField = &.{},
     limits: Limits = .{},
     h3: http3.runtime.HandshakeSessionOptions = .{},
     transport: quic.handshake.PreconfiguredConnectionOptions,
@@ -1405,6 +1620,13 @@ pub const StatefulProtectedClientSession = struct {
         self: StatefulProtectedClientSession,
     ) net.IpAddress {
         return self.session.h3.address();
+    }
+
+    pub fn responseHeader(
+        self: StatefulProtectedClientSession,
+        name: []const u8,
+    ) ?[]const u8 {
+        return self.session.responseHeader(name);
     }
 
     pub fn openBidirectionalStream(
@@ -1592,11 +1814,16 @@ fn connectStatefulSession(
     authority: []const u8,
     path: []const u8,
     origin: []const u8,
+    additional_headers: []const http3.Qpack.HeaderField,
     limits: Limits,
 ) Error!HandshakeClientSession {
     const allocator = h3_client.allocator;
-    var header_buf: [3]http3.Qpack.HeaderField = undefined;
-    const headers = connectRequestHeaders(origin, &header_buf);
+    var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
+    const headers = try connectRequestHeadersWithAdditional(
+        origin,
+        additional_headers,
+        &header_buf,
+    );
     const session_id = try h3_client.startRequest(.{
         .method = "CONNECT",
         .path = path,
@@ -1604,12 +1831,9 @@ fn connectStatefulSession(
         .authority = authority,
         .headers = headers,
     }, null);
-    const response_head =
+    var response_head =
         try receiveHandshakeConnectResponse(h3_client, session_id);
-    defer {
-        var owned = response_head;
-        owned.deinit(allocator);
-    }
+    errdefer response_head.deinit(allocator);
     try h3_client.detachResponseStream(session_id);
     try webtransport.ensureDatagramsNegotiated(
         h3_client.options.local_settings,
@@ -1635,19 +1859,19 @@ fn connectStatefulSession(
     return .{
         .h3 = owned_h3,
         .session_id = webtransport_session_id,
+        .response = response_head,
         .streams = streams,
         .control = control,
     };
 }
 
-fn acceptStatefulSession(
+fn receiveStatefulSessionRequest(
     session: *http3.runtime.HandshakeServerSession,
     limits: Limits,
-) Error!AcceptedHandshakeSession {
+) Error!PendingHandshakeSession {
     try session.ensureSettingsSent();
-    const request = try receiveHandshakeConnectRequest(session);
-    var request_head = request.head;
-    errdefer request_head.deinit(
+    var request = try receiveHandshakeConnectRequest(session);
+    errdefer request.head.deinit(
         session.established.connection.endpoint.allocator,
     );
     try webtransport.ensureDatagramsNegotiated(
@@ -1658,35 +1882,16 @@ fn acceptStatefulSession(
     if (!session_id.isClientInitiatedBidirectional()) {
         return error.InvalidConnect;
     }
-    try session.startResponse(
-        request.stream_id,
-        connectResponse(),
-        null,
-    );
-    try session.detachRequestStream(request.stream_id);
-    var streams = try initHandshakeStreamRegistry(
-        session.established.connection.endpoint.allocator,
-        session_id,
-        .server,
-        session.options.local_settings,
-        session.control.settings.peer,
-        limits.max_session_streams,
-        null,
-        null,
-    );
-    errdefer streams.deinit();
-    const control = try session_control.Control.init(session_id);
     const owned_h3 = session.*;
     session.* = undefined;
     return .{
         .h3 = owned_h3,
         .request = .{
             .stream_id = request.stream_id,
-            .request = request_head,
+            .request = request.head,
         },
         .session_id = session_id,
-        .streams = streams,
-        .control = control,
+        .limits = limits,
     };
 }
 
@@ -1794,6 +1999,14 @@ fn receiveProtectedConnectResponse(
 
 fn validateConnectRequest(request: anytype) Error!void {
     if (!std.mem.eql(u8, request.method, "CONNECT")) return error.InvalidConnect;
+    if (!std.mem.eql(u8, request.scheme, "https")) {
+        return error.InvalidConnect;
+    }
+    if (request.authority == null or request.authority.?.len == 0 or
+        request.path.len == 0)
+    {
+        return error.InvalidConnect;
+    }
     if (!std.mem.eql(u8, findHeader(request.headers, ":protocol") orelse "", "webtransport")) {
         return error.InvalidConnect;
     }
@@ -1801,12 +2014,72 @@ fn validateConnectRequest(request: anytype) Error!void {
 }
 
 fn connectResponse() http3.Response {
-    return .{ .status = 200, .headers = &.{http3.capsule.protocol_header} };
+    return connectResponseWithHeaders(&.{http3.capsule.protocol_header});
+}
+
+fn connectResponseWithHeaders(
+    headers: []const http3.Qpack.HeaderField,
+) http3.Response {
+    return .{ .status = 200, .headers = headers };
 }
 
 fn validateConnectResponse(response: anytype) Error!void {
-    if (response.status < 200 or response.status >= 300) return error.InvalidConnect;
+    if (response.status < 200 or response.status >= 300) {
+        return error.SessionRejected;
+    }
     try validateOptionalCapsuleProtocol(response.headers);
+}
+
+const AdditionalHeaderContext = enum { request, response };
+
+fn validateAdditionalConnectHeaders(
+    headers: []const http3.Qpack.HeaderField,
+    context: AdditionalHeaderContext,
+) Error!void {
+    const max_headers = switch (context) {
+        .request => max_additional_connect_request_headers,
+        .response => max_additional_connect_response_headers,
+    };
+    if (headers.len > max_headers) return error.InvalidFrame;
+    for (headers) |header| {
+        try validateAdditionalHeaderSyntax(header);
+        // Pseudo-fields are constructed from typed options, and the adapter
+        // owns Capsule-Protocol negotiation. Prevent generic metadata from
+        // smuggling a duplicate or contradictory reserved field.
+        if (std.mem.startsWith(u8, header.name, ":") or
+            std.ascii.eqlIgnoreCase(
+                header.name,
+                http3.capsule.header_name,
+            ) or
+            std.ascii.eqlIgnoreCase(header.name, "content-length") or
+            (context == .request and
+                std.ascii.eqlIgnoreCase(header.name, "origin")))
+        {
+            return error.InvalidHeader;
+        }
+    }
+}
+
+fn validateAdditionalHeaderSyntax(
+    header: http3.Qpack.HeaderField,
+) Error!void {
+    if (header.name.len == 0) return error.InvalidHeader;
+    for (header.name) |byte| {
+        if (!std.ascii.isLower(byte) and
+            !std.ascii.isDigit(byte) and
+            switch (byte) {
+                '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => false,
+                else => true,
+            })
+        {
+            return error.InvalidHeader;
+        }
+    }
+    for (header.value) |byte| {
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) {
+            return error.InvalidHeader;
+        }
+    }
 }
 
 fn validateOptionalCapsuleProtocol(
@@ -1838,6 +2111,25 @@ fn connectRequestHeaders(origin: []const u8, out: *[3]http3.Qpack.HeaderField) [
         count += 1;
     }
     return out[0..count];
+}
+
+fn connectRequestHeadersWithAdditional(
+    origin: []const u8,
+    additional: []const http3.Qpack.HeaderField,
+    out: *[max_additional_connect_request_headers + 3]http3.Qpack.HeaderField,
+) Error![]const http3.Qpack.HeaderField {
+    try validateAdditionalConnectHeaders(additional, .request);
+    var count: usize = 0;
+    out[count] = .{ .name = ":protocol", .value = "webtransport" };
+    count += 1;
+    out[count] = http3.capsule.protocol_header;
+    count += 1;
+    if (origin.len != 0 and !std.mem.eql(u8, origin, "/")) {
+        out[count] = .{ .name = "origin", .value = origin };
+        count += 1;
+    }
+    @memcpy(out[count..][0..additional.len], additional);
+    return out[0 .. count + additional.len];
 }
 
 pub const OwnedDatagram = struct {
@@ -2241,20 +2533,35 @@ test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
     try std.testing.expectEqual(@as(usize, 2), default_headers.len);
     try std.testing.expectEqualStrings("webtransport", findHeader(default_headers, ":protocol").?);
     try std.testing.expect(try http3.capsule.protocolEnabled(default_headers));
-    try validateConnectRequest(.{ .method = "CONNECT", .headers = default_headers });
+    try validateConnectRequest(.{
+        .method = "CONNECT",
+        .scheme = "https",
+        .path = "/",
+        .authority = @as(?[]const u8, "example.com"),
+        .headers = default_headers,
+    });
 
     var origin_buf: [3]http3.Qpack.HeaderField = undefined;
     const origin_headers = connectRequestHeaders("https://example.com", &origin_buf);
     try std.testing.expectEqual(@as(usize, 3), origin_headers.len);
     try std.testing.expectEqualStrings("https://example.com", findHeader(origin_headers, "origin").?);
     try std.testing.expect(try http3.capsule.protocolEnabled(origin_headers));
-    try validateConnectRequest(.{ .method = "CONNECT", .headers = origin_headers });
+    try validateConnectRequest(.{
+        .method = "CONNECT",
+        .scheme = "https",
+        .path = "/",
+        .authority = @as(?[]const u8, "example.com"),
+        .headers = origin_headers,
+    });
 
     const missing_capsule = [_]http3.Qpack.HeaderField{
         .{ .name = ":protocol", .value = "webtransport" },
     };
     try validateConnectRequest(.{
         .method = "CONNECT",
+        .scheme = "https",
+        .path = "/",
+        .authority = @as(?[]const u8, "example.com"),
         .headers = &missing_capsule,
     });
     const false_capsule = [_]http3.Qpack.HeaderField{
@@ -2265,7 +2572,20 @@ test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
         error.InvalidConnect,
         validateConnectRequest(.{
             .method = "CONNECT",
+            .scheme = "https",
+            .path = "/",
+            .authority = @as(?[]const u8, "example.com"),
             .headers = &false_capsule,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidConnect,
+        validateConnectRequest(.{
+            .method = "CONNECT",
+            .scheme = "http",
+            .path = "/",
+            .authority = @as(?[]const u8, "example.com"),
+            .headers = default_headers,
         }),
     );
 
@@ -2276,6 +2596,42 @@ test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
         .status = 200,
         .headers = &[_]http3.Qpack.HeaderField{},
     });
+    try std.testing.expectError(
+        error.SessionRejected,
+        validateConnectResponse(.{
+            .status = 403,
+            .headers = &[_]http3.Qpack.HeaderField{},
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidHeader,
+        validateAdditionalConnectHeaders(&.{.{
+            .name = ":path",
+            .value = "/override",
+        }}, .request),
+    );
+    try std.testing.expectError(
+        error.InvalidHeader,
+        validateAdditionalConnectHeaders(&.{.{
+            .name = "Capsule-Protocol",
+            .value = "?0",
+        }}, .response),
+    );
+    try std.testing.expectError(
+        error.InvalidHeader,
+        validateAdditionalConnectHeaders(&.{.{
+            .name = "content-length",
+            .value = "0",
+        }}, .response),
+    );
+    const too_many = [_]http3.Qpack.HeaderField{.{
+        .name = "x-extra",
+        .value = "value",
+    }} ** (max_additional_connect_request_headers + 1);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        validateAdditionalConnectHeaders(&too_many, .request),
+    );
 }
 
 test "WebTransport cleartext accept validates CONNECT session id direction" {
@@ -2924,4 +3280,5 @@ test "WebTransport handshake session receives datagrams with std.Io async batch"
 test {
     _ = @import("runtime/stream_tests.zig");
     _ = @import("runtime/session_control_tests.zig");
+    _ = @import("runtime/admission_tests.zig");
 }

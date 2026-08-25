@@ -1489,6 +1489,50 @@ test "public modules are reachable" {
         "StatefulProtectedClientSession",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "PendingHandshakeSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "RejectedHandshakeSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
+        "receiveSessionRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "receiveSessionRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeSession,
+        "acceptWithHeaders",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeSession,
+        "reject",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeSession,
+        "forbidden",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeSession,
+        "notFound",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeSession,
+        "tooManyRequests",
+    ));
+    try std.testing.expect(@hasField(
+        netz.webtransport.runtime.HandshakeConnectOptions,
+        "headers",
+    ));
+    try std.testing.expect(@hasField(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "response",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "writeStreams",
     ));

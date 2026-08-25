@@ -567,7 +567,12 @@ ACK/loss recovery or flow control. `StatefulProtectedServer` and
 they use the complete QUIC connection engine and therefore expose bidi/uni
 association, partial/batched writes, incremental and whole-stream reads,
 RESET_STREAM/STOP_SENDING, stream/session limits, connection statistics, and
-session-close cleanup. Their connection IDs, negotiated transport parameters,
+session-close cleanup. Stateful servers also provide two-phase CONNECT
+admission: applications can inspect authority, path, Origin, User-Agent, and
+custom request fields before accepting with custom response fields or rejecting
+with a final 3xx-5xx status. Stateful clients can attach validated custom
+CONNECT fields and retain the successful response metadata for the session
+lifetime. Their connection IDs, negotiated transport parameters,
 ALPN, packet keys, and optional resumption master secret must all come from the
 same authenticated external negotiation; the API does not replace TLS or
 authenticate those inputs.
@@ -587,8 +592,9 @@ zig build run-http2-h2c
 zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
-# Bidirectional wtransport interop for CONNECT, DATAGRAM, bidi/uni streams,
-# mapped RESET_STREAM/STOP_SENDING codes, post-cancellation reuse, and close.
+# Bidirectional wtransport interop for CONNECT admission metadata, DATAGRAM,
+# bidi/uni streams, mapped RESET_STREAM/STOP_SENDING codes, post-cancellation
+# reuse, and close.
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
 # always enables strict mode and rejects empty, skipped, or failed test runs.
