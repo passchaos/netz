@@ -1525,6 +1525,10 @@ test "public modules are reachable" {
         "closeConnection",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "closeConnection",
     ));

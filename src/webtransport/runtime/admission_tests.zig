@@ -37,6 +37,8 @@ test "WebTransport server admission exposes request and response metadata" {
 
     const Shared = struct {
         server: *runtime.HandshakeServer,
+        exporter: *[48]u8,
+        exporter_ready: *std.atomic.Value(bool),
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -76,12 +78,24 @@ test "WebTransport server admission exposes request and response metadata" {
             });
             pending_owned = false;
             defer accepted.deinit();
+            try accepted.exportKeyingMaterial(
+                "EXPORTER-netz-webtransport",
+                "admission",
+                self.exporter,
+            );
+            self.exporter_ready.store(true, .release);
             const event = try accepted.receiveSessionEvent();
             try std.testing.expect(event == .closed);
             try std.testing.expectEqual(@as(u32, 71), event.closed.code);
         }
     };
-    var shared = Shared{ .server = &server };
+    var server_exported: [48]u8 = undefined;
+    var exporter_ready: std.atomic.Value(bool) = .init(false);
+    var shared = Shared{
+        .server = &server,
+        .exporter = &server_exported,
+        .exporter_ready = &exporter_ready,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -117,6 +131,18 @@ test "WebTransport server admission exposes request and response metadata" {
     try std.testing.expectEqual(server.address(), client.remoteAddress());
     try std.testing.expect(client.remoteAddressValidated());
     try std.testing.expect(client.rttNanos() != null);
+    var client_exported: [48]u8 = undefined;
+    try client.exportKeyingMaterial(
+        "EXPORTER-netz-webtransport",
+        "admission",
+        &client_exported,
+    );
+    while (!exporter_ready.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_exported,
+        &server_exported,
+    );
     try std.testing.expectEqualStrings(
         "accepted",
         client.responseHeader("x-admission").?,

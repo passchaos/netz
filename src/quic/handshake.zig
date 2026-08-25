@@ -289,6 +289,10 @@ pub const EstablishedConnection = struct {
     /// Application data remains fully stateful, but post-handshake tickets are
     /// unavailable unless the external key negotiator supplies this secret.
     resumption_master_secret: ?quic.tls.secret.Secret,
+    /// TLS 1.3 exporter master secret bound to the transcript through the
+    /// server Finished. Both peers derive the same value. Externally installed
+    /// 1-RTT state may omit it when no TLS transcript is available.
+    exporter_master_secret: ?quic.tls.secret.Secret,
     peer_transport_parameters: quic.resumption.Snapshot,
     post_handshake_send_crypto_offset: u64 = 0,
     post_handshake_receive_crypto_offset: u64 = 0,
@@ -329,9 +333,27 @@ pub const EstablishedConnection = struct {
         );
     }
 
+    pub fn exportKeyingMaterial(
+        self: *const EstablishedConnection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        const exporter_master_secret = self.exporter_master_secret orelse
+            return error.PostHandshakeTlsUnavailable;
+        try quic.tls.key_schedule.exportKeyingMaterialFor(
+            exporter_master_secret,
+            label,
+            context,
+            out,
+        );
+    }
+
     pub fn deinit(self: *EstablishedConnection) void {
         const allocator = self.connection.endpoint.allocator;
         self.connection.deinit();
+        if (self.resumption_master_secret) |*secret| secret.deinit();
+        if (self.exporter_master_secret) |*secret| secret.deinit();
         allocator.free(self.local_connection_id);
         allocator.free(self.peer_connection_id);
         allocator.free(self.alpn);
@@ -363,6 +385,7 @@ pub const PreconfiguredConnectionOptions = struct {
     /// negotiator. Without it, post-handshake NewSessionTicket helpers fail
     /// closed while all QUIC application-data facilities remain available.
     resumption_master_secret: ?quic.tls.secret.Secret = null,
+    exporter_master_secret: ?quic.tls.secret.Secret = null,
 };
 
 pub fn establishPreconfigured(
@@ -410,6 +433,7 @@ pub fn establishPreconfigured(
         false,
         .not_offered,
         options.resumption_master_secret,
+        options.exporter_master_secret,
     );
 }
 
@@ -472,6 +496,15 @@ test "preconfigured QUIC validates externally negotiated metadata" {
         established.issueSessionTicket(threaded.io(), .{
             .now_ms = 0,
         }),
+    );
+    var exported: [32]u8 = undefined;
+    try std.testing.expectError(
+        error.PostHandshakeTlsUnavailable,
+        established.exportKeyingMaterial(
+            "EXPORTER-netz-test",
+            "context",
+            &exported,
+        ),
     );
 }
 
@@ -1408,6 +1441,10 @@ fn connectAttempt(
                 client_flight.items,
             }),
         ),
+        try quic.tls.key_schedule.deriveExporterMasterSecretFor(
+            application.master_secret,
+            application_transcript_hash,
+        ),
     );
     errdefer established.deinit();
     if (server_handshake.coalesced_one_rtt) |one_rtt| {
@@ -2031,6 +2068,14 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 server_flight.items,
                 client_flight.before_finished,
                 client_flight.finished,
+            }),
+        ),
+        try quic.tls.key_schedule.deriveExporterMasterSecretFor(
+            application.master_secret,
+            hashPartsForSuite(cipher_suite, &.{
+                client_initial.crypto_data,
+                server_hello.items,
+                server_flight.items,
             }),
         ),
     );
@@ -2972,6 +3017,7 @@ fn establishedConnection(
     resumed: bool,
     early_data_status: quic.zero_rtt.handshake.Status,
     resumption_master_secret: ?quic.tls.secret.Secret,
+    exporter_master_secret: ?quic.tls.secret.Secret,
 ) Error!EstablishedConnection {
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);
@@ -3000,6 +3046,7 @@ fn establishedConnection(
         .resumed = resumed,
         .early_data_status = early_data_status,
         .resumption_master_secret = resumption_master_secret,
+        .exporter_master_secret = exporter_master_secret,
         .peer_transport_parameters = .fromTransportParameters(
             peer_transport_parameters,
         ),

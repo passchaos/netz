@@ -577,7 +577,9 @@ HTTPS URL and derives DNS targets, SNI, authority, and path/query with the same
 multi-address fallback as the HTTP/3 client. Stateful sessions also expose the
 session ID, current migration-aware peer address, address-validation status,
 and smoothed RTT, plus an explicit connection-level application-close API that
-does not conflate QUIC shutdown with a WebTransport Session close. Their
+does not conflate QUIC shutdown with a WebTransport Session close. Integrated
+TLS sessions additionally expose RFC 8446 exporter keying material, with
+matching client/server output and no per-call allocation. Their
 connection IDs, negotiated
 transport parameters,
 ALPN, packet keys, and optional resumption master secret must all come from the

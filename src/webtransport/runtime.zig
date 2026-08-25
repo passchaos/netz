@@ -657,6 +657,19 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn exportKeyingMaterial(
+        self: *const AcceptedHandshakeSession,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try self.h3.established.exportKeyingMaterial(
+            label,
+            context,
+            out,
+        );
+    }
+
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
@@ -1129,6 +1142,19 @@ pub const HandshakeClientSession = struct {
         try self.h3.established.connection.closeApplication(
             error_code,
             reason,
+        );
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const HandshakeClientSession,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try self.h3.established.exportKeyingMaterial(
+            label,
+            context,
+            out,
         );
     }
 
@@ -1807,6 +1833,19 @@ pub const StatefulProtectedClientSession = struct {
         reason: []const u8,
     ) Error!void {
         return self.session.closeConnection(error_code, reason);
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const StatefulProtectedClientSession,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        return self.session.exportKeyingMaterial(
+            label,
+            context,
+            out,
+        );
     }
 
     pub fn openBidirectionalStream(
