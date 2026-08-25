@@ -163,13 +163,16 @@ frame scratch. Client frames still require
 masking, but now stream through the same bounded 16-KiB stack scratch used by
 HTTP/1 WebSocket instead of retaining the complete masked frame. The
 constrained-window regression verifies zero retained frame scratch in both
-directions.
-Five CPU-0 4-KiB regression samples with both directions using the bounded
-paths measured 30.952-32.594 us/roundtrip (31.563 us mean, 31.434 us median,
-1.78% relative standard deviation, 239.69-252.40 logical MiB/s). The range
+directions and uses the two-part API so HTTP/2 DATA framing crosses both the
+WebSocket header/payload and application-slice joins. A separate negotiated
+permessage-deflate test verifies the two borrowed slices are compressed as one
+binary message in both directions and still do not grow frame scratch.
+Five CPU-0 4-KiB regression samples after adding H2 two-part writes measured
+30.987-32.321 us/roundtrip (31.394 us mean, 31.072 us median, 1.63% relative
+standard deviation, 241.71-252.11 logical MiB/s). The range
 overlaps the earlier samples, so it is recorded as no demonstrated steady-state
 speedup; the proven improvement is eliminating payload-sized retained scratch
-on both directions of the ordinary single-frame path. The full 1,601-test suite
+on both directions of the ordinary single-frame path. The full 1,602-test suite
 and the bidirectional Hyper RFC 8441 gate remain green.
 
 The first compressed frame is copied once from the transport/caller frame

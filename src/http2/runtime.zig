@@ -54,6 +54,38 @@ const max_data_frames_per_write: usize = 4;
 const max_data_frames_with_headers: usize = 3;
 const local_reset_history_capacity: usize = 64;
 
+const DataSliceCursor = struct {
+    slices: []const []const u8,
+    slice_index: usize = 0,
+    slice_offset: usize = 0,
+
+    fn appendTo(
+        self: *DataSliceCursor,
+        output: [][]const u8,
+        output_len: *usize,
+        len: usize,
+    ) void {
+        var remaining = len;
+        while (remaining != 0) {
+            while (self.slice_index < self.slices.len and
+                self.slice_offset == self.slices[self.slice_index].len)
+            {
+                self.slice_index += 1;
+                self.slice_offset = 0;
+            }
+            std.debug.assert(self.slice_index < self.slices.len);
+            const slice = self.slices[self.slice_index];
+            const count = @min(remaining, slice.len - self.slice_offset);
+            std.debug.assert(output_len.* < output.len);
+            output[output_len.*] =
+                slice[self.slice_offset..][0..count];
+            output_len.* += 1;
+            self.slice_offset += count;
+            remaining -= count;
+        }
+    }
+};
+
 fn readSome(
     io: std.Io,
     stream: net.Stream,
@@ -7110,21 +7142,31 @@ pub const Connection = struct {
         second: []const u8,
         end_stream: bool,
     ) Error!void {
-        if (first.len == 0) return self.writeData(
+        return self.writeDataSlices(
             stream_id,
-            second,
+            &.{ first, second },
             end_stream,
         );
-        if (second.len == 0) return self.writeData(
+    }
+
+    fn writeDataSlices(
+        self: *Connection,
+        stream_id: u31,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!void {
+        try self.prepareDataWrite(stream_id);
+        return self.writeDataSlicesPrepared(
             stream_id,
-            first,
+            slices,
             end_stream,
         );
-        const total_len = std.math.add(
-            usize,
-            first.len,
-            second.len,
-        ) catch return error.MessageTooLarge;
+    }
+
+    fn prepareDataWrite(
+        self: *Connection,
+        stream_id: u31,
+    ) Error!void {
         if (!self.outboundStreamIsActive(stream_id)) {
             return error.InvalidStreamId;
         }
@@ -7133,9 +7175,51 @@ pub const Connection = struct {
         {
             return error.ResponseAvailable;
         }
+    }
+
+    fn writeDataSlicesPrepared(
+        self: *Connection,
+        stream_id: u31,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!void {
+        var total_len: usize = 0;
+        for (slices) |slice| {
+            total_len = std.math.add(
+                usize,
+                total_len,
+                slice.len,
+            ) catch return error.MessageTooLarge;
+        }
+        if (total_len == 0) {
+            try writeFrameTransport(
+                self.allocator,
+                self.transportForIo(),
+                .data,
+                if (end_stream) flag_end_stream else 0,
+                stream_id,
+                &.{},
+            );
+            return;
+        }
+
+        const wire_part_capacity = std.math.add(
+            usize,
+            slices.len,
+            2 * max_data_frames_per_write,
+        ) catch return error.MessageTooLarge;
+        var wire_parts_stack: [16][]const u8 = undefined;
+        const wire_parts = if (wire_part_capacity <= wire_parts_stack.len)
+            wire_parts_stack[0..wire_part_capacity]
+        else
+            try self.allocator.alloc([]const u8, wire_part_capacity);
+        defer if (wire_parts.ptr != wire_parts_stack[0..].ptr) {
+            self.allocator.free(wire_parts);
+        };
 
         const chunk_size = self.outboundFramePayloadLimit();
         var offset: usize = 0;
+        var cursor = DataSliceCursor{ .slices = slices };
         while (offset < total_len) {
             const stream_window = try self.sendStreamWindow(stream_id);
             const available_credit = @min(
@@ -7154,16 +7238,14 @@ pub const Connection = struct {
                 max_data_frames_per_write,
             ) catch std.math.maxInt(usize);
             const burst_len = @min(available_credit, burst_limit);
-            try self.writeDataPartsBurst(
+            try self.writeDataSlicesBurst(
                 stream_id,
-                first,
-                second,
-                offset,
+                &cursor,
                 burst_len,
-                total_len,
-                end_stream,
+                end_stream and offset + burst_len == total_len,
                 chunk_size,
                 stream_window,
+                wire_parts,
             );
             offset += burst_len;
         }
@@ -7277,23 +7359,19 @@ pub const Connection = struct {
         );
     }
 
-    fn writeDataPartsBurst(
+    fn writeDataSlicesBurst(
         self: *Connection,
         stream_id: u31,
-        first: []const u8,
-        second: []const u8,
-        logical_offset: usize,
+        cursor: *DataSliceCursor,
         payload_len: usize,
-        total_len: usize,
         end_stream: bool,
         chunk_size: usize,
         stream_window: *FlowWindow,
+        wire_parts: [][]const u8,
     ) Error!void {
-        std.debug.assert(first.len != 0 and second.len != 0);
         std.debug.assert(payload_len != 0);
         std.debug.assert(payload_len <=
             chunk_size *| max_data_frames_per_write);
-        std.debug.assert(logical_offset + payload_len <= total_len);
 
         try self.send_connection_window.reserve(payload_len);
         errdefer self.send_connection_window.update(
@@ -7307,45 +7385,29 @@ pub const Connection = struct {
         var headers: [max_data_frames_per_write][
             http2.FrameHeader.encoded_len
         ]u8 = undefined;
-        // One DATA frame can straddle the input join, so reserve one header and
-        // both borrowed ranges per frame. In practice only one frame has three
-        // parts, but the fixed upper bound keeps this loop branch-independent.
-        var wire_parts: [3 * max_data_frames_per_write][]const u8 = undefined;
         var wire_part_count: usize = 0;
-        const burst_end = logical_offset + payload_len;
-        var frame_start = logical_offset;
+        var frame_offset: usize = 0;
         var frame_index: usize = 0;
-        while (frame_start < burst_end) : (frame_index += 1) {
-            const frame_end = @min(burst_end, frame_start + chunk_size);
+        while (frame_offset < payload_len) : (frame_index += 1) {
+            const frame_end = @min(
+                payload_len,
+                frame_offset + chunk_size,
+            );
+            const frame_len = frame_end - frame_offset;
             try encodeFrameHeader(
                 &headers[frame_index],
                 .data,
-                if (end_stream and frame_end == total_len)
+                if (end_stream and frame_end == payload_len)
                     flag_end_stream
                 else
                     0,
                 stream_id,
-                frame_end - frame_start,
+                frame_len,
             );
             wire_parts[wire_part_count] = &headers[frame_index];
             wire_part_count += 1;
-
-            const first_end = @min(frame_end, first.len);
-            if (frame_start < first_end) {
-                wire_parts[wire_part_count] = first[frame_start..first_end];
-                wire_part_count += 1;
-            }
-            if (frame_end > first.len) {
-                const second_start = if (frame_start > first.len)
-                    frame_start - first.len
-                else
-                    0;
-                const second_end = frame_end - first.len;
-                wire_parts[wire_part_count] =
-                    second[second_start..second_end];
-                wire_part_count += 1;
-            }
-            frame_start = frame_end;
+            cursor.appendTo(wire_parts, &wire_part_count, frame_len);
+            frame_offset = frame_end;
         }
         try self.transportForIo().writeAllSlices(
             wire_parts[0..wire_part_count],
@@ -8395,6 +8457,38 @@ pub const Tunnel = struct {
         }
     }
 
+    /// Write borrowed slices as one ordered tunnel byte sequence. The HTTP/2
+    /// DATA framing layer may split or combine ranges at frame and flow-control
+    /// boundaries without copying their contents.
+    pub fn writeSlices(
+        self: *Tunnel,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!void {
+        try self.connection.writeDataSlices(
+            self.stream_id,
+            slices,
+            end_stream,
+        );
+        if (end_stream) {
+            self.connection.releaseLocalStream(self.stream_id);
+            self.connection.releasePeerStream(self.stream_id);
+        }
+    }
+
+    /// Begin one logical multi-call tunnel write. The initial preflight is
+    /// performed once so connection-level reads needed for flow-control credit
+    /// cannot turn a later chunk of the same byte sequence into
+    /// `ResponseAvailable`. The returned writer borrows this tunnel and must
+    /// not overlap another reader or writer on the HTTP/2 connection.
+    pub fn beginWriteSequence(self: *Tunnel) Error!TunnelWriter {
+        try self.connection.prepareDataWrite(self.stream_id);
+        return .{
+            .connection = self.connection,
+            .stream_id = self.stream_id,
+        };
+    }
+
     pub fn closeWrite(self: *Tunnel) Error!void {
         try self.connection.writeData(self.stream_id, &.{}, true);
     }
@@ -8458,6 +8552,50 @@ pub const Tunnel = struct {
                     continue;
                 },
             }
+        }
+    }
+};
+
+pub const TunnelWriter = struct {
+    connection: *Connection,
+    stream_id: u31,
+    ended: bool = false,
+
+    pub fn write(
+        self: *TunnelWriter,
+        data: []const u8,
+        end_stream: bool,
+    ) Error!void {
+        return self.writeSlices(&.{data}, end_stream);
+    }
+
+    pub fn writeParts(
+        self: *TunnelWriter,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+    ) Error!void {
+        return self.writeSlices(&.{ first, second }, end_stream);
+    }
+
+    pub fn writeSlices(
+        self: *TunnelWriter,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!void {
+        if (self.ended) return error.ConnectionClosed;
+        if (!self.connection.outboundStreamIsActive(self.stream_id)) {
+            return error.StreamReset;
+        }
+        try self.connection.writeDataSlicesPrepared(
+            self.stream_id,
+            slices,
+            end_stream,
+        );
+        if (end_stream) {
+            self.connection.releaseLocalStream(self.stream_id);
+            self.connection.releasePeerStream(self.stream_id);
+            self.ended = true;
         }
     }
 };

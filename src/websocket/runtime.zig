@@ -1937,6 +1937,77 @@ pub const H2Connection = struct {
         try self.sendMessage(.binary, payload);
     }
 
+    /// RFC 8441 counterpart to `Connection.sendBinaryParts`. The two caller-
+    /// owned slices remain one WebSocket message even when HTTP/2 flow control
+    /// divides its byte stream into several DATA frames.
+    pub fn sendBinaryParts(
+        self: *H2Connection,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        if (!canSendOpcode(.binary, self.close_sent, self.close_received)) {
+            return error.ConnectionClosed;
+        }
+        const payload_len = std.math.add(
+            usize,
+            first.len,
+            second.len,
+        ) catch return error.PayloadTooLarge;
+        if (payload_len > self.limits.max_message_bytes or
+            payload_len > self.limits.max_frame_bytes)
+        {
+            return error.PayloadTooLarge;
+        }
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+
+        if (self.permessage_deflate and
+            payload_len >= self.compression_threshold)
+        {
+            const parts = [_][]const u8{ first, second };
+            const compressed = try self.compressMessagePartsLocked(
+                &parts,
+                payload_len,
+            );
+            if (compressed.len < payload_len) {
+                try self.writeFrameLockedExtended(
+                    .binary,
+                    compressed,
+                    true,
+                    .{ .rsv1 = true },
+                );
+                return;
+            }
+        }
+
+        const mask_key = if (self.role == .client) blk: {
+            var key: [4]u8 = undefined;
+            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            break :blk key;
+        } else null;
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        const header = try websocket.writeFrameHeaderForLengthInto(
+            &header_storage,
+            .binary,
+            payload_len,
+            .{ .mask_key = mask_key },
+        );
+        const parts = [_][]const u8{ first, second };
+        if (mask_key) |mask| {
+            try writeMaskedTunnelPayloadSlices(
+                &self.tunnel,
+                header,
+                &parts,
+                mask,
+            );
+        } else {
+            try self.tunnel.writeSlices(
+                &.{ header, first, second },
+                false,
+            );
+        }
+    }
+
     pub fn sendPing(self: *H2Connection, payload: []const u8) Error!void {
         try self.sendFrame(.ping, payload);
     }
@@ -2333,6 +2404,23 @@ pub const H2Connection = struct {
         );
     }
 
+    fn compressMessagePartsLocked(
+        self: *H2Connection,
+        parts: []const []const u8,
+        payload_len: usize,
+    ) Error![]const u8 {
+        try self.compression_send.prepare(
+            self.allocator,
+            payload_len,
+        );
+        return websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
+            &self.compression_send.encoder.?,
+            &self.compression_send.payload,
+            parts,
+            self.compression_send_max_window_bits,
+        );
+    }
+
     fn writeFrameLocked(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
         try self.writeFrameLockedExtended(opcode, payload, fin, .{});
     }
@@ -2398,10 +2486,11 @@ pub const H2Connection = struct {
                 .rsv1 = options.rsv1,
             },
         );
-        try writeMaskedTunnelPayload(
+        const payload_parts = [_][]const u8{payload};
+        try writeMaskedTunnelPayloadSlices(
             &self.tunnel,
             header,
-            payload,
+            &payload_parts,
             mask_key.?,
         );
     }
@@ -3302,34 +3391,50 @@ fn writeMaskedPayloadParts(
     if (header_pending) try transport.writeAll(header);
 }
 
-fn writeMaskedTunnelPayload(
+fn writeMaskedTunnelPayloadSlices(
     tunnel: *http2_runtime.Tunnel,
     header: []const u8,
-    payload: []const u8,
+    payload_parts: []const []const u8,
     mask_key: [4]u8,
 ) Error!void {
-    if (payload.len == 0) {
-        try tunnel.write(header, false);
-        return;
-    }
-
+    var writer = try tunnel.beginWriteSequence();
     var scratch: [masked_write_scratch_len]u8 = undefined;
-    var offset: usize = 0;
-    while (offset < payload.len) {
-        const count = @min(scratch.len, payload.len - offset);
-        try websocket.applyMaskCopy(
-            scratch[0..count],
-            payload[offset..][0..count],
-            mask_key,
-            offset,
-        );
-        if (offset == 0) {
-            try tunnel.writeParts(header, scratch[0..count], false);
-        } else {
-            try tunnel.write(scratch[0..count], false);
+    var part_index: usize = 0;
+    var part_offset: usize = 0;
+    var mask_offset: usize = 0;
+    var header_pending = true;
+    while (part_index < payload_parts.len) {
+        var count: usize = 0;
+        while (part_index < payload_parts.len and count < scratch.len) {
+            const part = payload_parts[part_index];
+            if (part_offset == part.len) {
+                part_index += 1;
+                part_offset = 0;
+                continue;
+            }
+            const chunk_len = @min(
+                scratch.len - count,
+                part.len - part_offset,
+            );
+            try websocket.applyMaskCopy(
+                scratch[count..][0..chunk_len],
+                part[part_offset..][0..chunk_len],
+                mask_key,
+                mask_offset,
+            );
+            count += chunk_len;
+            part_offset += chunk_len;
+            mask_offset += chunk_len;
         }
-        offset += count;
+        if (count == 0) break;
+        if (header_pending) {
+            try writer.writeParts(header, scratch[0..count], false);
+            header_pending = false;
+        } else {
+            try writer.write(scratch[0..count], false);
+        }
     }
+    if (header_pending) try writer.write(header, false);
 }
 
 test "WebSocket client handshake accepts split Connection and rejects duplicate critical headers" {
@@ -4604,7 +4709,10 @@ test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqual(websocket.Opcode.binary, request.opcode);
             try std.testing.expectEqualStrings(payload, request.payload);
-            try ws.sendBinary(payload);
+            try ws.sendBinaryParts(
+                payload[0..19],
+                payload[19..],
+            );
             try std.testing.expectEqual(
                 @as(usize, 0),
                 ws.send_frame_buffer.capacity,
@@ -4635,7 +4743,10 @@ test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
     });
     defer client.close();
 
-    try client.sendBinary(payload);
+    try client.sendBinaryParts(
+        payload[0..41],
+        payload[41..],
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         client.send_frame_buffer.capacity,
@@ -4648,6 +4759,100 @@ test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
     var close = try client.receiveFrame();
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP/2 compressed binary parts preserve one message" {
+    const allocator = std.testing.allocator;
+    const first = "h2-compressed-prefix-";
+    const second = "compressible-borrowed-payload-" ** 64;
+    const expected = first ++ second;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_body_bytes = expected.len,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *http2_runtime.Server) !void {
+            var h2 = try server_ptr.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
+                .enable_permessage_deflate = true,
+                .compression_threshold = 0,
+                .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = expected.len,
+                    .max_message_bytes = expected.len,
+                },
+            });
+            defer ws.close();
+
+            var request = try ws.receiveMessage();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.binary, request.opcode);
+            try std.testing.expectEqualStrings(expected, request.payload);
+            try ws.sendBinaryParts(first, second);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                ws.send_frame_buffer.capacity,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_body_bytes = expected.len },
+    );
+    defer h2_client.close();
+    var client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/compressed-binary-parts",
+        .enable_permessage_deflate = true,
+        .compression_threshold = 0,
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = expected.len,
+            .max_message_bytes = expected.len,
+        },
+    });
+    defer client.close();
+
+    try client.sendBinaryParts(first, second);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.send_frame_buffer.capacity,
+    );
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, response.opcode);
+    try std.testing.expectEqualStrings(expected, response.payload);
 
     thread.join();
     if (shared.err) |err| return err;

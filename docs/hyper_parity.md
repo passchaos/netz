@@ -802,11 +802,14 @@ keep-alive, cancellation and GOAWAY gate remains green.
    more than 16 KiB, forcing repeated WINDOW_UPDATE and client masking cycles,
    and confirms that the H2 WebSocket adapter
    retains no frame scratch after sending in either direction; client masking
-   uses a bounded 16-KiB stack buffer. The existing bidirectional Hyper RFC 8441
+   uses a bounded 16-KiB stack buffer. `H2Connection.sendBinaryParts` retains
+   one RFC 6455 message across both caller slices, and the underlying tunnel's
+   slice writer permits HTTP/2 DATA frames to cross either logical join. The
+   existing bidirectional Hyper RFC 8441
    process gate remains the external interoperability check. Five CPU-0 4-KiB
-   echo samples after both directions adopted the bounded path measured
-   30.952-32.594 us/roundtrip (31.563 us mean, 31.434 us median, 1.78% relative
-   standard deviation); this overlaps the prior range and is not presented as
+   echo samples after adding H2 two-part writes measured 30.987-32.321
+   us/roundtrip (31.394 us mean, 31.072 us median, 1.63% relative standard
+   deviation); this overlaps the prior range and is not presented as
    a latency improvement. The full
-   1,601-test suite, 147-case h2spec strict gate, and bidirectional Hyper h2c/TLS
+   1,602-test suite, 147-case h2spec strict gate, and bidirectional Hyper h2c/TLS
    request, cancellation, keep-alive and GOAWAY matrix remain green.
