@@ -411,6 +411,29 @@ const ClientSlot = struct {
     }
 };
 
+/// Point-in-time broker gauges. The snapshot is collected under the same state
+/// lock as routing and Session transitions, so cross-field invariants describe
+/// one coherent instant rather than a mixture of concurrent updates.
+pub const Stats = struct {
+    active_connections: usize,
+    sessions: usize,
+    connected_sessions: usize,
+    disconnected_sessions: usize,
+    subscriptions: usize,
+    shared_subscriptions: usize,
+    retained_messages: usize,
+    retained_bytes: usize,
+    live_queued_deliveries: usize,
+    session_queued_messages: usize,
+    session_queued_payload_bytes: usize,
+    session_inflight_messages: usize,
+    session_inflight_payload_bytes: usize,
+    pending_incoming_qos2: usize,
+    scheduled_wills: usize,
+    scheduled_will_bytes: usize,
+    session_owned_bytes: usize,
+};
+
 /// A broker listener that accepts a configured, bounded number of live TCP
 /// clients and routes between them until each disconnects.
 pub const Broker = struct {
@@ -588,6 +611,40 @@ pub const Broker = struct {
 
     pub fn address(self: Broker) net.IpAddress {
         return self.server.address();
+    }
+
+    /// Return a coherent, allocation-free snapshot suitable for metrics,
+    /// health checks, and a future `$SYS` publisher.
+    pub fn stats(self: *Broker) Stats {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+
+        var active_connections: usize = 0;
+        var live_queued_deliveries: usize = 0;
+        for (self.slots) |slot| {
+            active_connections +|= @intFromBool(slot.active);
+            live_queued_deliveries +|= slot.queuedCount();
+        }
+        const sessions = self.sessions.aggregateStats();
+        return .{
+            .active_connections = active_connections,
+            .sessions = sessions.session_count,
+            .connected_sessions = sessions.connected_count,
+            .disconnected_sessions = sessions.disconnected_count,
+            .subscriptions = self.router.subscriptionCount(),
+            .shared_subscriptions = self.router.sharedSubscriptionCount(),
+            .retained_messages = self.retained.count(),
+            .retained_bytes = self.retained.totalBytes(),
+            .live_queued_deliveries = live_queued_deliveries,
+            .session_queued_messages = sessions.queued_count,
+            .session_queued_payload_bytes = sessions.queued_payload_bytes,
+            .session_inflight_messages = sessions.inflight_count,
+            .session_inflight_payload_bytes = sessions.inflight_payload_bytes,
+            .pending_incoming_qos2 = self.pending_qos2.count(),
+            .scheduled_wills = self.wills.count(),
+            .scheduled_will_bytes = self.wills.totalBytes(),
+            .session_owned_bytes = sessions.owned_wire_bytes,
+        };
     }
 
     /// Start a crash-tolerant append journal with the broker's current state.
@@ -1471,10 +1528,10 @@ pub const Broker = struct {
         handle: session_mod.Handle,
         route_id: u64,
     ) Error!void {
-        const stats = try self.sessions.stats(handle);
+        const session_stats = try self.sessions.stats(handle);
         const subscriptions = try self.allocator.alloc(
             session_mod.Subscription,
-            stats.subscription_count,
+            session_stats.subscription_count,
         );
         defer self.allocator.free(subscriptions);
         const restored = try self.sessions.subscriptionsInto(
@@ -1503,10 +1560,10 @@ pub const Broker = struct {
         handle: session_mod.Handle,
         route_id: u64,
     ) Error!void {
-        const stats = try sessions.stats(handle);
+        const session_stats = try sessions.stats(handle);
         const subscriptions = try allocator.alloc(
             session_mod.Subscription,
-            stats.subscription_count,
+            session_stats.subscription_count,
         );
         defer allocator.free(subscriptions);
         const restored = try sessions.subscriptionsInto(
@@ -1572,8 +1629,10 @@ pub const Broker = struct {
                     return err;
                 }
             };
-            const stats = self.sessions.stats(handle) catch null;
-            if (stats == null or stats.?.expiry_interval == 0) {
+            const session_stats = self.sessions.stats(handle) catch null;
+            if (session_stats == null or
+                session_stats.?.expiry_interval == 0)
+            {
                 if (route_id) |value| {
                     _ = self.pending_qos2.removePublisher(
                         sessionSubscriberId(value),

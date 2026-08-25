@@ -68,6 +68,23 @@ pub const Stats = struct {
     owned_wire_bytes: usize,
 };
 
+/// Aggregate Session Store gauges captured while the owner provides external
+/// synchronization. Counts include transient connected Sessions and durable
+/// connected/offline Sessions. Totals saturate so observability cannot fail
+/// or wrap under deliberately extreme configured limits.
+pub const StoreStats = struct {
+    session_count: usize,
+    connected_count: usize,
+    disconnected_count: usize,
+    subscription_count: usize,
+    queued_count: usize,
+    queued_payload_bytes: usize,
+    inflight_count: usize,
+    inflight_payload_bytes: usize,
+    incoming_qos2_count: usize,
+    owned_wire_bytes: usize,
+};
+
 pub const Subscription = struct {
     topic_filter: []const u8,
     qos: mqtt.QoS,
@@ -349,6 +366,46 @@ pub const Store = struct {
 
     pub fn totalBytes(self: Store) usize {
         return self.total_bytes;
+    }
+
+    pub fn aggregateStats(self: Store) StoreStats {
+        var result = StoreStats{
+            .session_count = self.session_count,
+            .connected_count = 0,
+            .disconnected_count = 0,
+            .subscription_count = 0,
+            .queued_count = 0,
+            .queued_payload_bytes = 0,
+            .inflight_count = 0,
+            .inflight_payload_bytes = 0,
+            .incoming_qos2_count = 0,
+            .owned_wire_bytes = self.total_bytes,
+        };
+        for (self.sessions.items) |maybe_session| {
+            const session = maybe_session orelse continue;
+            if (session.connected) {
+                result.connected_count +|= 1;
+            } else {
+                result.disconnected_count +|= 1;
+            }
+            result.subscription_count +|= session.subscription_count;
+            result.queued_count +|= session.queued_count +|
+                @intFromBool(session.pending_qos0 != null);
+            result.queued_payload_bytes +|= session.queued_payload_bytes +|
+                if (session.pending_qos0) |pending|
+                    pending.publish.payload.len
+                else
+                    0;
+            result.inflight_count +|= session.inflight_count;
+            result.inflight_payload_bytes +|=
+                session.inflight_payload_bytes;
+            result.incoming_qos2_count +|= session.incoming_qos2.count();
+        }
+        std.debug.assert(
+            result.connected_count + result.disconnected_count ==
+                result.session_count,
+        );
+        return result;
     }
 
     /// Encode durable Session State without exposing private slot layouts.

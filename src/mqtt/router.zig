@@ -134,6 +134,18 @@ pub const Router = struct {
         return count;
     }
 
+    /// Count shared-subscription members, matching Mosquitto's
+    /// `$SYS/broker/shared_subscriptions/count` semantics. This counts each
+    /// client/filter membership, not only distinct `{group, filter}` keys.
+    pub fn sharedSubscriptionCount(self: Router) usize {
+        var count: usize = 0;
+        for (self.entries.items) |maybe_entry| {
+            const entry = maybe_entry orelse continue;
+            count += @intFromBool(entry.shared_group != null);
+        }
+        return count;
+    }
+
     pub fn subscribe(self: *Router, subscriber_id: SubscriberId, subscription: mqtt.Subscription) Error!void {
         _ = try self.subscribeWithStatus(subscriber_id, subscription);
     }

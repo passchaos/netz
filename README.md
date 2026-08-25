@@ -441,7 +441,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   out-of-order ACKs and incoming QoS 2 deduplication, atomic versioned broker
   snapshots, and an opt-in fsynced append journal with CRC/sequence/footer
   validation, torn-tail recovery, atomic compaction, and protocol-visible
-  durability boundaries, integrated into one live
+  durability boundaries, plus coherent allocation-free broker statistics for
+  connection, Session, subscription, retained, queue, inflight, QoS 2 and Will
+  state, integrated into one live
   TCP broker listener that auto-detects MQTT 3.1.1/5 per connection, exposes
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing with trusted source,
   destination, transport and v2 TLV metadata,

@@ -30,6 +30,7 @@ and equal-wire broker results are kept separate.
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
 | Broker persistence | Atomic versioned snapshots plus an opt-in fsynced append journal for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
+| Observability | `Broker.stats()` takes one allocation-free, state-locked snapshot of live connections, connected/offline Sessions, ordinary/shared subscriptions, retained state, live queues, durable queues/inflight, inbound QoS 2 and scheduled Wills, including owned byte gauges | Mosquitto publishes a broader counter/gauge set through `$SYS`; rumqttd exposes metrics through its server architecture |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
@@ -48,7 +49,7 @@ transport-aware CONNECT authorization callback receives them together with the
 effective source address and any directly verified mTLS certificate chain.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 132 raw scenarios
+deadline on every one of its finite broker processes, so all 134 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 

@@ -530,6 +530,19 @@ test "public modules are reachable" {
         netz.mqtt.broker.Broker,
         "restoreSnapshot",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "stats",
+    ));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "Stats"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.router.Router,
+        "sharedSubscriptionCount",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "aggregateStats",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.retained, "Store"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.retained.Store,

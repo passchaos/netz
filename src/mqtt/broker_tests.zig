@@ -519,6 +519,111 @@ test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker statistics form one coherent live and offline snapshot" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    const empty = broker.stats();
+    try std.testing.expectEqual(@as(usize, 0), empty.active_connections);
+    try std.testing.expectEqual(@as(usize, 0), empty.sessions);
+    try std.testing.expectEqual(@as(usize, 0), empty.subscriptions);
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{
+            .protocol = .v5,
+            .client_id = "stats-subscriber",
+            .clean_start = false,
+            .properties = &.{.{ .four_byte = .{
+                .id = .session_expiry_interval,
+                .value = 60,
+            } }},
+        },
+    );
+    defer subscriber.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "stats-publisher",
+        &.{},
+    );
+    defer publisher.close();
+    var suback = try subscriber.subscribe(
+        &.{
+            .{
+                .topic_filter = "metrics/#",
+                .qos = .at_least_once,
+            },
+            .{
+                .topic_filter = "$share/observers/metrics/+",
+                .qos = .at_least_once,
+            },
+        },
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try publisher.publish(
+        "metrics/value",
+        "retained-metric",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+
+    const live = broker.stats();
+    try std.testing.expectEqual(@as(usize, 2), live.active_connections);
+    try std.testing.expectEqual(@as(usize, 2), live.sessions);
+    try std.testing.expectEqual(@as(usize, 2), live.connected_sessions);
+    try std.testing.expectEqual(@as(usize, 0), live.disconnected_sessions);
+    try std.testing.expectEqual(@as(usize, 2), live.subscriptions);
+    try std.testing.expectEqual(@as(usize, 1), live.shared_subscriptions);
+    try std.testing.expectEqual(@as(usize, 1), live.retained_messages);
+    try std.testing.expect(live.retained_bytes > 0);
+    try std.testing.expectEqual(@as(usize, 0), live.live_queued_deliveries);
+    try std.testing.expectEqual(@as(usize, 0), live.session_queued_messages);
+    try std.testing.expectEqual(@as(usize, 1), live.session_inflight_messages);
+    try std.testing.expectEqual(
+        "retained-metric".len,
+        live.session_inflight_payload_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 0), live.pending_incoming_qos2);
+    try std.testing.expectEqual(@as(usize, 0), live.scheduled_wills);
+    try std.testing.expect(live.session_owned_bytes > 0);
+
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+
+    const offline = broker.stats();
+    try std.testing.expectEqual(@as(usize, 0), offline.active_connections);
+    try std.testing.expectEqual(@as(usize, 1), offline.sessions);
+    try std.testing.expectEqual(@as(usize, 0), offline.connected_sessions);
+    try std.testing.expectEqual(@as(usize, 1), offline.disconnected_sessions);
+    try std.testing.expectEqual(@as(usize, 2), offline.subscriptions);
+    try std.testing.expectEqual(@as(usize, 1), offline.shared_subscriptions);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        offline.session_inflight_messages,
+    );
+}
+
 test {
     _ = @import("broker/capability_tests.zig");
     _ = @import("broker/protocol_tests.zig");
