@@ -35,6 +35,7 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || erro
     UnsupportedScheme,
     PriorityCapacityExceeded,
     InvalidAlpn,
+    PostHandshakeTlsUnavailable,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -1427,6 +1428,30 @@ pub const Connection = struct {
             .tls_server => |connection| connection.peerCertificates(),
             .tls_client => |connection| connection.peerCertificates(),
             .tcp => null,
+        };
+    }
+
+    /// Export RFC 8446 channel-bound keying material for TLS connections.
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        const transport = self.transport orelse
+            return error.PostHandshakeTlsUnavailable;
+        return switch (transport) {
+            .tls_client => |connection| connection.exportKeyingMaterial(
+                label,
+                context,
+                out,
+            ),
+            .tls_server => |connection| connection.exportKeyingMaterial(
+                label,
+                context,
+                out,
+            ),
+            .tcp => error.PostHandshakeTlsUnavailable,
         };
     }
 

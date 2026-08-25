@@ -139,6 +139,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
+        "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
         "startResponse",
     ));
     try std.testing.expect(@hasDecl(
@@ -214,6 +218,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
         "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "exportKeyingMaterial",
     ));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
@@ -1001,6 +1009,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "exportKeyingMaterial",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

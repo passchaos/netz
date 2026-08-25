@@ -40,6 +40,7 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     UnsupportedScheme,
     MessageTooLarge,
     TimedReadUnsupported,
+    ExporterUnavailable,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
 
 pub const Limits = struct {
@@ -1094,6 +1095,22 @@ pub const Connection = struct {
             return connection.peerCertificates();
         }
         return null;
+    }
+
+    /// Export RFC 8446 channel-bound keying material for vail-backed WSS.
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        if (self.tls_server_conn) |connection| {
+            return connection.exportKeyingMaterial(label, context, out);
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.exportKeyingMaterial(label, context, out);
+        }
+        return error.ExporterUnavailable;
     }
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {

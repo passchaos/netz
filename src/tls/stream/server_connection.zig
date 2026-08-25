@@ -28,6 +28,7 @@ pub const Connection = struct {
     records: record_stream.Stream,
     peer_certificate_chain: ?server_handshake.PeerCertificateChain = null,
     selected_alpn: ?[]u8 = null,
+    exporter_master_secret: @import("vail").tls.secret.Secret,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -47,7 +48,6 @@ pub const Connection = struct {
         else
             null;
         errdefer if (selected_alpn) |protocol| allocator.free(protocol);
-
         const connection = try allocator.create(Connection);
         connection.* = .{
             .allocator = allocator,
@@ -56,7 +56,9 @@ pub const Connection = struct {
             .records = .init(keys.read, keys.write),
             .peer_certificate_chain = keys.peer_certificate_chain,
             .selected_alpn = selected_alpn,
+            .exporter_master_secret = keys.exporter_master_secret,
         };
+        keys.exporter_master_secret = undefined;
         return connection;
     }
 
@@ -69,6 +71,7 @@ pub const Connection = struct {
         self.stream.close(self.io);
         const allocator = self.allocator;
         if (self.selected_alpn) |protocol| allocator.free(protocol);
+        self.exporter_master_secret.deinit();
         self.* = undefined;
         allocator.destroy(self);
     }
@@ -85,6 +88,21 @@ pub const Connection = struct {
     /// is owned by this connection and remains valid until `deinit`.
     pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
         return self.selected_alpn;
+    }
+
+    /// Export TLS 1.3 channel-bound keying material (RFC 8446 section 7.5).
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try @import("vail").tls.key_schedule.exportKeyingMaterialFor(
+            self.exporter_master_secret,
+            label,
+            context,
+            out,
+        );
     }
 
     /// Read decrypted application bytes with stream semantics.

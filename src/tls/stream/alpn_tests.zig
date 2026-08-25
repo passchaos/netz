@@ -27,6 +27,7 @@ test "TLS stream negotiates ALPN and exchanges application data" {
         io: std.Io,
         certificate: *const [tls_testing.certificate_der_len]u8,
         key_pair: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+        exporter: [32]u8 = undefined,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -60,6 +61,14 @@ test "TLS stream negotiates ALPN and exchanges application data" {
                 shared.err = error.InvalidAlpn;
                 return;
             }
+            connection.exportKeyingMaterial(
+                "EXPORTER-netz-stream-test",
+                "shared-context",
+                &shared.exporter,
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
             var request: [4]u8 = undefined;
             var offset: usize = 0;
             while (offset < request.len) {
@@ -107,6 +116,12 @@ test "TLS stream negotiates ALPN and exchanges application data" {
     stream_owned = false;
     defer connection.deinit();
     try std.testing.expectEqualStrings("h2", connection.selected_alpn.?);
+    var client_exporter: [32]u8 = undefined;
+    try connection.exportKeyingMaterial(
+        "EXPORTER-netz-stream-test",
+        "shared-context",
+        &client_exporter,
+    );
     try connection.writeAllSlices(&.{ "pi", "", "ng" });
     var response: [4]u8 = undefined;
     var offset: usize = 0;
@@ -120,6 +135,11 @@ test "TLS stream negotiates ALPN and exchanges application data" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqualSlices(
+        u8,
+        &shared.exporter,
+        &client_exporter,
+    );
 }
 
 test "TLS stream rejects ALPN without a shared protocol" {

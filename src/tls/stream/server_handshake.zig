@@ -73,11 +73,13 @@ pub const TrafficKeys = struct {
     write: tls_record.Keys,
     peer_certificate_chain: ?PeerCertificateChain = null,
     selected_alpn: ?[]const u8 = null,
+    exporter_master_secret: vail.tls.secret.Secret,
 
     pub fn deinit(self: *TrafficKeys) void {
         self.read.deinit();
         self.write.deinit();
         if (self.peer_certificate_chain) |*chain| chain.deinit();
+        self.exporter_master_secret.deinit();
         self.* = undefined;
     }
 };
@@ -232,6 +234,12 @@ pub fn perform(
         application.client_traffic_secret,
     );
     errdefer read_keys.deinit();
+    var exporter_master_secret =
+        try vail.tls.key_schedule.deriveExporterMasterSecretFor(
+            application.master_secret,
+            handshake.transcript_after_server_finished,
+        );
+    errdefer exporter_master_secret.deinit();
     return .{
         .read = read_keys,
         .write = try tls_record.Keys.derive(
@@ -240,6 +248,7 @@ pub fn perform(
         ),
         .peer_certificate_chain = peer_certificate_chain,
         .selected_alpn = handshake.selection.alpn_protocol,
+        .exporter_master_secret = exporter_master_secret,
     };
 }
 

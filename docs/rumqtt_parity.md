@@ -845,6 +845,8 @@ server-selected value available through `Connection.negotiatedAlpn()` on both
 ends. The same client path now retains the complete verified server certificate
 chain and exposes it through `Connection.peerCertificates()` for native MQTT
 TLS and WSS; server-side mTLS continues to expose the verified client chain.
+Both endpoint roles also expose RFC 8446 exporter keying material for
+application authentication and channel binding.
 This covers rumqttc's configurable TLS ALPN surface and Mosquitto's
 client/bridge ALPN option while also giving server applications the negotiated
 identity directly. Empty ALPN lists preserve the existing standard-library TLS

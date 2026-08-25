@@ -470,7 +470,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   servers with caller-provided certificate chains/signers and concurrent
   serving, including optional/required client-certificate authentication,
   pluggable trust verification, verified peer-chain access on both native TLS
-  endpoint roles and identity-enabled WSS clients, and opt-in native
+  endpoint roles and identity-enabled WSS clients, RFC 8446 exporter keying
+  material on vail-backed HTTP/2, WebSocket, and MQTT connections, and opt-in native
   MQTT TLS ALPN negotiation with the selected protocol exposed per
   connection, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with

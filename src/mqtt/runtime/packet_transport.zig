@@ -13,6 +13,7 @@ pub const Error = mqtt.Error || websocket_runtime.Error ||
     ConnectionClosed,
     InvalidWebSocketMessage,
     PacketTooLarge,
+    ExporterUnavailable,
 } || net.Stream.Reader.Error || net.Stream.Writer.Error ||
     keep_alive_reader.Error;
 
@@ -85,6 +86,32 @@ pub const Transport = union(enum) {
             // MQTT-over-WebSocket negotiates its application protocol through
             // Sec-WebSocket-Protocol rather than the underlying TLS session.
             .tcp, .tls, .websocket => null,
+        };
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const Transport,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        return switch (self.*) {
+            .tls_vail => |connection| connection.exportKeyingMaterial(
+                label,
+                context,
+                out,
+            ),
+            .tls_server => |connection| connection.exportKeyingMaterial(
+                label,
+                context,
+                out,
+            ),
+            .websocket => |*ws| ws.connection.exportKeyingMaterial(
+                label,
+                context,
+                out,
+            ),
+            .tcp, .tls => error.ExporterUnavailable,
         };
     }
 

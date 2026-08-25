@@ -84,6 +84,7 @@ pub const Connection = struct {
     records: record_stream.Stream,
     selected_alpn: ?[]u8 = null,
     peer_certificate_chain: [][]const u8 = &.{},
+    exporter_master_secret: vail.tls.secret.Secret,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -251,8 +252,22 @@ pub const Connection = struct {
         errdefer if (selected_alpn) |protocol| allocator.free(protocol);
         const peer_certificate_chain = verified.peer_certificate_chain;
         verified.peer_certificate_chain = &.{};
+        errdefer {
+            for (peer_certificate_chain) |certificate| {
+                allocator.free(certificate);
+            }
+            allocator.free(peer_certificate_chain);
+        }
+        var exporter_master_secret =
+            try vail.tls.key_schedule.deriveExporterMasterSecretFor(
+                verified.application.master_secret,
+                verified.transcript_after_server_finished,
+            );
+        errdefer exporter_master_secret.deinit();
 
         const connection = try allocator.create(Connection);
+        // Transfer all established-session secrets only after the final
+        // allocation succeeds; earlier failures stay owned by local errdefers.
         connection.* = .{
             .allocator = allocator,
             .io = io,
@@ -260,7 +275,9 @@ pub const Connection = struct {
             .records = .init(read_keys, write_keys),
             .selected_alpn = selected_alpn,
             .peer_certificate_chain = peer_certificate_chain,
+            .exporter_master_secret = exporter_master_secret,
         };
+        exporter_master_secret = undefined;
         return connection;
     }
 
@@ -327,6 +344,7 @@ pub const Connection = struct {
             allocator.free(certificate);
         }
         allocator.free(self.peer_certificate_chain);
+        self.exporter_master_secret.deinit();
         self.* = undefined;
         allocator.destroy(self);
     }
@@ -341,6 +359,21 @@ pub const Connection = struct {
     /// owned by this connection and remain valid until `deinit`.
     pub fn peerCertificates(self: *const Connection) []const []const u8 {
         return self.peer_certificate_chain;
+    }
+
+    /// Export TLS 1.3 channel-bound keying material (RFC 8446 section 7.5).
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try vail.tls.key_schedule.exportKeyingMaterialFor(
+            self.exporter_master_secret,
+            label,
+            context,
+            out,
+        );
     }
 
     pub fn read(self: *Connection, out: []u8) Error!usize {

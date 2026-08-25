@@ -35,6 +35,7 @@ pub const Error = packet_transport.Error || error{
     RedirectLimitExceeded,
     RedirectLoop,
     RedirectRejected,
+    ExporterUnavailable,
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -1038,6 +1039,22 @@ pub const Connection = struct {
     /// return null. The borrowed value remains valid until `close`.
     pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
         return self.transport.negotiatedAlpn();
+    }
+
+    /// Export RFC 8446 channel-bound keying material from vail-backed native
+    /// TLS or WSS. Cleartext and standard-library TLS return
+    /// `ExporterUnavailable` rather than silently producing unbound bytes.
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        return self.transport.exportKeyingMaterial(
+            label,
+            context,
+            out,
+        );
     }
 
     /// Return trusted PROXY protocol metadata, if this listener required it.
