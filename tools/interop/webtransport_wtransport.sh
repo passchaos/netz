@@ -115,7 +115,7 @@ server_pid=
 cat "$work/netz-client.log"
 cat "$rust_log"
 grep -Fq \
-  'netz WebTransport client interop passed: CONNECT rejection=404 admission-headers=true DATAGRAM max_datagram_size=' \
+  'netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size=' \
   "$work/netz-client.log"
 grep -Fq 'oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close' \
   "$work/netz-client.log"

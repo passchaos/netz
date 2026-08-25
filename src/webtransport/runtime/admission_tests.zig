@@ -49,12 +49,13 @@ test "WebTransport server admission exposes request and response metadata" {
             var pending = try self.server.receiveSessionRequest();
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
-            try std.testing.expectEqualStrings(
-                "localhost",
+            try std.testing.expect(std.mem.startsWith(
+                u8,
                 pending.authority().?,
-            );
+                "127.0.0.1:",
+            ));
             try std.testing.expectEqualStrings(
-                "/authorized",
+                "/authorized?room=7",
                 pending.path(),
             );
             try std.testing.expectEqualStrings(
@@ -85,14 +86,18 @@ test "WebTransport server admission exposes request and response metadata" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var client = try runtime.HandshakeClientSession.connect(
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/authorized?room=7",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var client = try runtime.HandshakeClientSession.connectUri(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        server.address(),
+        uri,
         .{
-            .authority = "localhost",
-            .path = "/authorized",
             .origin = "https://example.test",
             .headers = &.{
                 .{ .name = "authorization", .value = "Bearer permitted" },
@@ -101,7 +106,6 @@ test "WebTransport server admission exposes request and response metadata" {
             .h3 = .{ .handshake = .{
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
-                .server_name = "localhost",
                 .random = [_]u8{0xa1} ** 32,
                 .x25519_secret_key = [_]u8{0xa2} ** 32,
             } },

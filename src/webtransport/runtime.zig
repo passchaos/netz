@@ -976,6 +976,46 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Connect to a complete HTTPS WebTransport URL. This derives SNI,
+    /// authority, and path/query from one parsed value and inherits HTTP/3's
+    /// all-address DNS fallback rather than exposing those pieces separately.
+    pub fn connectUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: HandshakeUriConnectOptions,
+    ) Error!HandshakeClientSession {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        const path = try http3.runtime.uriRequestTargetAlloc(allocator, uri);
+        defer allocator.free(path);
+
+        var h3_options = options.h3;
+        if (h3_options.handshake.server_name == null) {
+            h3_options.handshake.server_name = endpoint.tls_host;
+        }
+        var h3_client = try http3.runtime.HandshakeClient.connectUri(
+            allocator,
+            io,
+            local_address,
+            uri,
+            options.limits.http3,
+            webTransportHandshakeClientOptions(h3_options),
+        );
+        errdefer h3_client.deinit();
+        return connectStatefulSession(
+            &h3_client,
+            endpoint.authority,
+            path,
+            options.origin,
+            options.headers,
+            options.limits,
+        );
+    }
+
     /// Establish WebTransport over externally negotiated 1-RTT keys while
     /// retaining the full stateful QUIC transport used by associated streams.
     pub fn connectPreconfigured(
@@ -1581,6 +1621,45 @@ pub const HandshakeConnectOptions = struct {
     limits: Limits = .{},
     h3: http3.runtime.HandshakeClientOptions,
 };
+
+pub const HandshakeUriConnectOptions = struct {
+    origin: []const u8 = "/",
+    headers: []const http3.Qpack.HeaderField = &.{},
+    limits: Limits = .{},
+    h3: http3.runtime.HandshakeClientOptions,
+};
+
+test "WebTransport URI connect rejects non-HTTPS and userinfo before I/O" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const options = HandshakeUriConnectOptions{
+        .h3 = .{ .handshake = .{
+            .original_destination_connection_id = "original",
+            .local_connection_id = "local",
+        } },
+    };
+    try std.testing.expectError(
+        error.InvalidUri,
+        HandshakeClientSession.connectUri(
+            allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "http://example.com/wt",
+            options,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidUri,
+        HandshakeClientSession.connectUri(
+            allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://user@example.com/wt",
+            options,
+        ),
+    );
+}
 
 pub const StatefulProtectedConnectOptions = struct {
     authority: []const u8,

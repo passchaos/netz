@@ -339,7 +339,15 @@ fn ownedSingleAddress(
     return addresses;
 }
 
-fn uriPathAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
+/// Build the HTTP/3 origin-form request target from a parsed HTTPS URI.
+///
+/// The returned allocation preserves the URI's raw/percent-encoded path and
+/// query bytes while deliberately excluding fragments, which are not sent in
+/// HTTP requests.
+pub fn uriRequestTargetAlloc(
+    allocator: std.mem.Allocator,
+    uri: std.Uri,
+) Error![]u8 {
     const path_value = uriComponentBytes(uri.path);
     const path = if (path_value.len == 0) "/" else path_value;
     if (uri.query) |query| {
@@ -3988,7 +3996,7 @@ pub const HandshakeClient = struct {
     ) Error!OwnedHandshakeResponse {
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
-        const path = try uriPathAlloc(allocator, uri);
+        const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
         const servers = try endpoint.resolveAll(allocator, io);
         defer allocator.free(servers);
@@ -4031,7 +4039,7 @@ pub const HandshakeClient = struct {
         if (!http3.isHttp3Alpn(target.alpn)) return error.InvalidHeader;
         var origin = try uriEndpoint(allocator, uri);
         defer origin.deinit();
-        const path = try uriPathAlloc(allocator, uri);
+        const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
         const servers = try resolveHostPortAddresses(
             allocator,

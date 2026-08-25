@@ -572,7 +572,10 @@ admission: applications can inspect authority, path, Origin, User-Agent, and
 custom request fields before accepting with custom response fields or rejecting
 with a final 3xx-5xx status. Stateful clients can attach validated custom
 CONNECT fields and retain the successful response metadata for the session
-lifetime. Their connection IDs, negotiated transport parameters,
+lifetime. `HandshakeClientSession.connectUri` additionally accepts one complete
+HTTPS URL and derives DNS targets, SNI, authority, and path/query with the same
+multi-address fallback as the HTTP/3 client. Their connection IDs, negotiated
+transport parameters,
 ALPN, packet keys, and optional resumption master secret must all come from the
 same authenticated external negotiation; the API does not replace TLS or
 authenticate those inputs.

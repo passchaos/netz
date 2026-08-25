@@ -113,14 +113,18 @@ pub fn main(init: std.process.Init) !void {
         ),
     );
 
-    var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/interop",
+        .{port},
+    );
+    defer allocator.free(uri);
+    var client = try netz.webtransport.runtime.HandshakeClientSession.connectUri(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .ip4 = .loopback(port) },
+        uri,
         .{
-            .authority = "127.0.0.1",
-            .path = "/interop",
             .headers = &.{
                 .{
                     .name = "authorization",
@@ -143,7 +147,6 @@ pub fn main(init: std.process.Init) !void {
                 .handshake = .{
                     .original_destination_connection_id = &original_dcid,
                     .local_connection_id = &client_cid,
-                    .server_name = "127.0.0.1",
                     .max_crypto_buffer = 64 * 1024,
                 },
                 .session = .{
@@ -265,7 +268,7 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedConnectionClose,
     }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
+        "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
         .{max_datagram_size},
     );
 }
