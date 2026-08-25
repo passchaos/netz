@@ -2450,20 +2450,33 @@ pub const Connection = struct {
         if (probe_size <= overhead + 1) return null;
         const target_payload_len = probe_size - overhead;
 
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.endpoint.allocator);
-        try (quic.Frame{ .ping = {} }).write(&payload, self.endpoint.allocator);
-        try quic.appendPadding(&payload, self.endpoint.allocator, target_payload_len - payload.items.len);
+        // `init` reserves at least one path-sized plaintext payload. Reuse it
+        // for PMTU probes instead of allocating and zero-filling a temporary
+        // ArrayList for every binary-search step. QUIC PING and PADDING are
+        // each one-byte frame types, so their encoded payload is canonical.
+        std.debug.assert(self.send_frame_buffer.items.len == 0);
+        defer self.send_frame_buffer.items.len = 0;
+        try self.send_frame_buffer.ensureUnusedCapacity(
+            self.endpoint.allocator,
+            target_payload_len,
+        );
+        self.send_frame_buffer.items.len = target_payload_len;
+        self.send_frame_buffer.items[0] = @intFromEnum(quic.FrameType.ping);
+        @memset(
+            self.send_frame_buffer.items[1..],
+            @intFromEnum(quic.FrameType.padding),
+        );
+        const payload = self.send_frame_buffer.items;
 
-        try self.congestion.reserve(payload.items.len);
-        errdefer self.congestion.discard(payload.items.len);
-        _ = try self.recovery.trackSent(packet_number, payload.items);
+        try self.congestion.reserve(payload.len);
+        errdefer self.congestion.discard(payload.len);
+        _ = try self.recovery.trackSent(packet_number, payload);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
-        try self.sent.sentAtWithPmtu(packet_number, true, payload.items.len, .not_ect, sent_time_ns, probe_size);
+        try self.sent.sentAtWithPmtu(packet_number, true, payload.len, .not_ect, sent_time_ns, probe_size);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,
-            payload.items,
+            payload,
             packet_number_len,
             .not_ect,
             sent_time_ns,

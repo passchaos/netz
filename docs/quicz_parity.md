@@ -150,6 +150,12 @@ temporary frame-array allocation. Five CPU-0, 100-connection, quicz-aligned
 handshake samples measured 2,035.4-2,072.3 connections/s (2,060.7 mean, 0.65%
 relative standard deviation) with p50 466.117-472.825 us. This is a regression
 sample, not a new cross-stack ratio.
+PMTU probe construction now uses the connection's pre-sized plaintext scratch
+for the canonical PING-plus-PADDING payload instead of allocating and freeing a
+probe-sized temporary list on every search step. Recovery still takes stable
+ownership before the socket write. A real UDP regression sends and retires one
+probe, then re-arms the same size under an allocator that rejects all new
+allocations; the second exact-size probe succeeds with stable scratch pointers.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
 fills unpredictable bytes, caps responses at 1200 bytes, requires a valid

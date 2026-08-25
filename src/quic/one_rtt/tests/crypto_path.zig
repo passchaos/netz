@@ -419,6 +419,74 @@ test "QUIC 1-RTT connection sends and validates PMTU probes" {
     try std.testing.expectEqual(@as(usize, 1300), client.currentSendDatagramSize());
 }
 
+test "QUIC PMTU probes reuse connection packet construction storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    var sender = try quic.runtime.Endpoint.bind(
+        counting.allocator(),
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbc} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pmtu-reuse-local",
+        .peer_connection_id = "pmtu-reuse-peer",
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const first_size = (try connection.sendPmtuProbeAt(1300, 100)).?;
+    const payload_capacity = connection.send_frame_buffer.capacity;
+    const payload_ptr = connection.send_frame_buffer.allocatedSlice().ptr;
+    try std.testing.expectEqual(@as(usize, 0), connection.send_frame_buffer.items.len);
+    var first_wire = try receiver.receiveBytes();
+    first_wire.deinit(allocator);
+
+    // Retire the first probe so recovery returns its payload storage to the
+    // bounded cache, then re-arm the same size. This isolates connection and
+    // recovery-scratch reuse from first-use durable ownership allocation.
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    _ = try connection.recovery.applyAck(ack);
+    _ = try connection.sent.applyAck(ack);
+    connection.pmtud.should_probe = true;
+    counting.fail_index = counting.alloc_index;
+    counting.resize_fail_index = counting.resize_index;
+    try std.testing.expectEqual(
+        first_size,
+        (try connection.sendPmtuProbeAt(1300, 200)).?,
+    );
+    try std.testing.expect(!counting.has_induced_failure);
+    try std.testing.expectEqual(payload_capacity, connection.send_frame_buffer.capacity);
+    try std.testing.expectEqual(payload_ptr, connection.send_frame_buffer.allocatedSlice().ptr);
+    try std.testing.expectEqual(@as(usize, 0), connection.send_frame_buffer.items.len);
+}
+
 test "QUIC 1-RTT PMTUD gates ordinary sends until probe succeeds" {
     const allocator = std.testing.allocator;
 
