@@ -1510,6 +1510,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerOneRttKeyPhase"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "initiateKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pendingOneRttKeyUpdateAckThreshold"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake.EstablishedConnection,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake.EstablishedConnection,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake.EstablishedConnection,
+        "initiateKeyUpdate",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "resetStream"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendStopSending"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamResetReceived"));
@@ -1828,6 +1840,18 @@ test "public modules are reachable" {
         "negotiatedAlpn",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "initiateKeyUpdate",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "closeConnection",
     ));
@@ -1842,6 +1866,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
         "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "initiateKeyUpdate",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedServer,

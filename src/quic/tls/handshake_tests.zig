@@ -68,6 +68,7 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
         server_key: EcdsaP384Sha384.KeyPair,
         server_public: *const [97]u8,
         client_public: [97]u8,
+        cipher_suite: quic.tls_client_hello.CipherSuite,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -75,6 +76,7 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
                 .local_connection_id = "server",
                 .random = [_]u8{0x33} ** 32,
                 .x25519_secret_key = [_]u8{0x34} ** 32,
+                .cipher_suites = &.{shared.cipher_suite},
                 .identity = .{
                     .certificate_chain = &.{shared.server_public},
                     .signer = .{ .ecdsa_p384_sha384 = .{
@@ -93,6 +95,13 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
                 established.deinit();
                 return;
             };
+            if (established.negotiatedCipherSuite() !=
+                shared.cipher_suite or
+                established.negotiatedTranscriptHash() !=
+                    shared.cipher_suite.hash())
+            {
+                shared.err = error.TestUnexpectedResult;
+            }
             if (peer.len != 1 or
                 !std.mem.eql(u8, peer[0], &shared.client_public))
             {
@@ -106,6 +115,7 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
         .server_key = server_key,
         .server_public = &server_public,
         .client_public = client_public,
+        .cipher_suite = .aes_256_gcm_sha384,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
@@ -117,6 +127,7 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
             .local_connection_id = "client",
             .random = [_]u8{0x35} ** 32,
             .x25519_secret_key = [_]u8{0x36} ** 32,
+            .cipher_suites = &.{.aes_256_gcm_sha384},
             .server_auth = .{
                 .pinned_ecdsa_p384_public_key = server_public,
             },

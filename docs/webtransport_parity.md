@@ -55,6 +55,11 @@ reporting only the peer's DATAGRAM frame allowance. The gate compares this
 with wtransport's corresponding API
 and requires both implementations to reject an allocation-backed payload one
 byte above their independently reported limit before continuing normally.
+Handshake-backed WebTransport client/server sessions also expose the negotiated
+TLS cipher suite and transcript hash together with QUIC key-update initiation,
+local/peer generation counts and the outstanding ACK gate. The same APIs are
+forwarded by the stateful protected client wrapper; metadata comes from the
+shared authenticated QUIC connection rather than per-session guesses.
 
 The Chrome gate drives the browser's real `WebTransport` API through
 Puppeteer, not a native QUIC substitute. It generates a fresh P-256 localhost

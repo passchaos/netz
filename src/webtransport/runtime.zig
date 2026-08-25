@@ -679,7 +679,35 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn negotiatedAlpn(self: AcceptedHandshakeSession) []const u8 {
-        return self.h3.established.alpn;
+        return self.h3.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: AcceptedHandshakeSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.h3.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: AcceptedHandshakeSession,
+    ) quic.tls.secret.Hash {
+        return self.h3.negotiatedTranscriptHash();
+    }
+
+    pub fn initiateKeyUpdate(self: *AcceptedHandshakeSession) Error!void {
+        try self.h3.initiateKeyUpdate();
+    }
+
+    pub fn localKeyUpdateCount(self: AcceptedHandshakeSession) u64 {
+        return self.h3.localKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(self: AcceptedHandshakeSession) u64 {
+        return self.h3.peerKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(self: AcceptedHandshakeSession) bool {
+        return self.h3.keyUpdateAwaitingAck();
     }
 
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
@@ -1177,7 +1205,35 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn negotiatedAlpn(self: HandshakeClientSession) []const u8 {
-        return self.h3.established.alpn;
+        return self.h3.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: HandshakeClientSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.h3.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: HandshakeClientSession,
+    ) quic.tls.secret.Hash {
+        return self.h3.negotiatedTranscriptHash();
+    }
+
+    pub fn initiateKeyUpdate(self: *HandshakeClientSession) Error!void {
+        try self.h3.initiateKeyUpdate();
+    }
+
+    pub fn localKeyUpdateCount(self: HandshakeClientSession) u64 {
+        return self.h3.localKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(self: HandshakeClientSession) u64 {
+        return self.h3.peerKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(self: HandshakeClientSession) bool {
+        return self.h3.keyUpdateAwaitingAck();
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
@@ -1880,6 +1936,42 @@ pub const StatefulProtectedClientSession = struct {
         self: StatefulProtectedClientSession,
     ) []const u8 {
         return self.session.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: StatefulProtectedClientSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.session.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: StatefulProtectedClientSession,
+    ) quic.tls.secret.Hash {
+        return self.session.negotiatedTranscriptHash();
+    }
+
+    pub fn initiateKeyUpdate(
+        self: *StatefulProtectedClientSession,
+    ) Error!void {
+        return self.session.initiateKeyUpdate();
+    }
+
+    pub fn localKeyUpdateCount(
+        self: StatefulProtectedClientSession,
+    ) u64 {
+        return self.session.localKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(
+        self: StatefulProtectedClientSession,
+    ) u64 {
+        return self.session.peerKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(
+        self: StatefulProtectedClientSession,
+    ) bool {
+        return self.session.keyUpdateAwaitingAck();
     }
 
     pub fn openBidirectionalStream(

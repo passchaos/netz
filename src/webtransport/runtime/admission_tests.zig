@@ -78,6 +78,14 @@ test "WebTransport server admission exposes request and response metadata" {
             });
             pending_owned = false;
             defer accepted.deinit();
+            try std.testing.expectEqual(
+                @TypeOf(accepted.negotiatedCipherSuite()).aes_128_gcm_sha256,
+                accepted.negotiatedCipherSuite(),
+            );
+            try std.testing.expectEqual(
+                @TypeOf(accepted.negotiatedTranscriptHash()).sha256,
+                accepted.negotiatedTranscriptHash(),
+            );
             try accepted.exportKeyingMaterial(
                 "EXPORTER-netz-webtransport",
                 "admission",
@@ -131,6 +139,14 @@ test "WebTransport server admission exposes request and response metadata" {
     try std.testing.expectEqual(server.address(), client.remoteAddress());
     try std.testing.expect(client.remoteAddressValidated());
     try std.testing.expect(client.rttNanos() != null);
+    try std.testing.expectEqual(
+        @TypeOf(client.negotiatedCipherSuite()).aes_128_gcm_sha256,
+        client.negotiatedCipherSuite(),
+    );
+    try std.testing.expectEqual(
+        @TypeOf(client.negotiatedTranscriptHash()).sha256,
+        client.negotiatedTranscriptHash(),
+    );
     var client_exported: [48]u8 = undefined;
     try client.exportKeyingMaterial(
         "EXPORTER-netz-webtransport",

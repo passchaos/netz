@@ -314,6 +314,10 @@ pub const EstablishedConnection = struct {
     local_connection_id: []u8,
     peer_connection_id: []u8,
     alpn: []u8,
+    /// TLS 1.3 suite authenticated by the handshake and used to derive QUIC
+    /// packet protection. Preconfigured sessions derive the same metadata
+    /// from their installed packet keys.
+    cipher_suite: quic.tls.cipher_suite.Suite,
     /// Whether this handshake authenticated and followed a Retry exchange.
     /// Exposing the fact lets process-level interop gates prove address
     /// validation instead of inferring it from a successful connection.
@@ -392,6 +396,34 @@ pub const EstablishedConnection = struct {
         return chain.certificates;
     }
 
+    pub fn negotiatedCipherSuite(
+        self: EstablishedConnection,
+    ) quic.tls.cipher_suite.Suite {
+        return self.cipher_suite;
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: EstablishedConnection,
+    ) quic.tls.secret.Hash {
+        return self.cipher_suite.hash();
+    }
+
+    pub fn initiateKeyUpdate(self: *EstablishedConnection) Error!void {
+        try self.connection.initiateKeyUpdate();
+    }
+
+    pub fn localKeyUpdateCount(self: EstablishedConnection) u64 {
+        return self.connection.localOneRttKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(self: EstablishedConnection) u64 {
+        return self.connection.peerOneRttKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(self: EstablishedConnection) bool {
+        return self.connection.pendingOneRttKeyUpdateAckThreshold() != null;
+    }
+
     pub fn deinit(self: *EstablishedConnection) void {
         const allocator = self.connection.endpoint.allocator;
         self.connection.deinit();
@@ -443,7 +475,8 @@ pub fn establishPreconfigured(
 ) Error!EstablishedConnection {
     if (options.version == .negotiation or
         quic.isReservedVersionWire(options.version.wireValue()) or
-        options.local_connection_id.len == 0)
+        options.local_connection_id.len == 0 or
+        options.receive_keys.suite != options.send_keys.suite)
     {
         return error.InvalidTransportParameter;
     }
@@ -476,6 +509,7 @@ pub fn establishPreconfigured(
         options.local_transport_parameters,
         options.peer_transport_parameters,
         options.alpn_protocol,
+        options.send_keys.suite,
         false,
         false,
         .not_offered,
@@ -551,6 +585,18 @@ test "preconfigured QUIC validates externally negotiated metadata" {
         @intFromPtr(peer_certificates[0].ptr) !=
             @intFromPtr("externally-authenticated-peer".ptr),
     );
+    try std.testing.expectEqual(
+        quic.tls.cipher_suite.Suite.aes_128_gcm_sha256,
+        established.negotiatedCipherSuite(),
+    );
+    try std.testing.expectEqual(
+        quic.tls.secret.Hash.sha256,
+        established.negotiatedTranscriptHash(),
+    );
+    try established.initiateKeyUpdate();
+    try std.testing.expectEqual(@as(u64, 1), established.localKeyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 0), established.peerKeyUpdateCount());
+    try std.testing.expect(established.keyUpdateAwaitingAck());
     try std.testing.expectError(
         error.PostHandshakeTlsUnavailable,
         established.issueSessionTicket(threaded.io(), .{
@@ -1494,6 +1540,7 @@ fn connectAttempt(
         local_transport_parameters,
         peer_transport_parameters,
         encrypted_extensions.alpn,
+        parsed_server.cipher_suite,
         retry_processed,
         parsed_server.selected_psk,
         early_data_status,
@@ -2130,6 +2177,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         local_transport_parameters,
         peer_transport_parameters,
         alpn,
+        cipher_suite,
         effective_options.retry_source_connection_id.len != 0,
         selected_psk != null,
         if (early_data_accepted) .accepted else if (client_offered_early_data) .rejected else .not_offered,
@@ -3087,6 +3135,7 @@ fn establishedConnection(
     local_transport_parameters: quic.TransportParameters,
     peer_transport_parameters: quic.TransportParameters,
     alpn: []const u8,
+    cipher_suite: quic.tls.cipher_suite.Suite,
     retry_processed: bool,
     resumed: bool,
     early_data_status: quic.zero_rtt.handshake.Status,
@@ -3123,6 +3172,7 @@ fn establishedConnection(
         .local_connection_id = local_owned,
         .peer_connection_id = peer_owned,
         .alpn = alpn_owned,
+        .cipher_suite = cipher_suite,
         .retry_processed = retry_processed,
         .resumed = resumed,
         .early_data_status = early_data_status,

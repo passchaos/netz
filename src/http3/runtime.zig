@@ -2752,6 +2752,53 @@ pub const HandshakeServerSession = struct {
         self.* = undefined;
     }
 
+    pub fn negotiatedAlpn(self: HandshakeServerSession) []const u8 {
+        return self.established.alpn;
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: HandshakeServerSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.established.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: HandshakeServerSession,
+    ) quic.tls.secret.Hash {
+        return self.established.negotiatedTranscriptHash();
+    }
+
+    pub fn peerCertificates(
+        self: *const HandshakeServerSession,
+    ) ?[]const []const u8 {
+        return self.established.peerCertificates();
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const HandshakeServerSession,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try self.established.exportKeyingMaterial(label, context, out);
+    }
+
+    pub fn initiateKeyUpdate(self: *HandshakeServerSession) Error!void {
+        try self.established.initiateKeyUpdate();
+    }
+
+    pub fn localKeyUpdateCount(self: HandshakeServerSession) u64 {
+        return self.established.localKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(self: HandshakeServerSession) u64 {
+        return self.established.peerKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(self: HandshakeServerSession) bool {
+        return self.established.keyUpdateAwaitingAck();
+    }
+
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
         if (self.streaming_requests.retainedCount() != 0) {
             return error.UnexpectedStream;
@@ -4125,6 +4172,53 @@ pub const HandshakeClient = struct {
 
     pub fn address(self: HandshakeClient) net.IpAddress {
         return self.endpoint.address();
+    }
+
+    pub fn negotiatedAlpn(self: HandshakeClient) []const u8 {
+        return self.established.alpn;
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: HandshakeClient,
+    ) quic.tls.cipher_suite.Suite {
+        return self.established.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: HandshakeClient,
+    ) quic.tls.secret.Hash {
+        return self.established.negotiatedTranscriptHash();
+    }
+
+    pub fn peerCertificates(
+        self: *const HandshakeClient,
+    ) ?[]const []const u8 {
+        return self.established.peerCertificates();
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const HandshakeClient,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try self.established.exportKeyingMaterial(label, context, out);
+    }
+
+    pub fn initiateKeyUpdate(self: *HandshakeClient) Error!void {
+        try self.established.initiateKeyUpdate();
+    }
+
+    pub fn localKeyUpdateCount(self: HandshakeClient) u64 {
+        return self.established.localKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(self: HandshakeClient) u64 {
+        return self.established.peerKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(self: HandshakeClient) bool {
+        return self.established.keyUpdateAwaitingAck();
     }
 
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
