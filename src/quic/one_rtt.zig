@@ -1535,7 +1535,6 @@ pub const Connection = struct {
             packet_streams,
         );
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
-        defer self.send_frame_buffer.items.len = 0;
         const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
 
         // Pacing preflight above is deliberately mutation-free. Once it
@@ -2268,7 +2267,6 @@ pub const Connection = struct {
 
     fn sendTrackedFramesEcnAtUncheckedRaw(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
-        defer self.send_frame_buffer.items.len = 0;
         const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
         try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
         self.observePacketSent(
@@ -2280,7 +2278,8 @@ pub const Connection = struct {
     }
 
     const PreparedFrames = struct {
-        payload: []const u8,
+        frames: []const quic.Frame,
+        payload_len: usize,
         packet_number_len: u8,
         packet_len: usize,
         is_ack_eliciting: bool,
@@ -2290,8 +2289,6 @@ pub const Connection = struct {
     };
 
     fn prepareFramesForSend(self: *Connection, frames: []const quic.Frame, sent_time_ns: ?u64) Error!PreparedFrames {
-        std.debug.assert(self.send_frame_buffer.items.len == 0);
-        errdefer self.send_frame_buffer.items.len = 0;
         var payload_len: usize = 0;
         for (frames) |frame| {
             payload_len = std.math.add(
@@ -2300,28 +2297,19 @@ pub const Connection = struct {
                 try frame.wireLen(),
             ) catch return error.InvalidFrameLength;
         }
-        try self.send_frame_buffer.ensureUnusedCapacity(
-            self.endpoint.allocator,
-            payload_len,
-        );
-        for (frames) |frame| {
-            try frame.writeAssumeCapacity(&self.send_frame_buffer);
-        }
-        std.debug.assert(self.send_frame_buffer.items.len == payload_len);
-        const payload = self.send_frame_buffer.items;
         const is_ack_eliciting = ackEliciting(frames);
         const is_in_flight = packetInFlight(frames);
         const packet_number_len = quic.protection.packetNumberLenForPayload(
             self.next_packet_number,
             self.sent.largestAcknowledged(),
-            payload.len,
+            payload_len,
         );
-        const packet_len = try quic.protection.shortPacketLen(.{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = self.next_packet_number,
-            .packet_number_len = packet_number_len,
-            .payload = payload,
-        });
+        const packet_len = try quic.protection.shortPacketLenForPayloadLen(
+            self.config.peer_connection_id.len,
+            self.next_packet_number,
+            packet_number_len,
+            payload_len,
+        );
         if (packet_len > self.currentSendDatagramSize()) return error.DatagramTooLarge;
         if (is_in_flight) if (sent_time_ns) |now_ns| {
             if (self.pacingDeadlineAt(now_ns, packet_len)) |deadline| {
@@ -2331,7 +2319,8 @@ pub const Connection = struct {
         };
 
         return .{
-            .payload = payload,
+            .frames = frames,
+            .payload_len = payload_len,
             .packet_number_len = packet_number_len,
             .packet_len = packet_len,
             .is_ack_eliciting = is_ack_eliciting,
@@ -2348,14 +2337,15 @@ pub const Connection = struct {
         sent_time_ns: ?u64,
     ) Error!void {
         const packet_number = self.next_packet_number;
-        const payload = prepared.payload;
         var tracked_congestion = false;
         if (prepared.is_in_flight) {
-            try self.congestion.reserve(payload.len);
+            try self.congestion.reserve(prepared.payload_len);
             tracked_congestion = true;
         }
         errdefer {
-            if (tracked_congestion) self.congestion.discard(payload.len);
+            if (tracked_congestion) {
+                self.congestion.discard(prepared.payload_len);
+            }
         }
         var tracked_recovery = false;
         // This rollback must live at function scope. Non-HANDSHAKE_DONE sends
@@ -2364,52 +2354,56 @@ pub const Connection = struct {
         errdefer if (tracked_recovery) {
             _ = self.recovery.forgetPacketNumber(packet_number);
         };
+        var recovery_payload: ?[]const u8 = null;
+        var recovery_group_id: ?u64 = null;
         if (prepared.is_ack_eliciting) {
-            const recovery_group_id = try self.recovery.trackSent(
+            const tracked = try self.recovery.trackSentUninitialized(
                 packet_number,
-                payload,
+                prepared.payload_len,
             );
             tracked_recovery = true;
-            if (self.handshake_status.needsHandshakeDone() and
-                prepared.contains_handshake_done)
-            {
-                // Commit the control-frame state only after every remaining
-                // fallible allocation has succeeded. A socket error will then
-                // roll the group back through the errdefer below.
-                try self.sent.sentInFlightAtWithMetadata(
-                    packet_number,
-                    prepared.is_ack_eliciting,
-                    prepared.is_in_flight,
-                    payload.len,
-                    ecn,
-                    sent_time_ns,
-                    null,
-                    prepared.largest_acknowledged_sent,
-                );
-                var tracked_sent = true;
-                errdefer if (tracked_sent) {
-                    _ = self.sent.forget(packet_number);
-                };
-                try self.sendPayloadPacketWithPacketNumberLenAt(
-                    packet_number,
-                    payload,
-                    prepared.packet_number_len,
-                    ecn,
-                    sent_time_ns,
-                    prepared.is_ack_eliciting,
-                    prepared.is_in_flight,
-                );
-                self.handshake_status.onHandshakeDoneTracked(
-                    recovery_group_id,
-                );
-                tracked_sent = false;
-                tracked_recovery = false;
-                self.next_packet_number += 1;
-                return;
+            var payload_list = std.ArrayList(u8).initBuffer(
+                tracked.payload,
+            );
+            for (prepared.frames) |frame| {
+                try frame.writeAssumeCapacity(&payload_list);
             }
+            std.debug.assert(
+                payload_list.items.len == prepared.payload_len,
+            );
+            recovery_payload = tracked.payload;
+            recovery_group_id = tracked.group_id;
+        } else {
+            std.debug.assert(self.send_frame_buffer.items.len == 0);
+            errdefer self.send_frame_buffer.items.len = 0;
+            try self.send_frame_buffer.ensureUnusedCapacity(
+                self.endpoint.allocator,
+                prepared.payload_len,
+            );
+            for (prepared.frames) |frame| {
+                try frame.writeAssumeCapacity(&self.send_frame_buffer);
+            }
+            std.debug.assert(
+                self.send_frame_buffer.items.len == prepared.payload_len,
+            );
         }
-        try self.sent.sentInFlightAtWithMetadata(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns, null, prepared.largest_acknowledged_sent);
-        errdefer _ = self.sent.forget(packet_number);
+        defer self.send_frame_buffer.items.len = 0;
+        const payload = recovery_payload orelse self.send_frame_buffer.items;
+
+        try self.sent.sentInFlightAtWithMetadata(
+            packet_number,
+            prepared.is_ack_eliciting,
+            prepared.is_in_flight,
+            prepared.payload_len,
+            ecn,
+            sent_time_ns,
+            null,
+            prepared.largest_acknowledged_sent,
+        );
+        var tracked_sent = true;
+        errdefer if (tracked_sent) {
+            _ = self.sent.forget(packet_number);
+        };
         try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,
             payload,
@@ -2419,6 +2413,12 @@ pub const Connection = struct {
             prepared.is_ack_eliciting,
             prepared.is_in_flight,
         );
+        if (prepared.contains_handshake_done) {
+            self.handshake_status.onHandshakeDoneTracked(
+                recovery_group_id orelse unreachable,
+            );
+        }
+        tracked_sent = false;
         tracked_recovery = false;
         self.next_packet_number += 1;
     }

@@ -194,6 +194,81 @@ test "QUIC 1-RTT stateful batch keeps direct recovery payload bytes" {
     );
 }
 
+test "QUIC 1-RTT single send builds frames in recovery ownership" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcb} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "single-local",
+        .peer_connection_id = "single-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const frame_buffer_capacity = connection.send_frame_buffer.capacity;
+
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "single recovery bytes",
+        .fin = true,
+    } }};
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    try frames[0].write(&expected, allocator);
+
+    try connection.sendAt(&frames, 1_000);
+    try std.testing.expectEqualSlices(
+        u8,
+        expected.items,
+        one_rtt.testing.recoveryPayloadForPacket(&connection, 0).?,
+    );
+    // Reliable single-packet sends never materialize plaintext in the
+    // transient frame buffer after direct recovery construction.
+    try std.testing.expectEqual(
+        frame_buffer_capacity,
+        connection.send_frame_buffer.capacity,
+    );
+
+    var raw = try receiver.receiveBytes();
+    defer raw.deinit(allocator);
+    var received = try one_rtt.openReceivedBytes(
+        &receiver,
+        raw.from,
+        raw.bytes,
+        keys,
+        "single-peer".len,
+        0,
+        8,
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "single recovery bytes",
+        received.frames[0].stream.data,
+    );
+}
+
 test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" {
     const allocator = std.testing.allocator;
 

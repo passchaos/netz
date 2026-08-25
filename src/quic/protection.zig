@@ -1424,13 +1424,38 @@ pub fn sealShortPacketInPlace(
 }
 
 pub fn shortPacketLen(options: ShortPacketOptions) Error!usize {
-    try validatePacketNumberLen(options.packet_number_len);
-    try validatePacketNumber(options.packet_number);
-    if (options.destination_connection_id.len > 20) return error.InvalidInitialPacket;
+    return shortPacketLenForPayloadLen(
+        options.destination_connection_id.len,
+        options.packet_number,
+        options.packet_number_len,
+        options.payload.len,
+    );
+}
 
-    const pn_len = @as(usize, options.packet_number_len);
-    const header_len = std.math.add(usize, 1 + pn_len, options.destination_connection_id.len) catch return error.InvalidPayloadLength;
-    const protected_payload_len = std.math.add(usize, options.payload.len, aead_tag_len) catch return error.InvalidPayloadLength;
+/// Compute short-packet capacity without requiring an already-materialized
+/// plaintext slice. Stateful senders use this during mutation-free preflight,
+/// before they allocate stable recovery ownership for the payload.
+pub fn shortPacketLenForPayloadLen(
+    destination_connection_id_len: usize,
+    packet_number: u64,
+    packet_number_len: u8,
+    payload_len: usize,
+) Error!usize {
+    try validatePacketNumberLen(packet_number_len);
+    try validatePacketNumber(packet_number);
+    if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
+
+    const pn_len = @as(usize, packet_number_len);
+    const header_len = std.math.add(
+        usize,
+        1 + pn_len,
+        destination_connection_id_len,
+    ) catch return error.InvalidPayloadLength;
+    const protected_payload_len = std.math.add(
+        usize,
+        payload_len,
+        aead_tag_len,
+    ) catch return error.InvalidPayloadLength;
     return std.math.add(usize, header_len, protected_payload_len) catch error.InvalidPayloadLength;
 }
 
