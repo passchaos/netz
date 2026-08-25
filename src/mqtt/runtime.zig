@@ -9,6 +9,7 @@ const stream_io = @import("../internal/stream_io.zig");
 const auth_runtime = @import("runtime/auth.zig");
 const topic_alias = @import("runtime/topic_alias.zig");
 const proxy_protocol = @import("proxy_protocol.zig");
+const listener_namespace = @import("listener_namespace.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
 
@@ -25,6 +26,7 @@ pub const Error = packet_transport.Error || error{
     RetainNotSupported,
     TopicAliasInvalid,
     WildcardSubscriptionsNotSupported,
+    TopicOutsideNamespace,
     SubscriptionIdentifiersNotSupported,
     SharedSubscriptionsNotSupported,
     OutgoingPacketTooLarge,
@@ -170,6 +172,21 @@ pub const Server = struct {
         return self.acceptStreamPending(stream, options);
     }
 
+    pub fn pendingSource(self: *Server) PendingSource {
+        return .{
+            .context = self,
+            .accept_pending = struct {
+                fn call(
+                    context: *anyopaque,
+                    options: AcceptOptions,
+                ) anyerror!PendingAcceptedClient {
+                    const server: *Server = @ptrCast(@alignCast(context));
+                    return server.acceptPending(options);
+                }
+            }.call,
+        };
+    }
+
     /// Complete trusted-proxy parsing and MQTT CONNECT on an already accepted
     /// stream. This is also the reusable entry point for broker front ends
     /// that own their accept loop.
@@ -251,6 +268,25 @@ pub const Server = struct {
 
         try group.await(self.io);
         return .{ .allocator = self.allocator, .errors = results };
+    }
+};
+
+/// Type-erased pending CONNECT source used by the shared broker core. Keeping
+/// transport setup behind one callback lets TCP, TLS, WS and WSS listeners
+/// feed the same authorization/Session state machine without importing each
+/// other or introducing module cycles.
+pub const PendingSource = struct {
+    context: *anyopaque,
+    accept_pending: *const fn (
+        context: *anyopaque,
+        options: AcceptOptions,
+    ) anyerror!PendingAcceptedClient,
+
+    pub fn acceptPending(
+        self: PendingSource,
+        options: AcceptOptions,
+    ) anyerror!PendingAcceptedClient {
+        return self.accept_pending(self.context, options);
     }
 };
 
@@ -909,6 +945,10 @@ pub const Connection = struct {
     /// Keeping it beside rather than inside the transport allows the same
     /// identity model to span raw TCP, TLS, WS, and WSS adapters.
     proxy_metadata: ?proxy_protocol.Metadata = null,
+    /// Broker listener namespace. Empty means the global topic space. This is
+    /// owned by the Connection so Session takeover and asynchronous delivery
+    /// can always project canonical topics through the destination listener.
+    topic_namespace: listener_namespace.Namespace = .{},
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -1017,6 +1057,7 @@ pub const Connection = struct {
             packet.deinit(self.allocator);
         }
         if (self.proxy_metadata) |*metadata| metadata.deinit();
+        self.topic_namespace.deinit(self.allocator);
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -1104,6 +1145,24 @@ pub const Connection = struct {
     ) void {
         std.debug.assert(self.proxy_metadata == null);
         self.proxy_metadata = metadata;
+    }
+
+    pub fn setTopicNamespace(
+        self: *Connection,
+        prefix: []const u8,
+    ) Error!void {
+        const namespace = try listener_namespace.Namespace.initOwned(
+            self.allocator,
+            prefix,
+        );
+        self.topic_namespace.deinit(self.allocator);
+        self.topic_namespace = namespace;
+    }
+
+    pub fn topicNamespace(
+        self: *const Connection,
+    ) []const u8 {
+        return self.topic_namespace.prefix;
     }
 
     /// Return the proxied source IP when available, otherwise the connected
@@ -1598,6 +1657,85 @@ pub const Connection = struct {
         bytes: []u8,
     ) Error!void {
         try self.writePacket(bytes);
+    }
+
+    /// Write an already-selected durable Session transmission while projecting
+    /// its canonical topic through this connection's listener namespace.
+    /// PUBREL has no topic and is forwarded unchanged.
+    pub fn writeSessionTransmission(
+        self: *Connection,
+        transmission: @import("session/mod.zig").Transmission,
+        maximum_qos: mqtt.QoS,
+    ) Error!void {
+        var visible = transmission;
+        switch (visible) {
+            .publish => |*publish_value| {
+                publish_value.topic = try self.topic_namespace.visibleTopic(
+                    publish_value.topic,
+                );
+                publish_value.qos = if (@intFromEnum(publish_value.qos) <
+                    @intFromEnum(maximum_qos))
+                    publish_value.qos
+                else
+                    maximum_qos;
+                return self.writeSessionPublish(publish_value.*);
+            },
+            .pubrel => |pubrel| return self.writeSessionPubRel(pubrel),
+        }
+    }
+
+    fn writeSessionPublish(
+        self: *Connection,
+        value: @import("session/mod.zig").PublishTransmission,
+    ) Error!void {
+        var properties: std.ArrayList(mqtt.Property) = .empty;
+        defer properties.deinit(self.allocator);
+        if (self.protocol == .v5) {
+            try properties.ensureTotalCapacity(
+                self.allocator,
+                value.properties.len,
+            );
+            for (value.properties) |property| {
+                if (property == .four_byte and
+                    property.four_byte.id == .message_expiry_interval)
+                {
+                    const remaining = value.message_expiry_interval orelse
+                        continue;
+                    properties.appendAssumeCapacity(.{ .four_byte = .{
+                        .id = .message_expiry_interval,
+                        .value = remaining,
+                    } });
+                } else {
+                    properties.appendAssumeCapacity(property);
+                }
+            }
+        }
+        self.write_scratch.clearRetainingCapacity();
+        try mqtt.writePublish(
+            &self.write_scratch,
+            self.allocator,
+            self.protocol,
+            value.topic,
+            value.payload,
+            .{
+                .qos = value.qos,
+                .retain = value.retain,
+                .dup = value.qos != .at_most_once and value.dup,
+                .packet_id = if (value.qos == .at_most_once)
+                    null
+                else
+                    value.packet_id,
+                .properties = properties.items,
+            },
+        );
+        try self.writePacket(self.write_scratch.items);
+    }
+
+    fn writeSessionPubRel(
+        self: *Connection,
+        pubrel: @import("session/mod.zig").PubRelTransmission,
+    ) Error!void {
+        try self.writePubRel(pubrel.packet_id, 0);
     }
 
     pub fn completePublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) Error!void {

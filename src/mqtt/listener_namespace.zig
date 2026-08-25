@@ -9,7 +9,8 @@
 const std = @import("std");
 const mqtt = @import("mod.zig");
 
-pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
+pub const MapError = mqtt.Error || std.mem.Allocator.Error;
+pub const Error = MapError || error{
     TopicOutsideNamespace,
 };
 
@@ -19,7 +20,7 @@ pub const Namespace = struct {
 
     /// Validate a listener namespace. Like Mosquitto, a mount point is a
     /// literal topic prefix rather than a filter, so `+` and `#` are forbidden.
-    pub fn init(prefix: []const u8) Error!Namespace {
+    pub fn init(prefix: []const u8) mqtt.Error!Namespace {
         if (prefix.len > std.math.maxInt(u16)) return error.InvalidTopic;
         if (prefix.len != 0) try mqtt.validateTopicName(prefix);
         return .{ .prefix = prefix };
@@ -30,7 +31,7 @@ pub const Namespace = struct {
     pub fn initOwned(
         allocator: std.mem.Allocator,
         prefix: []const u8,
-    ) Error!Namespace {
+    ) MapError!Namespace {
         const borrowed = try init(prefix);
         if (borrowed.prefix.len == 0) return .{};
         return .{
@@ -48,7 +49,7 @@ pub const Namespace = struct {
         self: Namespace,
         allocator: std.mem.Allocator,
         topic: []const u8,
-    ) Error![]u8 {
+    ) MapError![]u8 {
         try mqtt.validateTopicName(topic);
         return self.prependAlloc(allocator, topic);
     }
@@ -57,7 +58,7 @@ pub const Namespace = struct {
         self: Namespace,
         allocator: std.mem.Allocator,
         filter: []const u8,
-    ) Error![]u8 {
+    ) MapError![]u8 {
         try mqtt.validateTopicFilter(filter);
         if (sharedFilterParts(filter)) |shared| {
             const mapped_filter_len = std.math.add(
@@ -106,7 +107,7 @@ pub const Namespace = struct {
         self: Namespace,
         allocator: std.mem.Allocator,
         connect: *mqtt.Connect,
-    ) Error!?MappedWillTopic {
+    ) MapError!?MappedWillTopic {
         const will = &(connect.will orelse return null);
         const previous = will.topic;
         const mapped = try self.mapTopicAlloc(allocator, previous);
@@ -148,7 +149,7 @@ pub const Namespace = struct {
         self: Namespace,
         allocator: std.mem.Allocator,
         value: []const u8,
-    ) Error![]u8 {
+    ) MapError![]u8 {
         const len = std.math.add(usize, self.prefix.len, value.len) catch
             return error.InvalidTopic;
         if (len > std.math.maxInt(u16)) return error.InvalidTopic;

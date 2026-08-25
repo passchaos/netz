@@ -912,6 +912,16 @@ test "public modules are reachable" {
         netz.mqtt.broker.Broker,
         "serve",
     ));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker.Broker, "init"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "serveListeners",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "servePending",
+    ));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "Listener"));
     try std.testing.expectEqual(
         @as(usize, 1024),
         (netz.mqtt.broker.Limits{}).max_connections,
@@ -936,6 +946,11 @@ test "public modules are reachable" {
         netz.mqtt.runtime.Server,
         "acceptPending",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "pendingSource",
+    ));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime, "PendingSource"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
         "PendingAcceptedClient",
@@ -1132,6 +1147,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.tls_runtime.Server,
+        "pendingSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Server,
         "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
@@ -1238,6 +1257,14 @@ test "public modules are reachable" {
         netz.mqtt.runtime.Connection,
         "remoteAddress",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "setTopicNamespace",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "topicNamespace",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,
@@ -1256,6 +1283,10 @@ test "public modules are reachable" {
         "acceptPending",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.TlsServer,
+        "pendingSource",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Server,
         "listen",
     ));
@@ -1266,6 +1297,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Server,
         "acceptPending",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Server,
+        "pendingSource",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,

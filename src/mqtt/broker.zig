@@ -11,6 +11,7 @@ const mqtt = @import("mod.zig");
 const owned_properties = @import("owned_properties.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
+const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
@@ -277,6 +278,7 @@ const Registration = struct {
 
 const EncodedSessionPacket = struct {
     encoded: session_route.EncodedPacket,
+    transmission: session_mod.Transmission,
     handle: session_mod.Handle,
     route_id: u64,
 
@@ -480,6 +482,13 @@ pub const SystemMetric = enum {
     }
 };
 
+pub const Listener = struct {
+    source: runtime.PendingSource,
+    namespace: listener_namespace.Namespace = .{},
+    /// Finite accept count for deterministic process/test teardown.
+    connection_count: usize,
+};
+
 pub const system_metrics = [_]SystemMetric{
     .clients_connected,
     .clients_disconnected,
@@ -499,12 +508,15 @@ pub const system_metrics = [_]SystemMetric{
     .session_owned_bytes,
 };
 
-/// A broker listener that accepts a configured, bounded number of live TCP
-/// clients and routes between them until each disconnects.
+/// A bounded broker core with an optional compatibility TCP listener.
+///
+/// `listen` preserves the original one-listener API. `init` plus
+/// `serveListeners` lets TCP/TLS/WS/WSS listeners share the same router,
+/// retained store, Session store, Will scheduler and deadline driver.
 pub const Broker = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    server: runtime.Server,
+    server: ?runtime.Server = null,
     options: Options,
     router: router_mod.Router,
     pending_qos2: qos2_mod.Store,
@@ -527,6 +539,23 @@ pub const Broker = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         bind_address: net.IpAddress,
+        options: Options,
+    ) Error!Broker {
+        var broker = try init(allocator, io, options);
+        errdefer broker.deinit();
+        broker.server = try runtime.Server.listen(
+            allocator,
+            io,
+            bind_address,
+            options.limits.runtime,
+        );
+        return broker;
+    }
+
+    /// Construct shared broker state without binding a transport listener.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
         options: Options,
     ) Error!Broker {
         if (options.limits.max_connections == 0 or
@@ -633,12 +662,6 @@ pub const Broker = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .server = try runtime.Server.listen(
-                allocator,
-                io,
-                bind_address,
-                options.limits.runtime,
-            ),
             .options = owned_options,
             .router = router,
             .pending_qos2 = pending_qos2,
@@ -673,13 +696,13 @@ pub const Broker = struct {
         self.retained.deinit();
         self.pending_qos2.deinit();
         self.router.deinit();
-        self.server.deinit();
+        if (self.server) |*server| server.deinit();
         if (self.commit_log) |*log| log.deinit();
         self.* = undefined;
     }
 
     pub fn address(self: Broker) net.IpAddress {
-        return self.server.address();
+        return self.server.?.address();
     }
 
     /// Return a coherent, allocation-free snapshot suitable for metrics,
@@ -1108,6 +1131,33 @@ pub const Broker = struct {
         self: *Broker,
         connection_count: usize,
     ) anyerror!void {
+        const server = &(self.server orelse return error.InvalidProperty);
+        const listener = Listener{
+            .source = server.pendingSource(),
+            .connection_count = connection_count,
+        };
+        return self.serveListeners(&.{listener});
+    }
+
+    /// Serve finite accept counts from heterogeneous listeners over one broker
+    /// state core. One accept task is scheduled per finite connection, so
+    /// listeners and their established clients make progress concurrently;
+    /// connection slots are allocated atomically by the shared state mutex.
+    pub fn serveListeners(
+        self: *Broker,
+        listeners: []const Listener,
+    ) anyerror!void {
+        var connection_count: usize = 0;
+        for (listeners) |listener| {
+            _ = try listener_namespace.Namespace.init(
+                listener.namespace.prefix,
+            );
+            connection_count = std.math.add(
+                usize,
+                connection_count,
+                listener.connection_count,
+            ) catch return error.BrokerFull;
+        }
         if (connection_count > self.slots.len) return error.BrokerFull;
         var group: std.Io.Group = .init;
         self.deadline_driver.start();
@@ -1120,12 +1170,11 @@ pub const Broker = struct {
             Broker.runDeadlineDriver,
             .{self},
         );
-        var clients_started: usize = 0;
         var clients_joined = false;
         defer if (!clients_joined) {
             // An accept/setup failure must not strand already-started readers
             // behind this finite serve call.
-            for (self.slots[0..clients_started]) |*slot| {
+            for (self.slots) |*slot| {
                 if (slot.connection) |*connection| {
                     connection.shutdown() catch {};
                 }
@@ -1144,152 +1193,22 @@ pub const Broker = struct {
         defer self.allocator.free(errors);
         @memset(errors, null);
 
-        for (errors, 0..) |*result, index| {
-            var pending = try self.server.acceptPending(
-                self.options.accept,
-            );
-            errdefer pending.deinit(self.allocator);
-            var accept_options = try pending.resolvedOptions(
-                self.options.accept,
-            );
-            if (accept_options.reason_code != 0) {
-                // Resolve policies before registration so rejected CONNECTs
-                // cannot create Session, Will, or router state.
-                var refused = try pending.finish(accept_options);
-                refused.deinit(self.allocator);
-                clients_started += 1;
-                continue;
-            }
-            if (pending.connect.connect.will) |will| {
-                if (self.payloadTooLarge(will.payload)) {
-                    // MQTT 5 has a precise Packet Too Large CONNACK reason.
-                    // MQTT 3.1.1 has no equivalent and Mosquitto uses its
-                    // legacy Not Authorized refusal for this policy failure.
-                    var refused = try pending.finish(.{
-                        .reason_code = switch (pending.connect.connect.protocol) {
-                            .v5 => 0x95,
-                            .v3_1_1 => 0x05,
-                        },
-                    });
-                    refused.deinit(self.allocator);
-                    clients_started += 1;
-                    continue;
-                }
-            }
-            if (pending.connection.authentication.phase ==
-                .authenticating)
-            {
-                const handler = self.options.authentication orelse
-                    return error.AuthenticationNotConfigured;
-                try handler.start(
-                    handler.context,
-                    &pending,
+        var next_result: usize = 0;
+        for (listeners) |listener| {
+            for (0..listener.connection_count) |_| {
+                const result = &errors[next_result];
+                next_result += 1;
+                const accept_task = ListenerAcceptTask{
+                    .broker = self,
+                    .listener = listener,
+                    .result = result,
+                };
+                group.async(
+                    self.io,
+                    ListenerAcceptTask.run,
+                    .{accept_task},
                 );
-                if (!pending.authentication_authorized) {
-                    return error.AuthenticationInProgress;
-                }
             }
-            if (self.options.connect_authorization) |authorization| {
-                if (!authorization.authorize(
-                    authorization.context,
-                    pending.connect.connect,
-                )) {
-                    // Match Mosquitto's version-specific refusal codes. This
-                    // happens before registration so rejected credentials
-                    // cannot create, resume, replace, or erase durable state.
-                    var refused = try pending.finish(.{
-                        .reason_code = switch (pending.connect.connect.protocol) {
-                            .v3_1_1 => 0x05,
-                            .v5 => 0x87,
-                        },
-                    });
-                    refused.deinit(self.allocator);
-                    clients_started += 1;
-                    continue;
-                }
-            }
-            if (self.options.connect_context_authorization) |authorization| {
-                if (!authorization.authorize(authorization.context, .{
-                    .connect = pending.connect.connect,
-                    .remote_address = pending.connection.remoteAddress(),
-                    .proxy = pending.connection.proxyMetadata(),
-                    .peer_certificates = pending.connection.peerCertificates(),
-                })) {
-                    // Context-aware authorization uses the same refusal and
-                    // pre-registration guarantee as the legacy CONNECT hook.
-                    var refused = try pending.finish(.{
-                        .reason_code = switch (pending.connect.connect.protocol) {
-                            .v3_1_1 => 0x05,
-                            .v5 => 0x87,
-                        },
-                    });
-                    refused.deinit(self.allocator);
-                    clients_started += 1;
-                    continue;
-                }
-            }
-            const registration = try self.register(
-                index,
-                pending.connect.connect,
-            );
-            const subscriber_id = registration.subscriber_id;
-            accept_options.session_present =
-                self.slots[index].session_present;
-            if (self.slots[index].assigned_client_id_len != 0) {
-                accept_options.assigned_client_identifier =
-                    self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
-            }
-            // The Session/Will generation must reach the journal before the
-            // peer can observe a successful CONNACK. Snapshot encoding treats
-            // this short registration phase as crash-disconnected state.
-            self.appendProvisionalCommitIfEnabled() catch |err| {
-                self.abortRegistration(index, subscriber_id);
-                return err;
-            };
-            var accepted = pending.finish(accept_options) catch |err| {
-                self.abortRegistration(index, subscriber_id);
-                self.appendCommitIfEnabled() catch {};
-                return err;
-            };
-            // MQTT requires the replacement to be accepted before the old
-            // Network Connection is terminated. Sending its CONNACK first
-            // also prevents a slow displaced writer from delaying acceptance.
-            if (registration.replaced_owner_id) |owner_id| {
-                self.disconnectReplacedSessionOwner(owner_id);
-            }
-            var accepted_owns_connection = true;
-            errdefer if (accepted_owns_connection) {
-                accepted.deinit(self.allocator);
-            };
-            self.attachConnection(
-                index,
-                subscriber_id,
-                &accepted.connection,
-            );
-            accepted_owns_connection = false;
-            errdefer accepted.connect.deinit(self.allocator);
-            // From this point the slot owns the connection. Setup failures
-            // must follow normal unregister cleanup rather than the transient
-            // AcceptedClient errdefer, whose connection was moved above.
-            errdefer self.unregister(
-                index,
-                subscriber_id,
-            ) catch {};
-            try self.flushSlot(index, &self.slots[index]);
-            const task = ClientTask{
-                .broker = self,
-                .slot_index = index,
-                .subscriber_id = subscriber_id,
-                .connect = accepted.connect,
-                .result = result,
-            };
-            group.async(self.io, ClientTask.run, .{task});
-            // The task now owns only the compact CONNECT parse tree. Keeping
-            // the moved Connection out of the async closure avoids copying
-            // its large inflight bitsets through every worker stack.
-            accepted.connect = undefined;
-            accepted.connection = undefined;
-            clients_started += 1;
         }
         group.await(self.io) catch {};
         clients_joined = true;
@@ -1302,6 +1221,179 @@ pub const Broker = struct {
         }
     }
 
+    /// Admit one already parsed CONNECT from any transport listener and run
+    /// it synchronously through the shared broker state machine. This is the
+    /// composable building block for external accept-loop orchestration.
+    pub fn servePending(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        namespace: listener_namespace.Namespace,
+    ) anyerror!void {
+        const slot_index = try self.claimSlot();
+        var slot_claimed = true;
+        defer if (slot_claimed) {
+            self.state_mutex.lockUncancelable(self.io);
+            self.slots[slot_index].active = false;
+            self.state_mutex.unlock(self.io);
+        };
+        var result: ?anyerror = null;
+        const task = try self.preparePending(
+            slot_index,
+            pending,
+            namespace,
+            &result,
+        ) orelse {
+            slot_claimed = false;
+            self.state_mutex.lockUncancelable(self.io);
+            self.slots[slot_index].active = false;
+            self.state_mutex.unlock(self.io);
+            return;
+        };
+        slot_claimed = false;
+        ClientTask.run(task) catch |err| return err;
+        if (result) |err| return err;
+    }
+
+    fn claimSlot(self: *Broker) Error!usize {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        for (self.slots, 0..) |slot, index| {
+            if (!slot.active) {
+                self.slots[index].active = true;
+                return index;
+            }
+        }
+        return error.BrokerFull;
+    }
+
+    fn preparePending(
+        self: *Broker,
+        index: usize,
+        pending: *runtime.PendingAcceptedClient,
+        namespace: @import("listener_namespace.zig").Namespace,
+        result: *?anyerror,
+    ) Error!?ClientTask {
+        var pending_owned = true;
+        defer if (pending_owned) pending.deinit(self.allocator);
+        try pending.connection.setTopicNamespace(namespace.prefix);
+        var mapped_will = try namespace.mapConnectWill(
+            self.allocator,
+            &pending.connect.connect,
+        );
+        defer if (mapped_will) |*mapped| mapped.deinit();
+
+        var accept_options = try pending.resolvedOptions(self.options.accept);
+        if (accept_options.reason_code != 0) {
+            var refused = try pending.finish(accept_options);
+            pending_owned = false;
+            refused.deinit(self.allocator);
+            return null;
+        }
+        if (pending.connect.connect.will) |will| {
+            if (self.payloadTooLarge(will.payload)) {
+                var refused = try pending.finish(.{
+                    .reason_code = switch (pending.connect.connect.protocol) {
+                        .v5 => 0x95,
+                        .v3_1_1 => 0x05,
+                    },
+                });
+                pending_owned = false;
+                refused.deinit(self.allocator);
+                return null;
+            }
+        }
+        if (pending.connection.authentication.phase == .authenticating) {
+            const handler = self.options.authentication orelse
+                return error.AuthenticationNotConfigured;
+            try handler.start(handler.context, pending);
+            if (!pending.authentication_authorized) {
+                return error.AuthenticationInProgress;
+            }
+        }
+        if (self.options.connect_authorization) |authorization| {
+            if (!authorization.authorize(
+                authorization.context,
+                pending.connect.connect,
+            )) {
+                var refused = try pending.finish(.{
+                    .reason_code = switch (pending.connect.connect.protocol) {
+                        .v3_1_1 => 0x05,
+                        .v5 => 0x87,
+                    },
+                });
+                pending_owned = false;
+                refused.deinit(self.allocator);
+                return null;
+            }
+        }
+        if (self.options.connect_context_authorization) |authorization| {
+            if (!authorization.authorize(authorization.context, .{
+                .connect = pending.connect.connect,
+                .remote_address = pending.connection.remoteAddress(),
+                .proxy = pending.connection.proxyMetadata(),
+                .peer_certificates = pending.connection.peerCertificates(),
+            })) {
+                var refused = try pending.finish(.{
+                    .reason_code = switch (pending.connect.connect.protocol) {
+                        .v3_1_1 => 0x05,
+                        .v5 => 0x87,
+                    },
+                });
+                pending_owned = false;
+                refused.deinit(self.allocator);
+                return null;
+            }
+        }
+        const registration = try self.register(
+            index,
+            pending.connect.connect,
+        );
+        const subscriber_id = registration.subscriber_id;
+        // The Will scheduler now owns its canonical topic. Restore the parsed
+        // CONNECT view before it transfers to the long-lived client task.
+        if (mapped_will) |*mapped| {
+            mapped.deinit();
+            mapped_will = null;
+        }
+        accept_options.session_present = self.slots[index].session_present;
+        if (self.slots[index].assigned_client_id_len != 0) {
+            accept_options.assigned_client_identifier =
+                self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
+        }
+        self.appendProvisionalCommitIfEnabled() catch |err| {
+            self.abortRegistration(index, subscriber_id);
+            return err;
+        };
+        var accepted = pending.finish(accept_options) catch |err| {
+            self.abortRegistration(index, subscriber_id);
+            self.appendCommitIfEnabled() catch {};
+            return err;
+        };
+        pending_owned = false;
+        if (registration.replaced_owner_id) |owner_id| {
+            self.disconnectReplacedSessionOwner(owner_id);
+        }
+        var accepted_owns_connection = true;
+        errdefer if (accepted_owns_connection) {
+            accepted.deinit(self.allocator);
+        };
+        self.attachConnection(index, subscriber_id, &accepted.connection);
+        accepted_owns_connection = false;
+        errdefer accepted.connect.deinit(self.allocator);
+        errdefer self.unregister(index, subscriber_id) catch {};
+        try self.flushSlot(index, &self.slots[index]);
+        const task = ClientTask{
+            .broker = self,
+            .slot_index = index,
+            .subscriber_id = subscriber_id,
+            .connect = accepted.connect,
+            .result = result,
+        };
+        accepted.connect = undefined;
+        accepted.connection = undefined;
+        return task;
+    }
+
     fn register(
         self: *Broker,
         slot_index: usize,
@@ -1310,7 +1402,9 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         const slot = &self.slots[slot_index];
-        if (slot.active) return error.BrokerFull;
+        // `claimSlot` reserves the slot before CONNECT-dependent setup begins.
+        // Legacy direct callers may still provide an unclaimed slot.
+        if (slot.active and slot.connection != null) return error.BrokerFull;
         slot.generation = nextConnectionGeneration(slot.generation);
         slot.active = true;
         slot.connection = null;
@@ -1840,12 +1934,35 @@ pub const Broker = struct {
         connect: mqtt.Connect,
         subscribe: mqtt.Subscribe,
     ) Error!void {
-        const reasons = try self.allocator.alloc(
-            u8,
+        const namespace = listener_namespace.Namespace{
+            .prefix = connection.topicNamespace(),
+        };
+        const mapped_subscriptions = try self.allocator.alloc(
+            mqtt.Subscription,
             subscribe.subscriptions.len,
         );
+        defer self.allocator.free(mapped_subscriptions);
+        var mapped_count: usize = 0;
+        defer for (mapped_subscriptions[0..mapped_count]) |subscription| {
+            self.allocator.free(subscription.topic_filter);
+        };
+        for (subscribe.subscriptions, mapped_subscriptions) |
+            subscription,
+            *mapped,
+        | {
+            mapped.* = subscription;
+            mapped.topic_filter = try namespace.mapFilterAlloc(
+                self.allocator,
+                subscription.topic_filter,
+            );
+            mapped_count += 1;
+        }
+        const reasons = try self.allocator.alloc(
+            u8,
+            mapped_subscriptions.len,
+        );
         defer self.allocator.free(reasons);
-        for (subscribe.subscriptions, reasons) |subscription, *reason| {
+        for (mapped_subscriptions, reasons) |subscription, *reason| {
             reason.* = if (self.options.access_control) |access|
                 if (access.authorize_subscribe(
                     access.context,
@@ -1875,7 +1992,7 @@ pub const Broker = struct {
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
-        for (subscribe.subscriptions, 0..) |subscription, index| {
+        for (mapped_subscriptions, 0..) |subscription, index| {
             if (reasons[index] != 0xff) continue;
             var granted = subscription;
             granted.qos = minQos(
@@ -2043,14 +2160,32 @@ pub const Broker = struct {
         connect: mqtt.Connect,
         unsubscribe: mqtt.Unsubscribe,
     ) Error!void {
+        const namespace = listener_namespace.Namespace{
+            .prefix = connection.topicNamespace(),
+        };
+        const mapped_filters = try self.allocator.alloc(
+            []u8,
+            unsubscribe.topic_filters.len,
+        );
+        var mapped_count: usize = 0;
+        defer {
+            for (mapped_filters[0..mapped_count]) |filter| {
+                self.allocator.free(filter);
+            }
+            self.allocator.free(mapped_filters);
+        }
+        for (unsubscribe.topic_filters, mapped_filters) |filter, *mapped| {
+            mapped.* = try namespace.mapFilterAlloc(self.allocator, filter);
+            mapped_count += 1;
+        }
         const reasons = try self.allocator.alloc(
             u8,
-            unsubscribe.topic_filters.len,
+            mapped_filters.len,
         );
         defer self.allocator.free(reasons);
         const slot = try self.slotForSubscriber(id);
         self.state_mutex.lockUncancelable(self.io);
-        for (unsubscribe.topic_filters, 0..) |filter, index| {
+        for (mapped_filters, 0..) |filter, index| {
             if (self.options.access_control) |access| {
                 if (access.authorize_unsubscribe) |authorize| {
                     if (!authorize(access.context, connect, filter)) {
@@ -2116,39 +2251,49 @@ pub const Broker = struct {
         if (mqtt.subscriptionIdentifier(publish.properties) != null) {
             return error.InvalidProperty;
         }
+        const namespace = listener_namespace.Namespace{
+            .prefix = publisher.topicNamespace(),
+        };
+        const mapped_topic = try namespace.mapTopicAlloc(
+            self.allocator,
+            publish.topic,
+        );
+        defer self.allocator.free(mapped_topic);
+        var canonical_publish = publish;
+        canonical_publish.topic = mapped_topic;
         if (self.options.access_control) |access| {
             if (!access.authorize_publish(
                 access.context,
                 connect,
-                publish,
+                canonical_publish,
             )) {
                 return self.rejectPublish(
                     publisher_id,
                     publisher,
-                    publish,
+                    canonical_publish,
                     0x87,
                 );
             }
         }
-        if (self.payloadTooLarge(publish.payload)) {
+        if (self.payloadTooLarge(canonical_publish.payload)) {
             return self.rejectPublish(
                 publisher_id,
                 publisher,
-                publish,
+                canonical_publish,
                 0x95,
             );
         }
-        if (publish.qos == .exactly_once) {
+        if (canonical_publish.qos == .exactly_once) {
             return self.recordQoS2Publish(
                 publisher_id,
                 publisher,
-                publish,
+                canonical_publish,
             );
         }
         return self.routeReleasedPublish(
             publisher_id,
             publisher,
-            publish,
+            canonical_publish,
             true,
         );
     }
@@ -2900,8 +3045,9 @@ pub const Broker = struct {
                 // the same identifier with DUP rather than inventing a new
                 // transaction.
                 try self.appendCommitIfEnabled();
-                slot.connection.?.writeEncodedSessionPacket(
-                    packet.encoded.bytes,
+                slot.connection.?.writeSessionTransmission(
+                    packet.transmission,
+                    self.maximumQoS(),
                 ) catch |err| switch (err) {
                     error.OutgoingPacketTooLarge => {
                         if (packet.encoded.kind == .pubrel) return err;
@@ -2963,6 +3109,18 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
 
             const connection = &slot.connection.?;
+            const visible_topic = connection.topic_namespace.visibleTopic(
+                delivery.publication.topic(),
+            ) catch |err| switch (err) {
+                error.TopicOutsideNamespace => {
+                    // The canonical route should make this impossible for a
+                    // correctly namespaced subscription. Fail closed if
+                    // restored/corrupt state violates that invariant.
+                    delivery.deinit();
+                    continue;
+                },
+                else => return err,
+            };
             var properties: std.ArrayList(mqtt.Property) = .empty;
             defer properties.deinit(self.allocator);
             const identifier_count =
@@ -2988,7 +3146,7 @@ pub const Broker = struct {
             }
             const outgoing_topic = try connection
                 .prepareAutomaticTopicAlias(
-                delivery.publication.topic(),
+                visible_topic,
                 &properties,
             );
             const packet_id = connection.writePublish(
@@ -3098,6 +3256,7 @@ pub const Broker = struct {
             };
             return .{
                 .encoded = encoded,
+                .transmission = transmission,
                 .handle = handle,
                 .route_id = route_id,
             };
@@ -3510,6 +3669,53 @@ const ClientTask = struct {
             };
         }
         return true;
+    }
+};
+
+const ListenerAcceptTask = struct {
+    broker: *Broker,
+    listener: Listener,
+    result: *?anyerror,
+
+    fn run(task: ListenerAcceptTask) std.Io.Cancelable!void {
+        var pending = task.listener.source.acceptPending(
+            task.broker.options.accept,
+        ) catch |err| {
+            task.result.* = err;
+            return;
+        };
+        const slot_index = task.broker.claimSlot() catch |err| {
+            pending.deinit(task.broker.allocator);
+            task.result.* = err;
+            return;
+        };
+        var slot_claimed = true;
+        defer if (slot_claimed) {
+            task.broker.state_mutex.lockUncancelable(task.broker.io);
+            task.broker.slots[slot_index].active = false;
+            task.broker.state_mutex.unlock(task.broker.io);
+        };
+        const client_task = task.broker.preparePending(
+            slot_index,
+            &pending,
+            task.listener.namespace,
+            task.result,
+        ) catch |err| {
+            // `preparePending` owns and closes the pending connection on every
+            // error path. Only the slot reservation remains ours to release.
+            task.result.* = err;
+            return;
+        } orelse {
+            slot_claimed = false;
+            task.broker.state_mutex.lockUncancelable(task.broker.io);
+            task.broker.slots[slot_index].active = false;
+            task.broker.state_mutex.unlock(task.broker.io);
+            return;
+        };
+        slot_claimed = false;
+        ClientTask.run(client_task) catch |err| {
+            task.result.* = err;
+        };
     }
 };
 

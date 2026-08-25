@@ -454,9 +454,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
   WSS application handshakes, with trusted source, destination, transport and
   v2 TLV metadata,
-  a public listener-namespace primitive for Mosquitto-compatible mount-point
-  validation, inbound topic/Will mapping, ordinary/shared-filter mapping, and
-  fail-closed outbound topic projection ahead of multi-listener integration,
+  heterogeneous TCP/TLS/WS/WSS listener sources sharing one broker core and
+  Mosquitto-compatible mount-point namespaces with inbound PUBLISH/Will and
+  ordinary/shared-filter mapping plus fail-closed live/durable outbound topic
+  projection,
   pre-registration CONNECT authorization with remote/proxy/certificate
   identity context plus pre-mutation
   PUBLISH/SUBSCRIBE/UNSUBSCRIBE, per-recipient outgoing-delivery, and

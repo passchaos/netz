@@ -112,6 +112,21 @@ pub const Server = struct {
         }
         return connection.acceptPending(options);
     }
+
+    pub fn pendingSource(self: *Server) runtime.PendingSource {
+        return .{
+            .context = self,
+            .accept_pending = struct {
+                fn call(
+                    context: *anyopaque,
+                    options: runtime.AcceptOptions,
+                ) anyerror!runtime.PendingAcceptedClient {
+                    const server: *Server = @ptrCast(@alignCast(context));
+                    return server.acceptPending(options);
+                }
+            }.call,
+        };
+    }
 };
 
 pub const ListenOptions = struct {
@@ -224,6 +239,21 @@ pub const TlsServer = struct {
             proxy_metadata = null;
         }
         return connection.acceptPending(options);
+    }
+
+    pub fn pendingSource(self: *TlsServer) runtime.PendingSource {
+        return .{
+            .context = self,
+            .accept_pending = struct {
+                fn call(
+                    context: *anyopaque,
+                    options: runtime.AcceptOptions,
+                ) anyerror!runtime.PendingAcceptedClient {
+                    const server: *TlsServer = @ptrCast(@alignCast(context));
+                    return server.acceptPending(options);
+                }
+            }.call,
+        };
     }
 
     pub fn serveConcurrent(

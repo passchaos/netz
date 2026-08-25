@@ -186,6 +186,251 @@ fn subscribeWithIdentifier(
     );
 }
 
+test "broker shares mounted and global TCP listener namespaces" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var global_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer global_server.deinit();
+    var mounted_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer mounted_server.deinit();
+    const mount = try mqtt.listener_namespace.Namespace.init("mount/");
+    const listeners = [_]broker_mod.Listener{
+        .{
+            .source = global_server.pendingSource(),
+            .connection_count = 1,
+        },
+        .{
+            .source = mounted_server.pendingSource(),
+            .namespace = mount,
+            .connection_count = 2,
+        },
+    };
+
+    const Shared = struct {
+        broker: *Broker,
+        listeners: []const broker_mod.Listener,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListeners(self.listeners) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var global = try runtime.Client.connect(
+        allocator,
+        io,
+        global_server.address(),
+        .{ .protocol = .v5, .client_id = "global" },
+    );
+    defer global.close();
+    var mounted = try runtime.Client.connect(
+        allocator,
+        io,
+        mounted_server.address(),
+        .{ .protocol = .v5, .client_id = "mounted" },
+    );
+    defer mounted.close();
+    var publisher = try runtime.Client.connect(
+        allocator,
+        io,
+        mounted_server.address(),
+        .{ .protocol = .v5, .client_id = "publisher" },
+    );
+    defer publisher.close();
+
+    var global_suback = try global.subscribe(
+        &.{.{ .topic_filter = "mount/#" }},
+        .{},
+    );
+    defer global_suback.deinit(allocator);
+    var mounted_suback = try mounted.subscribe(
+        &.{.{ .topic_filter = "#" }},
+        .{},
+    );
+    defer mounted_suback.deinit(allocator);
+    try publisher.publish("room/value", "payload", .{});
+
+    var global_delivery = try global.readPublish();
+    defer global_delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "mount/room/value",
+        global_delivery.publish.topic,
+    );
+    var mounted_delivery = try mounted.readPublish();
+    defer mounted_delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "room/value",
+        mounted_delivery.publish.topic,
+    );
+
+    try disconnectAll(&.{ &global, &mounted, &publisher });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "mounted listener keeps retained and Will topics inside its namespace" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var global_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer global_server.deinit();
+    var mounted_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer mounted_server.deinit();
+    const listeners = [_]broker_mod.Listener{
+        .{
+            .source = global_server.pendingSource(),
+            .connection_count = 1,
+        },
+        .{
+            .source = mounted_server.pendingSource(),
+            .namespace = try mqtt.listener_namespace.Namespace.init("mount/"),
+            .connection_count = 2,
+        },
+    };
+    const Shared = struct {
+        broker: *Broker,
+        listeners: []const broker_mod.Listener,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListeners(self.listeners) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .broker = &broker, .listeners = &listeners };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var global = try runtime.Client.connect(
+        allocator,
+        io,
+        global_server.address(),
+        .{ .protocol = .v5, .client_id = "global-observer" },
+    );
+    defer global.close();
+    var mounted_publisher = try runtime.Client.connect(
+        allocator,
+        io,
+        mounted_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "mounted-will",
+            .will = .{
+                .topic = "status",
+                .payload = "offline",
+            },
+        },
+    );
+    defer mounted_publisher.close();
+
+    var global_suback = try global.subscribe(
+        &.{.{ .topic_filter = "mount/#" }},
+        .{},
+    );
+    defer global_suback.deinit(allocator);
+    try mounted_publisher.publish(
+        "retained/value",
+        "saved",
+        .{ .retain = true },
+    );
+    var live = try global.readPublish();
+    defer live.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "mount/retained/value",
+        live.publish.topic,
+    );
+
+    // Abrupt close publishes the namespaced Will through the same canonical
+    // route used by ordinary traffic.
+    try mounted_publisher.shutdown();
+    var will = try global.readPublish();
+    defer will.deinit(allocator);
+    try std.testing.expectEqualStrings("mount/status", will.publish.topic);
+    try std.testing.expectEqualStrings("offline", will.publish.payload);
+
+    var mounted_subscriber = try runtime.Client.connect(
+        allocator,
+        io,
+        mounted_server.address(),
+        .{ .protocol = .v5, .client_id = "mounted-replay" },
+    );
+    defer mounted_subscriber.close();
+    var mounted_suback = try mounted_subscriber.subscribe(
+        &.{.{ .topic_filter = "retained/#" }},
+        .{},
+    );
+    defer mounted_suback.deinit(allocator);
+    var replay = try mounted_subscriber.readPublish();
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "retained/value",
+        replay.publish.topic,
+    );
+    try std.testing.expectEqualStrings("saved", replay.publish.payload);
+
+    try disconnectAll(&.{ &global, &mounted_subscriber });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "broker routes QoS 1 across live TCP clients" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

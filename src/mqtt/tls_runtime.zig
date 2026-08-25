@@ -122,6 +122,21 @@ pub const Server = struct {
         return connection.acceptPending(options);
     }
 
+    pub fn pendingSource(self: *Server) mqtt_runtime.PendingSource {
+        return .{
+            .context = self,
+            .accept_pending = struct {
+                fn call(
+                    context: *anyopaque,
+                    options: mqtt_runtime.AcceptOptions,
+                ) anyerror!mqtt_runtime.PendingAcceptedClient {
+                    const server: *Server = @ptrCast(@alignCast(context));
+                    return server.acceptPending(options);
+                }
+            }.call,
+        };
+    }
+
     pub fn serveConcurrent(
         self: *Server,
         comptime HandlerContext: type,
