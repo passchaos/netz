@@ -95,6 +95,9 @@ test "WSS server completes verified WebSocket echo" {
         } },
     );
     defer client.close();
+    // The standard-library client path cannot expose its authenticated chain;
+    // vail-backed client-identity and ALPN paths do so below.
+    try std.testing.expect(client.peerCertificates() == null);
     try client.sendBinary("encrypted websocket");
     var echoed = try client.receiveMessage();
     defer echoed.deinit(allocator);
@@ -346,6 +349,15 @@ test "WSS public client identity completes mTLS echo" {
         .{},
     );
     defer client.close();
+    const server_chain = client.peerCertificates() orelse {
+        return error.MissingPeerCertificate;
+    };
+    try std.testing.expectEqual(@as(usize, 1), server_chain.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &certificate_der,
+        server_chain[0],
+    );
     try client.sendBinary("authenticated websocket");
     var echoed = try client.receiveMessage();
     defer echoed.deinit(allocator);

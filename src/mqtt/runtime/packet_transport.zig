@@ -69,10 +69,11 @@ pub const Transport = union(enum) {
     ) ?[]const []const u8 {
         return switch (self.*) {
             .tls_server => |connection| connection.peerCertificates(),
+            .tls_vail => |connection| connection.peerCertificates(),
             .websocket => |*ws| ws.connection.peerCertificates(),
-            // Client-side TLS peer inspection and non-TLS transports do not
-            // expose a client-authenticated identity through this broker API.
-            .tcp, .tls, .tls_vail => null,
+            // Zig's standard TLS client does not expose its authenticated
+            // chain, and cleartext TCP has no certificate identity.
+            .tcp, .tls => null,
         };
     }
 

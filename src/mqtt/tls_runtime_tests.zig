@@ -115,6 +115,14 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
         },
     );
     defer client.close();
+    const server_chain = client.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqual(@as(usize, 1), server_chain.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &certificate_der,
+        server_chain[0],
+    );
     // The transport must own its selection rather than borrowing either
     // caller's short-lived ALPN list.
     try std.testing.expect(

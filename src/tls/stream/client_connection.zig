@@ -83,6 +83,7 @@ pub const Connection = struct {
     stream: net.Stream,
     records: record_stream.Stream,
     selected_alpn: ?[]u8 = null,
+    peer_certificate_chain: [][]const u8 = &.{},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -248,6 +249,8 @@ pub const Connection = struct {
         else
             null;
         errdefer if (selected_alpn) |protocol| allocator.free(protocol);
+        const peer_certificate_chain = verified.peer_certificate_chain;
+        verified.peer_certificate_chain = &.{};
 
         const connection = try allocator.create(Connection);
         connection.* = .{
@@ -256,6 +259,7 @@ pub const Connection = struct {
             .stream = stream,
             .records = .init(read_keys, write_keys),
             .selected_alpn = selected_alpn,
+            .peer_certificate_chain = peer_certificate_chain,
         };
         return connection;
     }
@@ -319,6 +323,10 @@ pub const Connection = struct {
         self.stream.close(self.io);
         const allocator = self.allocator;
         if (self.selected_alpn) |protocol| allocator.free(protocol);
+        for (self.peer_certificate_chain) |certificate| {
+            allocator.free(certificate);
+        }
+        allocator.free(self.peer_certificate_chain);
         self.* = undefined;
         allocator.destroy(self);
     }
@@ -327,6 +335,12 @@ pub const Connection = struct {
     /// is owned by this connection and remains valid until `deinit`.
     pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
         return self.selected_alpn;
+    }
+
+    /// Return the authenticated server certificate chain. The DER entries are
+    /// owned by this connection and remain valid until `deinit`.
+    pub fn peerCertificates(self: *const Connection) []const []const u8 {
+        return self.peer_certificate_chain;
     }
 
     pub fn read(self: *Connection, out: []u8) Error!usize {

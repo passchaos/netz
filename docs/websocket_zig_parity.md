@@ -392,6 +392,9 @@ non-matching Origin is rejected before the successful handshake; leaving the
 list empty preserves native-client behavior. The MQTT adapter exposes the same
 policy for WS and WSS, and its Mosquitto-derived process gate ports the raw
 allowed/denied request shape from `13-websocket-bad-origin.py`.
+Client-identity WSS connections also retain and expose the authenticated server
+certificate chain, while mTLS servers expose the verified client chain through
+the same `peerCertificates()` API.
 
 Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
 reads plus `closeWithTimeout`. A close step sends Close at most once, consumes

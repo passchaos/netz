@@ -1416,16 +1416,17 @@ pub const Connection = struct {
         return self.transport orelse tcpTransport(self.io, self.stream);
     }
 
-    /// Return the verified client certificate chain for TLS server
-    /// connections. Anonymous TLS and every client/cleartext connection return
-    /// null; the slices remain valid until `close`.
+    /// Return the verified peer certificate chain for vail-backed TLS. Server
+    /// connections expose an authenticated client chain; client connections
+    /// expose the authenticated server chain. Slices remain valid until close.
     pub fn peerCertificates(
         self: *const Connection,
     ) ?[]const []const u8 {
         const transport = self.transport orelse return null;
         return switch (transport) {
             .tls_server => |connection| connection.peerCertificates(),
-            .tcp, .tls_client => null,
+            .tls_client => |connection| connection.peerCertificates(),
+            .tcp => null,
         };
     }
 

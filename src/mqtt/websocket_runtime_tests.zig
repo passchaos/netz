@@ -570,6 +570,14 @@ test "MQTT WSS client identity completes authenticated QoS 1" {
         },
     );
     defer client.close();
+    const server_chain = client.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqual(@as(usize, 1), server_chain.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &certificate_der,
+        server_chain[0],
+    );
     try client.publish(
         "wss/mtls/qos1",
         "authenticated websocket mqtt",

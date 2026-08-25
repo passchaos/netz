@@ -842,7 +842,10 @@ Direct MQTT TLS clients can likewise send an ordered ALPN offer without
 requiring a client certificate. This selects the vail-backed client path,
 retains normal system/caller-CA and hostname verification, and makes the
 server-selected value available through `Connection.negotiatedAlpn()` on both
-ends. This covers rumqttc's configurable TLS ALPN surface and Mosquitto's
+ends. The same client path now retains the complete verified server certificate
+chain and exposes it through `Connection.peerCertificates()` for native MQTT
+TLS and WSS; server-side mTLS continues to expose the verified client chain.
+This covers rumqttc's configurable TLS ALPN surface and Mosquitto's
 client/bridge ALPN option while also giving server applications the negotiated
 identity directly. Empty ALPN lists preserve the existing standard-library TLS
 client path.

@@ -1081,13 +1081,19 @@ pub const Connection = struct {
     compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
 
-    /// Verified TLS client chain for WSS server connections. Anonymous,
-    /// cleartext, and client-side connections return null.
+    /// Return the authenticated peer certificate chain. Server-side WSS
+    /// returns a verified client chain when mTLS succeeded; vail-backed WSS
+    /// clients return the verified server chain. Other transports return null.
     pub fn peerCertificates(
         self: *const Connection,
     ) ?[]const []const u8 {
-        const tls_connection = self.tls_server_conn orelse return null;
-        return tls_connection.peerCertificates();
+        if (self.tls_server_conn) |connection| {
+            return connection.peerCertificates();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.peerCertificates();
+        }
+        return null;
     }
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {

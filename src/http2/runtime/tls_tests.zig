@@ -290,7 +290,14 @@ test "HTTP/2 TLS runtime exposes a required authenticated client chain" {
         },
     );
     defer client.close();
-    try std.testing.expect(client.peerCertificates() == null);
+    const server_chain = client.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqual(@as(usize, 1), server_chain.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &certificate_der,
+        server_chain[0],
+    );
     var response = try client.request(.{ .path = "/mtls" });
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("authenticated h2", response.body);

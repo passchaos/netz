@@ -720,7 +720,8 @@ keep-alive, cancellation and GOAWAY gate remains green.
    TLS 1.3 HTTP/2 runtime separately has an end-to-end encrypted request test
    that verifies `h2` ALPN and the transport-derived `https` pseudo-header,
    plus no-common-ALPN rejection and required-client-certificate tests; verified
-   peer chains are exposed on accepted server connections. Passing `--tls` to
+   peer chains are exposed on accepted server connections, and the vail-backed
+   HTTP/2 client retains and exposes the authenticated server chain. Passing `--tls` to
    the same h2spec command runs all 147 strict cases through TLS 1.3 and
    negotiated `h2` when h2spec is built with a current Go TLS stack that offers
    an X25519 key share.
