@@ -72,6 +72,18 @@ pub const Server = struct {
         self: *Server,
         options: mqtt_runtime.AcceptOptions,
     ) mqtt_runtime.Error!mqtt_runtime.AcceptedClient {
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    /// Complete transport setup and parse CONNECT without sending CONNACK.
+    /// Stateful brokers use this to apply Session and authorization policy
+    /// consistently across TCP, TLS, WS and WSS listeners.
+    pub fn acceptPending(
+        self: *Server,
+        options: mqtt_runtime.AcceptOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
@@ -107,7 +119,7 @@ pub const Server = struct {
             connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
-        return connection.accept(options);
+        return connection.acceptPending(options);
     }
 
     pub fn serveConcurrent(

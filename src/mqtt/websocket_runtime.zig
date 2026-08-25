@@ -58,6 +58,15 @@ pub const Server = struct {
         self: *Server,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.AcceptedClient {
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPending(
+        self: *Server,
+        options: runtime.AcceptOptions,
+    ) runtime.Error!runtime.PendingAcceptedClient {
         const stream = try self.websocket_server.http.listener.accept(
             self.websocket_server.http.io,
         );
@@ -101,7 +110,7 @@ pub const Server = struct {
             connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
-        return connection.accept(options);
+        return connection.acceptPending(options);
     }
 };
 
@@ -168,6 +177,15 @@ pub const TlsServer = struct {
         self: *TlsServer,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.AcceptedClient {
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPending(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+    ) runtime.Error!runtime.PendingAcceptedClient {
         const stream = try self.websocket_server.listener.accept(
             self.websocket_server.io,
         );
@@ -205,7 +223,7 @@ pub const TlsServer = struct {
             connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
-        return connection.accept(options);
+        return connection.acceptPending(options);
     }
 
     pub fn serveConcurrent(
