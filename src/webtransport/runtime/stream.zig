@@ -352,6 +352,13 @@ fn takeHandshakeSessionStream(
     stream_id: u62,
     max_stream_bytes: usize,
 ) Error!?OwnedHandshakeStream {
+    // Receive mode is selected per stream, not per session. A caller may use
+    // the compatibility whole-stream API for one stream and incremental reads
+    // for another. Ignore streams already claimed by the incremental reader
+    // rather than making them poison every later whole-stream scan.
+    if (registry.get(stream_id)) |registered| {
+        if (registered.receive_mode == .incremental) return null;
+    }
     const available = connection.availableReceivedStream(stream_id) orelse
         return null;
     const stream = try association.identify(

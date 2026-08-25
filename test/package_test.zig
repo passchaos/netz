@@ -1480,6 +1480,22 @@ test "public modules are reachable" {
         "receiveSessionEvent",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "StatefulProtectedServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "StatefulProtectedClientSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "writeStreams",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "receivePeerConnectionClose",
+    ));
     try std.testing.expect(@hasField(netz.webtransport.runtime.OwnedHandshakeDatagram, "bytes"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "maxDatagramPayloadSize"));

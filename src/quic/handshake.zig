@@ -21,6 +21,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
     InvalidHandshakeRecovery,
     HandshakeSendFailed,
     HandshakeReceiveFailed,
+    PostHandshakeTlsUnavailable,
 };
 
 pub const ClientOptions = struct {
@@ -284,7 +285,10 @@ pub const EstablishedConnection = struct {
     retry_processed: bool = false,
     resumed: bool = false,
     early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
-    resumption_master_secret: quic.tls.secret.Secret,
+    /// Absent when 1-RTT state was installed without the TLS transcript secret.
+    /// Application data remains fully stateful, but post-handshake tickets are
+    /// unavailable unless the external key negotiator supplies this secret.
+    resumption_master_secret: ?quic.tls.secret.Secret,
     peer_transport_parameters: quic.resumption.Snapshot,
     post_handshake_send_crypto_offset: u64 = 0,
     post_handshake_receive_crypto_offset: u64 = 0,
@@ -296,11 +300,13 @@ pub const EstablishedConnection = struct {
         io: std.Io,
         config: quic.resumption.ticket.handshake.ServerConfig,
     ) Error!quic.resumption.ticket.handshake.Issued {
+        const resumption_master_secret = self.resumption_master_secret orelse
+            return error.PostHandshakeTlsUnavailable;
         return quic.resumption.ticket.handshake.issue(
             &self.connection,
             io,
             config,
-            self.resumption_master_secret,
+            resumption_master_secret,
             &self.post_handshake_send_crypto_offset,
         );
     }
@@ -311,10 +317,12 @@ pub const EstablishedConnection = struct {
         self: *EstablishedConnection,
         config: quic.resumption.ticket.handshake.ClientConfig,
     ) Error!void {
+        const resumption_master_secret = self.resumption_master_secret orelse
+            return error.PostHandshakeTlsUnavailable;
         try quic.resumption.ticket.handshake.receiveAndCache(
             &self.connection,
             config,
-            self.resumption_master_secret,
+            resumption_master_secret,
             self.alpn,
             self.peer_transport_parameters,
             &self.post_handshake_receive_crypto_offset,
@@ -330,6 +338,142 @@ pub const EstablishedConnection = struct {
         self.* = undefined;
     }
 };
+
+/// Inputs for installing externally negotiated 1-RTT keys into the complete
+/// stateful QUIC transport.
+///
+/// This is intentionally distinct from the lightweight packet-protection APIs:
+/// the resulting connection owns ACK/loss recovery, congestion, flow control,
+/// stream limits, reset/stop state, timers, and key-update accounting. It is
+/// suitable for deterministic deployments whose TLS/PSK setup happens outside
+/// this module but which still require production QUIC stream semantics.
+pub const PreconfiguredConnectionOptions = struct {
+    version: quic.Version = .version_1,
+    receive_keys: quic.protection.PacketProtectionKeys,
+    send_keys: quic.protection.PacketProtectionKeys,
+    local_connection_id: []const u8,
+    peer_connection_id: []const u8,
+    local_transport_parameters: quic.TransportParameters =
+        quic.practical_transport_parameters,
+    peer_transport_parameters: quic.TransportParameters =
+        quic.practical_transport_parameters,
+    one_rtt: OneRttConfig = .{},
+    alpn_protocol: []const u8 = "h3",
+    /// Optional TLS resumption master secret retained by the external
+    /// negotiator. Without it, post-handshake NewSessionTicket helpers fail
+    /// closed while all QUIC application-data facilities remain available.
+    resumption_master_secret: ?quic.tls.secret.Secret = null,
+};
+
+pub fn establishPreconfigured(
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    local_endpoint: quic.one_rtt.ConnectionConfig.EndpointRole,
+    options: PreconfiguredConnectionOptions,
+) Error!EstablishedConnection {
+    if (options.version == .negotiation or
+        quic.isReservedVersionWire(options.version.wireValue()) or
+        options.local_connection_id.len == 0)
+    {
+        return error.InvalidTransportParameter;
+    }
+    const local_source: quic.TransportParameterSource = switch (local_endpoint) {
+        .client => .client,
+        .server => .server,
+    };
+    const peer_source: quic.TransportParameterSource = switch (local_endpoint) {
+        .client => .server,
+        .server => .client,
+    };
+    try quic.validateTransportParameters(
+        options.local_transport_parameters,
+        local_source,
+    );
+    try quic.validateTransportParameters(
+        options.peer_transport_parameters,
+        peer_source,
+    );
+    return establishedConnection(
+        endpoint,
+        options.version,
+        peer,
+        options.receive_keys,
+        options.send_keys,
+        options.local_connection_id,
+        options.peer_connection_id,
+        options.one_rtt,
+        local_endpoint,
+        options.local_transport_parameters,
+        options.peer_transport_parameters,
+        options.alpn_protocol,
+        false,
+        false,
+        .not_offered,
+        options.resumption_master_secret,
+    );
+}
+
+test "preconfigured QUIC validates externally negotiated metadata" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x4a} ** quic.protection.secret_len,
+    );
+    const peer: net.IpAddress = .{ .ip4 = .loopback(443) };
+
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        establishPreconfigured(&endpoint, peer, .client, .{
+            .version = .negotiation,
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "local",
+            .peer_connection_id = "peer",
+        }),
+    );
+    try std.testing.expectError(
+        error.TransportParameterForbidden,
+        establishPreconfigured(&endpoint, peer, .server, .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "local",
+            .peer_connection_id = "peer",
+            .peer_transport_parameters = .{
+                .preferred_address = .{},
+            },
+        }),
+    );
+
+    var established = try establishPreconfigured(
+        &endpoint,
+        peer,
+        .client,
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "local",
+            // RFC 9000 permits a peer to select a zero-length CID. The local
+            // CID cannot be empty because short-header receive routing needs
+            // a deterministic length on this endpoint.
+            .peer_connection_id = &.{},
+        },
+    );
+    defer established.deinit();
+    try std.testing.expectError(
+        error.PostHandshakeTlsUnavailable,
+        established.issueSessionTicket(threaded.io(), .{
+            .now_ms = 0,
+        }),
+    );
+}
 
 fn validateConfiguredVersions(version: quic.Version, available_versions: []const quic.Version) Error!void {
     if (version == .negotiation or quic.isReservedVersionWire(version.wireValue())) return error.InvalidVersionNegotiation;
@@ -2827,7 +2971,7 @@ fn establishedConnection(
     retry_processed: bool,
     resumed: bool,
     early_data_status: quic.zero_rtt.handshake.Status,
-    resumption_master_secret: quic.tls.secret.Secret,
+    resumption_master_secret: ?quic.tls.secret.Secret,
 ) Error!EstablishedConnection {
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);

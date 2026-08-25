@@ -492,7 +492,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   per-session limits, prevalidated transactional cross-stream packet-batch writes that
   commit only the socket-visible prefix, shared HTTP/3/WT stream-ID allocation, and
   WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
-  counters
+  counters, plus an externally negotiated-key stateful runtime with the same
+  recovery, congestion/flow-control, associated-stream, cancellation, and
+  session-lifecycle facilities as the integrated TLS-handshake runtime
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with priority encode/decode,
   USERNAME ufrag demux, PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE role-conflict tiebreaker decisions, UNKNOWN-ATTRIBUTES helpers, and authenticated 487 Role Conflict error responses plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
@@ -538,7 +540,9 @@ protected HTTP/3 runtime uses the QUIC 1-RTT short-packet API for SETTINGS
 control streams and request/response STREAM frames. WebTransport has the
 cleartext development transport, a protected runtime that performs CONNECT over
 protected HTTP/3 and datagrams over protected QUIC 1-RTT packets, and a
-handshake-backed protected session API. The protected WebTransport runtimes
+handshake-backed protected session API, plus a stateful preconfigured-key API
+for deployments that negotiate and authenticate 1-RTT keys externally. The
+protected WebTransport runtimes
 enable CONNECT, H3 DATAGRAM, WebTransport max-sessions, and draft-13
 per-session stream/data credit SETTINGS by default, then reject DATAGRAM send or
 receive calls if the peer did not negotiate the matching capabilities.
@@ -557,7 +561,16 @@ frame type, without conflating connection shutdown with a Session close
 capsule. The lightweight preconfigured-key protected runtime shares the same
 incremental Capsule parser and drain/close semantics, including same-chunk
 event retention through the largest valid 1024-byte close reason; associated
-stream cleanup remains specific to the stateful real-handshake runtime.
+streams intentionally remain unavailable because that transport does not own
+ACK/loss recovery or flow control. `StatefulProtectedServer` and
+`StatefulProtectedClientSession` fill that gap for externally negotiated keys:
+they use the complete QUIC connection engine and therefore expose bidi/uni
+association, partial/batched writes, incremental and whole-stream reads,
+RESET_STREAM/STOP_SENDING, stream/session limits, connection statistics, and
+session-close cleanup. Their connection IDs, negotiated transport parameters,
+ALPN, packet keys, and optional resumption master secret must all come from the
+same authenticated external negotiation; the API does not replace TLS or
+authenticate those inputs.
 
 ## Build
 
@@ -827,13 +840,14 @@ if (session.maxDatagramPayloadSize()) |limit| {
   legal leading table-size updates while keeping dynamic state scoped to one block.
   HTTP/3 QPACK now provides RFC 9204 dynamic-table state with single-pass
   exact/name matching, dynamic field
-  sections, both instruction stream codecs, and Protected plus handshake-backed
-  client/server decode-side live encoder-stream processing with decoder
-  feedback. Both protected runtimes persist their encoder/decoder streams and
+  sections, both instruction stream codecs, and lightweight Protected plus
+  stateful client/server decode-side live encoder-stream processing with decoder
+  feedback. These HTTP/3 runtimes persist their encoder/decoder streams and
   automatically use peer-capacity-bounded, reference-safe dynamic compression
   for repeated request and response fields after either preconfigured 1-RTT or
-  a full QUIC handshake. The preconfigured 1-RTT runtime also reuses protected
-  packet scratch. Both preconfigured and handshake-backed runtimes batch
+  a full QUIC handshake. The lightweight preconfigured 1-RTT runtime also
+  reuses protected packet scratch. Stateful preconfigured-key and
+  handshake-backed runtimes batch
   multi-packet STREAM sends through UDP GSO or sendmmsg while preserving
   flow/recovery state and consuming every protected packet number on partial
   socket writes.

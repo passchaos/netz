@@ -133,6 +133,13 @@ fn pollStream(
     stream_id: u62,
     out: []u8,
 ) Error!?Read {
+    // A session can mix whole-stream and incremental consumption as long as a
+    // single receive direction never changes mode. Skip streams claimed by
+    // the whole-stream reader so an already-consumed stream cannot prevent
+    // incremental events from other associated streams being observed.
+    if (registry.get(stream_id)) |registered| {
+        if (registered.receive_mode == .whole) return null;
+    }
     const stream = try association.identify(
         connection,
         registry,

@@ -182,6 +182,87 @@ pub const ProtectedServer = struct {
     }
 };
 
+/// A preconfigured-key WebTransport server backed by the complete stateful
+/// QUIC transport. Unlike `ProtectedServer`, this variant owns recovery,
+/// congestion/flow control, stream limits, and RESET/STOP state, so it safely
+/// exposes the same associated-stream API as the TLS-handshake runtime.
+pub const StatefulProtectedServer = struct {
+    endpoint: quic.runtime.Endpoint,
+    limits: Limits,
+    h3_options: http3.runtime.HandshakeSessionOptions,
+    transport: quic.handshake.PreconfiguredConnectionOptions,
+
+    pub fn bind(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        limits: Limits,
+        h3_options: http3.runtime.HandshakeSessionOptions,
+        transport: quic.handshake.PreconfiguredConnectionOptions,
+    ) Error!StatefulProtectedServer {
+        if (!http3.isHttp3Alpn(transport.alpn_protocol)) {
+            return error.InvalidAlpn;
+        }
+        return .{
+            .endpoint = try .bind(
+                allocator,
+                io,
+                bind_address,
+                limits.http3.quic,
+            ),
+            .limits = limits,
+            .h3_options = webTransportHandshakeSessionOptions(h3_options),
+            .transport = transport,
+        };
+    }
+
+    pub fn deinit(self: *StatefulProtectedServer) void {
+        self.endpoint.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: StatefulProtectedServer) net.IpAddress {
+        return self.endpoint.address();
+    }
+
+    /// Receive the first protected packet, bind the stateful QUIC connection
+    /// to its source address, and continue the normal HTTP/3/WT accept path.
+    pub fn accept(self: *StatefulProtectedServer) Error!AcceptedHandshakeSession {
+        var first = try self.endpoint.receiveBytes();
+        defer first.deinit(self.endpoint.allocator);
+        var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+            &self.endpoint,
+            first.from,
+            self.h3_options,
+            self.transport,
+        );
+        errdefer h3.deinit();
+        try h3.established.connection.preloadReceivedDatagram(
+            first.from,
+            first.bytes,
+            first.ecn,
+        );
+        return acceptStatefulSession(&h3, self.limits);
+    }
+
+    /// Accept one WebTransport session from an already authenticated peer.
+    /// The returned value borrows this server's endpoint and must be destroyed
+    /// before the server, matching ordinary `HandshakeServer.accept`.
+    pub fn acceptFrom(
+        self: *StatefulProtectedServer,
+        peer: net.IpAddress,
+    ) Error!AcceptedHandshakeSession {
+        var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+            &self.endpoint,
+            peer,
+            self.h3_options,
+            self.transport,
+        );
+        errdefer h3.deinit();
+        return acceptStatefulSession(&h3, self.limits);
+    }
+};
+
 pub const HandshakeServer = struct {
     h3: http3.runtime.HandshakeServer,
     limits: Limits,
@@ -217,44 +298,7 @@ pub const HandshakeServer = struct {
     pub fn accept(self: *HandshakeServer) Error!AcceptedHandshakeSession {
         var session = try self.h3.accept();
         errdefer session.deinit();
-        try session.ensureSettingsSent();
-
-        const request = try receiveHandshakeConnectRequest(&session);
-        var request_head = request.head;
-        errdefer request_head.deinit(
-            session.established.connection.endpoint.allocator,
-        );
-        try webtransport.ensureDatagramsNegotiated(session.options.local_settings, session.control.settings.peer);
-        const session_id = webtransport.SessionId.init(request.stream_id);
-        if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try session.startResponse(
-            request.stream_id,
-            connectResponse(),
-            null,
-        );
-        try session.detachRequestStream(request.stream_id);
-        var streams = try initHandshakeStreamRegistry(
-            session.established.connection.endpoint.allocator,
-            session_id,
-            .server,
-            session.options.local_settings,
-            session.control.settings.peer,
-            self.limits.max_session_streams,
-            null,
-            null,
-        );
-        errdefer streams.deinit();
-        const control = try session_control.Control.init(session_id);
-        return .{
-            .h3 = session,
-            .request = .{
-                .stream_id = request.stream_id,
-                .request = request_head,
-            },
-            .session_id = session_id,
-            .streams = streams,
-            .control = control,
-        };
+        return acceptStatefulSession(&session, self.limits);
     }
 };
 
@@ -722,45 +766,42 @@ pub const HandshakeClientSession = struct {
     ) Error!HandshakeClientSession {
         var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportHandshakeClientOptions(options.h3));
         errdefer h3_client.deinit();
-        var header_buf: [3]http3.Qpack.HeaderField = undefined;
-        const headers = connectRequestHeaders(options.origin, &header_buf);
-        const session_id = try h3_client.startRequest(.{
-            .method = "CONNECT",
-            .path = options.path,
-            .scheme = "https",
-            .authority = options.authority,
-            .headers = headers,
-        }, null);
-        const response_head =
-            try receiveHandshakeConnectResponse(&h3_client, session_id);
-        defer {
-            var owned = response_head;
-            owned.deinit(allocator);
-        }
-        try h3_client.detachResponseStream(session_id);
-        try webtransport.ensureDatagramsNegotiated(h3_client.options.local_settings, h3_client.control.settings.peer);
-        const webtransport_session_id =
-            webtransport.SessionId.init(session_id);
-        var streams = try initHandshakeStreamRegistry(
+        return connectStatefulSession(
+            &h3_client,
+            options.authority,
+            options.path,
+            options.origin,
+            options.limits,
+        );
+    }
+
+    /// Establish WebTransport over externally negotiated 1-RTT keys while
+    /// retaining the full stateful QUIC transport used by associated streams.
+    pub fn connectPreconfigured(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+    ) Error!HandshakeClientSession {
+        const h3_options = webTransportHandshakeSessionOptions(options.h3);
+        var h3_client = try http3.runtime.HandshakeClient.initPreconfigured(
             allocator,
-            webtransport_session_id,
-            .client,
-            h3_client.options.local_settings,
-            h3_client.control.settings.peer,
-            options.limits.max_session_streams,
-            null,
-            null,
+            io,
+            local_address,
+            server,
+            options.limits.http3,
+            h3_options,
+            options.transport,
         );
-        errdefer streams.deinit();
-        const control = try session_control.Control.init(
-            webtransport_session_id,
+        errdefer h3_client.deinit();
+        return connectStatefulSession(
+            &h3_client,
+            options.authority,
+            options.path,
+            options.origin,
+            options.limits,
         );
-        return .{
-            .h3 = h3_client,
-            .session_id = webtransport_session_id,
-            .streams = streams,
-            .control = control,
-        };
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
@@ -1327,6 +1368,199 @@ pub const HandshakeConnectOptions = struct {
     h3: http3.runtime.HandshakeClientOptions,
 };
 
+pub const StatefulProtectedConnectOptions = struct {
+    authority: []const u8,
+    path: []const u8 = "/",
+    origin: []const u8 = "/",
+    limits: Limits = .{},
+    h3: http3.runtime.HandshakeSessionOptions = .{},
+    transport: quic.handshake.PreconfiguredConnectionOptions,
+};
+
+pub const StatefulProtectedClientSession = struct {
+    session: HandshakeClientSession,
+
+    pub fn connect(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+    ) Error!StatefulProtectedClientSession {
+        return .{ .session = try HandshakeClientSession.connectPreconfigured(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+        ) };
+    }
+
+    pub fn deinit(self: *StatefulProtectedClientSession) void {
+        self.session.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(
+        self: StatefulProtectedClientSession,
+    ) net.IpAddress {
+        return self.session.h3.address();
+    }
+
+    pub fn openBidirectionalStream(
+        self: *StatefulProtectedClientSession,
+    ) Error!u62 {
+        return self.session.openBidirectionalStream();
+    }
+
+    pub fn openUnidirectionalStream(
+        self: *StatefulProtectedClientSession,
+    ) Error!u62 {
+        return self.session.openUnidirectionalStream();
+    }
+
+    pub fn sendStream(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        return self.session.sendStream(stream_id, payload, fin);
+    }
+
+    pub fn writeStream(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!usize {
+        return self.session.writeStream(stream_id, payload);
+    }
+
+    pub fn writeStreams(
+        self: *StatefulProtectedClientSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+    ) Error!StreamWriteResult {
+        return self.session.writeStreams(writes, counts);
+    }
+
+    pub fn finishStream(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+    ) Error!void {
+        return self.session.finishStream(stream_id);
+    }
+
+    pub fn receiveStream(
+        self: *StatefulProtectedClientSession,
+    ) Error!OwnedHandshakeStream {
+        return self.session.receiveStream();
+    }
+
+    pub fn readStream(
+        self: *StatefulProtectedClientSession,
+        out: []u8,
+    ) Error!StreamRead {
+        return self.session.readStream(out);
+    }
+
+    pub fn serviceTransport(
+        self: *StatefulProtectedClientSession,
+    ) Error!void {
+        return self.session.serviceTransport();
+    }
+
+    pub fn resetStream(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+    ) Error!void {
+        return self.session.resetStream(stream_id, application_error_code);
+    }
+
+    pub fn stopStream(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+    ) Error!void {
+        return self.session.stopStream(stream_id, application_error_code);
+    }
+
+    pub fn sendDatagram(
+        self: *StatefulProtectedClientSession,
+        payload: []const u8,
+    ) Error!void {
+        return self.session.sendDatagram(payload);
+    }
+
+    pub fn receiveDatagram(
+        self: *StatefulProtectedClientSession,
+    ) Error!OwnedHandshakeDatagram {
+        return self.session.receiveDatagram();
+    }
+
+    pub fn receiveManyDatagrams(
+        self: *StatefulProtectedClientSession,
+        count: usize,
+    ) Error!OwnedHandshakeDatagramBatch {
+        return self.session.receiveManyDatagrams(count);
+    }
+
+    pub fn maxDatagramPayloadSize(
+        self: StatefulProtectedClientSession,
+    ) ?usize {
+        return self.session.maxDatagramPayloadSize();
+    }
+
+    pub fn maxDatagramSize(
+        self: StatefulProtectedClientSession,
+    ) usize {
+        return self.session.maxDatagramSize();
+    }
+
+    pub fn datagramsNegotiated(
+        self: StatefulProtectedClientSession,
+    ) bool {
+        return self.session.datagramsNegotiated();
+    }
+
+    pub fn drain(self: *StatefulProtectedClientSession) Error!void {
+        return self.session.drain();
+    }
+
+    pub fn close(
+        self: *StatefulProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        return self.session.close(code, reason);
+    }
+
+    pub fn receiveSessionEvent(
+        self: *StatefulProtectedClientSession,
+    ) Error!SessionEvent {
+        return self.session.receiveSessionEvent();
+    }
+
+    pub fn receivePeerConnectionClose(
+        self: *StatefulProtectedClientSession,
+    ) Error!quic.one_rtt.PeerCloseInfo {
+        return self.session.receivePeerConnectionClose();
+    }
+
+    pub fn stats(
+        self: StatefulProtectedClientSession,
+    ) quic.one_rtt.ConnectionStats {
+        return self.session.stats();
+    }
+
+    pub fn getStats(
+        self: StatefulProtectedClientSession,
+    ) quic.one_rtt.ConnectionStats {
+        return self.stats();
+    }
+};
+
 fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) http3.runtime.ProtectedConfig {
     var out = config;
     out.local_settings = webtransport.defaultSettings(out.local_settings);
@@ -1343,6 +1577,117 @@ fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOpti
     var out = options;
     out.session.local_settings = webtransport.defaultSettings(out.session.local_settings);
     return out;
+}
+
+fn webTransportHandshakeSessionOptions(
+    options: http3.runtime.HandshakeSessionOptions,
+) http3.runtime.HandshakeSessionOptions {
+    var out = options;
+    out.local_settings = webtransport.defaultSettings(out.local_settings);
+    return out;
+}
+
+fn connectStatefulSession(
+    h3_client: *http3.runtime.HandshakeClient,
+    authority: []const u8,
+    path: []const u8,
+    origin: []const u8,
+    limits: Limits,
+) Error!HandshakeClientSession {
+    const allocator = h3_client.allocator;
+    var header_buf: [3]http3.Qpack.HeaderField = undefined;
+    const headers = connectRequestHeaders(origin, &header_buf);
+    const session_id = try h3_client.startRequest(.{
+        .method = "CONNECT",
+        .path = path,
+        .scheme = "https",
+        .authority = authority,
+        .headers = headers,
+    }, null);
+    const response_head =
+        try receiveHandshakeConnectResponse(h3_client, session_id);
+    defer {
+        var owned = response_head;
+        owned.deinit(allocator);
+    }
+    try h3_client.detachResponseStream(session_id);
+    try webtransport.ensureDatagramsNegotiated(
+        h3_client.options.local_settings,
+        h3_client.control.settings.peer,
+    );
+    const webtransport_session_id = webtransport.SessionId.init(session_id);
+    var streams = try initHandshakeStreamRegistry(
+        allocator,
+        webtransport_session_id,
+        .client,
+        h3_client.options.local_settings,
+        h3_client.control.settings.peer,
+        limits.max_session_streams,
+        null,
+        null,
+    );
+    errdefer streams.deinit();
+    const control = try session_control.Control.init(
+        webtransport_session_id,
+    );
+    const owned_h3 = h3_client.*;
+    h3_client.* = undefined;
+    return .{
+        .h3 = owned_h3,
+        .session_id = webtransport_session_id,
+        .streams = streams,
+        .control = control,
+    };
+}
+
+fn acceptStatefulSession(
+    session: *http3.runtime.HandshakeServerSession,
+    limits: Limits,
+) Error!AcceptedHandshakeSession {
+    try session.ensureSettingsSent();
+    const request = try receiveHandshakeConnectRequest(session);
+    var request_head = request.head;
+    errdefer request_head.deinit(
+        session.established.connection.endpoint.allocator,
+    );
+    try webtransport.ensureDatagramsNegotiated(
+        session.options.local_settings,
+        session.control.settings.peer,
+    );
+    const session_id = webtransport.SessionId.init(request.stream_id);
+    if (!session_id.isClientInitiatedBidirectional()) {
+        return error.InvalidConnect;
+    }
+    try session.startResponse(
+        request.stream_id,
+        connectResponse(),
+        null,
+    );
+    try session.detachRequestStream(request.stream_id);
+    var streams = try initHandshakeStreamRegistry(
+        session.established.connection.endpoint.allocator,
+        session_id,
+        .server,
+        session.options.local_settings,
+        session.control.settings.peer,
+        limits.max_session_streams,
+        null,
+        null,
+    );
+    errdefer streams.deinit();
+    const control = try session_control.Control.init(session_id);
+    const owned_h3 = session.*;
+    session.* = undefined;
+    return .{
+        .h3 = owned_h3,
+        .request = .{
+            .stream_id = request.stream_id,
+            .request = request_head,
+        },
+        .session_id = session_id,
+        .streams = streams,
+        .control = control,
+    };
 }
 
 fn receiveHandshakeConnectRequest(
@@ -2104,6 +2449,215 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     try std.testing.expectEqualStrings("", peer_fin.closed.reason);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport stateful preconfigured runtime exchanges associated streams" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc2} ** quic.protection.secret_len,
+    );
+    const local_settings = webtransport.defaultSettings(.{});
+
+    var server = try StatefulProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+            .max_session_streams = 2,
+        },
+        .{ .local_settings = local_settings },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .local_transport_parameters = quic.practical_transport_parameters,
+            .peer_transport_parameters = quic.practical_transport_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *StatefulProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+
+            var client_bidi = try session.receiveStream();
+            defer client_bidi.deinit();
+            try std.testing.expectEqual(
+                webtransport.StreamDirection.bidirectional,
+                client_bidi.direction,
+            );
+            try std.testing.expectEqualStrings("client-bidi", client_bidi.payload);
+            try session.sendStream(client_bidi.stream_id, "server-bidi", true);
+
+            var client_uni = try session.receiveStream();
+            defer client_uni.deinit();
+            try std.testing.expectEqual(
+                webtransport.StreamDirection.unidirectional,
+                client_uni.direction,
+            );
+            try std.testing.expectEqualStrings("client-uni", client_uni.payload);
+
+            const server_uni = try session.openUnidirectionalStream();
+            try session.sendStream(server_uni, "server-uni", true);
+
+            var reset_buffer: [32]u8 = undefined;
+            while (true) {
+                const event = try session.readStream(&reset_buffer);
+                switch (event) {
+                    .reset => |reset| {
+                        try std.testing.expectEqual(
+                            @as(?u32, 91),
+                            reset.error_info.application_code,
+                        );
+                        break;
+                    },
+                    .data => {},
+                    else => return error.UnexpectedStreamEvent,
+                }
+            }
+
+            const stopped_uni = try session.openUnidirectionalStream();
+            try session.sendStream(stopped_uni, "stop-this", false);
+            while (true) {
+                const event = try session.readStream(&reset_buffer);
+                switch (event) {
+                    .stopped => |stopped| {
+                        try std.testing.expectEqual(stopped_uni, stopped.stream_id);
+                        try std.testing.expectEqual(
+                            @as(?u32, 92),
+                            stopped.error_info.application_code,
+                        );
+                        break;
+                    },
+                    .data => {},
+                    else => return error.UnexpectedStreamEvent,
+                }
+            }
+
+            try session.drain();
+            const close_event = try session.receiveSessionEvent();
+            try std.testing.expect(close_event == .closed);
+            try std.testing.expectEqual(
+                @as(u32, 93),
+                close_event.closed.code,
+            );
+            try std.testing.expectEqualStrings(
+                "stateful done",
+                close_event.closed.reason,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try StatefulProtectedClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-stateful-protected",
+            .limits = .{
+                .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+                .max_session_streams = 2,
+            },
+            .h3 = .{ .local_settings = local_settings },
+            .transport = .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = &client_cid,
+                .peer_connection_id = &server_cid,
+                .local_transport_parameters = quic.practical_transport_parameters,
+                .peer_transport_parameters = quic.practical_transport_parameters,
+                .one_rtt = .{ .enable_pacing = false },
+            },
+        },
+    );
+    defer client.deinit();
+    try std.testing.expect(client.datagramsNegotiated());
+    try std.testing.expect(client.maxDatagramSize() != 0);
+    try std.testing.expectEqual(
+        client.address(),
+        client.session.h3.address(),
+    );
+    const bidi = try client.openBidirectionalStream();
+    try client.sendStream(bidi, "client-bidi", true);
+    const uni = try client.openUnidirectionalStream();
+    try client.sendStream(uni, "client-uni", true);
+
+    var response_bidi = try client.receiveStream();
+    defer response_bidi.deinit();
+    try std.testing.expectEqual(bidi, response_bidi.stream_id);
+    try std.testing.expectEqualStrings("server-bidi", response_bidi.payload);
+    var response_uni = try client.receiveStream();
+    defer response_uni.deinit();
+    try std.testing.expectEqual(
+        webtransport.StreamDirection.unidirectional,
+        response_uni.direction,
+    );
+    try std.testing.expectEqualStrings("server-uni", response_uni.payload);
+
+    const reset_bidi = try client.openBidirectionalStream();
+    try std.testing.expectError(
+        error.StreamLimitExceeded,
+        client.openBidirectionalStream(),
+    );
+    try client.sendStream(reset_bidi, "before-reset", false);
+    try client.resetStream(reset_bidi, 91);
+    var stop_buffer: [32]u8 = undefined;
+    var stop_sent = false;
+    while (!stop_sent) {
+        const event = try client.readStream(&stop_buffer);
+        switch (event) {
+            .data => |data| {
+                if (data.direction == .unidirectional and
+                    !data.locally_initiated)
+                {
+                    try client.stopStream(data.stream_id, 92);
+                    stop_sent = true;
+                }
+            },
+            else => {},
+        }
+    }
+    const drain_event = try client.receiveSessionEvent();
+    try std.testing.expect(drain_event == .draining);
+    try client.close(93, "stateful done");
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.openUnidirectionalStream(),
+    );
+    const peer_fin = try client.receiveSessionEvent();
+    try std.testing.expect(peer_fin == .closed);
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 

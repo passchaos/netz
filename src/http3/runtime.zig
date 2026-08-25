@@ -58,6 +58,7 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     RequestRejected,
     ClosedCriticalStream,
     InvalidUri,
+    InvalidAlpn,
 };
 
 const client_control_stream_id: u62 = 2;
@@ -2585,42 +2586,10 @@ pub const HandshakeServer = struct {
     pub fn accept(self: *HandshakeServer) Error!HandshakeServerSession {
         var established = try quic.handshake.accept(&self.quic_server.endpoint, self.handshake_options);
         errdefer established.deinit();
-        const max_capacity = std.math.cast(
-            usize,
-            self.session_options.local_settings.qpack_max_table_capacity,
-        ) orelse return error.InvalidSetting;
-        return .{
-            .established = established,
-            .options = self.session_options,
-            .qpack_decode = .init(
-                established.connection.endpoint.allocator,
-                max_capacity,
-                self.session_options.max_stream_buffer,
-            ),
-            .qpack_encode = .initAwaitingPeerSettings(
-                established.connection.endpoint.allocator,
-                self.session_options.max_stream_buffer,
-            ),
-            .request_streams = .init(
-                established.connection.endpoint.allocator,
-                self.session_options.max_stream_buffer,
-                self.session_options.max_concurrent_request_streams,
-            ),
-            .streaming_requests = .init(
-                established.connection.endpoint.allocator,
-                self.session_options.max_concurrent_request_streams,
-                self.session_options.max_stream_buffer,
-                self.session_options.local_settings,
-                .request,
-            ),
-            .request_lifecycle = .init(
-                established.connection.endpoint.allocator,
-            ),
-            .outbound_bodies = .init(
-                established.connection.endpoint.allocator,
-                self.session_options.max_concurrent_request_streams,
-            ),
-        };
+        return HandshakeServerSession.initEstablished(
+            established,
+            self.session_options,
+        );
     }
 };
 
@@ -2646,6 +2615,68 @@ pub const HandshakeServerSession = struct {
     sent_push_ids: std.ArrayList(u64) = .empty,
     peer_promised_push_ids: std.ArrayList(u64) = .empty,
     next_push_stream_id: u62 = first_server_push_stream_id,
+
+    pub fn initEstablished(
+        established: quic.handshake.EstablishedConnection,
+        options: HandshakeSessionOptions,
+    ) Error!HandshakeServerSession {
+        if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
+        const max_capacity = std.math.cast(
+            usize,
+            options.local_settings.qpack_max_table_capacity,
+        ) orelse return error.InvalidSetting;
+        const allocator = established.connection.endpoint.allocator;
+        return .{
+            .established = established,
+            .options = options,
+            .qpack_decode = .init(
+                allocator,
+                max_capacity,
+                options.max_stream_buffer,
+            ),
+            .qpack_encode = .initAwaitingPeerSettings(
+                allocator,
+                options.max_stream_buffer,
+            ),
+            .request_streams = .init(
+                allocator,
+                options.max_stream_buffer,
+                options.max_concurrent_request_streams,
+            ),
+            .streaming_requests = .init(
+                allocator,
+                options.max_concurrent_request_streams,
+                options.max_stream_buffer,
+                options.local_settings,
+                .request,
+            ),
+            .request_lifecycle = .init(allocator),
+            .outbound_bodies = .init(
+                allocator,
+                options.max_concurrent_request_streams,
+            ),
+        };
+    }
+
+    pub fn initPreconfigured(
+        endpoint: *quic.runtime.Endpoint,
+        peer: net.IpAddress,
+        options: HandshakeSessionOptions,
+        transport: quic.handshake.PreconfiguredConnectionOptions,
+    ) Error!HandshakeServerSession {
+        try validateBlockedStreamLimit(
+            options.local_settings,
+            options.max_concurrent_request_streams,
+        );
+        var established = try quic.handshake.establishPreconfigured(
+            endpoint,
+            peer,
+            .server,
+            transport,
+        );
+        errdefer established.deinit();
+        return initEstablished(established, options);
+    }
 
     /// Reserve one server-initiated unidirectional stream ID.
     ///
@@ -3741,54 +3772,113 @@ pub const HandshakeClient = struct {
 
         var established = try quic.handshake.connect(endpoint, server, options.handshake);
         errdefer established.deinit();
+        return initOwnedEstablished(
+            allocator,
+            endpoint,
+            server,
+            established,
+            options.session,
+        );
+    }
+
+    /// Build the HTTP/3 client state around a successfully initialized QUIC
+    /// connection. Ownership of both `endpoint` and `established` transfers
+    /// only on success. Keeping this common path prevents the TLS and external
+    /// key-negotiation entry points from drifting in lifecycle behavior.
+    fn initOwnedEstablished(
+        allocator: std.mem.Allocator,
+        endpoint: *quic.runtime.Endpoint,
+        peer: net.IpAddress,
+        established: quic.handshake.EstablishedConnection,
+        options: HandshakeSessionOptions,
+    ) Error!HandshakeClient {
+        if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
         const max_capacity = std.math.cast(
             usize,
-            options.session.local_settings.qpack_max_table_capacity,
+            options.local_settings.qpack_max_table_capacity,
         ) orelse return error.InvalidSetting;
         return .{
             .endpoint = endpoint,
-            .peer = server,
+            .peer = peer,
             .allocator = allocator,
             .established = established,
-            .options = options.session,
+            .options = options,
             .qpack_decode = .init(
                 allocator,
                 max_capacity,
-                options.session.max_stream_buffer,
+                options.max_stream_buffer,
             ),
             .qpack_encode = .initAwaitingPeerSettings(
                 allocator,
-                options.session.max_stream_buffer,
+                options.max_stream_buffer,
             ),
             .response_streams = .init(
                 allocator,
-                options.session.max_stream_buffer,
-                options.session.max_concurrent_request_streams,
+                options.max_stream_buffer,
+                options.max_concurrent_request_streams,
             ),
             .streaming_responses = .initWithInformationalLimit(
                 allocator,
-                options.session.max_concurrent_request_streams,
-                options.session.max_stream_buffer,
-                options.session.max_informational_responses,
-                options.session.local_settings,
+                options.max_concurrent_request_streams,
+                options.max_stream_buffer,
+                options.max_informational_responses,
+                options.local_settings,
                 .response,
             ),
             .push_streams = .initWithInformationalLimit(
                 allocator,
-                options.session.max_concurrent_request_streams,
-                options.session.max_stream_buffer,
-                options.session.max_informational_responses,
-                options.session.local_settings,
+                options.max_concurrent_request_streams,
+                options.max_stream_buffer,
+                options.max_informational_responses,
+                options.local_settings,
             ),
             .request_lifecycle = .init(
                 allocator,
-                options.session.max_concurrent_request_streams,
+                options.max_concurrent_request_streams,
             ),
             .outbound_bodies = .init(
                 allocator,
-                options.session.max_concurrent_request_streams,
+                options.max_concurrent_request_streams,
             ),
         };
+    }
+
+    pub fn initPreconfigured(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        peer: net.IpAddress,
+        limits: Limits,
+        options: HandshakeSessionOptions,
+        transport: quic.handshake.PreconfiguredConnectionOptions,
+    ) Error!HandshakeClient {
+        try validateBlockedStreamLimit(
+            options.local_settings,
+            options.max_concurrent_request_streams,
+        );
+        const endpoint = try allocator.create(quic.runtime.Endpoint);
+        errdefer allocator.destroy(endpoint);
+        endpoint.* = try quic.runtime.Endpoint.bind(
+            allocator,
+            io,
+            local_address,
+            limits.quic,
+        );
+        errdefer endpoint.deinit();
+        var established = try quic.handshake.establishPreconfigured(
+            endpoint,
+            peer,
+            .client,
+            transport,
+        );
+        errdefer established.deinit();
+        return initOwnedEstablished(
+            allocator,
+            endpoint,
+            peer,
+            established,
+            options,
+        );
     }
 
     /// Try every DNS result that can be reached from `local_address`.
