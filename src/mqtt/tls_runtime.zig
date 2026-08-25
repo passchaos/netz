@@ -52,6 +52,7 @@ pub const Server = struct {
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
                 .client_auth = options.client_auth,
+                .alpn_protocols = options.alpn_protocols,
             },
             .tcp_nodelay = options.tcp_nodelay,
         };
@@ -154,6 +155,9 @@ pub const ListenOptions = struct {
     /// Request and verify a TLS 1.3 client certificate. `required` is the
     /// default within the policy; use `.optional` to retain anonymous clients.
     client_auth: ?ClientAuthPolicy = null,
+    /// Supported ALPN protocols. A non-empty list requires the client to offer
+    /// one of these protocols and exposes the selection on Connection.
+    alpn_protocols: []const []const u8 = &.{},
     /// MQTT control packets are latency sensitive, matching the client
     /// default. Disable this when deliberate TCP batching is preferred.
     tcp_nodelay: bool = true,
@@ -415,6 +419,10 @@ pub const ConnectOptions = struct {
     /// `tls.ca_bundle`/system roots and hostname verification to vail's X.509
     /// verifier, preserving the ordinary client defaults.
     server_verifier: ?ClientCertificateVerifier = null,
+    /// Ordered TLS ALPN offers. Supplying any offer selects the vail-backed
+    /// client even without a client certificate because Zig's standard TLS
+    /// client does not expose ALPN configuration.
+    alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const CipherSuite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
@@ -438,7 +446,10 @@ fn connectStreamAttempt(
     if (options.tcp_nodelay) {
         try socket_options.setTcpNoDelay(stream);
     }
-    if (options.client_identity) |client_identity| {
+    if (options.client_identity != null or
+        options.server_verifier != null or
+        options.alpn_protocols.len != 0)
+    {
         // The vail helper owns teardown from this point, including handshake
         // failures before a Connection object exists.
         stream_owned = false;
@@ -448,7 +459,7 @@ fn connectStreamAttempt(
             stream,
             tls_host,
             options,
-            client_identity,
+            options.client_identity,
         );
     }
     const tls_connection = try http1_runtime.TlsClientConnection.init(
@@ -478,7 +489,7 @@ fn connectVailStreamAttempt(
     stream: net.Stream,
     tls_host: []const u8,
     options: ConnectOptions,
-    client_identity: ClientIdentity,
+    client_identity: ?ClientIdentity,
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
@@ -495,6 +506,7 @@ fn connectVailStreamAttempt(
                 null,
             .server_verifier = options.server_verifier,
             .client_identity = client_identity,
+            .alpn_protocols = options.alpn_protocols,
             .cipher_suites = options.cipher_suites,
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.tls_handshake_timeout,

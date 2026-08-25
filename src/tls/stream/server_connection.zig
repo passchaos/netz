@@ -81,6 +81,12 @@ pub const Connection = struct {
         return chain.certificates;
     }
 
+    /// Return the ALPN protocol selected during the TLS handshake. The slice
+    /// is owned by this connection and remains valid until `deinit`.
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        return self.selected_alpn;
+    }
+
     /// Read decrypted application bytes with stream semantics.
     ///
     /// A TLS record may contain several MQTT packets or only part of one. Any

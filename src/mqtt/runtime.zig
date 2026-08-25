@@ -909,6 +909,13 @@ pub const Connection = struct {
         return self.transport.peerCertificates();
     }
 
+    /// Return the negotiated TLS ALPN protocol for native MQTT-over-TLS.
+    /// Cleartext, standard-library TLS without ALPN, and WebSocket transports
+    /// return null. The borrowed value remains valid until `close`.
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        return self.transport.negotiatedAlpn();
+    }
+
     /// Return the MQTT 5 Client Identifier assigned for an empty CONNECT ID.
     ///
     /// The value is deep-owned by this Connection, so it remains available

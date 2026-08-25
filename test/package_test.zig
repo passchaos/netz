@@ -911,6 +911,10 @@ test "public modules are reachable" {
         "server_verifier",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "alpn_protocols",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ListenOptions,
         "identity",
     ));
@@ -918,9 +922,17 @@ test "public modules are reachable" {
         netz.mqtt.tls_runtime.ListenOptions,
         "client_auth",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ListenOptions,
+        "alpn_protocols",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "negotiatedAlpn",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
     try std.testing.expect(@hasDecl(

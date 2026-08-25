@@ -807,6 +807,7 @@ without an identity keep the standard-library TLS path.
 vail primitives. It accepts caller-provided DER certificate chains and
 Ed25519/ECDSA/SM2 signers, generates fresh handshake/key-exchange/signature
 entropy per connection, supports configured TLS 1.3 cipher-suite preference,
+supports an ALPN protocol list with mandatory overlap when configured,
 fragments large MQTT writes into bounded TLS records, and preserves byte-stream
 semantics when records and MQTT Control Packets have different boundaries. The
 accepted transport enters the same MQTT broker-side CONNECT, capability, Topic
@@ -822,6 +823,15 @@ CertificateVerify possession and Finished, and keeps an owned peer DER chain
 available from `Connection.peerCertificates()` until close. Optional mode
 accepts the standards-compliant empty client Certificate response; required
 mode rejects it.
+
+Direct MQTT TLS clients can likewise send an ordered ALPN offer without
+requiring a client certificate. This selects the vail-backed client path,
+retains normal system/caller-CA and hostname verification, and makes the
+server-selected value available through `Connection.negotiatedAlpn()` on both
+ends. This covers rumqttc's configurable TLS ALPN surface and Mosquitto's
+client/bridge ALPN option while also giving server applications the negotiated
+identity directly. Empty ALPN lists preserve the existing standard-library TLS
+client path.
 
 End-to-end tests cover a real production-listener handshake with verified
 localhost CA/SAN, MQTT 5 CONNECT and QoS 1 PUBLISH/PUBACK, plus MQTT 3.1.1

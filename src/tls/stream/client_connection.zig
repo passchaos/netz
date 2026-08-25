@@ -323,6 +323,12 @@ pub const Connection = struct {
         allocator.destroy(self);
     }
 
+    /// Return the ALPN protocol selected during the TLS handshake. The slice
+    /// is owned by this connection and remains valid until `deinit`.
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        return self.selected_alpn;
+    }
+
     pub fn read(self: *Connection, out: []u8) Error!usize {
         return self.records.read(self.io, self.stream, out);
     }

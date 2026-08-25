@@ -10,6 +10,108 @@ const tls_server_max_packet_size: usize = 32 * 1024;
 const large_payload_bytes: usize = 20 * 1024;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 
+test "MQTT TLS negotiates configured ALPN without client authentication" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{ "mqtt", "x-amzn-mqtt-ca" },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *mqtt_tls.Server) !void {
+            var accepted = try server_ptr.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings(
+                "mqtt",
+                accepted.connection.negotiatedAlpn().?,
+            );
+            try std.testing.expect(
+                accepted.connection.peerCertificates() == null,
+            );
+            try std.testing.expectEqualStrings(
+                "mqtt-alpn",
+                accepted.connect.connect.client_id,
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-alpn",
+            },
+            // An ALPN-only client must use the vail path even though it has no
+            // certificate identity of its own. The pin keeps the test fully
+            // local and proves ordinary server authentication still applies.
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{ "mqtt", "x-amzn-mqtt-ca" },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer client.close();
+    // The transport must own its selection rather than borrowing either
+    // caller's short-lived ALPN list.
+    try std.testing.expect(
+        client.negotiatedAlpn().?.ptr != "mqtt".ptr,
+    );
+    try std.testing.expectEqualStrings(
+        "mqtt",
+        client.negotiatedAlpn().?,
+    );
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     const allocator = std.testing.allocator;
 

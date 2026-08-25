@@ -76,6 +76,17 @@ pub const Transport = union(enum) {
         };
     }
 
+    pub fn negotiatedAlpn(self: *const Transport) ?[]const u8 {
+        return switch (self.*) {
+            .tls_vail => |connection| connection.negotiatedAlpn(),
+            .tls_server => |connection| connection.negotiatedAlpn(),
+            // Zig's standard TLS client does not currently expose ALPN, and
+            // MQTT-over-WebSocket negotiates its application protocol through
+            // Sec-WebSocket-Protocol rather than the underlying TLS session.
+            .tcp, .tls, .websocket => null,
+        };
+    }
+
     pub fn deadlineFromNow(
         self: Transport,
         duration: std.Io.Duration,
