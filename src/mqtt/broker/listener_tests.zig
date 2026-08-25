@@ -554,3 +554,90 @@ test "mounted listeners keep shared subscription groups namespace-local" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "refused listener admission releases the only broker slot" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+        .accept = .{ .allow_zero_length_client_id = false },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const listener = mqtt.broker.Listener{
+        .source = server.pendingSource(),
+        .namespace = try mqtt.listener_namespace.Namespace.init("mount/"),
+        .connection_count = 1,
+    };
+    var first_serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &.{listener},
+    };
+    const first_thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&first_serve},
+    );
+    var first_joined = false;
+    defer if (!first_joined) first_thread.join();
+
+    var refused = try runtime.Client.connectAttempt(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "",
+            .clean_start = true,
+        },
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.accepted());
+    first_thread.join();
+    first_joined = true;
+    if (first_serve.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+
+    // Reusing the same Broker and listener in a second finite batch proves the
+    // refused CONNECT released both transport ownership and the reserved slot.
+    var second_serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &.{listener},
+    };
+    const second_thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&second_serve},
+    );
+    var second_joined = false;
+    defer if (!second_joined) second_thread.join();
+    var accepted = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "accepted-after-refusal" },
+    );
+    defer accepted.close();
+    try accepted.ping();
+    try accepted.disconnect(0);
+    second_thread.join();
+    second_joined = true;
+    if (second_serve.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+}
