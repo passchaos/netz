@@ -185,7 +185,11 @@ fn runIteration(
     const round_robin_chunk_bytes = transferRoundRobinChunkBytes(config);
     const stream_buffer = transferStreamBufferBytes(config);
     const transport_parameters = transferTransportParameters(config);
-    const enable_data_prefix_fast_path = config.streams == 1;
+    // Every DATA contribution has private prefix storage in both the single-
+    // stream and cross-stream batch paths. Body descriptors borrow immutable
+    // application slices only until QUIC has copied recovery ownership, so
+    // multi-stream workloads can use the same zero-copy framing safely.
+    const enable_data_prefix_fast_path = true;
     const enable_hystart = config.enable_hystart orelse (config.streams != 1);
     const enable_pacing = config.enable_pacing;
 

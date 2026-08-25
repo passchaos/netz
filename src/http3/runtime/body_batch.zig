@@ -24,10 +24,12 @@ pub const ResponseBody = struct {
     data: []const u8,
 };
 
-/// The DATA prefix and first body fragment share storage so a packet can borrow
-/// the remainder directly from the caller without allocating a full encoded
-/// HTTP/3 payload. The normal paced body budget keeps this comfortably below
-/// the cap; callers fall back to the copying path if it does not fit.
+/// Storage for an encoded DATA frame prefix and, only at a packet-frame
+/// boundary, the minimum body prefix needed to avoid adding another packet.
+///
+/// Most sends use only the at-most-nine-byte DATA prefix and borrow every body
+/// byte from the caller. The larger capacity preserves the single-packet path
+/// for boundary sizes without materializing the complete DATA frame.
 pub const prefix_capacity: usize = 4096;
 pub const Prefix = [prefix_capacity]u8;
 
@@ -65,9 +67,12 @@ pub const Scratch = struct {
 /// Append STREAM-frame views for one HTTP/3 DATA frame.
 ///
 /// `prefix` is unique to this DATA frame and must remain alive through the QUIC
-/// send call. Remaining STREAM frames borrow `data`; stateful QUIC recovery
-/// copies the encoded packet payload before returning, so the caller only needs
-/// to preserve the body slice for the duration of the call.
+/// send call. Body STREAM frames normally borrow all of `data`; only enough of
+/// its beginning to keep the same packet count as a coalesced DATA frame is
+/// copied when the extra prefix descriptor crosses a `max_frames_per_packet`
+/// boundary. Stateful QUIC recovery copies the encoded packet payload before
+/// returning, so the caller only needs to preserve the body slice for the
+/// duration of the call.
 pub fn appendDataStreamFrames(
     send: *quic.stream_state.SendState,
     frames: *std.ArrayList(quic.Frame),
@@ -76,6 +81,7 @@ pub fn appendDataStreamFrames(
     data: []const u8,
     fin: bool,
     max_stream_frame_data: usize,
+    max_frames_per_packet: usize,
 ) !bool {
     if (data.len == 0 or max_stream_frame_data == 0) return false;
     if (send.fin_sent) return error.FinalSizeMismatch;
@@ -92,19 +98,57 @@ pub fn appendDataStreamFrames(
         payload_len_u64,
     );
     prefix_len += len_bytes.len;
-    if (prefix_len >= max_stream_frame_data) return false;
-    const first_body_len = @min(
+    // A prefix that exactly fills a STREAM frame is valid. A larger prefix
+    // falls back to the ordinary contiguous encoder, which can split it.
+    if (prefix_len > max_stream_frame_data) return false;
+
+    const combined_len = std.math.add(
+        usize,
+        prefix_len,
         data.len,
-        @min(
-            max_stream_frame_data - prefix_len,
-            prefix.len - prefix_len,
-        ),
+    ) catch return error.InvalidFrameLength;
+    const combined_len_u64 = std.math.cast(u64, combined_len) orelse
+        return error.IntegerOverflow;
+    const final_next_offset = std.math.add(
+        u64,
+        send.next_offset,
+        combined_len_u64,
+    ) catch return error.InvalidStreamRange;
+    if (final_next_offset > quic.varint.max_value) {
+        return error.InvalidStreamRange;
+    }
+    const coalesced_frame_count = std.math.divCeil(
+        usize,
+        combined_len,
+        max_stream_frame_data,
+    ) catch return error.InvalidFrameLength;
+    const packet_frame_budget = @max(
+        @as(usize, 1),
+        max_frames_per_packet,
     );
-    if (first_body_len == 0) return false;
-    @memcpy(
-        prefix[prefix_len..][0..first_body_len],
-        data[0..first_body_len],
-    );
+    const coalesced_packet_count = std.math.divCeil(
+        usize,
+        coalesced_frame_count,
+        packet_frame_budget,
+    ) catch return error.InvalidFrameLength;
+    // Saturation is intentional: an unrepresentably large descriptor budget
+    // can certainly cover every body byte addressable by this process.
+    const descriptor_capacity =
+        coalesced_packet_count *| packet_frame_budget;
+    const borrowed_body_capacity =
+        (descriptor_capacity - 1) *| max_stream_frame_data;
+    const first_body_len = data.len -| borrowed_body_capacity;
+    if (first_body_len > max_stream_frame_data - prefix_len or
+        first_body_len > prefix.len - prefix_len)
+    {
+        return false;
+    }
+    if (first_body_len != 0) {
+        @memcpy(
+            prefix[prefix_len..][0..first_body_len],
+            data[0..first_body_len],
+        );
+    }
     const first_len = prefix_len + first_body_len;
     const remaining = data[first_body_len..];
     const additional = if (remaining.len == 0)
@@ -115,14 +159,20 @@ pub fn appendDataStreamFrames(
             remaining.len,
             max_stream_frame_data,
         ) catch return error.InvalidFrameLength;
-    try frames.ensureUnusedCapacity(allocator, 1 + additional);
+    const frame_count = std.math.add(
+        usize,
+        1,
+        additional,
+    ) catch return error.InvalidFrameLength;
+    try frames.ensureUnusedCapacity(allocator, frame_count);
+    var next_offset = send.next_offset;
     frames.appendAssumeCapacity(.{ .stream = .{
         .stream_id = send.stream_id,
-        .offset = send.next_offset,
+        .offset = next_offset,
         .data = prefix[0..first_len],
         .fin = fin and remaining.len == 0,
     } });
-    send.next_offset += first_len;
+    next_offset += first_len;
     var written: usize = 0;
     while (written < remaining.len) {
         const chunk_len = @min(
@@ -132,13 +182,15 @@ pub fn appendDataStreamFrames(
         const is_last = written + chunk_len == remaining.len;
         frames.appendAssumeCapacity(.{ .stream = .{
             .stream_id = send.stream_id,
-            .offset = send.next_offset,
+            .offset = next_offset,
             .data = remaining[written .. written + chunk_len],
             .fin = fin and is_last,
         } });
-        send.next_offset += chunk_len;
+        next_offset += chunk_len;
         written += chunk_len;
     }
+    std.debug.assert(next_offset == final_next_offset);
+    send.next_offset = final_next_offset;
     if (fin) send.fin_sent = true;
     return true;
 }
@@ -160,6 +212,7 @@ test "HTTP/3 body batch keeps DATA prefixes isolated" {
         "first-body",
         false,
         8,
+        8,
     ));
     const second_start = frames.items.len;
     try std.testing.expect(try appendDataStreamFrames(
@@ -169,6 +222,7 @@ test "HTTP/3 body batch keeps DATA prefixes isolated" {
         &second_prefix,
         "second-body",
         true,
+        8,
         8,
     ));
 
@@ -183,4 +237,196 @@ test "HTTP/3 body batch keeps DATA prefixes isolated" {
         frames.items[0].stream.data,
         frames.items[second_start].stream.data,
     ));
+}
+
+test "HTTP/3 body batch borrows complete body behind DATA prefix" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var send = quic.stream_state.SendState.init(8);
+    const body = "borrowed-body";
+
+    try std.testing.expect(try appendDataStreamFrames(
+        &send,
+        &frames,
+        allocator,
+        &prefix,
+        body,
+        true,
+        8,
+        4,
+    ));
+
+    try std.testing.expectEqual(@as(usize, 3), frames.items.len);
+    const encoded_prefix = [_]u8{ 0, @intCast(body.len) };
+    try std.testing.expectEqualSlices(
+        u8,
+        &encoded_prefix,
+        frames.items[0].stream.data,
+    );
+    try std.testing.expectEqual(@as(usize, 2), frames.items[0].stream.data.len);
+    try std.testing.expectEqual(body.ptr, frames.items[1].stream.data.ptr);
+    try std.testing.expectEqualSlices(u8, body[0..8], frames.items[1].stream.data);
+    try std.testing.expectEqualSlices(u8, body[8..], frames.items[2].stream.data);
+    try std.testing.expectEqual(@as(u64, 0), frames.items[0].stream.offset);
+    try std.testing.expectEqual(@as(u64, 2), frames.items[1].stream.offset);
+    try std.testing.expectEqual(@as(u64, 10), frames.items[2].stream.offset);
+    try std.testing.expect(!frames.items[0].stream.fin);
+    try std.testing.expect(!frames.items[1].stream.fin);
+    try std.testing.expect(frames.items[2].stream.fin);
+    try std.testing.expectEqual(@as(u64, 2 + body.len), send.next_offset);
+    try std.testing.expect(send.fin_sent);
+}
+
+test "HTTP/3 body batch copies only packet-boundary body prefix" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var send = quic.stream_state.SendState.init(0);
+    const body = "123456789";
+
+    // A prefix-only plan would need three descriptors. Copying one byte,
+    // rather than filling the whole first STREAM frame, preserves the two
+    // descriptors that the contiguous DATA representation used.
+    try std.testing.expect(try appendDataStreamFrames(
+        &send,
+        &frames,
+        allocator,
+        &prefix,
+        body,
+        false,
+        8,
+        2,
+    ));
+
+    try std.testing.expectEqual(@as(usize, 2), frames.items.len);
+    const encoded_prefix = [_]u8{ 0, @intCast(body.len), body[0] };
+    try std.testing.expectEqualSlices(
+        u8,
+        &encoded_prefix,
+        frames.items[0].stream.data,
+    );
+    try std.testing.expectEqual(body.ptr + 1, frames.items[1].stream.data.ptr);
+    try std.testing.expectEqualSlices(u8, body[1..], frames.items[1].stream.data);
+}
+
+test "HTTP/3 body batch accepts exact prefix frame and rejects smaller limit" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var exact = quic.stream_state.SendState.init(0);
+    const short_body = [_]u8{'x'} ** 63;
+
+    try std.testing.expect(try appendDataStreamFrames(
+        &exact,
+        &frames,
+        allocator,
+        &prefix,
+        &short_body,
+        true,
+        2,
+        64,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), frames.items[0].stream.data.len);
+    try std.testing.expectEqual(@as(u64, 65), exact.next_offset);
+    try std.testing.expect(exact.fin_sent);
+
+    frames.clearRetainingCapacity();
+    var too_small = quic.stream_state.SendState.init(4);
+    const previous = too_small;
+    const long_body = [_]u8{'y'} ** 64;
+    try std.testing.expect(!try appendDataStreamFrames(
+        &too_small,
+        &frames,
+        allocator,
+        &prefix,
+        &long_body,
+        true,
+        2,
+        64,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), frames.items.len);
+    try std.testing.expectEqualDeep(previous, too_small);
+}
+
+test "HTTP/3 body batch leaves empty DATA and FIN to fallback" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var send = quic.stream_state.SendState.init(0);
+    const previous = send;
+
+    try std.testing.expect(!try appendDataStreamFrames(
+        &send,
+        &frames,
+        allocator,
+        &prefix,
+        &.{},
+        true,
+        8,
+        2,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), frames.items.len);
+    try std.testing.expectEqualDeep(previous, send);
+}
+
+test "HTTP/3 body batch allocation failure is transactional" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var send = quic.stream_state.SendState.init(12);
+    send.next_offset = 37;
+    const previous = send;
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        appendDataStreamFrames(
+            &send,
+            &frames,
+            fail_first.allocator(),
+            &prefix,
+            "borrowed-body",
+            true,
+            8,
+            4,
+        ),
+    );
+    try std.testing.expect(fail_first.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), frames.items.len);
+    try std.testing.expectEqualDeep(previous, send);
+}
+
+test "HTTP/3 body batch rejects an overflowing final stream offset" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var send = quic.stream_state.SendState.init(0);
+    send.next_offset = quic.varint.max_value;
+    const previous = send;
+
+    try std.testing.expectError(
+        error.InvalidStreamRange,
+        appendDataStreamFrames(
+            &send,
+            &frames,
+            allocator,
+            &prefix,
+            "x",
+            true,
+            8,
+            2,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), frames.items.len);
+    try std.testing.expectEqualDeep(previous, send);
 }

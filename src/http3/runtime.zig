@@ -2436,10 +2436,10 @@ pub const HandshakeSessionOptions = struct {
     /// `max_stream_frame_data`, `max_frames_per_packet`, and the handshake
     /// one_rtt max datagram size to reduce ACK/flow-control pump iterations.
     paced_body_chunk_bytes: usize = 1024,
-    /// Experimental DATA-frame send path that avoids copying most body bytes
-    /// into a temporary HTTP/3 DATA payload. It is opt-in because shared
-    /// payload lifetime is subtle for multi-stream batching; benchmark enables
-    /// it only for single-stream transfer.
+    /// Experimental DATA-frame send path that emits the DATA prefix from
+    /// per-packet scratch and borrows immutable application body slices until
+    /// QUIC takes stable recovery ownership. Multi-stream batches keep one
+    /// prefix buffer per packet, so their descriptors do not alias.
     enable_data_prefix_fast_path: bool = false,
     /// Optional delay after this many socket-visible response body bytes.
     ///
@@ -10119,6 +10119,7 @@ fn sendConnectionBodyChunk(
             data,
             fin,
             options.max_stream_frame_data,
+            options.max_frames_per_packet,
         ))
     {
         try sendConnectionFrames(
@@ -10251,6 +10252,7 @@ fn sendConnectionBodyBatchPacedProgress(
             chunk.data,
             chunk.fin,
             options.max_stream_frame_data,
+            options.max_frames_per_packet,
         )) {
             return error.DatagramTooLarge;
         }
@@ -10330,6 +10332,7 @@ fn sendProtectedBodyChunk(
         data,
         fin,
         config.max_stream_frame_data,
+        config.max_frames_per_packet,
     )) {
         if (entry.flow_limit) |limit| {
             if (entry.send.next_offset > limit) {
