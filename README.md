@@ -454,7 +454,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
   WSS application handshakes, with trusted source, destination, transport and
   v2 TLV metadata,
-  heterogeneous TCP/TLS/WS/WSS listener sources sharing one broker core and
+  heterogeneous TCP/TLS/WS/WSS listener sources sharing one broker core, with
+  finite deterministic batches plus a graceful-shutdown production supervisor
+  that continuously replaces disconnected clients, and
   Mosquitto-compatible mount-point namespaces with inbound PUBLISH/Will and
   ordinary/shared-filter mapping plus fail-closed live/durable outbound topic
   projection,

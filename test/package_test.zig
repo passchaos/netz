@@ -919,9 +919,21 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
+        "serveListenersUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
         "servePending",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Listener"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "ListenerEndpoint",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "ServeListenersUntilOptions",
+    ));
     try std.testing.expectEqual(
         @as(usize, 1024),
         (netz.mqtt.broker.Limits{}).max_connections,

@@ -489,6 +489,52 @@ pub const Listener = struct {
     connection_count: usize,
 };
 
+/// One endpoint in a long-running heterogeneous listener service.
+///
+/// Multiple workers permit TLS and HTTP Upgrade handshakes and established
+/// connections to overlap. Their aggregate concurrency must fit the Broker's
+/// `max_connections`; each worker accepts another client after its prior one
+/// disconnects or is refused.
+pub const ListenerEndpoint = struct {
+    source: runtime.PendingSource,
+    namespace: listener_namespace.Namespace = .{},
+    accept_concurrency: usize = 1,
+};
+
+pub const ListenerErrorStage = enum {
+    accept,
+    connection,
+};
+
+pub const ListenerErrorPolicy = enum {
+    continue_serving,
+    stop,
+};
+
+pub const ListenerErrorEvent = struct {
+    listener_index: usize,
+    stage: ListenerErrorStage,
+    err: anyerror,
+};
+
+pub const ListenerErrorObserver = struct {
+    context: *anyopaque,
+    /// May run concurrently for independent listeners and connections.
+    observe: *const fn (context: *anyopaque, event: ListenerErrorEvent) void,
+};
+
+pub const ServeListenersUntilOptions = struct {
+    /// Setting this event cancels pending accepts and active client reads.
+    shutdown: *std.Io.Event,
+    /// Handshake and malformed-CONNECT errors normally affect only that peer.
+    accept_error_policy: ListenerErrorPolicy = .continue_serving,
+    /// Protocol/transport errors after CONNACK normally affect only that peer.
+    connection_error_policy: ListenerErrorPolicy = .continue_serving,
+    /// Prevent a failed/closed listener from becoming an unbounded retry loop.
+    accept_error_backoff: std.Io.Duration = .fromMilliseconds(10),
+    error_observer: ?ListenerErrorObserver = null,
+};
+
 pub const system_metrics = [_]SystemMetric{
     .clients_connected,
     .clients_disconnected,
@@ -511,8 +557,9 @@ pub const system_metrics = [_]SystemMetric{
 /// A bounded broker core with an optional compatibility TCP listener.
 ///
 /// `listen` preserves the original one-listener API. `init` plus
-/// `serveListeners` lets TCP/TLS/WS/WSS listeners share the same router,
-/// retained store, Session store, Will scheduler and deadline driver.
+/// `serveListeners` or `serveListenersUntil` lets TCP/TLS/WS/WSS listeners
+/// share the same router, retained store, Session store, Will scheduler and
+/// deadline driver.
 pub const Broker = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1221,6 +1268,119 @@ pub const Broker = struct {
         }
     }
 
+    /// Run heterogeneous listeners until `options.shutdown` is set.
+    ///
+    /// This is the production-oriented counterpart to finite `serveListeners`.
+    /// It continuously replaces completed connections, bounds live clients by
+    /// the Broker's configured slot count, and cancels accepts plus active
+    /// client reads before returning. The caller must keep listener servers,
+    /// namespaces, the shutdown event and any error observer alive throughout
+    /// the call. Only one serve method may run on a Broker at a time.
+    pub fn serveListenersUntil(
+        self: *Broker,
+        listeners: []const ListenerEndpoint,
+        options: ServeListenersUntilOptions,
+    ) anyerror!void {
+        if (listeners.len == 0) return error.InvalidProperty;
+        if (options.accept_error_backoff.nanoseconds < 0) {
+            return error.InvalidProperty;
+        }
+        var worker_count: usize = 0;
+        for (listeners) |listener| {
+            _ = try listener_namespace.Namespace.init(
+                listener.namespace.prefix,
+            );
+            if (listener.accept_concurrency == 0) {
+                return error.InvalidProperty;
+            }
+            worker_count = std.math.add(
+                usize,
+                worker_count,
+                listener.accept_concurrency,
+            ) catch return error.BrokerFull;
+        }
+        if (worker_count > self.slots.len) return error.BrokerFull;
+
+        var group: std.Io.Group = .init;
+        var supervisor = ListenerSupervisorState{
+            .broker = self,
+            .options = options,
+        };
+        self.deadline_driver.start();
+        var stop_driver = true;
+        defer if (stop_driver) {
+            self.deadline_driver.stop(self.io);
+        };
+        var group_finished = false;
+        defer if (!group_finished) {
+            supervisor.stopping.store(true, .release);
+            group.cancel(self.io);
+        };
+
+        for (listeners, 0..) |listener, listener_index| {
+            for (0..listener.accept_concurrency) |_| {
+                try group.concurrent(
+                    self.io,
+                    ListenerSupervisorAcceptTask.run,
+                    .{ListenerSupervisorAcceptTask{
+                        .supervisor = &supervisor,
+                        .listener = listener,
+                        .listener_index = listener_index,
+                    }},
+                );
+            }
+        }
+
+        const Wake = union(enum) {
+            shutdown: std.Io.Cancelable!void,
+            failure: std.Io.Cancelable!void,
+            deadline: ?anyerror,
+        };
+        var wake_buffer: [3]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(self.io, &wake_buffer);
+        defer select.cancelDiscard();
+        try select.concurrent(
+            .shutdown,
+            waitForListenerEvent,
+            .{ options.shutdown, self.io },
+        );
+        try select.concurrent(
+            .failure,
+            waitForListenerEvent,
+            .{ &supervisor.failed, self.io },
+        );
+        // A persistence or periodic-$SYS failure in the deadline driver must
+        // terminate the supervisor rather than leave it waiting forever for
+        // an unrelated shutdown request. Select also owns cancellation of the
+        // driver after an ordinary shutdown/error wake.
+        try select.concurrent(
+            .deadline,
+            Broker.runDeadlineDriver,
+            .{self},
+        );
+        const wake = try select.await();
+        const deadline_error: ?anyerror = switch (wake) {
+            .shutdown => |result| blk: {
+                try result;
+                break :blk null;
+            },
+            .failure => |result| blk: {
+                try result;
+                break :blk null;
+            },
+            .deadline => |maybe_error| maybe_error,
+        };
+
+        supervisor.stopping.store(true, .release);
+        group.cancel(self.io);
+        group_finished = true;
+        self.deadline_driver.stop(self.io);
+        stop_driver = false;
+        select.cancelDiscard();
+        if (deadline_error) |err| return err;
+        if (supervisor.firstError()) |err| return err;
+    }
+
     /// Admit one already parsed CONNECT from any transport listener and run
     /// it synchronously through the shared broker state machine. This is the
     /// composable building block for external accept-loop orchestration.
@@ -1232,9 +1392,7 @@ pub const Broker = struct {
         const slot_index = try self.claimSlot();
         var slot_claimed = true;
         defer if (slot_claimed) {
-            self.state_mutex.lockUncancelable(self.io);
-            self.slots[slot_index].active = false;
-            self.state_mutex.unlock(self.io);
+            self.releaseClaimedSlot(slot_index);
         };
         var result: ?anyerror = null;
         const task = try self.preparePending(
@@ -1244,9 +1402,7 @@ pub const Broker = struct {
             &result,
         ) orelse {
             slot_claimed = false;
-            self.state_mutex.lockUncancelable(self.io);
-            self.slots[slot_index].active = false;
-            self.state_mutex.unlock(self.io);
+            self.releaseClaimedSlot(slot_index);
             return;
         };
         slot_claimed = false;
@@ -1264,6 +1420,15 @@ pub const Broker = struct {
             }
         }
         return error.BrokerFull;
+    }
+
+    fn releaseClaimedSlot(self: *Broker, slot_index: usize) void {
+        self.state_mutex.lockUncancelable(self.io);
+        const slot = &self.slots[slot_index];
+        std.debug.assert(slot.active);
+        std.debug.assert(slot.connection == null);
+        slot.active = false;
+        self.state_mutex.unlock(self.io);
     }
 
     fn preparePending(
@@ -3708,9 +3873,7 @@ const ListenerAcceptTask = struct {
         };
         var slot_claimed = true;
         defer if (slot_claimed) {
-            task.broker.state_mutex.lockUncancelable(task.broker.io);
-            task.broker.slots[slot_index].active = false;
-            task.broker.state_mutex.unlock(task.broker.io);
+            task.broker.releaseClaimedSlot(slot_index);
         };
         const client_task = task.broker.preparePending(
             slot_index,
@@ -3724,9 +3887,7 @@ const ListenerAcceptTask = struct {
             return;
         } orelse {
             slot_claimed = false;
-            task.broker.state_mutex.lockUncancelable(task.broker.io);
-            task.broker.slots[slot_index].active = false;
-            task.broker.state_mutex.unlock(task.broker.io);
+            task.broker.releaseClaimedSlot(slot_index);
             return;
         };
         slot_claimed = false;
@@ -3735,6 +3896,139 @@ const ListenerAcceptTask = struct {
         };
     }
 };
+
+const ListenerSupervisorState = struct {
+    broker: *Broker,
+    options: ServeListenersUntilOptions,
+    stopping: std.atomic.Value(bool) = .init(false),
+    failed: std.Io.Event = .unset,
+    error_mutex: std.Io.Mutex = .init,
+    first_error: ?anyerror = null,
+
+    fn shouldStop(self: *@This()) bool {
+        return self.stopping.load(.acquire) or
+            self.options.shutdown.isSet();
+    }
+
+    fn report(
+        self: *@This(),
+        listener_index: usize,
+        stage: ListenerErrorStage,
+        err: anyerror,
+    ) void {
+        if (self.options.error_observer) |observer| {
+            observer.observe(observer.context, .{
+                .listener_index = listener_index,
+                .stage = stage,
+                .err = err,
+            });
+        }
+        const policy = switch (stage) {
+            .accept => self.options.accept_error_policy,
+            .connection => self.options.connection_error_policy,
+        };
+        if (policy != .stop) return;
+        self.error_mutex.lockUncancelable(self.broker.io);
+        if (self.first_error == null) self.first_error = err;
+        self.error_mutex.unlock(self.broker.io);
+        self.stopping.store(true, .release);
+        self.failed.set(self.broker.io);
+    }
+
+    fn firstError(self: *@This()) ?anyerror {
+        self.error_mutex.lockUncancelable(self.broker.io);
+        defer self.error_mutex.unlock(self.broker.io);
+        return self.first_error;
+    }
+};
+
+const ListenerSupervisorAcceptTask = struct {
+    supervisor: *ListenerSupervisorState,
+    listener: ListenerEndpoint,
+    listener_index: usize,
+
+    fn run(task: ListenerSupervisorAcceptTask) std.Io.Cancelable!void {
+        while (!task.supervisor.shouldStop()) {
+            var pending = task.listener.source.acceptPending(
+                task.supervisor.broker.options.accept,
+            ) catch |err| {
+                if (err == error.Canceled or task.supervisor.shouldStop()) {
+                    return error.Canceled;
+                }
+                task.supervisor.report(task.listener_index, .accept, err);
+                if (task.supervisor.shouldStop()) return;
+                const backoff = task.supervisor.options.accept_error_backoff;
+                if (backoff.nanoseconds > 0) {
+                    std.Io.sleep(
+                        task.supervisor.broker.io,
+                        backoff,
+                        .awake,
+                    ) catch |sleep_err| switch (sleep_err) {
+                        error.Canceled => return error.Canceled,
+                    };
+                }
+                continue;
+            };
+            if (task.supervisor.shouldStop()) {
+                pending.deinit(task.supervisor.broker.allocator);
+                return;
+            }
+            const slot_index = task.supervisor.broker.claimSlot() catch |err| {
+                pending.deinit(task.supervisor.broker.allocator);
+                task.supervisor.report(
+                    task.listener_index,
+                    .connection,
+                    err,
+                );
+                if (task.supervisor.shouldStop()) return;
+                continue;
+            };
+            var slot_claimed = true;
+            defer if (slot_claimed) {
+                task.supervisor.broker.releaseClaimedSlot(slot_index);
+            };
+            var connection_error: ?anyerror = null;
+            const client_task = task.supervisor.broker.preparePending(
+                slot_index,
+                &pending,
+                task.listener.namespace,
+                &connection_error,
+            ) catch |err| {
+                task.supervisor.report(
+                    task.listener_index,
+                    .connection,
+                    err,
+                );
+                if (task.supervisor.shouldStop()) return;
+                continue;
+            } orelse {
+                task.supervisor.broker.releaseClaimedSlot(slot_index);
+                slot_claimed = false;
+                continue;
+            };
+            slot_claimed = false;
+            ClientTask.run(client_task) catch |err| {
+                connection_error = err;
+            };
+            if (connection_error) |err| {
+                if (err == error.Canceled and
+                    task.supervisor.shouldStop()) return;
+                task.supervisor.report(
+                    task.listener_index,
+                    .connection,
+                    err,
+                );
+            }
+        }
+    }
+};
+
+fn waitForListenerEvent(
+    event: *std.Io.Event,
+    io: std.Io,
+) std.Io.Cancelable!void {
+    try event.wait(io);
+}
 
 fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
     return switch (err) {

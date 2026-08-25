@@ -1057,8 +1057,10 @@ prefixing only its nested Topic Filter, maps PUBLISH/Will topics into canonical
 broker space, and refuses to expose a canonical topic outside a destination
 namespace. `Broker.init` plus `serveListeners` runs finite TCP/TLS/WS/WSS
 accept counts concurrently over one router, retained store, Session store, Will
-scheduler and deadline driver; the legacy `Broker.listen`/`serve` remains a
-single-TCP convenience. Each accepted connection deep-owns its namespace, so
+scheduler and deadline driver. `serveListenersUntil` adds a long-running,
+gracefully cancellable supervisor with configurable per-listener concurrency
+and error policy; the legacy `Broker.listen`/`serve` remains a single-TCP
+convenience. Each accepted connection deep-owns its namespace, so
 live and durable Session delivery always strips according to the current
 destination listener. Durable Sessions retain canonical subscriptions across
 listener changes: queued topics visible through the reconnecting listener are

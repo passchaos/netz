@@ -641,3 +641,246 @@ test "refused listener admission releases the only broker slot" {
     if (second_serve.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
 }
+
+test "listener supervisor replaces clients until graceful shutdown" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Supervisor = struct {
+        broker: *Broker,
+        endpoint: mqtt.broker.ListenerEndpoint,
+        shutdown: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListenersUntil(&.{self.endpoint}, .{
+                .shutdown = &self.shutdown,
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var supervisor = Supervisor{
+        .broker = &broker,
+        .endpoint = .{ .source = server.pendingSource() },
+    };
+    const thread = try std.Thread.spawn(.{}, Supervisor.run, .{&supervisor});
+    var joined = false;
+    defer if (!joined) {
+        supervisor.shutdown.set(io);
+        thread.join();
+    };
+
+    var first = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "supervised-first" },
+    );
+    defer first.close();
+    try first.ping();
+    try first.disconnect(0);
+    try waitForPeerClose(&first);
+
+    // `accept_concurrency=1` is a permanent accept/connection worker rather
+    // than a finite connection budget: it must accept again after teardown.
+    var second = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "supervised-second" },
+    );
+    defer second.close();
+    try second.ping();
+    // Shutdown cancels both a blocked accept and this active connection, then
+    // waits for broker unregister/transport cleanup before returning.
+    supervisor.shutdown.set(io);
+    try waitForPeerClose(&second);
+
+    thread.join();
+    joined = true;
+    if (supervisor.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+}
+
+test "listener supervisor isolates malformed CONNECT errors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Observer = struct {
+        io: std.Io,
+        observed: std.Io.Event = .unset,
+        count: std.atomic.Value(usize) = .init(0),
+        listener_index: usize = std.math.maxInt(usize),
+        stage: mqtt.broker.ListenerErrorStage = .connection,
+        err: ?anyerror = null,
+
+        fn observe(context_ptr: *anyopaque, event: mqtt.broker.ListenerErrorEvent) void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.listener_index = event.listener_index;
+            self.stage = event.stage;
+            self.err = event.err;
+            _ = self.count.fetchAdd(1, .release);
+            self.observed.set(self.io);
+        }
+    };
+    const Supervisor = struct {
+        broker: *Broker,
+        endpoint: mqtt.broker.ListenerEndpoint,
+        shutdown: std.Io.Event = .unset,
+        observer: *Observer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListenersUntil(&.{self.endpoint}, .{
+                .shutdown = &self.shutdown,
+                .error_observer = .{
+                    .context = self.observer,
+                    .observe = Observer.observe,
+                },
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var observer = Observer{ .io = io };
+    var supervisor = Supervisor{
+        .broker = &broker,
+        .endpoint = .{ .source = server.pendingSource() },
+        .observer = &observer,
+    };
+    const thread = try std.Thread.spawn(.{}, Supervisor.run, .{&supervisor});
+    var joined = false;
+    defer if (!joined) {
+        supervisor.shutdown.set(io);
+        thread.join();
+    };
+
+    const malformed = try server.address().connect(io, .{ .mode = .stream });
+    const malformed_bytes = [_]u8{ 0xc0, 0x00 };
+    var malformed_writer = malformed.writer(io, &.{});
+    try malformed_writer.interface.writeAll(&malformed_bytes);
+    malformed.close(io);
+    try observer.observed.wait(io);
+    try std.testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), observer.listener_index);
+    try std.testing.expectEqual(
+        mqtt.broker.ListenerErrorStage.accept,
+        observer.stage,
+    );
+    try std.testing.expect(observer.err != null);
+
+    // The default policy treats malformed peers as connection-local. The same
+    // accept worker must remain alive and admit a subsequent valid client.
+    var accepted = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "valid-after-malformed" },
+    );
+    defer accepted.close();
+    try accepted.ping();
+    supervisor.shutdown.set(io);
+    try waitForPeerClose(&accepted);
+
+    thread.join();
+    joined = true;
+    if (supervisor.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+}
+
+test "listener supervisor can stop on an accept error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Supervisor = struct {
+        broker: *Broker,
+        endpoint: mqtt.broker.ListenerEndpoint,
+        shutdown: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListenersUntil(&.{self.endpoint}, .{
+                .shutdown = &self.shutdown,
+                .accept_error_policy = .stop,
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var supervisor = Supervisor{
+        .broker = &broker,
+        .endpoint = .{ .source = server.pendingSource() },
+    };
+    const thread = try std.Thread.spawn(.{}, Supervisor.run, .{&supervisor});
+
+    const malformed = try server.address().connect(io, .{ .mode = .stream });
+    const malformed_bytes = [_]u8{ 0xc0, 0x00 };
+    var malformed_writer = malformed.writer(io, &.{});
+    try malformed_writer.interface.writeAll(&malformed_bytes);
+    malformed.close(io);
+
+    thread.join();
+    try std.testing.expectEqual(error.UnexpectedPacket, supervisor.err.?);
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+}
