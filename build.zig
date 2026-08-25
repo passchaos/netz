@@ -141,6 +141,28 @@ pub fn build(b: *std.Build) void {
         &mqtt_websocket_mosquitto.step,
     );
 
+    const mqtt_mount_server = b.addExecutable(.{
+        .name = "netz-mqtt-mount-interop-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/mqtt_mount_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_listener_mount = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_listener_mount_mosquitto.py",
+    });
+    mqtt_listener_mount.addArtifactArg(mqtt_mount_server);
+    const mqtt_listener_mount_step = b.step(
+        "interop-mqtt-listener-mount-mosquitto",
+        "Run Mosquitto-derived MQTT listener mount-point vectors",
+    );
+    mqtt_listener_mount_step.dependOn(&mqtt_listener_mount.step);
+
     const mqtt_websocket_origin = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_websocket_origin.py",

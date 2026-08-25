@@ -1066,6 +1066,10 @@ projected into its namespace, while queued topics outside that listener's view
 are dropped rather than leaking names or blocking later delivery. Cross-listener
 tests cover TCP/WSS routing, mounted/global subscription visibility, retained
 replay, namespaced Will publication, durable reconnects and shared groups.
+`zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
+also ports Mosquitto's `10-listener-mount-point.py` process shape for both
+MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific
+egress against Mosquitto's independent wire-packet helpers.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 126
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
