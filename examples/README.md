@@ -55,6 +55,10 @@ preface.
 Never expose such a listener directly to untrusted clients because PROXY
 metadata is an assertion made by the connecting peer.
 
+`--system-interval-seconds=N` periodically publishes the coherent broker
+statistics snapshot as retained QoS 0 `$SYS` topics. Applications embedding
+the library can call `Broker.stats()` or `Broker.publishSystemStats()` directly.
+
 The URI helpers derive Host / `:authority` / `:scheme` from the URI. Host names,
 IPv4 literals, and bracketed IPv6 literals such as `http://[::1]:8080/` are
 supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.

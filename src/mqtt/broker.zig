@@ -78,6 +78,9 @@ pub const Options = struct {
     /// while a persistent Session is offline. The MQTT-oriented default drops
     /// those messages because delivery has no reliability guarantee.
     queue_qos0_messages: bool = false,
+    /// Publish retained `$SYS` gauge snapshots at this interval. Null disables
+    /// periodic publication. Explicit `publishSystemStats` remains available.
+    system_stats_interval: ?std.Io.Duration = null,
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -434,6 +437,68 @@ pub const Stats = struct {
     session_owned_bytes: usize,
 };
 
+/// Stable `$SYS` gauge names emitted by `publishSystemStats`. Applications may
+/// expose the same snapshot through another telemetry backend without parsing
+/// topic strings.
+pub const SystemMetric = enum {
+    clients_connected,
+    clients_disconnected,
+    clients_total,
+    subscriptions,
+    shared_subscriptions,
+    retained_messages,
+    retained_bytes,
+    live_queued_deliveries,
+    session_queued_messages,
+    session_queued_payload_bytes,
+    session_inflight_messages,
+    session_inflight_payload_bytes,
+    pending_incoming_qos2,
+    scheduled_wills,
+    scheduled_will_bytes,
+    session_owned_bytes,
+
+    pub fn topic(self: SystemMetric) []const u8 {
+        return switch (self) {
+            .clients_connected => "$SYS/broker/clients/connected",
+            .clients_disconnected => "$SYS/broker/clients/disconnected",
+            .clients_total => "$SYS/broker/clients/total",
+            .subscriptions => "$SYS/broker/subscriptions/count",
+            .shared_subscriptions => "$SYS/broker/shared_subscriptions/count",
+            .retained_messages => "$SYS/broker/retained messages/count",
+            .retained_bytes => "$SYS/broker/store/retained/bytes",
+            .live_queued_deliveries => "$SYS/broker/store/live/queued/count",
+            .session_queued_messages => "$SYS/broker/store/session/queued/count",
+            .session_queued_payload_bytes => "$SYS/broker/store/session/queued/payload bytes",
+            .session_inflight_messages => "$SYS/broker/store/session/inflight/count",
+            .session_inflight_payload_bytes => "$SYS/broker/store/session/inflight/payload bytes",
+            .pending_incoming_qos2 => "$SYS/broker/store/incoming qos2/count",
+            .scheduled_wills => "$SYS/broker/wills/scheduled/count",
+            .scheduled_will_bytes => "$SYS/broker/wills/scheduled/bytes",
+            .session_owned_bytes => "$SYS/broker/store/session/bytes",
+        };
+    }
+};
+
+pub const system_metrics = [_]SystemMetric{
+    .clients_connected,
+    .clients_disconnected,
+    .clients_total,
+    .subscriptions,
+    .shared_subscriptions,
+    .retained_messages,
+    .retained_bytes,
+    .live_queued_deliveries,
+    .session_queued_messages,
+    .session_queued_payload_bytes,
+    .session_inflight_messages,
+    .session_inflight_payload_bytes,
+    .pending_incoming_qos2,
+    .scheduled_wills,
+    .scheduled_will_bytes,
+    .session_owned_bytes,
+};
+
 /// A broker listener that accepts a configured, bounded number of live TCP
 /// clients and routes between them until each disconnects.
 pub const Broker = struct {
@@ -456,6 +521,7 @@ pub const Broker = struct {
     commit_log: ?commit_log_mod.Log = null,
     persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
+    next_system_stats_ns: ?i96 = null,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -477,6 +543,9 @@ pub const Broker = struct {
                 client_id_mod.max_prefix_len)
         {
             return error.InvalidProperty;
+        }
+        if (options.system_stats_interval) |interval| {
+            if (interval.nanoseconds <= 0) return error.InvalidProperty;
         }
         try mqtt.validateUtf8String(options.auto_client_id_prefix);
         if (options.accept.response_information) |value| {
@@ -618,7 +687,10 @@ pub const Broker = struct {
     pub fn stats(self: *Broker) Stats {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
+        return self.statsLocked();
+    }
 
+    fn statsLocked(self: Broker) Stats {
         var active_connections: usize = 0;
         var live_queued_deliveries: usize = 0;
         for (self.slots) |slot| {
@@ -645,6 +717,56 @@ pub const Broker = struct {
             .scheduled_will_bytes = self.wills.totalBytes(),
             .session_owned_bytes = sessions.owned_wire_bytes,
         };
+    }
+
+    /// Publish one coherent gauge snapshot as retained QoS 0 `$SYS` messages.
+    ///
+    /// Every value is derived before the first retained/router mutation, so
+    /// subscribers observe one logical snapshot even though MQTT transports
+    /// carry its topics as distinct Application Messages. The system
+    /// publications use the normal routing, overlap, ACL, queue-bound and
+    /// protocol-conversion paths; no privileged delivery bypass is created.
+    pub fn publishSystemStats(self: *Broker) Error!void {
+        var plans: [system_metrics.len]RoutePlan = undefined;
+        var plan_count: usize = 0;
+        defer for (plans[0..plan_count]) |plan| {
+            self.allocator.free(plan.storage);
+        };
+        var payloads: [system_metrics.len][32]u8 = undefined;
+
+        self.state_mutex.lockUncancelable(self.io);
+        const snapshot = self.statsLocked();
+        for (system_metrics, 0..) |metric, index| {
+            const payload = std.fmt.bufPrint(
+                &payloads[index],
+                "{d}",
+                .{systemMetricValue(snapshot, metric)},
+            ) catch unreachable;
+            const plan = self.enqueuePublishLocked(
+                null,
+                .{
+                    .dup = false,
+                    .qos = .at_most_once,
+                    .retain = true,
+                    .topic = metric.topic(),
+                    .packet_id = null,
+                    .properties = &.{},
+                    .payload = payload,
+                },
+                std.Io.Clock.awake.now(self.io),
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
+            plans[plan_count] = plan;
+            plan_count += 1;
+        }
+        self.state_mutex.unlock(self.io);
+
+        // Persist the complete retained snapshot before any subscriber can
+        // observe it, then perform socket writes outside the global state lock.
+        try self.appendCommitIfEnabled();
+        for (plans[0..plan_count]) |plan| try self.flushPlan(plan);
     }
 
     /// Start a crash-tolerant append journal with the broker's current state.
@@ -2995,9 +3117,35 @@ pub const Broker = struct {
                 self.state_mutex.unlock(self.io);
                 return err;
             };
-            const deadline = earliestDeadline(
+            // `$SYS` publication itself uses the state lock and ordinary
+            // routing. Decide whether it is due here, but advance the next
+            // deadline only after a complete snapshot is published. A failed
+            // update is therefore retryable instead of silently skipped.
+            var publish_system_stats = false;
+            if (self.options.system_stats_interval != null) {
+                // Wait one full interval after startup. Publishing before the
+                // first accepted connection is registered would expose a
+                // misleading zero-client snapshot to that client.
+                if (self.next_system_stats_ns == null) {
+                    self.next_system_stats_ns = now.addDuration(
+                        self.options.system_stats_interval.?,
+                    ).nanoseconds;
+                }
+                const due = self.next_system_stats_ns.?;
+                if (now.nanoseconds >= due) {
+                    publish_system_stats = true;
+                }
+            }
+            const lifecycle_deadline = earliestDeadline(
                 self.wills.nextDeadline(),
                 self.sessions.nextExpiryDeadline(),
+            );
+            const deadline = earliestDeadline(
+                lifecycle_deadline,
+                if (self.next_system_stats_ns) |value|
+                    .{ .nanoseconds = value }
+                else
+                    null,
             );
             const generation =
                 self.deadline_driver.currentGeneration();
@@ -3008,6 +3156,16 @@ pub const Broker = struct {
             }
             if (published_any) {
                 self.flushAllSlots() catch |err| return err;
+            }
+            if (publish_system_stats) {
+                self.publishSystemStats() catch |err| return err;
+                self.state_mutex.lockUncancelable(self.io);
+                const interval = self.options.system_stats_interval.?;
+                // Skip missed ticks instead of bursting stale snapshots after
+                // a long scheduling pause.
+                self.next_system_stats_ns = std.Io.Clock.awake.now(self.io)
+                    .addDuration(interval).nanoseconds;
+                self.state_mutex.unlock(self.io);
             }
             self.deadline_driver.wait(
                 self.io,
@@ -3460,6 +3618,27 @@ fn earliestDeadline(
 
 fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
+}
+
+fn systemMetricValue(stats_value: Stats, metric: SystemMetric) usize {
+    return switch (metric) {
+        .clients_connected => stats_value.active_connections,
+        .clients_disconnected => stats_value.disconnected_sessions,
+        .clients_total => stats_value.sessions,
+        .subscriptions => stats_value.subscriptions,
+        .shared_subscriptions => stats_value.shared_subscriptions,
+        .retained_messages => stats_value.retained_messages,
+        .retained_bytes => stats_value.retained_bytes,
+        .live_queued_deliveries => stats_value.live_queued_deliveries,
+        .session_queued_messages => stats_value.session_queued_messages,
+        .session_queued_payload_bytes => stats_value.session_queued_payload_bytes,
+        .session_inflight_messages => stats_value.session_inflight_messages,
+        .session_inflight_payload_bytes => stats_value.session_inflight_payload_bytes,
+        .pending_incoming_qos2 => stats_value.pending_incoming_qos2,
+        .scheduled_wills => stats_value.scheduled_wills,
+        .scheduled_will_bytes => stats_value.scheduled_will_bytes,
+        .session_owned_bytes => stats_value.session_owned_bytes,
+    };
 }
 
 fn maxQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {

@@ -624,6 +624,166 @@ test "broker statistics form one coherent live and offline snapshot" {
     );
 }
 
+test "broker publishes coherent retained system statistics" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "sys-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "$SYS/broker/clients/#",
+            .qos = .at_most_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    try broker.publishSystemStats();
+    var received: usize = 0;
+    while (received < 3) : (received += 1) {
+        var publish = try subscriber.readPublish();
+        defer publish.deinit(allocator);
+        // Live subscribers follow normal MQTT routing semantics: retained
+        // state is updated, while RETAIN is cleared unless the subscription
+        // requested Retain As Published.
+        try std.testing.expect(!publish.publish.retain);
+        if (std.mem.eql(
+            u8,
+            publish.publish.topic,
+            "$SYS/broker/clients/connected",
+        )) {
+            try std.testing.expectEqualStrings("1", publish.publish.payload);
+        } else if (std.mem.eql(
+            u8,
+            publish.publish.topic,
+            "$SYS/broker/clients/disconnected",
+        )) {
+            try std.testing.expectEqualStrings("0", publish.publish.payload);
+        } else if (std.mem.eql(
+            u8,
+            publish.publish.topic,
+            "$SYS/broker/clients/total",
+        )) {
+            try std.testing.expectEqualStrings("1", publish.publish.payload);
+        } else {
+            return error.UnexpectedSystemMetric;
+        }
+    }
+
+    try subscriber.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+
+    const retained_count_before = broker.retained.count();
+    try broker.publishSystemStats();
+    try std.testing.expectEqual(
+        retained_count_before,
+        broker.retained.count(),
+    );
+    var storage: [1]mqtt.retained.Match = undefined;
+    const retained = try broker.retained.matchInto(
+        "$SYS/broker/clients/connected",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retained.len);
+    try std.testing.expectEqualStrings("0", retained[0].payload);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, retained[0].qos);
+}
+
+test "broker periodically publishes system statistics" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 32,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .system_stats_interval = .fromMilliseconds(75),
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "periodic-sys",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "$SYS/broker/clients/connected",
+            .qos = .at_most_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var publish = try subscriber.readPublish();
+    defer publish.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "$SYS/broker/clients/connected",
+        publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings("1", publish.publish.payload);
+    try subscriber.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker rejects non-positive system statistics interval" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        Broker.listen(
+            allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            .{ .system_stats_interval = .zero },
+        ),
+    );
+}
+
 test {
     _ = @import("broker/capability_tests.zig");
     _ = @import("broker/protocol_tests.zig");

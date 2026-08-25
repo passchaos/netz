@@ -554,7 +554,17 @@ test "public modules are reachable" {
         netz.mqtt.broker.Broker,
         "stats",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "publishSystemStats",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Stats"));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "SystemMetric"));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "system_metrics"));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Options,
+        "system_stats_interval",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.router.Router,
         "sharedSubscriptionCount",

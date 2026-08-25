@@ -443,7 +443,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   validation, torn-tail recovery, atomic compaction, and protocol-visible
   durability boundaries, plus coherent allocation-free broker statistics for
   connection, Session, subscription, retained, queue, inflight, QoS 2 and Will
-  state, integrated into one live
+  state and retained `$SYS` gauge publication through the normal routing/ACL
+  path, integrated into one live
   TCP broker listener that auto-detects MQTT 3.1.1/5 per connection, exposes
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
   WSS application handshakes, with trusted source, destination, transport and

@@ -39,6 +39,7 @@ const Config = struct {
     deny_will_topic: ?[]const u8 = null,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
+    system_interval_seconds: ?u32 = null,
     persistence_path: ?[]const u8 = null,
     commit_log_path: ?[]const u8 = null,
     autosave_interval_seconds: ?u32 = null,
@@ -239,6 +240,10 @@ pub fn main(init: std.process.Init) !void {
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
+            .system_stats_interval = if (config.system_interval_seconds) |seconds|
+                .fromSeconds(seconds)
+            else
+                null,
             .connect_authorization = authorization,
             .access_control = access_control,
             .problem_information = problem_information[0..problem_information_count],
@@ -681,6 +686,19 @@ fn parseArgs(
             "--queue-qos0-messages",
         )) {
             config.queue_qos0_messages = true;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--system-interval-seconds=",
+        )) {
+            config.system_interval_seconds = try std.fmt.parseInt(
+                u32,
+                arg["--system-interval-seconds=".len..],
+                10,
+            );
+            if (config.system_interval_seconds.? == 0) {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.startsWith(
             u8,
             arg,
