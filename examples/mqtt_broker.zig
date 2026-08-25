@@ -12,6 +12,9 @@ const Config = struct {
     connect_timeout_ms: ?u32 = null,
     max_packet_size: usize = 16 * 1024 * 1024,
     max_payload_size: usize = 0,
+    proxy_protocol: ?netz.mqtt.proxy_protocol.Version = null,
+    proxy_v2_require_tls: bool = false,
+    proxy_v2_require_client_certificate: bool = false,
     maximum_qos: ?netz.mqtt.QoS = null,
     retain_available: bool = true,
     topic_alias_maximum: u16 = 16,
@@ -203,7 +206,12 @@ pub fn main(init: std.process.Init) !void {
                 .max_queued_deliveries_per_connection = config.max_queued_deliveries,
                 .max_pending_incoming_qos2 = config.max_pending_incoming_qos2,
                 .max_payload_size = config.max_payload_size,
-                .runtime = .{ .max_packet_size = config.max_packet_size },
+                .runtime = .{
+                    .max_packet_size = config.max_packet_size,
+                    .proxy_protocol = config.proxy_protocol,
+                    .proxy_v2_require_tls = config.proxy_v2_require_tls,
+                    .proxy_v2_require_client_certificate = config.proxy_v2_require_client_certificate,
+                },
             },
             .accept = .{
                 .reason_code = config.connack_reason,
@@ -427,6 +435,33 @@ fn parseArgs(
                 arg["--max-payload-size=".len..],
                 10,
             );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--proxy-protocol=",
+        )) {
+            if (config.proxy_protocol != null) {
+                return error.InvalidArgument;
+            }
+            const value = arg["--proxy-protocol=".len..];
+            config.proxy_protocol = if (std.mem.eql(u8, value, "1"))
+                .v1
+            else if (std.mem.eql(u8, value, "2"))
+                .v2
+            else
+                return error.InvalidArgument;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--proxy-v2-require-tls",
+        )) {
+            config.proxy_v2_require_tls = true;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--proxy-v2-require-client-certificate",
+        )) {
+            config.proxy_v2_require_client_certificate = true;
         } else if (std.mem.startsWith(
             u8,
             arg,

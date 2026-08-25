@@ -629,9 +629,34 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "username"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "password"));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.mqtt.runtime.Limits{}).max_packet_size);
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.Limits,
+        "proxy_protocol",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.Limits,
+        "proxy_v2_require_tls",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.Limits,
+        "proxy_v2_require_client_certificate",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.mqtt, "broker"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "proxy_protocol"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.proxy_protocol,
+        "Metadata",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Broker"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "ConnectContext",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "ConnectContextAuthorizationHandler",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "listen",
@@ -933,6 +958,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "proxyMetadata",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "remoteAddress",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
     try std.testing.expect(@hasDecl(

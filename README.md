@@ -443,7 +443,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   validation, torn-tail recovery, atomic compaction, and protocol-visible
   durability boundaries, integrated into one live
   TCP broker listener that auto-detects MQTT 3.1.1/5 per connection, exposes
-  pre-registration CONNECT authorization plus pre-mutation
+  opt-in bounded HAProxy PROXY protocol v1/v2 parsing with trusted source,
+  destination, transport and v2 TLV metadata,
+  pre-registration CONNECT authorization with remote/proxy/certificate
+  identity context plus pre-mutation
   PUBLISH/SUBSCRIBE/UNSUBSCRIBE, per-recipient outgoing-delivery, and
   publication-time Will access-control hooks, and
   performs version-correct property/ACK downgrades, including securely

@@ -46,6 +46,13 @@ The finite `run-mqtt-broker` example enables this with
 configured connection batch exits. Pass `--no-restore` to replace an existing
 database with a fresh run.
 
+Trusted reverse proxies can prepend HAProxy PROXY protocol metadata with
+`--proxy-protocol=1` or `--proxy-protocol=2`. For v2,
+`--proxy-v2-require-tls` and `--proxy-v2-require-client-certificate` reject
+connections whose SSL TLV lacks the corresponding authenticated edge state.
+Never expose such a listener directly to untrusted clients because PROXY
+metadata is an assertion made by the connecting peer.
+
 The URI helpers derive Host / `:authority` / `:scheme` from the URI. Host names,
 IPv4 literals, and bracketed IPv6 literals such as `http://[::1]:8080/` are
 supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.

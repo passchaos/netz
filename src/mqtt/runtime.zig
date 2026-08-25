@@ -5,8 +5,10 @@ const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
+const stream_io = @import("../internal/stream_io.zig");
 const auth_runtime = @import("runtime/auth.zig");
 const topic_alias = @import("runtime/topic_alias.zig");
+const proxy_protocol = @import("proxy_protocol.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
 
@@ -33,7 +35,7 @@ pub const Error = packet_transport.Error || error{
     RedirectLimitExceeded,
     RedirectLoop,
     RedirectRejected,
-} || auth_runtime.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
@@ -49,6 +51,17 @@ pub const Limits = struct {
     /// delayed-ACK cliff; callers can opt back into coalescing for WAN bulk
     /// transports.
     tcp_nodelay: bool = true,
+    /// Require and consume one trusted-proxy header before MQTT CONNECT. This
+    /// is opt-in because accepting source metadata from arbitrary peers would
+    /// allow address spoofing. `connect_timeout` covers this header and CONNECT
+    /// under one absolute admission deadline.
+    proxy_protocol: ?proxy_protocol.Version = null,
+    /// Require a PROXY v2 SSL TLV whose client_ssl bit is set. This is useful
+    /// only behind a trusted TLS-terminating proxy.
+    proxy_v2_require_tls: bool = false,
+    /// Additionally require the SSL TLV to assert a verified certificate used
+    /// on this connection or reused from the proxy's TLS Session.
+    proxy_v2_require_client_certificate: bool = false,
 };
 
 const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
@@ -61,6 +74,12 @@ pub const Server = struct {
     limits: Limits = .{},
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        if ((limits.proxy_v2_require_tls or
+            limits.proxy_v2_require_client_certificate) and
+            limits.proxy_protocol != .v2)
+        {
+            return error.InvalidProperty;
+        }
         return .{
             .io = io,
             .allocator = allocator,
@@ -89,27 +108,79 @@ pub const Server = struct {
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPending(stream, options);
+    }
+
+    /// Complete trusted-proxy parsing and MQTT CONNECT on an already accepted
+    /// stream. This is also the reusable entry point for broker front ends
+    /// that own their accept loop.
+    pub fn acceptStreamPending(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+    ) Error!PendingAcceptedClient {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
+        const connect_deadline = if (options.connect_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk std.Io.Clock.Timestamp.fromNow(
+                self.io,
+                .{ .raw = timeout, .clock = .awake },
+            );
+        } else null;
         if (self.limits.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch
                 return error.SocketOptionFailed;
         }
+        var proxy_metadata: ?proxy_protocol.Metadata =
+            if (self.limits.proxy_protocol) |version|
+                try proxy_protocol.readWithDeadline(
+                    self.allocator,
+                    self.io,
+                    stream,
+                    version,
+                    connect_deadline,
+                )
+            else
+                null;
+        errdefer if (proxy_metadata) |*metadata| metadata.deinit();
+        if (proxy_metadata) |metadata| {
+            const tls = metadata.tls;
+            if (self.limits.proxy_v2_require_tls and
+                (tls == null or !tls.?.client_ssl))
+            {
+                return error.InvalidHeader;
+            }
+            if (self.limits.proxy_v2_require_client_certificate and
+                (tls == null or !tls.?.client_ssl or !tls.?.verified or
+                    (!tls.?.client_certificate_connection and
+                        !tls.?.client_certificate_session)))
+            {
+                return error.InvalidHeader;
+            }
+        }
 
         var connection = Connection{
             .allocator = self.allocator,
-            .transport = .initTcp(self.io, stream),
+            .transport = if (proxy_metadata) |metadata|
+                .initTcpProxy(self.io, stream, metadata)
+            else
+                .initTcp(self.io, stream),
             .protocol = options.protocol,
             .limits = self.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
+        proxy_metadata = null;
         stream_owned = false;
         // After construction, `connection` is the sole stream owner. Its
         // cleanup subsumes the raw accepted-stream cleanup above.
         var connection_owned = true;
         defer if (connection_owned) connection.close();
-        const pending = try connection.acceptPending(options);
+        const pending = try connection.acceptPendingBefore(
+            options,
+            connect_deadline,
+        );
         connection_owned = false;
         return pending;
     }
@@ -916,6 +987,23 @@ pub const Connection = struct {
         return self.transport.negotiatedAlpn();
     }
 
+    /// Return trusted PROXY protocol metadata, if this listener required it.
+    /// The borrowed value remains valid until `close`.
+    pub fn proxyMetadata(
+        self: *const Connection,
+    ) ?*const proxy_protocol.Metadata {
+        return switch (self.transport) {
+            .tcp_proxy => |*tcp| &tcp.metadata,
+            else => null,
+        };
+    }
+
+    /// Return the proxied source IP when available, otherwise the connected
+    /// transport peer. PROXY UNKNOWN/LOCAL deliberately use the latter.
+    pub fn remoteAddress(self: *const Connection) net.IpAddress {
+        return self.transport.remoteAddress();
+    }
+
     /// Return the MQTT 5 Client Identifier assigned for an empty CONNECT ID.
     ///
     /// The value is deep-owned by this Connection, so it remains available
@@ -945,8 +1033,20 @@ pub const Connection = struct {
         self: *Connection,
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
-        var connect = if (options.connect_timeout) |timeout|
-            try self.readConnectWithTimeout(timeout)
+        const deadline = if (options.connect_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk self.transport.deadlineFromNow(timeout);
+        } else null;
+        return self.acceptPendingBefore(options, deadline);
+    }
+
+    fn acceptPendingBefore(
+        self: *Connection,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
+        var connect = if (deadline) |absolute|
+            try self.readConnectWithDeadline(absolute)
         else
             try self.readConnect();
         errdefer connect.deinit(self.allocator);
@@ -1174,6 +1274,13 @@ pub const Connection = struct {
     ) Error!OwnedConnect {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         const deadline = self.transport.deadlineFromNow(timeout);
+        return self.readConnectWithDeadline(deadline);
+    }
+
+    fn readConnectWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedConnect {
         const packet = try self.readPacketWithDeadline(deadline);
         return self.finishReadConnect(packet);
     }
@@ -3015,6 +3122,207 @@ test "MQTT runtime client and server exchange over TCP" {
     try client.disconnect(0);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TCP server consumes PROXY v1 before CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_packet_size = 4096,
+            .proxy_protocol = .v1,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            const metadata = accepted.connection.proxyMetadata() orelse {
+                shared.err = error.MissingProxyMetadata;
+                return;
+            };
+            if (metadata.version != .v1 or metadata.command != .proxy) {
+                shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            const source = accepted.connection.remoteAddress();
+            if (source != .ip4 or
+                !std.mem.eql(u8, &source.ip4.bytes, &.{ 192, 0, 2, 5 }) or
+                source.ip4.port != 6275)
+            {
+                shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            if (!std.mem.eql(
+                u8,
+                accepted.connect.connect.client_id,
+                "proxy-v1-client",
+            )) {
+                shared.err = error.InvalidClientId;
+                return;
+            }
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                shared.err = err;
+                return;
+            };
+            disconnect.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    try stream_io.writeAllParts(
+        io,
+        stream,
+        "PROXY TCP4 192.0.2.5 127.0.0.1 6275 1883\r\n",
+        "",
+    );
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, stream),
+        .protocol = .v5,
+        .limits = .{ .max_packet_size = 4096 },
+    };
+    stream_owned = false;
+    var attempt = try connection.establishClient(.{
+        .protocol = .v5,
+        .client_id = "proxy-v1-client",
+        .limits = .{ .max_packet_size = 4096 },
+    });
+    try std.testing.expect(attempt.accepted());
+    var result = try attempt.requireAccepted();
+    defer result.deinit(allocator);
+    try result.connection.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TCP PROXY v2 requires verified TLS metadata when configured" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{
+            .proxy_v2_require_tls = true,
+        }),
+    );
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_packet_size = 4096,
+            .proxy_protocol = .v2,
+            .proxy_v2_require_tls = true,
+            .proxy_v2_require_client_certificate = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            const metadata = accepted.connection.proxyMetadata() orelse {
+                shared.err = error.MissingProxyMetadata;
+                return;
+            };
+            const tls = metadata.tls orelse {
+                shared.err = error.MissingProxyTls;
+                return;
+            };
+            if (!tls.client_ssl or !tls.verified or
+                !tls.client_certificate_session or
+                !std.mem.eql(u8, tls.common_name.?, "device-42"))
+            {
+                shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                shared.err = err;
+                return;
+            };
+            disconnect.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const address = [_]u8{
+        192, 0, 2, 5, 127, 0, 0, 1, 0x18, 0x83, 0x07, 0x5b,
+    };
+    const ssl = [_]u8{
+        0x05, 0,   0,   0,   0,   0x22, 0,   9, 'd', 'e',
+        'v',  'i', 'c', 'e', '-', '4',  '2',
+    };
+    var proxy_header = proxy_protocol.v2_signature ++
+        [_]u8{ 0x21, 0x11, 0, address.len + 3 + ssl.len } ++
+        address ++ [_]u8{ 0x20, 0, ssl.len } ++ ssl;
+    var empty = [_][]const u8{""};
+    const remaining = try io.vtable.netWrite(
+        io.userdata,
+        stream.socket.handle,
+        &proxy_header,
+        &empty,
+        0,
+    );
+    try std.testing.expectEqual(proxy_header.len, remaining);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, stream),
+        .protocol = .v5,
+        .limits = .{ .max_packet_size = 4096 },
+    };
+    stream_owned = false;
+    var attempt = try connection.establishClient(.{
+        .protocol = .v5,
+        .client_id = "proxy-v2-tls",
+        .limits = .{ .max_packet_size = 4096 },
+    });
+    try std.testing.expect(attempt.accepted());
+    var accepted = try attempt.requireAccepted();
+    defer accepted.deinit(allocator);
+    try accepted.connection.disconnect(0);
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 

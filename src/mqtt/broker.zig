@@ -89,6 +89,9 @@ pub const Options = struct {
     /// routing state is created. This covers MQTT 3.1.1/5 username/password
     /// policy; Enhanced Authentication remains owned by `authentication`.
     connect_authorization: ?ConnectAuthorizationHandler = null,
+    /// Transport-aware counterpart to `connect_authorization`. When both are
+    /// configured they must both approve the connection.
+    connect_context_authorization: ?ConnectContextAuthorizationHandler = null,
     /// Optional per-client checks for incoming PUBLISH, SUBSCRIBE, and
     /// UNSUBSCRIBE packets plus outgoing Application Message delivery.
     /// Callbacks can run concurrently and receive borrowed views. They must
@@ -110,6 +113,26 @@ pub const ConnectAuthorizationHandler = struct {
     authorize: *const fn (
         context: *anyopaque,
         connect: mqtt.Connect,
+    ) bool,
+};
+
+/// CONNECT authorization context combining the MQTT identity with transport
+/// provenance. Trusted PROXY v2 TLVs are exposed without overwriting MQTT's
+/// username, so applications can require a verified edge TLS assertion while
+/// retaining the original protocol credentials for auditing.
+pub const ConnectContext = struct {
+    connect: mqtt.Connect,
+    remote_address: net.IpAddress,
+    proxy: ?*const mqtt.proxy_protocol.Metadata,
+    peer_certificates: ?[]const []const u8,
+};
+
+pub const ConnectContextAuthorizationHandler = struct {
+    context: *anyopaque,
+    /// The request and every nested slice are borrowed for this call only.
+    authorize: *const fn (
+        context: *anyopaque,
+        request: ConnectContext,
     ) bool,
 };
 
@@ -995,6 +1018,26 @@ pub const Broker = struct {
                     // Match Mosquitto's version-specific refusal codes. This
                     // happens before registration so rejected credentials
                     // cannot create, resume, replace, or erase durable state.
+                    var refused = try pending.finish(.{
+                        .reason_code = switch (pending.connect.connect.protocol) {
+                            .v3_1_1 => 0x05,
+                            .v5 => 0x87,
+                        },
+                    });
+                    refused.deinit(self.allocator);
+                    clients_started += 1;
+                    continue;
+                }
+            }
+            if (self.options.connect_context_authorization) |authorization| {
+                if (!authorization.authorize(authorization.context, .{
+                    .connect = pending.connect.connect,
+                    .remote_address = pending.connection.remoteAddress(),
+                    .proxy = pending.connection.proxyMetadata(),
+                    .peer_certificates = pending.connection.peerCertificates(),
+                })) {
+                    // Context-aware authorization uses the same refusal and
+                    // pre-registration guarantee as the legacy CONNECT hook.
                     var refused = try pending.finish(.{
                         .reason_code = switch (pending.connect.connect.protocol) {
                             .v3_1_1 => 0x05,

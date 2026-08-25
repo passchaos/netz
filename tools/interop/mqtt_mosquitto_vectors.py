@@ -193,6 +193,47 @@ def connect_v5(sock: socket.socket, mqtt_packets, client_id: str) -> None:
     connect_client(sock, mqtt_packets, client_id, 5)
 
 
+def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
+    # Direct wire ports of Mosquitto 21-proxy-v1-success.py and
+    # 21-proxy-v2-ipv4.py. Successful MQTT exchange after each header proves
+    # the proxy bytes were consumed rather than misparsed as CONNECT.
+    with NetzBroker(
+        executable, extra_args=("--proxy-protocol=1",)
+    ) as broker:
+        with broker.connect() as sock:
+            sock.sendall(
+                b"PROXY TCP4 192.0.2.5 127.0.0.1 6275 1883\r\n"
+            )
+            connect_v5(sock, mqtt_packets, "proxy-v1")
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(), "PROXY v1 PINGRESP"
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+    with NetzBroker(
+        executable, extra_args=("--proxy-protocol=2",)
+    ) as broker:
+        with broker.connect() as sock:
+            address = (
+                b"\xc0\x00\x02\x05"
+                + b"\x7f\x00\x00\x01"
+                + b"\x18\x83\x07\x5b"
+            )
+            sock.sendall(
+                b"\x0d\x0a\x0d\x0a\x00\x0d\x0aQUIT\x0a"
+                + b"\x21\x11"
+                + len(address).to_bytes(2, "big")
+                + address
+            )
+            connect_v5(sock, mqtt_packets, "proxy-v2")
+            sock.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                sock, mqtt_packets.gen_pingresp(), "PROXY v2 PINGRESP"
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def assigned_client_identifier(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -5516,6 +5557,7 @@ def main() -> None:
     import mqtt5_opts  # type: ignore
     import mqtt_packets  # type: ignore
 
+    proxy_protocol_v1_v2(args.broker, mqtt_packets)
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     server_reference_connack(args.broker, mqtt_packets, mqtt5_props)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
@@ -5624,7 +5666,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 132 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 134 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

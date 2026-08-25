@@ -12,6 +12,7 @@ and equal-wire broker results are kept separate.
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
 | MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
+| Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
 | Application Message size policy | Independent payload-byte cap for live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto `message_size_limit`; rumqttd `max_payload_size` |
@@ -21,7 +22,7 @@ and equal-wire broker results are kept separate.
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
-| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, including an active deadline task that atomically retires idle expired Sessions from routing and inbound QoS 2 state without waiting for later client traffic; pre-registration CONNECT authorization, pre-mutation PUBLISH/SUBSCRIBE/UNSUBSCRIBE access control, per-recipient delivery authorization before live/retained/offline queue mutation plus reconnect-time rechecks, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid`, password files, distinct read/write/subscribe/unsubscribe ACLs and `queue_qos0_messages` |
+| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, including an active deadline task that atomically retires idle expired Sessions from routing and inbound QoS 2 state without waiting for later client traffic; pre-registration CONNECT authorization with transport source, PROXY metadata and verified peer chains, pre-mutation PUBLISH/SUBSCRIBE/UNSUBSCRIBE access control, per-recipient delivery authorization before live/retained/offline queue mutation plus reconnect-time rechecks, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid`, password files, certificate identity/subject usernames, distinct read/write/subscribe/unsubscribe ACLs and `queue_qos0_messages` |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation, retained Will, and publication-time write authorization | Both production brokers integrate Will publication; Mosquitto rechecks its write ACL when the Will becomes due |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | CONNECT and PING liveness | Optional absolute CONNECT/CONNACK packet deadline covers TCP, native TLS, WS and WSS; partial MQTT bytes, WebSocket message boundaries and control frames cannot renew it. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on the same transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
@@ -36,6 +37,15 @@ important low-remapping invariant: when one member joins, only topics that
 select that new member move. It does not replace rumqttd's broader durable
 broker architecture or Mosquitto's full persistence plugin and protocol
 surface.
+
+PROXY v2 support is also stricter and broader than the audited Mosquitto
+decoder: it rejects non-stream transport metadata on the TCP listener, can
+verify the optional CRC32C TLV, retains standard ALPN, authority, unique-id,
+network-namespace and all defined SSL sub-TLVs, and can require either proxied
+TLS or a proxy-verified client certificate. These assertions are deliberately
+available only on explicitly configured trusted-proxy listeners. The broker's
+transport-aware CONNECT authorization callback receives them together with the
+effective source address and any directly verified mTLS certificate chain.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
 deadline on every one of its finite broker processes, so all 132 raw scenarios
@@ -1021,9 +1031,11 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 124
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 126
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
-generators: the seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
+generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
+prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
+seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
 with exact forwarded PUBLISH bytes; it also ports Mosquitto's hostile
 non-CONNECT-initial-packet shape for all packet types 2-15, using a declared
@@ -1357,7 +1369,7 @@ imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets. Four additional wire cases verify absent/zero/one Request Response
 Information plus both the default-enabled diagnostic path and Request Problem
 Information suppression while preserving an exact negative PUBACK reason; all
-132 scenarios pass. This is deliberately described as a selected
+134 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.

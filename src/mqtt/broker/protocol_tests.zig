@@ -148,6 +148,102 @@ test "broker authorizes CONNECT before creating Session state" {
     try std.testing.expectEqual(@as(usize, 4), policy.calls);
 }
 
+test "broker CONNECT context exposes trusted PROXY identity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        called: bool = false,
+
+        fn authorize(
+            context_ptr: *anyopaque,
+            request: context.ConnectContext,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.called = true;
+            const proxy = request.proxy orelse return false;
+            return proxy.version == .v1 and
+                proxy.command == .proxy and
+                request.peer_certificates == null and
+                request.remote_address == .ip4 and
+                request.remote_address.ip4.port == 6275 and
+                std.mem.eql(
+                    u8,
+                    &request.remote_address.ip4.bytes,
+                    &.{ 192, 0, 2, 5 },
+                ) and
+                std.mem.eql(
+                    u8,
+                    request.connect.client_id,
+                    "proxy-context",
+                );
+        }
+    };
+
+    var policy: Policy = .{};
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{
+                    .max_packet_size = 4096,
+                    .proxy_protocol = .v1,
+                },
+            },
+            .connect_context_authorization = .{
+                .context = &policy,
+                .authorize = Policy.authorize,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 1 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try broker.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    var prefix = "PROXY TCP4 192.0.2.5 127.0.0.1 6275 1883\r\n".*;
+    var bufs = [_][]const u8{""};
+    const remaining = try io.vtable.netWrite(
+        io.userdata,
+        stream.socket.handle,
+        &prefix,
+        &bufs,
+        0,
+    );
+    try std.testing.expectEqual(prefix.len, remaining);
+    var connection = context.runtime_mod.Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, stream),
+        .protocol = .v5,
+        .limits = .{ .max_packet_size = 4096 },
+    };
+    stream_owned = false;
+    var attempt = try connection.establishClient(.{
+        .protocol = .v5,
+        .client_id = "proxy-context",
+        .limits = .{ .max_packet_size = 4096 },
+    });
+    try std.testing.expect(attempt.accepted());
+    var accepted = try attempt.requireAccepted();
+    defer accepted.deinit(allocator);
+    try accepted.connection.disconnect(0);
+
+    try joinServer(thread, &joined, &serve);
+    try std.testing.expect(policy.called);
+}
+
 test "broker access control denies before durable state mutation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
