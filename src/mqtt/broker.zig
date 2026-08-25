@@ -3239,6 +3239,23 @@ pub const Broker = struct {
                 );
                 continue;
             }
+            if (transmission == .publish and
+                !connection.topic_namespace.containsTopic(
+                    transmission.publish.topic,
+                ))
+            {
+                // A durable Session may reconnect through a listener with a
+                // different mount point. Its subscriptions remain canonical,
+                // but a queued publication outside the new listener's view
+                // must not abort the connection or permanently block later
+                // visible messages. This follows the same fail-closed/drop
+                // policy as a delivery whose read ACL changed while offline.
+                _ = try self.sessions.dropOutgoingPublish(
+                    handle,
+                    transmission.publish.packet_id,
+                );
+                continue;
+            }
             const encoded = session_route.encodeTransmission(
                 self.allocator,
                 connection.protocol,

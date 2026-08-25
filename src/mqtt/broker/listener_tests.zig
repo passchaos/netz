@@ -6,6 +6,14 @@ const mqtt = context.TestContext.mqtt_mod;
 const Broker = context.TestContext.BrokerType;
 const runtime = context.TestContext.runtime_mod;
 const disconnectAll = context.TestContext.disconnectAllFn;
+const waitForPeerClose = context.TestContext.waitForPeerCloseFn;
+
+const session_expiry = [_]mqtt.Property{
+    .{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 30,
+    } },
+};
 
 const ListenerServeState = struct {
     broker: *Broker,
@@ -173,6 +181,375 @@ test "broker shares mounted WSS and global TCP listener namespaces" {
     );
 
     try disconnectAll(&.{ &global, &mounted, &publisher });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "durable Session projects queued topics through reconnect listener" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var global_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer global_server.deinit();
+    var mounted_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer mounted_server.deinit();
+
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = global_server.pendingSource(),
+            .connection_count = 2,
+        },
+        .{
+            .source = mounted_server.pendingSource(),
+            .namespace = try mqtt.listener_namespace.Namespace.init(
+                "tenant/",
+            ),
+            .connection_count = 1,
+        },
+    };
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    // Session subscriptions live in canonical broker space, rather than being
+    // tied to the transport that happened to establish them. This global
+    // subscription is therefore safe to resume through the mounted listener.
+    var first = try runtime.Client.connect(
+        allocator,
+        io,
+        global_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "cross-listener-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer first.close();
+    var suback = try first.subscribe(
+        &.{.{
+            .topic_filter = "tenant/offline/#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try first.disconnect(0);
+    try waitForPeerClose(&first);
+
+    var publisher = try runtime.Client.connect(
+        allocator,
+        io,
+        global_server.address(),
+        .{ .protocol = .v5, .client_id = "cross-listener-publisher" },
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "tenant/offline/value",
+        "queued",
+        .{ .qos = .at_least_once },
+    );
+
+    var resumed_result = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        mounted_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "cross-listener-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    var delivery = try resumed.readPublish();
+    defer delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "offline/value",
+        delivery.publish.topic,
+    );
+    try std.testing.expectEqualStrings("queued", delivery.publish.payload);
+    try resumed.writePubAck(delivery.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &publisher, &resumed });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "durable Session drops queued topics outside reconnect namespace" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var global_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer global_server.deinit();
+    var mounted_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer mounted_server.deinit();
+
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = global_server.pendingSource(),
+            .connection_count = 2,
+        },
+        .{
+            .source = mounted_server.pendingSource(),
+            .namespace = try mqtt.listener_namespace.Namespace.init(
+                "tenant/",
+            ),
+            .connection_count = 1,
+        },
+    };
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var first = try runtime.Client.connect(
+        allocator,
+        io,
+        global_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "cross-namespace-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer first.close();
+    var suback = try first.subscribe(
+        &.{.{
+            .topic_filter = "#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try first.disconnect(0);
+    try waitForPeerClose(&first);
+
+    var publisher = try runtime.Client.connect(
+        allocator,
+        io,
+        global_server.address(),
+        .{ .protocol = .v5, .client_id = "namespace-filter-publisher" },
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "outside/value",
+        "hidden",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "tenant/inside/value",
+        "visible",
+        .{ .qos = .at_least_once },
+    );
+
+    var resumed_result = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        mounted_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "cross-namespace-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    var delivery = try resumed.readPublish();
+    defer delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "inside/value",
+        delivery.publish.topic,
+    );
+    try std.testing.expectEqualStrings("visible", delivery.publish.payload);
+    try resumed.writePubAck(delivery.publish.packet_id.?, 0);
+    try resumed.ping();
+
+    try disconnectAll(&.{ &publisher, &resumed });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "mounted listeners keep shared subscription groups namespace-local" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var first_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer first_server.deinit();
+    var second_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer second_server.deinit();
+
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = first_server.pendingSource(),
+            .namespace = try mqtt.listener_namespace.Namespace.init(
+                "east/",
+            ),
+            .connection_count = 2,
+        },
+        .{
+            .source = second_server.pendingSource(),
+            .namespace = try mqtt.listener_namespace.Namespace.init(
+                "west/",
+            ),
+            .connection_count = 1,
+        },
+    };
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var east = try runtime.Client.connect(
+        allocator,
+        io,
+        first_server.address(),
+        .{ .protocol = .v5, .client_id = "east-worker" },
+    );
+    defer east.close();
+    var publisher = try runtime.Client.connect(
+        allocator,
+        io,
+        first_server.address(),
+        .{ .protocol = .v5, .client_id = "east-publisher" },
+    );
+    defer publisher.close();
+    var west = try runtime.Client.connect(
+        allocator,
+        io,
+        second_server.address(),
+        .{ .protocol = .v5, .client_id = "west-worker" },
+    );
+    defer west.close();
+
+    // The shared wrapper is routing metadata. Mapping the filter below must
+    // produce `$share/workers/east/jobs/#`, not prefix `$share` itself. The
+    // same client-visible group/filter on west therefore remains independent.
+    var east_suback = try east.subscribe(
+        &.{.{ .topic_filter = "$share/workers/jobs/#" }},
+        .{},
+    );
+    defer east_suback.deinit(allocator);
+    var west_suback = try west.subscribe(
+        &.{.{ .topic_filter = "$share/workers/jobs/#" }},
+        .{},
+    );
+    defer west_suback.deinit(allocator);
+
+    try publisher.publish("jobs/one", "east-only", .{});
+    var delivery = try east.readPublish();
+    defer delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "jobs/one",
+        delivery.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "east-only",
+        delivery.publish.payload,
+    );
+    // A PING round trip proves west has no unexpected PUBLISH queued ahead of
+    // PINGRESP, so identically named shared groups did not cross namespaces.
+    try west.ping();
+
+    try disconnectAll(&.{ &east, &publisher, &west });
     thread.join();
     joined = true;
     if (shared.err) |err| return err;

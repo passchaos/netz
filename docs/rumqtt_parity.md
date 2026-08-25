@@ -1060,8 +1060,12 @@ accept counts concurrently over one router, retained store, Session store, Will
 scheduler and deadline driver; the legacy `Broker.listen`/`serve` remains a
 single-TCP convenience. Each accepted connection deep-owns its namespace, so
 live and durable Session delivery always strips according to the current
-destination listener. Cross-listener tests cover mounted/global subscription
-visibility, retained replay and namespaced Will publication.
+destination listener. Durable Sessions retain canonical subscriptions across
+listener changes: queued topics visible through the reconnecting listener are
+projected into its namespace, while queued topics outside that listener's view
+are dropped rather than leaking names or blocking later delivery. Cross-listener
+tests cover TCP/WSS routing, mounted/global subscription visibility, retained
+replay, namespaced Will publication, durable reconnects and shared groups.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 126
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
