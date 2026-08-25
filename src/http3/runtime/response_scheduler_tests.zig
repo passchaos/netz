@@ -3,6 +3,40 @@ const runtime = @import("../runtime.zig");
 
 const quic = @import("../../quic/mod.zig");
 
+test "HTTP/3 response scheduler work storage is stack first" {
+    const capacity = runtime.testing.response_scheduler_test_stack_capacity;
+    var stack: [capacity]usize = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const common = try runtime.testing.stackFirstSliceForTest(
+        usize,
+        failing.allocator(),
+        &stack,
+        capacity,
+    );
+    defer runtime.testing.freeStackFirstSliceForTest(
+        usize,
+        failing.allocator(),
+        &stack,
+        common,
+    );
+    try std.testing.expectEqual(stack[0..].ptr, common.ptr);
+    try std.testing.expect(!failing.has_induced_failure);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runtime.testing.stackFirstSliceForTest(
+            usize,
+            failing.allocator(),
+            &stack,
+            capacity + 1,
+        ),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+}
+
 test "HTTP/3 handshake server schedules response bodies by priority" {
     const allocator = std.testing.allocator;
     const body = "0123456789abcdef" ** 192;

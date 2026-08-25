@@ -202,6 +202,17 @@ sample rather than an equal-wire quicz comparison. The bidirectional tquic
 GOAWAY/Retry matrix and the quic-go v1/v2 request, cancellation, and 1xx matrix
 remain green after the change. The audited quicz H3 layer has no RFC 9218
 PRIORITY_UPDATE support.
+The RFC 9218 complete-response scheduler now keeps offsets, candidates, and
+packet chunks for up to sixteen concurrent responses in stack storage and uses
+linear stream-ID lookup at that bounded size. Larger response sets retain exact
+heap arrays plus the indexed map. This removes four setup allocations from the
+common 1-16 stream call without changing socket-visible progress or scheduling
+order; a fail-first threshold test covers both stack and fallback storage. A
+three-iteration CPU-0, four-stream/16-MiB real-handshake download sample measured
+47.13 MiB/s mean with 6.87% standard deviation, so it remains a noisy internal
+regression result rather than a cross-stack throughput claim. The full
+1,611-test suite and quic-go v1/v2 plus tquic normal/Retry/GOAWAY gates remain
+green.
 Handshake-backed request, response, streaming-head, and trailer sends now keep
 one encoded-byte buffer and one borrowing STREAM-frame descriptor list per
 session. The buffers are cleared only after QUIC has copied protected recovery

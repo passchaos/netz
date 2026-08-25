@@ -67,6 +67,7 @@ const server_control_stream_id: u62 = 3;
 const server_qpack_encoder_stream_id: u62 = 7;
 const server_qpack_decoder_stream_id: u62 = 11;
 const first_server_push_stream_id: u62 = 15;
+const response_scheduler_stack_capacity: usize = 16;
 
 /// Reusable storage for one HTTP/3 request-stream send operation.
 ///
@@ -2466,6 +2467,59 @@ pub const HandshakeSessionOptions = struct {
 pub const BodyChunk = body_batch.Chunk;
 pub const ResponseBody = body_batch.ResponseBody;
 
+fn responseBodyIndex(
+    responses: []const ResponseBody,
+    stream_id: u62,
+) ?usize {
+    for (responses, 0..) |response, index| {
+        if (response.stream_id == stream_id) return index;
+    }
+    return null;
+}
+
+fn stackFirstSlice(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    stack: []T,
+    len: usize,
+) std.mem.Allocator.Error![]T {
+    if (len <= stack.len) return stack[0..len];
+    return allocator.alloc(T, len);
+}
+
+fn freeStackFirstSlice(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    stack: []T,
+    storage: []T,
+) void {
+    if (storage.ptr != stack.ptr) allocator.free(storage);
+}
+
+/// Narrow white-box surface for runtime tests kept in focused modules.
+pub const testing = struct {
+    pub const response_scheduler_test_stack_capacity =
+        response_scheduler_stack_capacity;
+
+    pub fn stackFirstSliceForTest(
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        stack: []T,
+        len: usize,
+    ) std.mem.Allocator.Error![]T {
+        return stackFirstSlice(T, allocator, stack, len);
+    }
+
+    pub fn freeStackFirstSliceForTest(
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        stack: []T,
+        storage: []T,
+    ) void {
+        freeStackFirstSlice(T, allocator, stack, storage);
+    }
+};
+
 pub const HandshakeServerOptions = struct {
     handshake: quic.handshake.ServerOptions,
     session: HandshakeSessionOptions = .{},
@@ -3023,36 +3077,74 @@ pub const HandshakeServerSession = struct {
             self.established.connection.endpoint.allocator;
         var response_index = std.AutoHashMapUnmanaged(u62, usize).empty;
         defer response_index.deinit(allocator);
-        const response_count = std.math.cast(
-            u32,
-            responses.len,
-        ) orelse return error.ExcessiveLoad;
-        try response_index.ensureTotalCapacity(
+        const use_response_index =
+            responses.len > response_scheduler_stack_capacity;
+        if (use_response_index) {
+            const response_count = std.math.cast(
+                u32,
+                responses.len,
+            ) orelse return error.ExcessiveLoad;
+            try response_index.ensureTotalCapacity(
+                allocator,
+                response_count,
+            );
+        }
+        var offsets_stack: [response_scheduler_stack_capacity]usize = undefined;
+        const offsets = try stackFirstSlice(
+            usize,
             allocator,
-            response_count,
-        );
-        const offsets = try allocator.alloc(usize, responses.len);
-        defer allocator.free(offsets);
-        @memset(offsets, 0);
-        const candidates = try allocator.alloc(
-            response_scheduler.Candidate,
+            &offsets_stack,
             responses.len,
         );
-        defer allocator.free(candidates);
-        const chunks = try allocator.alloc(BodyChunk, responses.len);
-        defer allocator.free(chunks);
+        defer freeStackFirstSlice(usize, allocator, &offsets_stack, offsets);
+        @memset(offsets, 0);
+        var candidates_stack: [response_scheduler_stack_capacity]response_scheduler.Candidate = undefined;
+        const candidates = try stackFirstSlice(
+            response_scheduler.Candidate,
+            allocator,
+            &candidates_stack,
+            responses.len,
+        );
+        defer freeStackFirstSlice(
+            response_scheduler.Candidate,
+            allocator,
+            &candidates_stack,
+            candidates,
+        );
+        var chunks_stack: [response_scheduler_stack_capacity]BodyChunk =
+            undefined;
+        const chunks = try stackFirstSlice(
+            BodyChunk,
+            allocator,
+            &chunks_stack,
+            responses.len,
+        );
+        defer freeStackFirstSlice(
+            BodyChunk,
+            allocator,
+            &chunks_stack,
+            chunks,
+        );
 
         for (responses, 0..) |response, index| {
             if (self.outbound_bodies.find(response.stream_id) == null) {
                 return error.UnexpectedStream;
             }
-            const slot = response_index.getOrPutAssumeCapacity(
-                response.stream_id,
-            );
-            if (slot.found_existing) {
-                return error.UnexpectedStream;
+            if (use_response_index) {
+                const slot = response_index.getOrPutAssumeCapacity(
+                    response.stream_id,
+                );
+                if (slot.found_existing) {
+                    return error.UnexpectedStream;
+                }
+                slot.value_ptr.* = index;
+            } else {
+                for (responses[0..index]) |prior| {
+                    if (prior.stream_id == response.stream_id) {
+                        return error.UnexpectedStream;
+                    }
+                }
             }
-            slot.value_ptr.* = index;
         }
 
         var remaining_responses = responses.len;
@@ -3136,8 +3228,14 @@ pub const HandshakeServerSession = struct {
             };
             var sent_body_bytes: usize = 0;
             for (chunks[0..sent_count]) |chunk| {
-                const index = response_index.get(chunk.stream_id) orelse
-                    return error.UnexpectedStream;
+                const index = if (use_response_index)
+                    response_index.get(chunk.stream_id) orelse
+                        return error.UnexpectedStream
+                else
+                    responseBodyIndex(
+                        responses,
+                        chunk.stream_id,
+                    ) orelse return error.UnexpectedStream;
                 offsets[index] += chunk.data.len;
                 if (offsets[index] == responses[index].data.len) {
                     remaining_responses -= 1;
@@ -3167,9 +3265,15 @@ pub const HandshakeServerSession = struct {
                 // ownership until completion unless it becomes blocked or a
                 // live PRIORITY_UPDATE changes the selected class.
                 if (sent_count != 0) {
-                    const last_sent = response_index.get(
-                        chunks[sent_count - 1].stream_id,
-                    ) orelse return error.UnexpectedStream;
+                    const last_sent = if (use_response_index)
+                        response_index.get(
+                            chunks[sent_count - 1].stream_id,
+                        ) orelse return error.UnexpectedStream
+                    else
+                        responseBodyIndex(
+                            responses,
+                            chunks[sent_count - 1].stream_id,
+                        ) orelse return error.UnexpectedStream;
                     next_stream = (last_sent + 1) % responses.len;
                 } else if (last_selected != null) {
                     next_stream = (last_selected.? + 1) % responses.len;
