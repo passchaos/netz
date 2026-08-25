@@ -34,6 +34,7 @@ const Config = struct {
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     persistence_path: ?[]const u8 = null,
+    commit_log_path: ?[]const u8 = null,
     autosave_interval_seconds: ?u32 = null,
     restore: bool = true,
     ignore_connection_errors: bool = false,
@@ -231,7 +232,17 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer broker.deinit();
-    if (config.persistence_path) |path| {
+    if (config.commit_log_path) |path| {
+        broker.restoreCommitLog(std.Io.Dir.cwd(), path, .{}) catch |err|
+            switch (err) {
+                error.CommitLogNotFound => try broker.createCommitLog(
+                    std.Io.Dir.cwd(),
+                    path,
+                    .{},
+                ),
+                else => return err,
+            };
+    } else if (config.persistence_path) |path| {
         if (config.restore) {
             broker.restoreSnapshot(std.Io.Dir.cwd(), path) catch |err| {
                 if (err != error.SnapshotNotFound) return err;
@@ -302,7 +313,11 @@ pub fn main(init: std.process.Init) !void {
             config.ignore_connection_errors,
         );
     }
-    if (config.persistence_path) |path| {
+    if (config.commit_log_path != null) {
+        // Each protocol-visible durable transition is already fsynced by the
+        // broker journal. Avoid an unrelated final snapshot format when the
+        // process is configured exclusively for incremental recovery.
+    } else if (config.persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
     }
 }
@@ -599,6 +614,14 @@ fn parseArgs(
             const path = arg["--persistence=".len..];
             if (path.len == 0) return error.InvalidArgument;
             config.persistence_path = path;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--commit-log=",
+        )) {
+            const path = arg["--commit-log=".len..];
+            if (path.len == 0) return error.InvalidArgument;
+            config.commit_log_path = path;
         } else if (std.mem.eql(u8, arg, "--no-restore")) {
             config.restore = false;
         } else if (std.mem.startsWith(
@@ -622,6 +645,13 @@ fn parseArgs(
     }
     if (config.autosave_interval_seconds != null and
         config.persistence_path == null)
+    {
+        return error.InvalidArgument;
+    }
+    if (config.commit_log_path != null and
+        (config.persistence_path != null or
+            config.autosave_interval_seconds != null or
+            !config.restore))
     {
         return error.InvalidArgument;
     }

@@ -106,6 +106,17 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_live_autosave_step.dependOn(&mqtt_live_autosave.step);
 
+    const mqtt_commit_log = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_commit_log.py",
+    });
+    mqtt_commit_log.addArtifactArg(mqtt_vectors_broker);
+    const mqtt_commit_log_step = b.step(
+        "interop-mqtt-commit-log",
+        "Verify MQTT per-transaction journal recovery after SIGKILL",
+    );
+    mqtt_commit_log_step.dependOn(&mqtt_commit_log.step);
+
     const mqtt_websocket_server = b.addExecutable(.{
         .name = "netz-mqtt-websocket-interop-server",
         .root_module = b.createModule(.{

@@ -13,6 +13,7 @@ const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const client_id_mod = @import("broker/client_id.zig");
 const persistence_mod = @import("persistence/mod.zig");
+const commit_log_mod = persistence_mod.commit_log;
 const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
 const session_delivery = @import("broker/session_delivery.zig");
@@ -27,10 +28,12 @@ const net = std.Io.net;
 pub const Error = runtime.Error || router_mod.Error ||
     retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
     session_mod.Error || will_mod.Error || persistence_mod.Error ||
+    commit_log_mod.Error ||
     std.Io.RandomSecureError || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
+    CommitLogAlreadyEnabled,
 };
 
 pub const PendingQoS2Store = qos2_mod.Store;
@@ -404,6 +407,7 @@ pub const Broker = struct {
     ) = .empty,
     will_publishers: will_mod.PublisherMap = .empty,
     slots: []ClientSlot,
+    commit_log: ?commit_log_mod.Log = null,
     persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
 
@@ -555,11 +559,126 @@ pub const Broker = struct {
         self.pending_qos2.deinit();
         self.router.deinit();
         self.server.deinit();
+        if (self.commit_log) |*log| log.deinit();
         self.* = undefined;
     }
 
     pub fn address(self: Broker) net.IpAddress {
         return self.server.address();
+    }
+
+    /// Start a crash-tolerant append journal with the broker's current state.
+    /// The initial state image is synced before the journal becomes visible.
+    pub fn createCommitLog(
+        self: *Broker,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        options: commit_log_mod.Options,
+    ) Error!void {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        if (self.commit_log != null) return error.CommitLogAlreadyEnabled;
+
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        const encoded = try self.encodeLiveStateLocked(false);
+        defer self.allocator.free(encoded);
+        var log = try commit_log_mod.Log.createWithInitial(
+            self.allocator,
+            self.io,
+            dir,
+            sub_path,
+            options,
+            encoded,
+        );
+        errdefer log.deinit();
+        self.commit_log = log;
+    }
+
+    /// Restore the latest complete transaction and keep its journal open.
+    /// Torn final writes are truncated; corruption in complete data is fatal.
+    pub fn restoreCommitLog(
+        self: *Broker,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        options: commit_log_mod.Options,
+    ) Error!void {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        if (self.commit_log != null) return error.CommitLogAlreadyEnabled;
+        var log = try commit_log_mod.Log.open(
+            self.allocator,
+            self.io,
+            dir,
+            sub_path,
+            options,
+        );
+        errdefer log.deinit();
+        const encoded = try log.latestAlloc();
+        defer self.allocator.free(encoded);
+
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        try self.restoreEncodedStateLocked(encoded);
+        self.commit_log = log;
+        self.deadline_driver.notify(self.io);
+    }
+
+    /// Append and sync a coherent live-broker state generation.
+    pub fn appendCommit(self: *Broker) Error!u64 {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        const log = &(self.commit_log orelse
+            return error.CommitLogNotFound);
+        const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            break :blk try self.encodeLiveStateLocked(false);
+        };
+        defer self.allocator.free(encoded);
+        return log.append(encoded);
+    }
+
+    /// Replace prior journal history with one synced baseline generation.
+    pub fn compactCommitLog(self: *Broker) Error!void {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        const log = &(self.commit_log orelse
+            return error.CommitLogNotFound);
+        const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            break :blk try self.encodeLiveStateLocked(false);
+        };
+        defer self.allocator.free(encoded);
+        try log.reset(encoded);
+    }
+
+    fn appendCommitIfEnabled(self: *Broker) Error!void {
+        return self.appendCommitModeIfEnabled(false);
+    }
+
+    fn appendProvisionalCommitIfEnabled(self: *Broker) Error!void {
+        return self.appendCommitModeIfEnabled(true);
+    }
+
+    fn appendCommitModeIfEnabled(
+        self: *Broker,
+        allow_provisional_registration: bool,
+    ) Error!void {
+        if (self.commit_log == null) return;
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        const log = &self.commit_log.?;
+        const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            break :blk try self.encodeLiveStateLocked(
+                allow_provisional_registration,
+            );
+        };
+        defer self.allocator.free(encoded);
+        _ = try log.append(encoded);
     }
 
     /// Atomically persist retained messages and durable Session State.
@@ -638,27 +757,7 @@ pub const Broker = struct {
         const encoded = blk: {
             self.state_mutex.lockUncancelable(self.io);
             defer self.state_mutex.unlock(self.io);
-            for (self.slots) |slot| {
-                // Registration becomes durable only once CONNACK succeeds and
-                // the accepted connection is attached. Retrying while this
-                // short transaction is in flight prevents a failed accept
-                // from manufacturing Session Present after restart.
-                if (slot.active and slot.connection == null) {
-                    return error.SnapshotBusy;
-                }
-            }
-            break :blk try persistence_mod.encodeLive(
-                self.allocator,
-                .{
-                    .retained = &self.retained,
-                    .sessions = &self.sessions,
-                    .wills = &self.wills,
-                    .will_publishers = &self.will_publishers,
-                    .pending_qos2 = &self.pending_qos2,
-                },
-                std.Io.Clock.awake.now(self.io),
-                std.Io.Clock.real.now(self.io),
-            );
+            break :blk try self.encodeLiveStateLocked(false);
         };
         defer self.allocator.free(encoded);
 
@@ -667,6 +766,35 @@ pub const Broker = struct {
             dir,
             sub_path,
             encoded,
+        );
+    }
+
+    fn encodeLiveStateLocked(
+        self: *Broker,
+        allow_provisional_registration: bool,
+    ) Error![]u8 {
+        for (self.slots) |slot| {
+            // Registration becomes durable only once CONNACK succeeds and the
+            // accepted connection is attached. Retrying while this short
+            // transaction is in flight prevents a failed accept from
+            // manufacturing Session Present after restart.
+            if (!allow_provisional_registration and
+                slot.active and slot.connection == null)
+            {
+                return error.SnapshotBusy;
+            }
+        }
+        return persistence_mod.encodeLive(
+            self.allocator,
+            .{
+                .retained = &self.retained,
+                .sessions = &self.sessions,
+                .wills = &self.wills,
+                .will_publishers = &self.will_publishers,
+                .pending_qos2 = &self.pending_qos2,
+            },
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
         );
     }
 
@@ -684,6 +812,24 @@ pub const Broker = struct {
         defer self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
+        const encoded = dir.readFileAlloc(
+            self.io,
+            sub_path,
+            self.allocator,
+            .limited(persistence_mod.max_snapshot_bytes),
+        ) catch |err| switch (err) {
+            error.FileNotFound => return error.SnapshotNotFound,
+            else => |other| return other,
+        };
+        defer self.allocator.free(encoded);
+        try self.restoreEncodedStateLocked(encoded);
+        self.deadline_driver.notify(self.io);
+    }
+
+    fn restoreEncodedStateLocked(
+        self: *Broker,
+        encoded: []const u8,
+    ) Error!void {
         for (self.slots) |slot| {
             if (slot.active) return error.SnapshotBusy;
         }
@@ -694,11 +840,9 @@ pub const Broker = struct {
         {
             return error.SnapshotBusy;
         }
-        var restored = try persistence_mod.load(
+        var restored = try persistence_mod.decode(
             self.allocator,
-            self.io,
-            dir,
-            sub_path,
+            encoded,
             self.options.retained,
             self.options.session,
             self.options.will,
@@ -752,7 +896,6 @@ pub const Broker = struct {
         restored.wills.deinit();
         restored.will_publishers.deinit(self.allocator);
         restored.pending_qos2.deinit();
-        self.deadline_driver.notify(self.io);
     }
 
     /// Accept exactly `connection_count` clients and serve them concurrently.
@@ -874,8 +1017,16 @@ pub const Broker = struct {
                 accept_options.assigned_client_identifier =
                     self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
             }
+            // The Session/Will generation must reach the journal before the
+            // peer can observe a successful CONNACK. Snapshot encoding treats
+            // this short registration phase as crash-disconnected state.
+            self.appendProvisionalCommitIfEnabled() catch |err| {
+                self.abortRegistration(index, subscriber_id);
+                return err;
+            };
             var accepted = pending.finish(accept_options) catch |err| {
                 self.abortRegistration(index, subscriber_id);
+                self.appendCommitIfEnabled() catch {};
                 return err;
             };
             // MQTT requires the replacement to be accepted before the old
@@ -963,7 +1114,7 @@ pub const Broker = struct {
         // `find` removes an expired Session without exposing its route ID.
         // Prune first so the router and Session Store always retire stable
         // identities atomically from the broker's point of view.
-        self.pruneExpiredSessionRoutesLocked(now);
+        _ = self.pruneExpiredSessionRoutesLocked(now);
         var effective_connect = connect;
         if (connect.client_id.len == 0) {
             effective_connect.client_id = self.assignClientIdLocked(
@@ -1400,6 +1551,9 @@ pub const Broker = struct {
         slot.clearQueue();
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);
+        // Persist disconnect, Session expiry, and Will scheduling before an
+        // orderly close becomes observable to the peer.
+        try self.appendCommitIfEnabled();
         if (slot.connection) |*value| value.close();
         slot.connection = null;
         slot.will_handle = null;
@@ -1548,6 +1702,9 @@ pub const Broker = struct {
             };
         }
         self.state_mutex.unlock(self.io);
+        // SUBACK makes the subscription durable from the peer's perspective.
+        // The journal must reach disk before that acknowledgement is emitted.
+        try self.appendCommitIfEnabled();
         try connection.writeSubAck(
             subscribe.packet_id,
             reasons,
@@ -1710,6 +1867,7 @@ pub const Broker = struct {
             reasons[index] = 0;
         }
         self.state_mutex.unlock(self.io);
+        try self.appendCommitIfEnabled();
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         try connection.writeUnsubAck(
@@ -1853,6 +2011,10 @@ pub const Broker = struct {
         };
         self.state_mutex.unlock(self.io);
 
+        // A successful PUBREC promises that this QoS 2 transaction survives a
+        // reconnect. Establish the durability point before sending PUBREC.
+        try self.appendCommitIfEnabled();
+
         // Mosquitto stores the inbound QoS 2 base message before PUBREC and
         // routes only when PUBREL arrives. A retransmitted PUBLISH receives the
         // same PUBREC without replacing or duplicating the stored message.
@@ -1915,6 +2077,10 @@ pub const Broker = struct {
                 false,
             );
         }
+        // `routeReleasedPublish` journals the routed state before returning.
+        // If Message Expiry discarded the Application Message instead, the
+        // pending inbound transaction removal is still a durable mutation.
+        try self.appendCommitIfEnabled();
 
         const publisher_slot = try self.slotForSubscriber(publisher_id);
         publisher_slot.writer_mutex.lockUncancelable(self.io);
@@ -1940,6 +2106,11 @@ pub const Broker = struct {
         };
         defer self.allocator.free(plan.storage);
         self.state_mutex.unlock(self.io);
+
+        // Retained changes and durable fanout queues precede PUBACK and every
+        // downstream write. A crash after either peer observes progress can
+        // therefore recover a state no older than that observable boundary.
+        try self.appendCommitIfEnabled();
 
         if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
             const publisher_slot = try self.slotForSubscriber(
@@ -1972,7 +2143,7 @@ pub const Broker = struct {
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
     ) Error!RoutePlan {
-        self.pruneExpiredSessionRoutesLocked(now);
+        _ = self.pruneExpiredSessionRoutesLocked(now);
         const route_publisher_id = if (publisher_id) |id|
             self.canonicalPublisherId(id)
         else
@@ -2248,8 +2419,8 @@ pub const Broker = struct {
     fn pruneExpiredSessionRoutesLocked(
         self: *Broker,
         now: std.Io.Timestamp,
-    ) void {
-        _ = self.sessions.pruneExpiredWithContext(
+    ) usize {
+        return self.sessions.pruneExpiredWithContext(
             now,
             self,
             struct {
@@ -2499,6 +2670,12 @@ pub const Broker = struct {
             if (try self.takeSessionPacketLocked(slot)) |packet_value| {
                 var packet = packet_value;
                 defer packet.deinit();
+                // Selecting a durable QoS 1/2 message moves it from queued to
+                // inflight and assigns its Packet Identifier. Sync that state
+                // before the bytes can reach the peer, so restart retransmits
+                // the same identifier with DUP rather than inventing a new
+                // transaction.
+                try self.appendCommitIfEnabled();
                 slot.connection.?.writeEncodedSessionPacket(
                     packet.encoded.bytes,
                 ) catch |err| switch (err) {
@@ -2547,6 +2724,7 @@ pub const Broker = struct {
                         error.SessionNotFound => {},
                         else => return err,
                     };
+                    try self.appendCommitIfEnabled();
                 }
                 continue;
             }
@@ -2708,7 +2886,7 @@ pub const Broker = struct {
         while (!self.deadline_driver.stopped()) {
             self.state_mutex.lockUncancelable(self.io);
             const now = std.Io.Clock.awake.now(self.io);
-            self.pruneExpiredSessionRoutesLocked(now);
+            const expired_count = self.pruneExpiredSessionRoutesLocked(now);
             const published_any = self.publishDueWillsLocked(
                 now,
             ) catch |err| {
@@ -2723,6 +2901,9 @@ pub const Broker = struct {
                 self.deadline_driver.currentGeneration();
             self.state_mutex.unlock(self.io);
 
+            if (published_any or expired_count != 0) {
+                self.appendCommitIfEnabled() catch |err| return err;
+            }
             if (published_any) {
                 self.flushAllSlots() catch |err| return err;
             }
@@ -2926,6 +3107,12 @@ const ClientTask = struct {
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
+                    if (session_owned) {
+                        task.broker.appendCommitIfEnabled() catch |err| {
+                            slot.writer_mutex.unlock(task.broker.io);
+                            return err;
+                        };
+                    }
                     if (!session_owned) connection.applyPubAck(
                         owned.ack,
                     ) catch |err| {
@@ -2955,6 +3142,12 @@ const ClientTask = struct {
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
+                    if (session_owned) {
+                        task.broker.appendCommitIfEnabled() catch |err| {
+                            slot.writer_mutex.unlock(task.broker.io);
+                            return err;
+                        };
+                    }
                     if (!session_owned) connection.applyPubRec(
                         owned.ack,
                     ) catch |err| {
@@ -2993,6 +3186,12 @@ const ClientTask = struct {
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
+                    if (session_owned) {
+                        task.broker.appendCommitIfEnabled() catch |err| {
+                            slot.writer_mutex.unlock(task.broker.io);
+                            return err;
+                        };
+                    }
                     if (!session_owned) connection.applyPubComp(
                         owned.ack,
                     ) catch |err| {

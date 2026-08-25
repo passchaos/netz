@@ -27,7 +27,7 @@ and equal-wire broker results are kept separate.
 | CONNECT and PING liveness | Optional absolute CONNECT/CONNACK packet deadline covers TCP, native TLS, WS and WSS; partial MQTT bytes, WebSocket message boundaries and control frames cannot renew it. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on the same transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
-| Broker persistence | Atomic versioned snapshots for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
+| Broker persistence | Atomic versioned snapshots plus an opt-in fsynced append journal for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
@@ -37,7 +37,7 @@ broker architecture or Mosquitto's full persistence plugin and protocol
 surface.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 130 raw scenarios
+deadline on every one of its finite broker processes, so all 131 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 
@@ -96,6 +96,35 @@ has narrower online autosave/plugin integration than Mosquitto, but tests now
 also cover inbound QoS 2 body ownership, downtime expiry, Clean Start cleanup,
 real broker restart, Session Present, post-restart PUBREL routing and duplicate
 PUBREL idempotence.
+
+## Incremental commit log
+
+`Broker.createCommitLog`, `restoreCommitLog`, `appendCommit`, and
+`compactCommitLog`
+add an opt-in append journal alongside periodic snapshots. Each record contains
+one coherent live-state image with a monotonically increasing sequence number,
+CRC32-protected header and payload, and a matching commit footer. The
+implementation fsyncs the complete record before reporting success; recovery
+accepts and truncates only an incomplete final record, while bad magic,
+sequence, header CRC, payload CRC, or footer is rejected instead of silently
+hiding committed corruption. Compaction writes a new one-record generation
+through `std.Io.File.Atomic` and replaces the old history only after the
+temporary file has been synced; append automatically takes this path before a
+configured journal-size bound would be exceeded.
+
+When `--commit-log=PATH` is enabled in the production example, the broker records
+protocol-visible durable boundaries before CONNACK, SUBACK, UNSUBACK,
+PUBACK/PUBREC/PUBCOMP, durable outgoing delivery, disconnect/Will scheduling,
+Will publication, and Session expiry can be observed by a peer. This first
+version intentionally journals complete state images so every private store is
+covered uniformly; compact typed delta records and group commit are performance
+work, not missing recovery semantics. The `interop-mqtt-commit-log` build step
+creates a durable subscription, receives PUBACK for an offline queued message,
+immediately kills the broker without any periodic or shutdown snapshot, and
+requires Session Present plus the exact delivery after restart. Unit coverage
+additionally verifies multi-generation replay, atomic compaction, torn-tail
+truncation, committed corruption rejection, and transactional broker-state
+preservation when the newest image cannot decode.
 
 ## Equal-wire live broker comparison
 
@@ -208,7 +237,7 @@ including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
-masked client and unmasked server messages assembled from two parts. The full 1,633-test suite, 131-scenario
+masked client and unmasked server messages assembled from two parts. The full 1,641-test suite, 131-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
@@ -1303,8 +1332,9 @@ wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
 
-1. **Partially completed:** `Broker.saveLiveSnapshot` now checkpoints while
-   clients remain connected. A persistence mutex serializes snapshot writers,
+1. **Completed for single-node crash durability:** `Broker.saveLiveSnapshot`
+   checkpoints while clients remain connected. A persistence mutex serializes
+   snapshot writers,
    while the broker state barrier is held only long enough to encode a detached
    immutable image; file write, fsync, and atomic replacement happen after
    traffic is unblocked. Durable connected Sessions restore offline with
@@ -1318,8 +1348,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    usable after checkpoint, followed by restore. The production example now
    accepts `--autosave-interval-seconds=N`, and the process gate above proves a
    periodic checkpoint survives forced termination with both subscription
-   metadata and an opt-in offline QoS 0 delivery intact. A replicated/
-   incremental commitlog is still needed to close mutations between intervals.
+   metadata and an opt-in offline QoS 0 delivery intact. The append journal
+   closes the interval between checkpoints for protocol-visible durable
+   mutations. Cross-node replication/consensus remains separate work.
 2. Extend the production-scale publisher-window, latency, allocation and RSS
    comparison above to Mosquitto and additional concurrency/fanout shapes;
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.

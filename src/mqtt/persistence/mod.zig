@@ -11,11 +11,12 @@ const retained = @import("../retained/mod.zig");
 const session = @import("../session/mod.zig");
 const will = @import("../will/mod.zig");
 pub const codec = @import("codec.zig");
+pub const commit_log = @import("commit_log.zig");
 
 const magic = "netz-mqtt-db\x00\x01";
 const version: u32 = 3;
 const max_section_bytes: usize = 1024 * 1024 * 1024;
-const max_snapshot_bytes: usize = 4 *| max_section_bytes +| 192;
+pub const max_snapshot_bytes: usize = 4 *| max_section_bytes +| 192;
 
 pub const Error = codec.Error || pending_qos2.Error || retained.Error ||
     session.Error || will.Error || error{
