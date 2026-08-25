@@ -590,6 +590,145 @@ test "broker Session Expiry override removes restored subscriptions" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker actively expires idle Session routing and QoS2 state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    // Keep one unrelated client connected for the entire expiry interval.
+    // This makes the assertion exercise the broker's autonomous deadline task
+    // rather than cleanup performed by a later CONNECT or PUBLISH operation.
+    var keeper = try connect(
+        allocator,
+        io,
+        broker,
+        "expiry-idle-keeper",
+        &.{},
+    );
+    defer keeper.close();
+    const expires_in_one_second = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 1,
+    } }};
+    var expiring = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "expiry-idle-state",
+            .clean_start = false,
+            .properties = &expires_in_one_second,
+        },
+    );
+    defer expiring.close();
+    var suback = try expiring.subscribe(
+        &.{.{ .topic_filter = "expiry/idle/#" }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    const packet_id = (try expiring.writePublish(
+        "expiry/idle/qos2",
+        "pending",
+        .{ .qos = .exactly_once },
+    )).?;
+    var pubrec = try expiring.readPubRec();
+    defer pubrec.deinit(allocator);
+    try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+    try expiring.disconnect(0);
+    try waitForPeerClose(&expiring);
+
+    const wait_deadline_ns = std.Io.Clock.awake.now(io).nanoseconds +
+        3 * std.time.ns_per_s;
+    while (true) {
+        broker.state_mutex.lockUncancelable(io);
+        const expired = broker.sessions.count() == 1 and
+            broker.router.subscriptionCount() == 0 and
+            broker.pending_qos2.count() == 0;
+        broker.state_mutex.unlock(io);
+        if (expired) break;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= wait_deadline_ns) {
+            return error.TestExpectedEqual;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+
+    // The lifecycle task must not disturb an unrelated live Network
+    // Connection while retiring all state owned by the expired route.
+    try keeper.ping();
+    try keeper.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker Session reconnect survives stale expiry wake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const expires_in_one_second = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 1,
+    } }};
+    var first = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "expiry-reconnect",
+            .clean_start = false,
+            .properties = &expires_in_one_second,
+        },
+    );
+    defer first.close();
+    try first.disconnect(0);
+    try waitForPeerClose(&first);
+
+    var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "expiry-reconnect",
+            .clean_start = false,
+            .properties = &expires_in_one_second,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+
+    // Reconnect leaves the old one-second cached deadline as a safe early
+    // wake. Crossing it must repair the cache rather than remove a connected
+    // Session or disturb its transport.
+    try std.Io.sleep(io, .fromMilliseconds(1200), .awake);
+    try resumed.ping();
+    try resumed.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker duplicate ClientID takeover has one subscription owner" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

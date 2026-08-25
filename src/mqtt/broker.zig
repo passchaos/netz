@@ -17,7 +17,7 @@ const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
 const session_delivery = @import("broker/session_delivery.zig");
 const session_route = @import("broker/session_route.zig");
-const will_driver_mod = @import("broker/will_driver.zig");
+const deadline_driver_mod = @import("broker/deadline_driver.zig");
 const retained_mod = @import("retained/mod.zig");
 const session_mod = @import("session/mod.zig");
 const will_mod = @import("will/mod.zig");
@@ -397,7 +397,7 @@ pub const Broker = struct {
     retained: retained_mod.Store,
     sessions: session_mod.Store,
     wills: will_mod.Scheduler,
-    will_driver: will_driver_mod.Driver = .{},
+    deadline_driver: deadline_driver_mod.Driver = .{},
     session_owners: std.AutoHashMapUnmanaged(
         u64,
         router_mod.SubscriberId,
@@ -752,7 +752,7 @@ pub const Broker = struct {
         restored.wills.deinit();
         restored.will_publishers.deinit(self.allocator);
         restored.pending_qos2.deinit();
-        self.will_driver.notify(self.io);
+        self.deadline_driver.notify(self.io);
     }
 
     /// Accept exactly `connection_count` clients and serve them concurrently.
@@ -765,14 +765,14 @@ pub const Broker = struct {
     ) anyerror!void {
         if (connection_count > self.slots.len) return error.BrokerFull;
         var group: std.Io.Group = .init;
-        self.will_driver.start();
+        self.deadline_driver.start();
         // Unlike `Io.async`, `concurrent` guarantees the deadline driver is
         // assigned execution before we block in the client group. A merely
-        // lazy future could otherwise leave an immediate Will queued until all
-        // clients had already disconnected.
-        var will_future = try std.Io.concurrent(
+        // lazy future could otherwise leave an immediate Will queued or an
+        // expired Session resident until all clients had disconnected.
+        var deadline_future = try std.Io.concurrent(
             self.io,
-            Broker.runWillDriver,
+            Broker.runDeadlineDriver,
             .{self},
         );
         var clients_started: usize = 0;
@@ -789,8 +789,8 @@ pub const Broker = struct {
         };
         var stop_driver = true;
         defer if (stop_driver) {
-            self.will_driver.stop(self.io);
-            _ = will_future.cancel(self.io);
+            self.deadline_driver.stop(self.io);
+            _ = deadline_future.cancel(self.io);
         };
         const errors = try self.allocator.alloc(
             ?anyerror,
@@ -920,10 +920,10 @@ pub const Broker = struct {
         }
         group.await(self.io) catch {};
         clients_joined = true;
-        self.will_driver.stop(self.io);
-        const will_result = will_future.await(self.io);
+        self.deadline_driver.stop(self.io);
+        const deadline_result = deadline_future.await(self.io);
         stop_driver = false;
-        if (will_result) |err| return err;
+        if (deadline_result) |err| return err;
         for (errors) |maybe_error| {
             if (maybe_error) |err| return err;
         }
@@ -963,10 +963,7 @@ pub const Broker = struct {
         // `find` removes an expired Session without exposing its route ID.
         // Prune first so the router and Session Store always retire stable
         // identities atomically from the broker's point of view.
-        self.pruneExpiredSessionRoutesLocked(now) catch |err| {
-            slot.active = false;
-            return err;
-        };
+        self.pruneExpiredSessionRoutesLocked(now);
         var effective_connect = connect;
         if (connect.client_id.len == 0) {
             effective_connect.client_id = self.assignClientIdLocked(
@@ -1079,7 +1076,7 @@ pub const Broker = struct {
                 sessionSubscriberId(opened_session.route_id),
             );
         }
-        self.will_driver.notify(self.io);
+        self.deadline_driver.notify(self.io);
         return .{
             .subscriber_id = id,
             .replaced_owner_id = replaced_owner_id,
@@ -1259,7 +1256,7 @@ pub const Broker = struct {
         slot.session_persistent = false;
         slot.will_handle = null;
         self.state_mutex.unlock(self.io);
-        self.will_driver.notify(self.io);
+        self.deadline_driver.notify(self.io);
     }
 
     fn restoreSessionSubscriptions(
@@ -1402,7 +1399,7 @@ pub const Broker = struct {
         slot.active = false;
         slot.clearQueue();
         self.state_mutex.unlock(self.io);
-        self.will_driver.notify(self.io);
+        self.deadline_driver.notify(self.io);
         if (slot.connection) |*value| value.close();
         slot.connection = null;
         slot.will_handle = null;
@@ -1455,7 +1452,7 @@ pub const Broker = struct {
         }
         slot.graceful_disconnect = true;
         self.state_mutex.unlock(self.io);
-        self.will_driver.notify(self.io);
+        self.deadline_driver.notify(self.io);
     }
 
     fn handleSubscribe(
@@ -1975,7 +1972,7 @@ pub const Broker = struct {
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
     ) Error!RoutePlan {
-        try self.pruneExpiredSessionRoutesLocked(now);
+        self.pruneExpiredSessionRoutesLocked(now);
         const route_publisher_id = if (publisher_id) |id|
             self.canonicalPublisherId(id)
         else
@@ -2251,26 +2248,21 @@ pub const Broker = struct {
     fn pruneExpiredSessionRoutesLocked(
         self: *Broker,
         now: std.Io.Timestamp,
-    ) Error!void {
-        const due_count = self.sessions.dueExpiryCount(now);
-        if (due_count == 0) return;
-        const route_ids = try self.allocator.alloc(
-            u64,
-            due_count,
-        );
-        defer self.allocator.free(route_ids);
-        const removed = try self.sessions.pruneExpiredInto(
+    ) void {
+        _ = self.sessions.pruneExpiredWithContext(
             now,
-            route_ids,
+            self,
+            struct {
+                fn removed(broker: *Broker, route_id: u64) void {
+                    _ = broker.pending_qos2.removePublisher(
+                        sessionSubscriberId(route_id),
+                    );
+                    _ = broker.router.removeSubscriber(
+                        sessionSubscriberId(route_id),
+                    ) catch {};
+                }
+            }.removed,
         );
-        for (removed) |route_id| {
-            _ = self.pending_qos2.removePublisher(
-                sessionSubscriberId(route_id),
-            );
-            _ = self.router.removeSubscriber(
-                sessionSubscriberId(route_id),
-            ) catch {};
-        }
     }
 
     fn enqueueSessionDeliveryLocked(
@@ -2710,26 +2702,31 @@ pub const Broker = struct {
         }
     }
 
-    fn runWillDriver(
+    fn runDeadlineDriver(
         self: *Broker,
     ) ?anyerror {
-        while (!self.will_driver.stopped()) {
+        while (!self.deadline_driver.stopped()) {
             self.state_mutex.lockUncancelable(self.io);
+            const now = std.Io.Clock.awake.now(self.io);
+            self.pruneExpiredSessionRoutesLocked(now);
             const published_any = self.publishDueWillsLocked(
-                std.Io.Clock.awake.now(self.io),
+                now,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
                 return err;
             };
-            const deadline = self.wills.nextDeadline();
+            const deadline = earliestDeadline(
+                self.wills.nextDeadline(),
+                self.sessions.nextExpiryDeadline(),
+            );
             const generation =
-                self.will_driver.currentGeneration();
+                self.deadline_driver.currentGeneration();
             self.state_mutex.unlock(self.io);
 
             if (published_any) {
                 self.flushAllSlots() catch |err| return err;
             }
-            self.will_driver.wait(
+            self.deadline_driver.wait(
                 self.io,
                 generation,
                 deadline,
@@ -3149,6 +3146,15 @@ fn ungracefulTransportClose(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+fn earliestDeadline(
+    a: ?std.Io.Timestamp,
+    b: ?std.Io.Timestamp,
+) ?std.Io.Timestamp {
+    const left = a orelse return b;
+    const right = b orelse return left;
+    return if (left.nanoseconds <= right.nanoseconds) left else right;
 }
 
 fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {

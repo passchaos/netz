@@ -409,6 +409,10 @@ test "session due-expiry gate repairs stale reconnect deadline" {
     defer store.deinit();
     const first = try store.open("expiry-gate", false, 1, .zero);
     try store.disconnect(first.handle, null, .zero);
+    try std.testing.expectEqual(
+        second_ns,
+        store.nextExpiryDeadline().?.nanoseconds,
+    );
     const resumed = try store.open(
         "expiry-gate",
         false,
@@ -421,10 +425,15 @@ test "session due-expiry gate repairs stale reconnect deadline" {
             std.Io.Timestamp.fromNanoseconds(second_ns),
         ),
     );
+    try std.testing.expect(store.nextExpiryDeadline() == null);
     try store.disconnect(
         resumed.handle,
         null,
         std.Io.Timestamp.fromNanoseconds(second_ns),
+    );
+    try std.testing.expectEqual(
+        11 * second_ns,
+        store.nextExpiryDeadline().?.nanoseconds,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -448,6 +457,60 @@ test "session due-expiry gate repairs stale reconnect deadline" {
         &.{resumed.route_id},
         removed,
     );
+    try std.testing.expect(store.nextExpiryDeadline() == null);
+}
+
+test "session expiry callback reports routes and advances deadline" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const first = try store.open("expiry-callback-1", false, 1, .zero);
+    const second = try store.open("expiry-callback-2", false, 2, .zero);
+    try store.disconnect(first.handle, null, .zero);
+    try store.disconnect(second.handle, null, .zero);
+
+    const Collector = struct {
+        routes: [2]u64 = undefined,
+        len: usize = 0,
+
+        fn append(self: *@This(), route_id: u64) void {
+            self.routes[self.len] = route_id;
+            self.len += 1;
+        }
+    };
+    var collector: Collector = .{};
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        store.pruneExpiredWithContext(
+            std.Io.Timestamp.fromNanoseconds(second_ns),
+            &collector,
+            Collector.append,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u64,
+        &.{first.route_id},
+        collector.routes[0..collector.len],
+    );
+    try std.testing.expectEqual(
+        2 * second_ns,
+        store.nextExpiryDeadline().?.nanoseconds,
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        store.pruneExpiredWithContext(
+            std.Io.Timestamp.fromNanoseconds(2 * second_ns),
+            &collector,
+            Collector.append,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u64,
+        &.{ first.route_id, second.route_id },
+        collector.routes[0..collector.len],
+    );
+    try std.testing.expect(store.nextExpiryDeadline() == null);
 }
 
 test "session openConnect and disconnectPacket apply MQTT 5 properties" {

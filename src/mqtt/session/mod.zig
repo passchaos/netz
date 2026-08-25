@@ -1067,14 +1067,54 @@ pub const Store = struct {
         self: *Store,
         now: std.Io.Timestamp,
     ) usize {
+        return self.pruneExpiredWithContext(
+            now,
+            {},
+            struct {
+                fn removed(_: void, _: u64) void {}
+            }.removed,
+        );
+    }
+
+    /// Remove every due offline Session and report its stable route identity.
+    ///
+    /// The callback runs synchronously before the next Session is inspected. A
+    /// broker can therefore hold its state lock and retire the corresponding
+    /// router and QoS records in the same atomic lifecycle transition without
+    /// allocating an array proportional to the number of expired Sessions.
+    pub fn pruneExpiredWithContext(
+        self: *Store,
+        now: std.Io.Timestamp,
+        context: anytype,
+        comptime onExpired: anytype,
+    ) usize {
+        const due = self.next_expiry_ns orelse return 0;
+        if (now.nanoseconds < due) return 0;
+
         var removed: usize = 0;
+        var next_expiry_ns: ?i96 = null;
         var index: usize = 0;
         while (index < self.sessions.items.len) : (index += 1) {
             const session = self.sessions.items[index] orelse continue;
-            if (!self.isExpired(session, now)) continue;
-            self.removeAt(index);
-            removed += 1;
+            if (self.isExpired(session, now)) {
+                const route_id = session.route_id;
+                self.removeAt(index);
+                onExpired(context, route_id);
+                removed += 1;
+            } else if (!session.connected) {
+                if (session.expires_at_ns) |deadline| {
+                    if (next_expiry_ns == null or
+                        deadline < next_expiry_ns.?)
+                    {
+                        next_expiry_ns = deadline;
+                    }
+                }
+            }
         }
+        // Reconnect and explicit removal can leave the cached value earlier
+        // than every live deadline. A due pass is the repair point, ensuring
+        // the lifecycle driver never spins on a stale timestamp.
+        self.next_expiry_ns = next_expiry_ns;
         return removed;
     }
 
@@ -1151,6 +1191,16 @@ pub const Store = struct {
         // Repair it when no removal sweep will follow this call.
         if (due_count == 0) self.next_expiry_ns = next_expiry_ns;
         return due_count;
+    }
+
+    /// Conservative awake-clock deadline for the next offline Session.
+    ///
+    /// The value can be stale and early after a reconnect or explicit discard,
+    /// but is never later than an actual deadline. Callers should run one due
+    /// sweep when it fires; the sweep repairs the cached lower bound.
+    pub fn nextExpiryDeadline(self: Store) ?std.Io.Timestamp {
+        const deadline = self.next_expiry_ns orelse return null;
+        return .{ .nanoseconds = deadline };
     }
 
     pub fn setSubscription(

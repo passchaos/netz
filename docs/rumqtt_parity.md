@@ -21,7 +21,7 @@ and equal-wire broker results are kept separate.
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
-| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, pre-registration CONNECT authorization, pre-mutation PUBLISH/SUBSCRIBE/UNSUBSCRIBE access control, per-recipient delivery authorization before live/retained/offline queue mutation plus reconnect-time rechecks, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid`, password files, distinct read/write/subscribe/unsubscribe ACLs and `queue_qos0_messages` |
+| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, including an active deadline task that atomically retires idle expired Sessions from routing and inbound QoS 2 state without waiting for later client traffic; pre-registration CONNECT authorization, pre-mutation PUBLISH/SUBSCRIBE/UNSUBSCRIBE access control, per-recipient delivery authorization before live/retained/offline queue mutation plus reconnect-time rechecks, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid`, password files, distinct read/write/subscribe/unsubscribe ACLs and `queue_qos0_messages` |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation, retained Will, and publication-time write authorization | Both production brokers integrate Will publication; Mosquitto rechecks its write ACL when the Will becomes due |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | CONNECT and PING liveness | Optional absolute CONNECT/CONNACK packet deadline covers TCP, native TLS, WS and WSS; partial MQTT bytes, WebSocket message boundaries and control frames cannot renew it. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on the same transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
@@ -191,7 +191,7 @@ property, the result also returns to the fixed path. A real TCP
 fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
-Mosquitto-derived 129-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
+Mosquitto-derived 131-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
 green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
@@ -208,7 +208,7 @@ including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
-masked client and unmasked server messages assembled from two parts. The full 1,600-test suite, 129-scenario
+masked client and unmasked server messages assembled from two parts. The full 1,633-test suite, 131-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
@@ -1178,6 +1178,13 @@ The Session Expiry case ports the timing-observable core of Mosquitto's
 present beyond the one-second CONNECT value, the Session is absent after the
 new deadline, and a zero DISCONNECT override removes the replacement
 immediately. Exact CONNACK bytes distinguish every Session Present transition.
+An additional idle-expiry case constrains the broker to one pending inbound
+QoS 2 transaction, leaves that transaction owned by a disconnected one-second
+Session, and keeps an unrelated connection online without CONNECT/PUBLISH
+traffic during expiry. That existing connection can then acquire and complete
+the sole QoS 2 slot, proving the shared deadline task removed the Session, its
+router entries, and pending transaction proactively rather than relying on a
+later registration or routing operation to prune it.
 The Clean Start/offline QoS 1 case ports Mosquitto's
 `05-clean-session-qos1.py`: a persistent subscriber disconnects after
 subscribing, receives the exact queued QoS 1 PUBLISH with Session Present on
@@ -1291,7 +1298,7 @@ imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets. Four additional wire cases verify absent/zero/one Request Response
 Information plus both the default-enabled diagnostic path and Request Problem
 Information suppression while preserving an exact negative PUBACK reason; all
-130 scenarios pass. This is deliberately described as a selected
+131 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1318,5 +1325,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 129 passing packet-vector scenarios do not cover
+   persistence semantics. The 131 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

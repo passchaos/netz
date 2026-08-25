@@ -5,6 +5,7 @@ const Config = struct {
     bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(1883) },
     connections: usize = 16,
     max_queued_deliveries: usize = 1024,
+    max_pending_incoming_qos2: usize = 4096,
     max_session_queued_payload_bytes: usize = 0,
     max_session_inflight_payload_bytes: usize = 0,
     max_outgoing_inflight: u16 = 64,
@@ -197,6 +198,7 @@ pub fn main(init: std.process.Init) !void {
             .limits = .{
                 .max_connections = config.connections,
                 .max_queued_deliveries_per_connection = config.max_queued_deliveries,
+                .max_pending_incoming_qos2 = config.max_pending_incoming_qos2,
                 .max_payload_size = config.max_payload_size,
                 .runtime = .{ .max_packet_size = config.max_packet_size },
             },
@@ -347,6 +349,14 @@ fn parseArgs(
             if (config.max_outgoing_inflight == 0) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--max-pending-incoming-qos2=",
+        )) {
+            config.max_pending_incoming_qos2 = try parsePositiveUsize(
+                arg["--max-pending-incoming-qos2=".len..],
+            );
         } else if (std.mem.startsWith(
             u8,
             arg,

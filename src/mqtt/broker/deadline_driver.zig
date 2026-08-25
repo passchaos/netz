@@ -1,8 +1,9 @@
-//! Concurrent deadline driver for the broker Will scheduler.
+//! Concurrent deadline driver for broker-owned lifecycle state.
 //!
-//! A generation futex makes deadline changes and broker shutdown wake the
-//! single timer task immediately. The scheduler itself remains protected by
-//! the broker state mutex; this driver only owns wait/wake coordination.
+//! A generation futex makes Will or Session deadline changes and broker
+//! shutdown wake the single timer task immediately. The state machines remain
+//! protected by the broker state mutex; this driver only owns wait/wake
+//! coordination.
 
 const std = @import("std");
 

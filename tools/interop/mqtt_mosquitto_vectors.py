@@ -1029,6 +1029,78 @@ def disconnect_session_expiry(
             removed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def idle_session_expiry_releases_qos2_quota(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # A later CONNECT or PUBLISH can lazily discover an expired Session, so
+    # Session Present alone does not prove that the broker owns an active
+    # expiry clock. Keep a second connection online and occupy the broker's
+    # sole inbound QoS 2 transaction with a one-second durable Session. After
+    # an otherwise idle interval, the live peer must acquire that quota.
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=("--max-pending-incoming-qos2=1",),
+    ) as broker:
+        with broker.connect() as keeper, broker.connect() as expiring:
+            connect_v5(keeper, mqtt_packets, "expiry-idle-keeper")
+            expiring.sendall(
+                mqtt_packets.gen_connect(
+                    "expiry-idle-owner",
+                    clean_session=False,
+                    proto_ver=5,
+                    session_expiry=1,
+                )
+            )
+            expect_packet(
+                expiring,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "idle Session Expiry CONNACK",
+            )
+            expiring.sendall(
+                mqtt_packets.gen_publish(
+                    "expiry/idle/held",
+                    qos=2,
+                    mid=1,
+                    payload="held",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                expiring,
+                mqtt_packets.gen_pubrec(1, proto_ver=5),
+                "idle Session Expiry held PUBREC",
+            )
+            expiring.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            if expiring.recv(1) != b"":
+                raise AssertionError(
+                    "broker sent data after idle Session DISCONNECT"
+                )
+
+            time.sleep(2)
+            keeper.sendall(
+                mqtt_packets.gen_publish(
+                    "expiry/idle/reused",
+                    qos=2,
+                    mid=2,
+                    payload="reused",
+                    proto_ver=5,
+                )
+            )
+            expect_packet(
+                keeper,
+                mqtt_packets.gen_pubrec(2, proto_ver=5),
+                "QoS2 quota after idle Session Expiry",
+            )
+            keeper.sendall(mqtt_packets.gen_pubrel(2, proto_ver=5))
+            expect_packet(
+                keeper,
+                mqtt_packets.gen_pubcomp(2, proto_ver=5),
+                "PUBCOMP after idle Session Expiry",
+            )
+            keeper.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def connect_persistent_v5(
     sock: socket.socket, mqtt_packets, client_id: str, session_present: bool
 ) -> None:
@@ -5494,8 +5566,11 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
+    idle_session_expiry_releases_qos2_quota(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 130 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 131 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
