@@ -2,6 +2,106 @@ const std = @import("std");
 const quic = @import("../../mod.zig");
 const one_rtt = @import("../../one_rtt.zig");
 
+test "QUIC HANDSHAKE_DONE augmentation uses stack storage for common batches" {
+    const frames = [_]quic.Frame{
+        .{ .ping = {} },
+        .{ .padding = .{ .len = 3 } },
+    };
+    var stack: [one_rtt.testing.handshake_done_test_stack_capacity]quic.Frame = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const combined = try one_rtt.testing.appendHandshakeDoneForTest(
+        failing.allocator(),
+        &stack,
+        &frames,
+    );
+    try std.testing.expectEqual(@as(usize, 3), combined.len);
+    try std.testing.expect(combined[0] == .ping);
+    try std.testing.expect(combined[1] == .padding);
+    try std.testing.expect(combined[2] == .handshake_done);
+    try std.testing.expectEqual(stack[0..].ptr, combined.ptr);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "QUIC HANDSHAKE_DONE augmentation falls back transactionally" {
+    const capacity = one_rtt.testing.handshake_done_test_stack_capacity;
+    const frames = [_]quic.Frame{.{ .ping = {} }} ** capacity;
+    var stack: [capacity]quic.Frame = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        one_rtt.testing.appendHandshakeDoneForTest(
+            failing.allocator(),
+            &stack,
+            &frames,
+        ),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+
+    const combined = try one_rtt.testing.appendHandshakeDoneForTest(
+        std.testing.allocator,
+        &stack,
+        &frames,
+    );
+    defer std.testing.allocator.free(combined);
+    try std.testing.expect(combined.ptr != stack[0..].ptr);
+    try std.testing.expectEqual(capacity + 1, combined.len);
+    try std.testing.expect(combined[capacity] == .handshake_done);
+}
+
+test "QUIC first server 1-RTT send does not allocate frame augmentation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    var local_endpoint = try quic.runtime.Endpoint.bind(
+        counting.allocator(),
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer local_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+        .tls_handshake_complete = true,
+        .max_datagram_size = 4096,
+    });
+    defer sender.deinit();
+
+    const allocations_before_send = counting.allocations;
+    try sender.sendAt(&.{.{ .padding = .{ .len = 32 } }}, 100);
+    // Six allocations establish durable recovery payload/index ownership. The
+    // old temporary `frames + HANDSHAKE_DONE` array made this seven.
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        counting.allocations - allocations_before_send,
+    );
+    try std.testing.expect(sender.handshakeDoneAwaitingAck());
+}
+
 test "QUIC integrated handshake coalesces HANDSHAKE_DONE after application frame" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -592,6 +592,26 @@ pub const TimerDeadline = struct {
 
 pub const anti_amplification_multiplier: usize = 3;
 const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_len;
+// HTTP/3's default packet builder contributes at most eight frames. Keep the
+// automatic HANDSHAKE_DONE augmentation for that common first-flight shape on
+// the stack while retaining an exact fallback for lower-level callers.
+const handshake_done_frame_stack_capacity: usize = 16;
+
+fn appendPendingHandshakeDone(
+    allocator: std.mem.Allocator,
+    stack: *[handshake_done_frame_stack_capacity]quic.Frame,
+    frames: []const quic.Frame,
+) Error![]quic.Frame {
+    const combined_len = std.math.add(usize, frames.len, 1) catch
+        return error.InvalidFrameLength;
+    const combined = if (combined_len <= stack.len)
+        stack[0..combined_len]
+    else
+        try allocator.alloc(quic.Frame, combined_len);
+    @memcpy(combined[0..frames.len], frames);
+    combined[frames.len] = .{ .handshake_done = {} };
+    return combined;
+}
 const timer_blocked_receive_backoff_ns: u64 = std.time.ns_per_ms;
 
 /// Established 1-RTT receive APIs no longer own Initial or Handshake keys.
@@ -1431,15 +1451,18 @@ pub const Connection = struct {
             self.handshake_status.needsHandshakeDone() and
             !containsHandshakeDone(frames))
         {
-            const combined = try self.endpoint.allocator.alloc(
-                quic.Frame,
-                frames.len + 1,
+            var stack: [handshake_done_frame_stack_capacity]quic.Frame =
+                undefined;
+            const combined = try appendPendingHandshakeDone(
+                self.endpoint.allocator,
+                &stack,
+                frames,
             );
-            defer self.endpoint.allocator.free(combined);
-            @memcpy(combined[0..frames.len], frames);
+            defer if (combined.ptr != stack[0..].ptr) {
+                self.endpoint.allocator.free(combined);
+            };
             // Keep caller frames first so scheduling HANDSHAKE_DONE cannot
             // reorder the application's first 1-RTT frame.
-            combined[frames.len] = .{ .handshake_done = {} };
             return self.sendWithEcnAtRaw(
                 combined,
                 ecn,
@@ -2171,13 +2194,16 @@ pub const Connection = struct {
             self.handshake_status.needsHandshakeDone() and
             !containsHandshakeDone(frames))
         {
-            const combined = try self.endpoint.allocator.alloc(
-                quic.Frame,
-                frames.len + 1,
+            var stack: [handshake_done_frame_stack_capacity]quic.Frame =
+                undefined;
+            const combined = try appendPendingHandshakeDone(
+                self.endpoint.allocator,
+                &stack,
+                frames,
             );
-            defer self.endpoint.allocator.free(combined);
-            @memcpy(combined[0..frames.len], frames);
-            combined[frames.len] = .{ .handshake_done = {} };
+            defer if (combined.ptr != stack[0..].ptr) {
+                self.endpoint.allocator.free(combined);
+            };
             return self.sendTrackedFramesEcnAtUncheckedRaw(
                 combined,
                 ecn,
@@ -7460,6 +7486,21 @@ fn parsePacketFramesForType(
 /// to normal transport callers while allowing the large conformance suite to
 /// live outside the production module.
 pub const testing = struct {
+    pub const handshake_done_test_stack_capacity =
+        handshake_done_frame_stack_capacity;
+
+    pub fn appendHandshakeDoneForTest(
+        allocator: std.mem.Allocator,
+        stack: *[handshake_done_test_stack_capacity]quic.Frame,
+        frames: []const quic.Frame,
+    ) Error![]quic.Frame {
+        return appendPendingHandshakeDone(
+            allocator,
+            stack,
+            frames,
+        );
+    }
+
     pub fn applyReceivedFrames(
         connection: *Connection,
         packet_number: u64,

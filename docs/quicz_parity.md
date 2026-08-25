@@ -140,6 +140,16 @@ Retry succeeds against both quic-go v1/v2 and s2n-quic. A CPU-0-aligned
 100-connection handshake regression sample without Retry measured 472.770 us
 p50 and 2,048.1 connections/s; it checks the shared handshake path but is not
 a Retry-specific performance claim.
+The server's first 1-RTT application send also appends HANDSHAKE_DONE through a
+16-frame stack-first view instead of allocating a temporary `Frame` array. The
+caller frames remain first, preserving HTTP/3 application ordering; oversized
+low-level batches retain an exact heap fallback. Direct fail-first tests cover
+the common stack case and transactional fallback, while a real first-send test
+shows six required recovery/index allocations rather than adding a seventh
+temporary frame-array allocation. Five CPU-0, 100-connection, quicz-aligned
+handshake samples measured 2,035.4-2,072.3 connections/s (2,060.7 mean, 0.65%
+relative standard deviation) with p50 466.117-472.825 us. This is a regression
+sample, not a new cross-stack ratio.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
 fills unpredictable bytes, caps responses at 1200 bytes, requires a valid
