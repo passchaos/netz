@@ -169,7 +169,7 @@ run_tquic_client_graceful_case() {
   client_pid=
   wait "$server_pid"
   server_pid=
-  grep -Fq "netz HTTP/3 server gracefully drained tquic: retry=$retry initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true" \
+  grep -Fq "netz HTTP/3 server gracefully drained tquic: retry=$retry origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true" \
     "$work/netz-server-graceful-$retry.log"
   # tquic creates the dump file before stream_new(), so rejection leaves an
   # empty placeholder rather than no file at all.
@@ -208,7 +208,7 @@ run_tquic_client_case() {
   server_pid=
   grep -Fq 'requests: sent 2, finish 2, success 2' \
     "$work/tquic-client-$retry.log"
-  grep -Fq "netz HTTP/3 server interoperated with tquic: retry=$retry requests=2 connection_reused=true bodies=14,14" \
+  grep -Fq "netz HTTP/3 server interoperated with tquic: retry=$retry origin=true requests=2 connection_reused=true bodies=14,14" \
     "$work/netz-server-$retry.log"
   test "$(cat "$work/downloads/one.txt")" = 'netz-tquic-one'
   test "$(cat "$work/downloads/two.txt")" = 'netz-tquic-two'

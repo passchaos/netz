@@ -26,6 +26,7 @@ pub const Error = wire.Error || error{
     InvalidStatus,
     TooManyInformationalResponses,
     InvalidHeader,
+    InvalidOrigin,
     InvalidPriorityUpdate,
     StreamCreationError,
     RequestCancelled,
@@ -43,6 +44,11 @@ pub const Error = wire.Error || error{
 
 pub const max_settings_payload_size: usize = 256;
 pub const default_max_informational_responses: usize = 16;
+/// RFC 8336 leaves the Origin Set unbounded. Apply a deterministic connection
+/// state cap so an authenticated server cannot grow client memory indefinitely.
+pub const max_peer_origins: usize = 256;
+/// Bound partial control-frame retention, including fragmented ORIGIN frames.
+pub const max_control_stream_buffer_size: usize = 64 * 1024;
 
 pub const ApplicationErrorCode = struct {
     pub const no_error: u64 = 0x100;
@@ -137,6 +143,43 @@ pub fn requestOriginKey(
     return try originKeyFromOrigin(allocator, parsed);
 }
 
+/// Parse and own one RFC 6454 ASCII serialization carried by RFC 9412.
+///
+/// ORIGIN entries must be origins, not general URIs: userinfo, path, query and
+/// fragment components are forbidden, and an explicit port is normalized to
+/// the same canonical key as the scheme's default port.
+pub fn requestOriginKeyFromSerialized(
+    allocator: std.mem.Allocator,
+    serialized: []const u8,
+) Error!OriginKey {
+    return originKeyFromOrigin(
+        allocator,
+        try originFromSerialized(serialized),
+    );
+}
+
+/// Parse one RFC 6454 ASCII serialization without taking ownership.
+pub fn originFromSerialized(serialized: []const u8) Error!Origin {
+    const uri = std.Uri.parse(serialized) catch return error.InvalidOrigin;
+    if (uri.user != null or uri.password != null or
+        !uri.path.isEmpty() or uri.query != null or uri.fragment != null)
+    {
+        return error.InvalidOrigin;
+    }
+    const host_component = uri.host orelse return error.InvalidOrigin;
+    const host = switch (host_component) {
+        .raw, .percent_encoded => |value| value,
+    };
+    if (host.len == 0) return error.InvalidOrigin;
+    const default_port = defaultPortForScheme(uri.scheme) orelse
+        return error.InvalidOrigin;
+    return .{
+        .scheme = uri.scheme,
+        .host = host,
+        .port = uri.port orelse default_port,
+    };
+}
+
 /// Allocate a stable lowercase key from an already parsed origin.
 ///
 /// This avoids re-rendering `scheme://authority` just to call
@@ -158,10 +201,47 @@ pub fn originKeyFromOrigin(
     };
 }
 
+fn cloneOriginKey(
+    allocator: std.mem.Allocator,
+    origin: OriginKey,
+) std.mem.Allocator.Error!OriginKey {
+    const scheme = try allocator.dupe(u8, origin.scheme);
+    errdefer allocator.free(scheme);
+    const host = try allocator.dupe(u8, origin.host);
+    return .{
+        .allocator = allocator,
+        .scheme = scheme,
+        .host = host,
+        .port = origin.port,
+    };
+}
+
+fn cloneOrigin(
+    allocator: std.mem.Allocator,
+    origin: Origin,
+) std.mem.Allocator.Error!OriginKey {
+    const scheme = try allocator.dupe(u8, origin.scheme);
+    errdefer allocator.free(scheme);
+    const host = try allocator.dupe(u8, origin.host);
+    return .{
+        .allocator = allocator,
+        .scheme = scheme,
+        .host = host,
+        .port = origin.port,
+    };
+}
+
 pub fn sameOrigin(a: Origin, b: Origin) bool {
     return std.ascii.eqlIgnoreCase(a.scheme, b.scheme) and
         std.ascii.eqlIgnoreCase(a.host, b.host) and
         a.port == b.port;
+}
+
+fn originListContains(origins: []const OriginKey, origin: Origin) bool {
+    for (origins) |candidate| {
+        if (sameOrigin(candidate.origin(), origin)) return true;
+    }
+    return false;
 }
 
 pub const ReuseDecision = enum {
@@ -401,10 +481,92 @@ pub const FrameType = struct {
     pub const settings: u64 = 0x04;
     pub const push_promise: u64 = 0x05;
     pub const goaway: u64 = 0x07;
+    /// RFC 9412 connection-authority advertisement.
+    pub const origin: u64 = 0x0c;
     pub const max_push_id: u64 = 0x0d;
     pub const priority_update_request: u64 = 0x0f0700;
     pub const priority_update_push: u64 = 0x0f0701;
     pub const webtransport_stream: u64 = 0x41;
+};
+
+/// RFC 9412 ORIGIN payload. Entry slices borrow `payload`; only the descriptor
+/// array is owned. Individual malformed origins are deliberately retained here
+/// because RFC 8336 requires clients to ignore those entries while processing
+/// the remaining frame.
+pub const OriginPayload = struct {
+    origins: []const []const u8,
+
+    pub fn parse(
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+    ) Error!OriginPayload {
+        if (payload.len == 0) {
+            return .{ .origins = @constCast(&[_][]const u8{}) };
+        }
+        var cursor = wire.Cursor.init(payload);
+        var count: usize = 0;
+        while (!cursor.eof()) {
+            const len = try cursor.readInt(u16, .big);
+            _ = try cursor.readSlice(len);
+            count += 1;
+        }
+        const origins = try allocator.alloc([]const u8, count);
+        errdefer allocator.free(origins);
+        cursor = wire.Cursor.init(payload);
+        for (origins) |*origin| {
+            const len = try cursor.readInt(u16, .big);
+            origin.* = try cursor.readSlice(len);
+        }
+        return .{ .origins = origins };
+    }
+
+    pub fn deinit(
+        self: *OriginPayload,
+        allocator: std.mem.Allocator,
+    ) void {
+        allocator.free(self.origins);
+        self.* = undefined;
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        origins: []const []const u8,
+    ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
+        var payload_len: usize = 0;
+        if (origins.len > max_peer_origins) return error.ExcessiveLoad;
+        for (origins) |origin| {
+            if (origin.len == 0 or origin.len > std.math.maxInt(u16)) {
+                return error.InvalidOrigin;
+            }
+            _ = try originFromSerialized(origin);
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                2 + origin.len,
+            ) catch return error.IntegerOverflow;
+        }
+        const total_len = std.math.add(
+            usize,
+            try frameHeaderWireLen(FrameType.origin, payload_len),
+            payload_len,
+        ) catch return error.IntegerOverflow;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        try writeFrameHeader(list, allocator, FrameType.origin, payload_len);
+        for (origins) |origin| {
+            const start = list.items.len;
+            list.items.len += 2 + origin.len;
+            std.mem.writeInt(
+                u16,
+                list.items[start..][0..2],
+                @intCast(origin.len),
+                .big,
+            );
+            @memcpy(list.items[start + 2 ..][0..origin.len], origin);
+        }
+    }
 };
 
 pub const StreamType = enum(u64) {
@@ -767,8 +929,22 @@ pub const ControlState = struct {
     settings: SettingsState = .{},
     peer_goaway_id: ?u64 = null,
     local_goaway_id: ?u64 = null,
+    /// Server-advertised RFC 9412 Origin Set additions, in first-seen order.
+    /// The first successfully processed ORIGIN frame initializes the set even
+    /// when it is empty; the client must then stop using implicit coalescing.
+    peer_origins: std.ArrayList(OriginKey) = .empty,
+    /// Origins removed after a 421 response, including the implicit initial
+    /// origin which is not otherwise stored in `peer_origins`.
+    peer_origin_exclusions: std.ArrayList(OriginKey) = .empty,
+    peer_origin_set_initialized: bool = false,
+    peer_origin_generation: u64 = 0,
+    local_origin_set_sent: bool = false,
     peer_max_push_id: ?u64 = null,
     local_max_push_id: ?u64 = null,
+    /// Counts successfully applied client-only frames even when a duplicate
+    /// leaves their value state unchanged. Runtime role checks compare this
+    /// generation after buffered parsing, including split control frames.
+    peer_client_only_frame_generation: u64 = 0,
     /// Most recent peer CANCEL_PUSH identifier, retained for compatibility.
     peer_cancelled_push_id: ?u64 = null,
     /// Every distinct peer-cancelled push ID in receive order.
@@ -781,6 +957,8 @@ pub const ControlState = struct {
     /// control frame would re-apply SETTINGS and incorrectly surface as
     /// H3_SETTINGS_ERROR.
     peer_control_stream_consumed_offset: usize = 0,
+    /// Incomplete control-frame bytes retained across QUIC STREAM boundaries.
+    peer_control_stream_buffer: std.ArrayList(u8) = .empty,
     latest_priority_update: ?PriorityUpdatePayload = null,
     latest_priority_update_type: ?u64 = null,
     priority_updates: std.ArrayList(StoredPriorityUpdate) = .empty,
@@ -793,6 +971,11 @@ pub const ControlState = struct {
     peer_cancelled_push_index: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {
+        for (self.peer_origins.items) |*origin| origin.deinit();
+        self.peer_origins.deinit(allocator);
+        for (self.peer_origin_exclusions.items) |*origin| origin.deinit();
+        self.peer_origin_exclusions.deinit(allocator);
+        self.peer_control_stream_buffer.deinit(allocator);
         for (self.priority_updates.items) |*update| {
             update.deinit(allocator);
         }
@@ -809,11 +992,34 @@ pub const ControlState = struct {
     ) std.mem.Allocator.Error!ControlState {
         var copy = self;
         copy.latest_priority_update = null;
+        copy.peer_origins = .empty;
+        copy.peer_origin_exclusions = .empty;
+        copy.peer_control_stream_buffer = .empty;
         copy.priority_updates = .empty;
         copy.priority_update_index = .empty;
         copy.peer_cancelled_push_ids = .empty;
         copy.peer_cancelled_push_index = .empty;
         errdefer copy.deinit(allocator);
+        try copy.peer_origins.ensureTotalCapacity(
+            allocator,
+            self.peer_origins.items.len,
+        );
+        for (self.peer_origins.items) |origin| {
+            const owned = try cloneOriginKey(allocator, origin);
+            copy.peer_origins.appendAssumeCapacity(owned);
+        }
+        try copy.peer_origin_exclusions.ensureTotalCapacity(
+            allocator,
+            self.peer_origin_exclusions.items.len,
+        );
+        for (self.peer_origin_exclusions.items) |origin| {
+            const owned = try cloneOriginKey(allocator, origin);
+            copy.peer_origin_exclusions.appendAssumeCapacity(owned);
+        }
+        try copy.peer_control_stream_buffer.appendSlice(
+            allocator,
+            self.peer_control_stream_buffer.items,
+        );
         try copy.peer_cancelled_push_ids.ensureUnusedCapacity(
             allocator,
             self.peer_cancelled_push_ids.items.len,
@@ -929,6 +1135,24 @@ pub const ControlState = struct {
         return bytes;
     }
 
+    /// Append one RFC 9412 ORIGIN frame and commit the local advertisement
+    /// marker only after all validation and allocation succeeds. Servers may
+    /// call this repeatedly to add origins; an empty first frame deliberately
+    /// restricts clients to the connection's initial origin.
+    pub fn writeOrigins(
+        self: *ControlState,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        origins: []const []const u8,
+    ) Error!void {
+        try OriginPayload.write(list, allocator, origins);
+        self.local_origin_set_sent = true;
+    }
+
+    pub fn hasSentOriginSet(self: ControlState) bool {
+        return self.local_origin_set_sent;
+    }
+
     pub fn applyControlStreamBytes(self: *ControlState, allocator: std.mem.Allocator, bytes: []const u8) Error!void {
         var cursor = wire.Cursor.init(bytes);
         const stream_type: StreamType = @enumFromInt(try quic.varint.decode(&cursor));
@@ -944,6 +1168,63 @@ pub const ControlState = struct {
             cursor.pos += frame.consumed;
             try self.applyFrame(allocator, frame);
         }
+    }
+
+    /// Append contiguous control-stream bytes and apply every complete frame.
+    /// A split type, length, or payload remains buffered for the next STREAM
+    /// fragment. The fixed cap prevents unknown or oversized extension frames
+    /// from turning a critical stream into unbounded connection memory.
+    pub fn appendControlPayload(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+    ) Error!void {
+        if (payload.len > max_control_stream_buffer_size -|
+            self.peer_control_stream_buffer.items.len)
+        {
+            return error.ExcessiveLoad;
+        }
+        // Reserve a rollback snapshot before append/application. A later frame
+        // can fail validation or allocation after earlier frames in this chunk
+        // mutated SETTINGS, priorities, or the Origin Set.
+        var previous = try self.clone(allocator);
+        var previous_owned = true;
+        defer if (previous_owned) previous.deinit(allocator);
+        errdefer {
+            self.deinit(allocator);
+            self.* = previous;
+            previous_owned = false;
+        }
+        try self.peer_control_stream_buffer.appendSlice(allocator, payload);
+        var consumed: usize = 0;
+        while (consumed < self.peer_control_stream_buffer.items.len) {
+            const remaining = self.peer_control_stream_buffer.items[consumed..];
+            const header = Frame.parseHeader(remaining) catch |err| switch (err) {
+                error.BufferTooShort => break,
+                else => return err,
+            };
+            if (header.payload_length > max_control_stream_buffer_size) {
+                return error.ExcessiveLoad;
+            }
+            const total = try header.totalLength();
+            if (remaining.len < total) break;
+            try self.applyFrame(allocator, .{
+                .frame_type = header.frame_type,
+                .payload = remaining[header.header_length..total],
+                .consumed = total,
+            });
+            consumed += total;
+        }
+        if (consumed == 0) return;
+        const retained = self.peer_control_stream_buffer.items.len - consumed;
+        if (retained != 0) {
+            std.mem.copyForwards(
+                u8,
+                self.peer_control_stream_buffer.items[0..retained],
+                self.peer_control_stream_buffer.items[consumed..],
+            );
+        }
+        self.peer_control_stream_buffer.items.len = retained;
     }
 
     pub fn registerControlStream(self: *ControlState, stream_id: u64) Error!void {
@@ -990,12 +1271,26 @@ pub const ControlState = struct {
                 if (self.peer_max_push_id) |previous| {
                     if (push_id < previous) return error.MaxPushIdReduced;
                 }
+                self.peer_client_only_frame_generation = std.math.add(
+                    u64,
+                    self.peer_client_only_frame_generation,
+                    1,
+                ) catch return error.InvalidFrame;
                 self.peer_max_push_id = push_id;
             },
             FrameType.cancel_push => {
                 const push_id = try parseSingleVarintPayload(frame.payload);
                 try self.storePushCancellation(allocator, push_id);
+                self.peer_client_only_frame_generation = std.math.add(
+                    u64,
+                    self.peer_client_only_frame_generation,
+                    1,
+                ) catch return error.InvalidFrame;
             },
+            FrameType.origin => try self.applyOriginFrame(
+                allocator,
+                frame.payload,
+            ),
             FrameType.priority_update_request => {
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
                 try validateRequestStreamId(priority_update.prioritized_element_id);
@@ -1020,6 +1315,131 @@ pub const ControlState = struct {
     pub fn acceptsRequestStream(self: ControlState, stream_id: u64) bool {
         const goaway_id = self.peer_goaway_id orelse return true;
         return stream_id < goaway_id;
+    }
+
+    pub fn peerOrigins(self: ControlState) []const OriginKey {
+        return self.peer_origins.items;
+    }
+
+    pub fn peerOriginSetInitialized(self: ControlState) bool {
+        return self.peer_origin_set_initialized;
+    }
+
+    pub fn peerOriginKnown(self: ControlState, origin: Origin) bool {
+        return originListContains(self.peer_origins.items, origin);
+    }
+
+    /// Return null until the first ORIGIN frame initializes authority policy.
+    /// Once initialized, the RFC 8336 Origin Set always includes the initial
+    /// connection origin plus every valid advertised addition. Certificate
+    /// verification remains a separate mandatory caller check.
+    pub fn peerOriginSetAllows(
+        self: ControlState,
+        initial_origin: Origin,
+        requested_origin: Origin,
+    ) ?bool {
+        if (!self.peer_origin_set_initialized) return null;
+        if (originListContains(
+            self.peer_origin_exclusions.items,
+            requested_origin,
+        )) return false;
+        return sameOrigin(initial_origin, requested_origin) or
+            self.peerOriginKnown(requested_origin);
+    }
+
+    fn applyOriginFrame(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+    ) Error!void {
+        const next_generation = std.math.add(
+            u64,
+            self.peer_origin_generation,
+            1,
+        ) catch return error.InvalidFrame;
+        var parsed = try OriginPayload.parse(allocator, payload);
+        defer parsed.deinit(allocator);
+        var additions: std.ArrayList(OriginKey) = .empty;
+        defer {
+            for (additions.items) |*origin| origin.deinit();
+            additions.deinit(allocator);
+        }
+        for (parsed.origins) |origin| {
+            var key = requestOriginKeyFromSerialized(
+                allocator,
+                origin,
+            ) catch |err| switch (err) {
+                error.InvalidOrigin => continue,
+                else => return err,
+            };
+            var duplicate = self.peerOriginKnown(key.origin());
+            if (!duplicate) for (additions.items) |candidate| {
+                if (sameOrigin(candidate.origin(), key.origin())) {
+                    duplicate = true;
+                    break;
+                }
+            };
+            if (duplicate) {
+                key.deinit();
+                continue;
+            }
+            if (self.peer_origins.items.len + additions.items.len >=
+                max_peer_origins)
+            {
+                key.deinit();
+                return error.ExcessiveLoad;
+            }
+            additions.append(allocator, key) catch |err| {
+                key.deinit();
+                return err;
+            };
+        }
+        try self.peer_origins.ensureUnusedCapacity(
+            allocator,
+            additions.items.len,
+        );
+        self.peer_origins.appendSliceAssumeCapacity(additions.items);
+        additions.items.len = 0;
+        // A later ORIGIN frame can re-add an origin removed by a 421 response.
+        var excluded_index: usize = 0;
+        while (excluded_index < self.peer_origin_exclusions.items.len) {
+            if (!self.peerOriginKnown(
+                self.peer_origin_exclusions.items[excluded_index].origin(),
+            )) {
+                excluded_index += 1;
+                continue;
+            }
+            var removed = self.peer_origin_exclusions.orderedRemove(
+                excluded_index,
+            );
+            removed.deinit();
+        }
+        self.peer_origin_set_initialized = true;
+        self.peer_origin_generation = next_generation;
+    }
+
+    /// RFC 8336 removes an origin after a 421 response. The initial origin is
+    /// supplied by the connection owner because this codec state does not own
+    /// SNI or peer-address metadata. Removal is idempotent and preserves order.
+    pub fn removePeerOrigin(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        origin: Origin,
+    ) Error!void {
+        if (!originListContains(self.peer_origin_exclusions.items, origin)) {
+            if (self.peer_origin_exclusions.items.len >= max_peer_origins) {
+                return error.ExcessiveLoad;
+            }
+            var owned = try cloneOrigin(allocator, origin);
+            errdefer owned.deinit();
+            try self.peer_origin_exclusions.append(allocator, owned);
+        }
+        for (self.peer_origins.items, 0..) |candidate, index| {
+            if (!sameOrigin(candidate.origin(), origin)) continue;
+            var removed = self.peer_origins.orderedRemove(index);
+            removed.deinit();
+            return;
+        }
     }
 
     pub fn acceptsLocalRequestStream(self: ControlState, stream_id: u64) bool {
@@ -3810,6 +4230,267 @@ test "HTTP/3 normalizes request origins for reuse policy" {
     try std.testing.expectError(error.InvalidHeader, requestOrigin("ftp", "example.com"));
     try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "user@example.com"));
     try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "example.com:bad"));
+}
+
+test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const advertised = [_][]const u8{
+        "https://Example.COM",
+        "https://cdn.example.com:8443",
+        "https://example.com:443",
+    };
+    try OriginPayload.write(&encoded, allocator, &advertised);
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(FrameType.origin, frame.frame_type);
+    var parsed = try OriginPayload.parse(allocator, frame.payload);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), parsed.origins.len);
+    const expected_single = "\x0c\x15\x00\x13https://example.com";
+    var single: std.ArrayList(u8) = .empty;
+    defer single.deinit(allocator);
+    try OriginPayload.write(
+        &single,
+        allocator,
+        &.{"https://example.com"},
+    );
+    try std.testing.expectEqualSlices(u8, expected_single, single.items);
+    const fixed = try Frame.parse(expected_single);
+    var fixed_payload = try OriginPayload.parse(allocator, fixed.payload);
+    defer fixed_payload.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "https://example.com",
+        fixed_payload.origins[0],
+    );
+
+    var control = ControlState{};
+    defer control.deinit(allocator);
+    control.settings.received = true;
+    try control.applyFrame(allocator, frame);
+    try std.testing.expect(control.peerOriginSetInitialized());
+    // The explicit default port canonicalizes to the first origin rather than
+    // consuming another bounded Origin Set entry.
+    try std.testing.expectEqual(@as(usize, 2), control.peerOrigins().len);
+    try std.testing.expect(control.peerOriginKnown(
+        try requestOrigin("https", "example.com"),
+    ));
+    try std.testing.expect(control.peerOriginKnown(
+        try requestOrigin("https", "CDN.EXAMPLE.COM:8443"),
+    ));
+    try std.testing.expectEqual(
+        true,
+        control.peerOriginSetAllows(
+            try requestOrigin("https", "initial.example"),
+            try requestOrigin("https", "cdn.example.com:8443"),
+        ).?,
+    );
+    try std.testing.expectEqual(
+        false,
+        control.peerOriginSetAllows(
+            try requestOrigin("https", "initial.example"),
+            try requestOrigin("https", "missing.example"),
+        ).?,
+    );
+    try control.removePeerOrigin(
+        allocator,
+        try requestOrigin("https", "cdn.example.com:8443"),
+    );
+    try std.testing.expect(!control.peerOriginKnown(
+        try requestOrigin("https", "cdn.example.com:8443"),
+    ));
+    try std.testing.expectEqual(@as(usize, 1), control.peerOrigins().len);
+    try control.removePeerOrigin(
+        allocator,
+        try requestOrigin("https", "initial.example"),
+    );
+    try std.testing.expectEqual(
+        false,
+        control.peerOriginSetAllows(
+            try requestOrigin("https", "initial.example"),
+            try requestOrigin("https", "initial.example"),
+        ).?,
+    );
+    var readded: std.ArrayList(u8) = .empty;
+    defer readded.deinit(allocator);
+    try OriginPayload.write(
+        &readded,
+        allocator,
+        &.{"https://initial.example"},
+    );
+    try control.applyFrame(allocator, try Frame.parse(readded.items));
+    try std.testing.expectEqual(
+        true,
+        control.peerOriginSetAllows(
+            try requestOrigin("https", "initial.example"),
+            try requestOrigin("https", "initial.example"),
+        ).?,
+    );
+    var uninitialized = ControlState{};
+    defer uninitialized.deinit(allocator);
+    try std.testing.expect(uninitialized.peerOriginSetAllows(
+        try requestOrigin("https", "initial.example"),
+        try requestOrigin("https", "missing.example"),
+    ) == null);
+
+    var empty: std.ArrayList(u8) = .empty;
+    defer empty.deinit(allocator);
+    try OriginPayload.write(&empty, allocator, &.{});
+    var empty_control = ControlState{};
+    defer empty_control.deinit(allocator);
+    empty_control.settings.received = true;
+    try empty_control.applyFrame(allocator, try Frame.parse(empty.items));
+    try std.testing.expect(empty_control.peerOriginSetInitialized());
+    try std.testing.expectEqual(@as(usize, 0), empty_control.peerOrigins().len);
+    try std.testing.expectEqual(
+        true,
+        empty_control.peerOriginSetAllows(
+            try requestOrigin("https", "initial.example"),
+            try requestOrigin("https", "initial.example:443"),
+        ).?,
+    );
+    try std.testing.expectEqual(
+        false,
+        empty_control.peerOriginSetAllows(
+            try requestOrigin("https", "initial.example"),
+            try requestOrigin("https", "other.example"),
+        ).?,
+    );
+}
+
+test "HTTP/3 ORIGIN ignores invalid origins and rejects malformed framing" {
+    const allocator = std.testing.allocator;
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try wire.appendInt(&payload, allocator, u16, 0, .big);
+    try wire.appendInt(&payload, allocator, u16, 13, .big);
+    try payload.appendSlice(allocator, "not-an-origin");
+    try wire.appendInt(&payload, allocator, u16, 21, .big);
+    try payload.appendSlice(allocator, "https://valid.example");
+
+    var control = ControlState{};
+    defer control.deinit(allocator);
+    control.settings.received = true;
+    try control.applyFrame(allocator, .{
+        .frame_type = FrameType.origin,
+        .payload = payload.items,
+        .consumed = 0,
+    });
+    try std.testing.expect(control.peerOriginSetInitialized());
+    try std.testing.expectEqual(@as(usize, 1), control.peerOrigins().len);
+    try std.testing.expect(control.peerOriginKnown(
+        try requestOrigin("https", "valid.example"),
+    ));
+
+    var malformed = [_]u8{ 0, 5, 'h', 't' };
+    try std.testing.expectError(
+        error.BufferTooShort,
+        OriginPayload.parse(allocator, &malformed),
+    );
+    try std.testing.expectError(
+        error.InvalidOrigin,
+        OriginPayload.write(&payload, allocator, &.{"https://example.com/path"}),
+    );
+}
+
+test "HTTP/3 ORIGIN state update is transactional on allocation failure" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try OriginPayload.write(
+        &encoded,
+        allocator,
+        &.{"https://new.example"},
+    );
+    const frame = try Frame.parse(encoded.items);
+
+    var control = ControlState{};
+    defer control.deinit(allocator);
+    control.settings.received = true;
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        control.applyFrame(fail_first.allocator(), frame),
+    );
+    try std.testing.expect(!control.peerOriginSetInitialized());
+    try std.testing.expectEqual(@as(usize, 0), control.peerOrigins().len);
+}
+
+test "HTTP/3 control stream buffers a split ORIGIN frame" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try OriginPayload.write(
+        &encoded,
+        allocator,
+        &.{"https://split.example"},
+    );
+
+    for (1..encoded.items.len) |split| {
+        var control = ControlState{};
+        defer control.deinit(allocator);
+        control.settings.received = true;
+        try control.appendControlPayload(
+            allocator,
+            encoded.items[0..split],
+        );
+        try std.testing.expect(!control.peerOriginSetInitialized());
+        try control.appendControlPayload(
+            allocator,
+            encoded.items[split..],
+        );
+        try std.testing.expect(control.peerOriginSetInitialized());
+        try std.testing.expect(control.peerOriginKnown(
+            try requestOrigin("https", "split.example"),
+        ));
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            control.peer_control_stream_buffer.items.len,
+        );
+    }
+}
+
+test "HTTP/3 ORIGIN state enforces its connection memory bound" {
+    const allocator = std.testing.allocator;
+    var control = ControlState{};
+    defer control.deinit(allocator);
+    control.settings.received = true;
+
+    var serialized: [max_peer_origins][32]u8 = undefined;
+    var origins: [max_peer_origins][]const u8 = undefined;
+    for (&serialized, &origins, 0..) |*storage, *origin, index| {
+        origin.* = try std.fmt.bufPrint(
+            storage,
+            "https://o{d}.example",
+            .{index},
+        );
+    }
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try OriginPayload.write(&encoded, allocator, &origins);
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    try std.testing.expectEqual(
+        max_peer_origins,
+        control.peerOrigins().len,
+    );
+
+    encoded.clearRetainingCapacity();
+    try OriginPayload.write(
+        &encoded,
+        allocator,
+        &.{"https://overflow.example"},
+    );
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        control.applyFrame(allocator, try Frame.parse(encoded.items)),
+    );
+    try std.testing.expectEqual(
+        max_peer_origins,
+        control.peerOrigins().len,
+    );
 }
 
 test "HTTP/3 owns canonical origin keys for connection pools" {

@@ -3503,6 +3503,48 @@ pub const HandshakeServerSession = struct {
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
 
+    /// Advertise RFC 9412 origins on the server control stream. Clients must
+    /// still validate certificate authority before coalescing requests.
+    pub fn sendOrigins(
+        self: *HandshakeServerSession,
+        origins: []const []const u8,
+    ) Error!void {
+        try sendConnectionSettings(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            server_control_stream_id,
+        );
+        const previous_sent = self.control.local_origin_set_sent;
+        errdefer self.control.local_origin_set_sent = previous_sent;
+        self.critical_stream_send_scratch.reset();
+        try self.control.writeOrigins(
+            &self.critical_stream_send_scratch.payload,
+            self.established.connection.endpoint.allocator,
+            origins,
+        );
+        const previous_send = self.control_send;
+        errdefer self.control_send = previous_send;
+        try self.control_send.appendFrames(
+            &self.critical_stream_send_scratch.frames,
+            self.established.connection.endpoint.allocator,
+            self.critical_stream_send_scratch.payload.items,
+            self.options.max_stream_frame_data,
+            false,
+        );
+        try sendConnectionFrames(
+            &self.established.connection,
+            self.critical_stream_send_scratch.frames.items,
+            self.options.max_frames_per_packet,
+        );
+    }
+
     pub fn initiateShutdown(self: *HandshakeServerSession) Error!void {
         if (self.request_lifecycle.shutdown_state != .active) return;
         try self.sendGoAway(@as(u64, quic.varint.max_value) & ~@as(u64, 0x3));
@@ -3581,6 +3623,12 @@ pub const HandshakeServerSession = struct {
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback();
         }
+    }
+
+    /// Process one transport packet for control-stream progress without
+    /// requiring a complete application request to become ready.
+    pub fn pollControl(self: *HandshakeServerSession) Error!void {
+        try self.receiveRequestPacket();
     }
 
     fn applyStreamingRequestEvent(
@@ -4875,6 +4923,48 @@ pub const HandshakeClient = struct {
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
 
+    pub fn peerOrigins(self: HandshakeClient) []const http3.OriginKey {
+        return self.control.peerOrigins();
+    }
+
+    pub fn peerOriginSetInitialized(self: HandshakeClient) bool {
+        return self.control.peerOriginSetInitialized();
+    }
+
+    pub fn peerOriginKnown(
+        self: HandshakeClient,
+        origin: http3.Origin,
+    ) bool {
+        return self.control.peerOriginKnown(origin);
+    }
+
+    pub fn peerOriginSetAllows(
+        self: HandshakeClient,
+        initial_origin: http3.Origin,
+        requested_origin: http3.Origin,
+    ) ?bool {
+        return self.control.peerOriginSetAllows(
+            initial_origin,
+            requested_origin,
+        );
+    }
+
+    /// Apply RFC 8336's 421 Misdirected Request removal rule. The caller
+    /// supplies the request origin because response state intentionally stores
+    /// no redundant authority copy after dispatch.
+    pub fn removePeerOriginAfterMisdirected(
+        self: *HandshakeClient,
+        origin: http3.Origin,
+    ) Error!void {
+        try self.control.removePeerOrigin(self.allocator, origin);
+    }
+
+    /// Process one transport packet for SETTINGS/ORIGIN/GOAWAY progress
+    /// without waiting for an application response event.
+    pub fn pollControl(self: *HandshakeClient) Error!void {
+        try self.receiveResponsePacket();
+    }
+
     /// Advertise the inclusive server-push ID limit.
     pub fn sendMaxPushId(
         self: *HandshakeClient,
@@ -5636,6 +5726,54 @@ pub const ProtectedServer = struct {
         try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
     }
 
+    pub fn sendOrigins(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        origins: []const []const u8,
+    ) Error!void {
+        try sendProtectedSettings(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            server_control_stream_id,
+        );
+        const previous_sent = self.control.local_origin_set_sent;
+        errdefer self.control.local_origin_set_sent = previous_sent;
+        self.protected_send.resetCriticalStreamScratch();
+        try self.control.writeOrigins(
+            &self.protected_send.critical_stream_payload,
+            self.quic_server.endpoint.allocator,
+            origins,
+        );
+        const previous_send = self.control_send;
+        errdefer self.control_send = previous_send;
+        try self.control_send.appendFrames(
+            &self.protected_send.critical_stream_frames,
+            self.quic_server.endpoint.allocator,
+            self.protected_send.critical_stream_payload.items,
+            self.config.max_stream_frame_data,
+            false,
+        );
+        try sendProtectedFrames(
+            &self.quic_server.endpoint,
+            to,
+            self.config.send_keys,
+            self.config.peer_connection_id,
+            &self.next_packet_number,
+            self.protected_send.critical_stream_frames.items,
+            self.config.max_frames_per_packet,
+            &self.protected_send,
+        );
+    }
+
     pub fn initiateShutdown(
         self: *ProtectedServer,
         to: net.IpAddress,
@@ -5792,6 +5930,11 @@ pub const ProtectedServer = struct {
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
         }
+    }
+
+    /// Process one protected transport packet for control-stream progress.
+    pub fn pollControl(self: *ProtectedServer) Error!void {
+        try self.receiveRequestPacket();
     }
 
     fn receiveRequestPacketTimeout(
@@ -6540,6 +6683,47 @@ pub const ProtectedClient = struct {
             client_control_stream_id,
         );
         try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
+    }
+
+    pub fn peerOrigins(self: ProtectedClient) []const http3.OriginKey {
+        return self.control.peerOrigins();
+    }
+
+    pub fn peerOriginSetInitialized(self: ProtectedClient) bool {
+        return self.control.peerOriginSetInitialized();
+    }
+
+    pub fn peerOriginKnown(
+        self: ProtectedClient,
+        origin: http3.Origin,
+    ) bool {
+        return self.control.peerOriginKnown(origin);
+    }
+
+    pub fn peerOriginSetAllows(
+        self: ProtectedClient,
+        initial_origin: http3.Origin,
+        requested_origin: http3.Origin,
+    ) ?bool {
+        return self.control.peerOriginSetAllows(
+            initial_origin,
+            requested_origin,
+        );
+    }
+
+    pub fn removePeerOriginAfterMisdirected(
+        self: *ProtectedClient,
+        origin: http3.Origin,
+    ) Error!void {
+        try self.control.removePeerOrigin(
+            self.quic_client.endpoint.allocator,
+            origin,
+        );
+    }
+
+    /// Process one protected transport packet for control-stream progress.
+    pub fn pollControl(self: *ProtectedClient) Error!void {
+        try self.receiveResponsePacket();
     }
 
     pub fn sendMaxPushId(
@@ -12016,7 +12200,8 @@ fn applyControlStreamFrameForRoleWithPushes(
         // MAX_PUSH_ID and PRIORITY_UPDATE are client-to-server control frames.
         // A client receiving them from a server must treat the frame as
         // unexpected; restore state so callers can recover or close cleanly.
-        if (control.peer_max_push_id != previous.peer_max_push_id or
+        if (control.peer_client_only_frame_generation !=
+            previous.peer_client_only_frame_generation or
             control.priority_update_generation !=
                 previous.priority_update_generation)
         {
@@ -12042,6 +12227,16 @@ fn applyControlStreamFrameForRoleWithPushes(
             previous_owned = false;
             return err;
         };
+    }
+    if (handled and role == .server and
+        control.peer_origin_generation != previous.peer_origin_generation)
+    {
+        // RFC 9412 defines ORIGIN only from servers to clients. Roll back the
+        // complete frame even when it arrived across several STREAM packets.
+        control.deinit(allocator);
+        control.* = previous;
+        previous_owned = false;
+        return error.UnexpectedFrame;
     }
     if (handled and role == .server and
         control.push_cancellation_generation !=
@@ -12109,7 +12304,10 @@ fn controlStreamContainsClientOnlyFrame(
     };
     var offset: usize = 0;
     while (offset < payload.len) {
-        const frame = try http3.Frame.parse(payload[offset..]);
+        const frame = http3.Frame.parse(payload[offset..]) catch |err| switch (err) {
+            error.BufferTooShort => return false,
+            else => return err,
+        };
         offset += frame.consumed;
         switch (frame.frame_type) {
             http3.FrameType.max_push_id,
@@ -12154,7 +12352,7 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
         }
         const payload_start =
             control.peer_control_stream_consumed_offset - stream_offset;
-        try control.applyControlPayload(
+        try control.appendControlPayload(
             allocator,
             stream.data[payload_start..],
         );
@@ -12183,7 +12381,7 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
                 control.peer_control_stream_consumed_offset,
             );
             if (apply_start < stream.data.len) {
-                try control.applyControlPayload(
+                try control.appendControlPayload(
                     allocator,
                     stream.data[apply_start..],
                 );
@@ -12550,6 +12748,34 @@ test "HTTP/3 client rejects server-only control frames" {
         .fin = false,
         .data = stream_bytes.items,
     }, .client));
+
+    var origin_payload: std.ArrayList(u8) = .empty;
+    defer origin_payload.deinit(allocator);
+    try http3.writeControlStreamPrefix(&origin_payload, allocator);
+    try http3.writeSettingsFrame(&origin_payload, allocator, .{});
+    try http3.OriginPayload.write(
+        &origin_payload,
+        allocator,
+        &.{"https://illegal-client.example"},
+    );
+    var origin_server_control = http3.ControlState{};
+    defer origin_server_control.deinit(allocator);
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        applyControlStreamFrameForRole(
+            &origin_server_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = origin_payload.items,
+            },
+            .server,
+        ),
+    );
+    try std.testing.expect(
+        !origin_server_control.peerOriginSetInitialized(),
+    );
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
@@ -12607,9 +12833,81 @@ test "HTTP/3 connection control frames advance control stream offset" {
     try std.testing.expectEqual(@as(?u64, 0), server.control.peer_goaway_id);
 }
 
+test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const server_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe9} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xea} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    try server.sendOrigins(client.quic_client.address(), &.{
+        "https://Example.COM",
+        "https://cdn.example.com:8443",
+    });
+    try server.sendOrigins(client.quic_client.address(), &.{
+        "https://example.com:443",
+        "https://img.example.com",
+    });
+    // ORIGIN is processed by the same shared control-stream receive path as
+    // SETTINGS and GOAWAY. Reading any application response is unnecessary;
+    // consume the two control packets directly to isolate this extension.
+    try client.pollControl();
+    while (client.peerOrigins().len < 3) {
+        try client.pollControl();
+    }
+
+    try std.testing.expect(client.peerOriginSetInitialized());
+    try std.testing.expectEqual(@as(usize, 3), client.peerOrigins().len);
+    try std.testing.expect(client.peerOriginKnown(
+        try http3.requestOrigin("https", "example.com"),
+    ));
+    try std.testing.expect(client.peerOriginKnown(
+        try http3.requestOrigin("https", "CDN.EXAMPLE.COM:8443"),
+    ));
+    try std.testing.expect(client.peerOriginKnown(
+        try http3.requestOrigin("https", "img.example.com:443"),
+    ));
+}
+
 test "HTTP/3 runtime rejects non-empty QPACK critical streams" {
     const allocator = std.testing.allocator;
     var control = http3.ControlState{};
+    defer control.deinit(allocator);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
     try http3.writeQpackEncoderStreamPrefix(&payload, allocator);
@@ -15115,6 +15413,7 @@ test "HTTP/3 runtime rejects closed critical streams" {
     try http3.writeSettingsFrame(&control_bytes, allocator, .{});
 
     var control = http3.ControlState{};
+    defer control.deinit(allocator);
     try std.testing.expectError(error.ClosedCriticalStream, applyControlStreamFrame(&control, allocator, .{
         .stream_id = client_control_stream_id,
         .offset = 0,
@@ -15141,6 +15440,7 @@ test "HTTP/3 runtime rejects closed critical streams" {
     try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, allocator);
 
     var qpack_control = http3.ControlState{};
+    defer qpack_control.deinit(allocator);
     try std.testing.expectError(error.ClosedCriticalStream, applyControlStreamFrame(&qpack_control, allocator, .{
         .stream_id = client_qpack_encoder_stream_id,
         .offset = 0,
@@ -15171,6 +15471,7 @@ test "HTTP/3 runtime rejects critical stream reset requests" {
     try http3.writeSettingsFrame(&control_bytes, allocator, .{});
 
     var control = http3.ControlState{};
+    defer control.deinit(allocator);
     try std.testing.expect(try applyControlStreamFrame(&control, allocator, .{
         .stream_id = client_control_stream_id,
         .offset = 0,

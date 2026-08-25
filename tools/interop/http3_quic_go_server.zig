@@ -94,6 +94,7 @@ pub fn main(init: std.process.Init) !void {
 
     var session = try server.accept();
     defer session.deinit();
+    try session.sendOrigins(&.{"https://localhost"});
     if (informational) {
         var request = try session.receiveRequest();
         defer request.deinit(allocator);
@@ -133,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
         );
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         std.debug.print(
-            "netz HTTP/3 server sent informational responses to quic-go: version={d} statuses=103,102 final=200 body=5\n",
+            "netz HTTP/3 server sent informational responses to quic-go: version={d} origin=true statuses=103,102 final=200 body=5\n",
             .{if (version == .version_2) @as(u8, 2) else 1},
         );
         return;
@@ -221,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
     }});
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz HTTP/3 server interoperated with quic-go: version={d} cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window={d} read_before_cancel={d} large_response={d} request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
+        "netz HTTP/3 server interoperated with quic-go: version={d} origin=true cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window={d} read_before_cancel={d} large_response={d} request_body=15 request_trailers=1 response_body=13 response_trailers=1\n",
         .{
             if (version == .version_2) @as(u8, 2) else 1,
             stream_receive_window,

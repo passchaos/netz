@@ -62,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
 
     var session = try server.accept();
     defer session.deinit();
+    try session.sendOrigins(&.{"https://localhost"});
     try std.testing.expectEqual(
         force_retry,
         session.established.retry_processed,
@@ -109,13 +110,13 @@ pub fn main(init: std.process.Init) !void {
         // follow-up request before this one-shot server exits.
         try std.Io.sleep(io, .fromMilliseconds(500), .awake);
         std.debug.print(
-            "netz HTTP/3 server gracefully drained tquic: retry={} initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true\n",
+            "netz HTTP/3 server gracefully drained tquic: retry={} origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true\n",
             .{force_retry},
         );
     } else {
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         std.debug.print(
-            "netz HTTP/3 server interoperated with tquic: retry={} requests=2 connection_reused=true bodies=14,14\n",
+            "netz HTTP/3 server interoperated with tquic: retry={} origin=true requests=2 connection_reused=true bodies=14,14\n",
             .{force_retry},
         );
     }

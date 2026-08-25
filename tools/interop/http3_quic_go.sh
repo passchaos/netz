@@ -136,7 +136,7 @@ grep -Fq \
   "version=$version cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 stop_sending_transmissions>=2 concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1" \
   "$work/quic-go-client.log"
 grep -Fq \
-  "version=$version cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1" \
+  "version=$version origin=true cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1" \
   "$work/netz-server.log"
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"
@@ -221,7 +221,7 @@ grep -Fq \
   "quic-go HTTP/3 client received netz informational responses: version=$version statuses=103,102 final=200 body=5" \
   "$work/quic-go-informational-client.log"
 grep -Fq \
-  "netz HTTP/3 server sent informational responses to quic-go: version=$version statuses=103,102 final=200 body=5" \
+  "netz HTTP/3 server sent informational responses to quic-go: version=$version origin=true statuses=103,102 final=200 body=5" \
   "$work/netz-informational-server.log"
 cat "$work/quic-go-informational-client.log"
 cat "$work/netz-informational-server.log"
