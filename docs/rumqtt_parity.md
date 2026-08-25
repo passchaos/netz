@@ -1071,7 +1071,7 @@ also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific
 egress against Mosquitto's independent wire-packet helpers.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 126
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 134
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
@@ -1438,5 +1438,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 132 passing packet-vector scenarios do not cover
+   persistence semantics. The 134 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
