@@ -870,6 +870,23 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.mqtt, "broker"));
     try std.testing.expect(@hasDecl(netz.mqtt, "proxy_protocol"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "listener_namespace"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.listener_namespace,
+        "Namespace",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.listener_namespace.Namespace,
+        "mapTopicAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.listener_namespace.Namespace,
+        "mapFilterAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.listener_namespace.Namespace,
+        "visibleTopic",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.proxy_protocol,
         "Metadata",

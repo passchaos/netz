@@ -19,6 +19,7 @@ and equal-wire broker results are kept separate.
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
+| Listener topic namespaces | `listener_namespace.Namespace` provides bounded validated mount-point mapping for PUBLISH/Will topics, ordinary filters and `$share/{group}/...` filters, plus fail-closed outbound stripping; shared Broker listener integration remains pending | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
@@ -1048,6 +1049,18 @@ polling and release; it is not an equal-wire broker throughput comparison with
 rumqttd.
 
 ## Remaining work before broad superiority
+
+The public `listener_namespace.Namespace` module now defines the reusable
+boundary needed for Mosquitto-compatible mount points. It validates literal
+UTF-8 prefixes, enforces MQTT's u16 wire limit after concatenation, preserves
+the `$share/{group}/` wrapper while prefixing only its nested Topic Filter,
+maps PUBLISH/Will topics into canonical broker space, and refuses to expose a
+canonical topic outside a destination namespace. The prefix can be borrowed or
+deep-owned. It is deliberately not yet attached to the current single-listener
+`Broker`; doing so would falsely implement ingress-only semantics. Correct
+integration still requires multiple listener accept loops sharing one broker
+core and retaining each connection's listener namespace through durable
+Session delivery.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 126
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
