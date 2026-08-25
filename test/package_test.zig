@@ -1505,6 +1505,22 @@ test "public modules are reachable" {
         "connectUri",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sessionId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "remoteAddress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "remoteAddressValidated",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "rttNanos",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedServer,
         "receiveSessionRequest",
     ));

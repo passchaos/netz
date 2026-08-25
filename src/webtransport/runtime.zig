@@ -619,6 +619,26 @@ pub const AcceptedHandshakeSession = struct {
         self.* = undefined;
     }
 
+    pub fn sessionId(
+        self: AcceptedHandshakeSession,
+    ) webtransport.SessionId {
+        return self.session_id;
+    }
+
+    /// Return the currently selected QUIC peer path. This can change after an
+    /// authenticated NAT rebinding or active migration.
+    pub fn remoteAddress(self: AcceptedHandshakeSession) net.IpAddress {
+        return self.h3.established.connection.peerAddress();
+    }
+
+    pub fn remoteAddressValidated(self: AcceptedHandshakeSession) bool {
+        return self.h3.established.connection.peerAddressValidated();
+    }
+
+    pub fn rttNanos(self: AcceptedHandshakeSession) ?u64 {
+        return self.stats().smoothed_rtt_ns;
+    }
+
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
@@ -1059,6 +1079,24 @@ pub const HandshakeClientSession = struct {
         name: []const u8,
     ) ?[]const u8 {
         return findHeader(self.response.headers, name);
+    }
+
+    pub fn sessionId(self: HandshakeClientSession) webtransport.SessionId {
+        return self.session_id;
+    }
+
+    /// Return the current QUIC peer path rather than the original connect
+    /// target, so applications observe validated migration/rebinding changes.
+    pub fn remoteAddress(self: HandshakeClientSession) net.IpAddress {
+        return self.h3.established.connection.peerAddress();
+    }
+
+    pub fn remoteAddressValidated(self: HandshakeClientSession) bool {
+        return self.h3.established.connection.peerAddressValidated();
+    }
+
+    pub fn rttNanos(self: HandshakeClientSession) ?u64 {
+        return self.stats().smoothed_rtt_ns;
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
@@ -1706,6 +1744,28 @@ pub const StatefulProtectedClientSession = struct {
         name: []const u8,
     ) ?[]const u8 {
         return self.session.responseHeader(name);
+    }
+
+    pub fn sessionId(
+        self: StatefulProtectedClientSession,
+    ) webtransport.SessionId {
+        return self.session.sessionId();
+    }
+
+    pub fn remoteAddress(
+        self: StatefulProtectedClientSession,
+    ) net.IpAddress {
+        return self.session.remoteAddress();
+    }
+
+    pub fn remoteAddressValidated(
+        self: StatefulProtectedClientSession,
+    ) bool {
+        return self.session.remoteAddressValidated();
+    }
+
+    pub fn rttNanos(self: StatefulProtectedClientSession) ?u64 {
+        return self.session.rttNanos();
     }
 
     pub fn openBidirectionalStream(

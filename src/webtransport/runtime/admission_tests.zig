@@ -113,6 +113,10 @@ test "WebTransport server admission exposes request and response metadata" {
     );
     defer client.deinit();
     try std.testing.expectEqual(@as(u16, 200), client.response.status);
+    try std.testing.expectEqual(client.session_id, client.sessionId());
+    try std.testing.expectEqual(server.address(), client.remoteAddress());
+    try std.testing.expect(client.remoteAddressValidated());
+    try std.testing.expect(client.rttNanos() != null);
     try std.testing.expectEqualStrings(
         "accepted",
         client.responseHeader("x-admission").?,
