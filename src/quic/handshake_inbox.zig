@@ -175,6 +175,12 @@ pub const Inbox = struct {
         return self.application_len;
     }
 
+    pub fn remainingCapacity(self: *Inbox) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.slots.len - self.len - self.application_len;
+    }
+
     pub fn takeApplication(self: *Inbox) ?quic.runtime.OwnedBytes {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -300,6 +306,7 @@ test "QUIC pending handshake inbox is bounded filtered and FIFO" {
     const second = try makeLongDatagram(allocator, "original", 'b');
     try inbox.push(.{ .from = peer, .bytes = second });
     try std.testing.expectEqual(@as(usize, 2), inbox.count());
+    try std.testing.expectEqual(@as(usize, 0), inbox.remainingCapacity());
 
     const extra = try makeLongDatagram(allocator, "server", 'c');
     var extra_owned = quic.runtime.OwnedBytes{ .from = peer, .bytes = extra };
@@ -318,6 +325,7 @@ test "QUIC pending handshake inbox is bounded filtered and FIFO" {
         @as(u8, 'b'),
         received_second.bytes[6 + "original".len],
     );
+    try std.testing.expectEqual(@as(usize, 2), inbox.remainingCapacity());
 
     const wrong_cid = try makeLongDatagram(allocator, "other", 'd');
     var wrong_cid_owned = quic.runtime.OwnedBytes{
