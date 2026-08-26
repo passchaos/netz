@@ -521,6 +521,19 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16 * 1024), (netz.http2.runtime.Limits{}).max_header_list_size);
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveUntil"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime, "UnixServer"));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.UnixServer,
+        "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.UnixServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectUnix",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.TlsServer,
         "serveConcurrent",

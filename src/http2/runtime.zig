@@ -581,6 +581,115 @@ pub const Server = struct {
     }
 };
 
+/// HTTP/2 prior-knowledge listener over a Unix-domain stream socket.
+///
+/// This shares the complete HTTP/2 connection state machine with TCP. The
+/// filesystem socket path remains caller-owned and is not removed by deinit.
+pub const UnixServer = struct {
+    io: std.Io,
+    listener: net.Server,
+    allocator: std.mem.Allocator,
+    limits: Limits = .{},
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        limits: Limits,
+    ) Error!UnixServer {
+        try validateLocalLimits(limits);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .listener = try address.listen(io, .{}),
+            .limits = limits,
+        };
+    }
+
+    pub fn deinit(self: *UnixServer) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn accept(self: *UnixServer) Error!Connection {
+        const stream = try self.listener.accept(self.io);
+        return acceptConnectionTransport(
+            self.allocator,
+            self.io,
+            stream,
+            tcpTransport(self.io, stream),
+            self.limits,
+        );
+    }
+
+    pub fn serveConnection(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_requests: usize,
+    ) Error!usize {
+        var connection = try self.accept();
+        defer connection.close();
+        return connection.serve(
+            HandlerContext,
+            context,
+            handler,
+            max_requests,
+        );
+    }
+
+    pub fn serveConcurrent(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+    ) AsyncServeError!ConcurrentServeResult {
+        return serveAcceptedConcurrent(
+            UnixServer,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+        );
+    }
+
+    pub fn serveUntil(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+        max_requests_per_connection: usize,
+        options: ServeUntilOptions,
+    ) anyerror!void {
+        return serveAcceptedUntil(
+            UnixServer,
+            self,
+            self.io,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            max_requests_per_connection,
+            options,
+        );
+    }
+};
+
 fn acceptConnectionTransport(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1093,6 +1202,32 @@ pub const Client = struct {
         return connection;
     }
 
+    /// Connect with HTTP/2 prior knowledge over a Unix-domain stream.
+    /// `authority` is copied for subsequent requests that omit it; the local
+    /// transport still uses the `http` scheme and skips TCP-only NODELAY.
+    pub fn connectUnix(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        authority: []const u8,
+        limits: Limits,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        if (authority.len == 0) return error.InvalidHeader;
+        const owned_authority = try allocator.dupe(u8, authority);
+        errdefer allocator.free(owned_authority);
+        const stream = try address.connect(io);
+        var connection = try connectStreamWithoutTcpOptions(
+            allocator,
+            io,
+            stream,
+            limits,
+        );
+        connection.default_authority = owned_authority;
+        connection.default_scheme = "http";
+        return connection;
+    }
+
     pub fn connectHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1334,6 +1469,20 @@ pub const Client = struct {
             try socket_options.setTcpNoDelay(stream);
         }
         stream_owned = false;
+        return connectStreamWithoutTcpOptions(
+            allocator,
+            io,
+            stream,
+            limits,
+        );
+    }
+
+    fn connectStreamWithoutTcpOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+    ) Error!Connection {
         return connectTransport(
             allocator,
             io,
@@ -17767,4 +17916,5 @@ test {
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
+    _ = @import("runtime/unix_tests.zig");
 }
