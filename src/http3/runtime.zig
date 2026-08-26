@@ -2997,7 +2997,8 @@ pub const HandshakeSupervisor = struct {
     next_handle_mutex: std.Io.Mutex = .init,
     completed_storage: []HandshakeCompletion,
     completed: *std.Io.Queue(HandshakeCompletion),
-
+    /// Active handshake CIDs are intentionally non-migratable. Same-IP port
+    /// rebinding is allowed, matching QUIC's authenticated migration rules.
     pub fn init(
         server: *HandshakeServer,
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
@@ -3174,6 +3175,10 @@ pub const HandshakeSupervisor = struct {
 
     pub fn pendingCount(self: *const HandshakeSupervisor) usize {
         return self.active_workers.load(.acquire);
+    }
+
+    pub fn connectionCount(self: *const HandshakeSupervisor) usize {
+        return self.dispatcher.connectionCount();
     }
 
     fn reserveHandle(

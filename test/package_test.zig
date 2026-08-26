@@ -2172,6 +2172,10 @@ test "public modules are reachable" {
         "receive",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeSupervisor,
+        "connectionCount",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "beginSessionAdmissionFromInitialSource",
     ));
