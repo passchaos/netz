@@ -2121,6 +2121,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
+        "admitPendingHandshake",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
         "promotePendingHandshake",
     ));
     try std.testing.expect(@hasDecl(

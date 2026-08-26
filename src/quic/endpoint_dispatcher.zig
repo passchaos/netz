@@ -20,6 +20,7 @@ test {
 
 pub const ConnectionHandle = usize;
 pub const PendingHandshakeHandle = usize;
+pub const default_server_connection_id_len: usize = 16;
 
 pub const Error = runtime.Error || one_rtt.Error ||
     connection_router.Error || endpoint_timers.Error || handshake_inbox.Error || error{
@@ -27,6 +28,7 @@ pub const Error = runtime.Error || one_rtt.Error ||
     UnknownConnectionHandle,
     ConnectionEndpointMismatch,
     StaleConnectionRoute,
+    PendingHandshakeLimitReached,
 };
 pub const ReceiveError = Error || runtime.ReceiveTimeoutError;
 
@@ -521,6 +523,49 @@ pub const Dispatcher = struct {
 
     pub fn pendingHandshakeCount(self: *const Dispatcher) usize {
         return self.pending_handshakes.count();
+    }
+
+    /// Allocate and register a bounded pending-handshake inbox using a fresh
+    /// random server CID. The returned inbox accepts the admitted original
+    /// DCID as well, which is required for retransmitted or fragmented Initial
+    /// flights. The caller owns the returned stable allocation after success
+    /// and must unregister it before deinitializing and destroying it.
+    pub fn admitPendingHandshake(
+        self: *Dispatcher,
+        handle: PendingHandshakeHandle,
+        initial: InitialDatagram,
+        max_pending_handshakes: usize,
+        inbox_capacity: usize,
+    ) Error!*handshake_inbox.Inbox {
+        if (max_pending_handshakes == 0 or
+            self.pending_handshakes.count() >= max_pending_handshakes)
+        {
+            return error.PendingHandshakeLimitReached;
+        }
+        var server_connection_id: [default_server_connection_id_len]u8 =
+            undefined;
+        // Collision probability is negligible, but lookup makes this a hard
+        // endpoint invariant rather than a probabilistic API contract.
+        while (true) {
+            try std.Io.randomSecure(self.endpoint.io, &server_connection_id);
+            if ((try self.router.lookup(&server_connection_id)) == null and
+                (try self.pending_router.lookup(&server_connection_id)) == null)
+            {
+                break;
+            }
+        }
+        const inbox = try self.allocator.create(handshake_inbox.Inbox);
+        errdefer self.allocator.destroy(inbox);
+        inbox.* = try handshake_inbox.Inbox.init(
+            self.allocator,
+            self.endpoint.io,
+            &.{ initial.destination_connection_id, &server_connection_id },
+            initial.datagram.from,
+            inbox_capacity,
+        );
+        errdefer inbox.deinit();
+        try self.registerPendingHandshake(handle, inbox);
+        return inbox;
     }
 
     /// Refresh timer state after application code sends or otherwise mutates a

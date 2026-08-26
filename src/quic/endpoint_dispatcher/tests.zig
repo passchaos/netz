@@ -860,3 +860,66 @@ test "QUIC endpoint dispatcher drains a coalesced packet after promotion" {
     try std.testing.expect((try dispatcher.pollConnectionPacket(52)) == null);
     try std.testing.expect(try dispatcher.unregisterConnection(52));
 }
+
+test "QUIC endpoint dispatcher bounds pending admission and generates CIDs" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    const first_bytes = try allocator.dupe(u8, "first");
+    var first_datagram = runtime.OwnedBytes{
+        .from = peer,
+        .bytes = first_bytes,
+    };
+    defer first_datagram.deinit(allocator);
+    const first = dispatcher_mod.InitialDatagram{
+        .datagram = first_datagram,
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = "first-dcid",
+        .source_connection_id = "client",
+        .first_packet_len = first_bytes.len,
+    };
+    const inbox = try dispatcher.admitPendingHandshake(61, first, 1, 2);
+    defer {
+        inbox.deinit();
+        allocator.destroy(inbox);
+    }
+    defer dispatcher.deinit();
+    try std.testing.expectEqual(@as(usize, 2), inbox.connectionIds().len);
+    try std.testing.expectEqualStrings(
+        "first-dcid",
+        inbox.connectionIds()[0].slice(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, dispatcher_mod.default_server_connection_id_len),
+        inbox.connectionIds()[1].slice().len,
+    );
+
+    const second_bytes = try allocator.dupe(u8, "second");
+    var second_datagram = runtime.OwnedBytes{
+        .from = peer,
+        .bytes = second_bytes,
+    };
+    defer second_datagram.deinit(allocator);
+    const second = dispatcher_mod.InitialDatagram{
+        .datagram = second_datagram,
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = "second-dcid",
+        .source_connection_id = "client",
+        .first_packet_len = second_bytes.len,
+    };
+    try std.testing.expectError(
+        error.PendingHandshakeLimitReached,
+        dispatcher.admitPendingHandshake(62, second, 1, 2),
+    );
+    try std.testing.expect(try dispatcher.unregisterPendingHandshake(61));
+}
