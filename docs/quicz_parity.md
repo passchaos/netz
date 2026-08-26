@@ -375,11 +375,14 @@ server. The low-level ownership and routing primitive is now present, but the
 HTTP/3 now exposes an owning admission lifecycle plus a bounded handshake
 supervisor. It generates unique per-connection server CIDs, assigns inboxes,
 starts cancelable workers, reports completions without blocking the socket
-owner, unregisters failures, and promotes successful connections. WebTransport
-exposes a split handshake/admission object that can be promoted before CONNECT
-polling. The remaining integration work is a turnkey server loop that stores
-and schedules established HTTP/3/WebTransport sessions, applies admission
-expiry policy, and hands completed requests to application workers.
+owner, unregisters failures, and returns stable heap-backed sessions whose
+successful promotion cannot invalidate dispatcher pointers. The supervisor's
+single-owner receive API interleaves completion polling, endpoint timers, and
+UDP routing. WebTransport exposes a split handshake/admission object that can
+be promoted before CONNECT polling. The remaining integration work is a
+turnkey server loop that stores and schedules established HTTP/3/WebTransport
+sessions, applies admission expiry policy, and hands completed requests to
+application workers.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and
