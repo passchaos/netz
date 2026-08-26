@@ -18,6 +18,7 @@ pub const flow_control = @import("flow_control.zig");
 pub const recovery = @import("recovery.zig");
 pub const connection_router = @import("connection_router.zig");
 pub const endpoint_timers = @import("endpoint_timers.zig");
+pub const endpoint_dispatcher = @import("endpoint_dispatcher.zig");
 pub const connection_id = @import("connection_id.zig");
 pub const stateless_reset = @import("stateless_reset.zig");
 pub const congestion = @import("congestion.zig");
@@ -2615,6 +2616,7 @@ test {
     _ = flow_control;
     _ = recovery;
     _ = connection_router;
+    _ = endpoint_dispatcher;
     _ = endpoint_timers;
     _ = connection_id;
     _ = stateless_reset;

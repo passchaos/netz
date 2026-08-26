@@ -202,7 +202,25 @@ fn validateRoutePath(route: Route, from: ?net.IpAddress) Error!void {
     if (!route.active_migration_disabled) return;
     const expected = route.peer_address orelse return;
     const actual = from orelse return;
-    if (!expected.eql(&actual)) return error.ActiveMigrationDisabled;
+    // RFC 9000 disables active migration, not NAT rebinding. Route before
+    // decryption by IP identity only; the connection pipeline authenticates
+    // the packet before committing a same-IP source-port change.
+    if (!sameIp(expected, actual)) return error.ActiveMigrationDisabled;
+}
+
+fn sameIp(a: net.IpAddress, b: net.IpAddress) bool {
+    return switch (a) {
+        .ip4 => |a4| switch (b) {
+            .ip4 => |b4| std.mem.eql(u8, &a4.bytes, &b4.bytes),
+            .ip6 => false,
+        },
+        .ip6 => |a6| switch (b) {
+            .ip4 => false,
+            .ip6 => |b6| std.mem.eql(u8, &a6.bytes, &b6.bytes) and
+                a6.flow == b6.flow and
+                a6.interface.index == b6.interface.index,
+        },
+    };
 }
 
 test "QUIC connection router maps and retires connection IDs" {
@@ -328,7 +346,9 @@ test "QUIC connection router rejects changed paths when migration disabled" {
     defer router.deinit();
 
     const path_a = net.IpAddress{ .ip4 = .loopback(1111) };
-    const path_b = net.IpAddress{ .ip4 = .loopback(2222) };
+    const rebound = net.IpAddress{ .ip4 = .loopback(2222) };
+    var path_b = net.IpAddress{ .ip4 = .loopback(3333) };
+    path_b.ip4.bytes = .{ 127, 0, 0, 2 };
     try router.register("abc", .{
         .connection_index = 1,
         .peer_address = path_a,
@@ -338,6 +358,9 @@ test "QUIC connection router rejects changed paths when migration disabled" {
     const short = [_]u8{ 0x40, 'a', 'b', 'c', 0x00 };
     const routed = (try router.routeDatagramFrom(path_a, &short)).?;
     try std.testing.expectEqual(@as(usize, 1), routed.route.connection_index);
+    try std.testing.expect(
+        (try router.routeDatagramFrom(rebound, &short)) != null,
+    );
     try std.testing.expectError(error.ActiveMigrationDisabled, router.routeDatagramFrom(path_b, &short));
 
     try router.register("def", .{

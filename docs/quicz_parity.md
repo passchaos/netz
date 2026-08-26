@@ -330,6 +330,24 @@ benchmarks.
 
 ## Known blockers before declaring the goal complete
 
+The endpoint foundation now includes a concrete single-receive-owner
+`quic.endpoint_dispatcher.Dispatcher`. It owns established-connection CID
+routes and the aggregate endpoint timer index, dispatches one UDP datagram to
+the matching `one_rtt.Connection`, refreshes that connection's deadline after
+each packet, and returns unknown-CID datagrams to handshake admission or
+stateless-reset policy without letting connection tasks race on the socket. A
+two-client test sends to one server UDP socket, verifies exact per-connection
+delivery, services a selected PTO through the shared timer index, preserves an
+unknown datagram for admission, and removes every route/timer before connection
+storage can be destroyed. Route-level migration blocking now permits same-IP
+port rebinding and rejects only address changes before authenticated connection
+processing, matching the transport's existing NAT-rebinding behavior.
+
+This is deliberately not yet described as a complete HTTP/3 multi-connection
+server: Initial/Retry handshakes still need incremental dispatcher-owned
+state, bounded admission, and HTTP/3 session scheduling on top of this
+established-connection receive/timer foundation.
+
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and
    four-stream runs, in addition to the 1MiB smoke tests and protected
