@@ -2916,6 +2916,17 @@ pub const HandshakeCompletion = struct {
         session: HandshakeServerSession,
         failure: Error,
     },
+
+    pub fn deinit(self: *HandshakeCompletion) void {
+        const allocator = self.admission.inbox.allocator;
+        switch (self.result) {
+            .session => |*session| session.deinit(),
+            .failure => {},
+        }
+        self.admission.deinit();
+        allocator.destroy(self.admission);
+        self.* = undefined;
+    }
 };
 
 /// Stable heap-backed session registered in the endpoint dispatcher. Moving
@@ -2943,15 +2954,24 @@ pub const PromotedHandshakeSession = struct {
 };
 
 pub const HandshakeSupervisorEvent = union(enum) {
+    consumed,
     completed: HandshakeCompletion,
     endpoint: quic.endpoint_dispatcher.Event,
 
     pub fn deinit(self: *HandshakeSupervisorEvent, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .completed => {},
+            .consumed => {},
+            .completed => |*completion| completion.deinit(),
             .endpoint => |*event| event.deinit(allocator),
         }
         self.* = undefined;
+    }
+
+    pub fn takeCompletion(self: *HandshakeSupervisorEvent) ?HandshakeCompletion {
+        if (self.* != .completed) return null;
+        const completion = self.completed;
+        self.* = .consumed;
+        return completion;
     }
 };
 
@@ -3150,8 +3170,8 @@ pub const HandshakeSupervisor = struct {
         self: *HandshakeSupervisor,
         completion: *HandshakeCompletion,
     ) void {
-        self.destroyCompletion(completion.*);
-        completion.* = undefined;
+        _ = self;
+        completion.deinit();
     }
 
     pub fn pendingCount(self: *const HandshakeSupervisor) usize {
@@ -3201,13 +3221,9 @@ pub const HandshakeSupervisor = struct {
         self: *HandshakeSupervisor,
         completion: HandshakeCompletion,
     ) void {
-        var owned_result = completion.result;
-        switch (owned_result) {
-            .session => |*session| session.deinit(),
-            .failure => {},
-        }
-        completion.admission.deinit();
-        self.allocator.destroy(completion.admission);
+        _ = self;
+        var owned = completion;
+        owned.deinit();
     }
 };
 

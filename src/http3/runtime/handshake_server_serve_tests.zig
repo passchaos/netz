@@ -453,10 +453,11 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
         );
         defer ready.deinit(allocator);
         switch (ready) {
-            .completed => |value| {
-                completion = value;
+            .completed => {
+                completion = ready.takeCompletion().?;
                 break;
             },
+            .consumed => unreachable,
             .endpoint => return error.TestUnexpectedResult,
         }
     }
