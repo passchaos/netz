@@ -2043,6 +2043,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
+        "connectAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectUriAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectPreconfiguredAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeConnectAttempt,
+        "requireAccepted",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
         "sessionId",
     ));
     try std.testing.expect(@hasDecl(
@@ -2148,6 +2164,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "writeStreams",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "connectAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedConnectAttempt,
+        "requireAccepted",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,

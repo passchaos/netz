@@ -226,25 +226,33 @@ test "WebTransport server admission sends explicit rejection response" {
     var joined = false;
     defer if (!joined) thread.join();
 
+    var attempt = try runtime.HandshakeClientSession.connectAttempt(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/missing",
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xb1} ** 32,
+                .x25519_secret_key = [_]u8{0xb2} ** 32,
+            } },
+        },
+    );
+    defer attempt.deinit();
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u16, 404), attempt.status());
+    try std.testing.expectEqualStrings(
+        "route-not-found",
+        attempt.responseHeader("x-rejection").?,
+    );
     try std.testing.expectError(
         error.SessionRejected,
-        runtime.HandshakeClientSession.connect(
-            allocator,
-            io,
-            .{ .ip4 = .loopback(0) },
-            server.address(),
-            .{
-                .authority = "localhost",
-                .path = "/missing",
-                .h3 = .{ .handshake = .{
-                    .original_destination_connection_id = &original_dcid,
-                    .local_connection_id = &client_cid,
-                    .server_name = "localhost",
-                    .random = [_]u8{0xb1} ** 32,
-                    .x25519_secret_key = [_]u8{0xb2} ** 32,
-                } },
-            },
-        ),
+        attempt.requireAccepted(),
     );
 
     thread.join();

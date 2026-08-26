@@ -1393,10 +1393,30 @@ pub const HandshakeClientSession = struct {
         server: net.IpAddress,
         options: HandshakeConnectOptions,
     ) Error!HandshakeClientSession {
+        var attempt = try connectAttempt(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    /// Establish authenticated QUIC and preserve a non-success Extended
+    /// CONNECT response for application inspection.
+    pub fn connectAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+    ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportHandshakeClientOptions(options.h3));
         errdefer h3_client.deinit();
-        return connectStatefulSession(
+        return connectStatefulAttempt(
             &h3_client,
             options.authority,
             options.path,
@@ -1416,6 +1436,24 @@ pub const HandshakeClientSession = struct {
         uri_text: []const u8,
         options: HandshakeUriConnectOptions,
     ) Error!HandshakeClientSession {
+        var attempt = try connectUriAttempt(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: HandshakeUriConnectOptions,
+    ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
@@ -1436,7 +1474,7 @@ pub const HandshakeClientSession = struct {
             webTransportHandshakeClientOptions(h3_options),
         );
         errdefer h3_client.deinit();
-        return connectStatefulSession(
+        return connectStatefulAttempt(
             &h3_client,
             endpoint.authority,
             path,
@@ -1455,6 +1493,24 @@ pub const HandshakeClientSession = struct {
         server: net.IpAddress,
         options: StatefulProtectedConnectOptions,
     ) Error!HandshakeClientSession {
+        var attempt = try connectPreconfiguredAttempt(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectPreconfiguredAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+    ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         const h3_options = webTransportHandshakeSessionOptions(options.h3);
         var h3_client = try http3.runtime.HandshakeClient.initPreconfigured(
@@ -1467,7 +1523,7 @@ pub const HandshakeClientSession = struct {
             options.transport,
         );
         errdefer h3_client.deinit();
-        return connectStatefulSession(
+        return connectStatefulAttempt(
             &h3_client,
             options.authority,
             options.path,
@@ -1879,6 +1935,68 @@ pub const HandshakeClientSession = struct {
         try self.h3.receiveDetachedResponseProgress(
             self.session_id.value,
         );
+    }
+};
+
+pub const HandshakeConnectAttempt = struct {
+    h3: ?http3.runtime.HandshakeClient,
+    session_id: webtransport.SessionId,
+    response: http3.DecodedResponseHead,
+    limits: Limits,
+
+    pub fn accepted(self: HandshakeConnectAttempt) bool {
+        return self.response.status >= 200 and self.response.status < 300;
+    }
+
+    pub fn status(self: HandshakeConnectAttempt) u16 {
+        return self.response.status;
+    }
+
+    pub fn responseHeader(
+        self: HandshakeConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.response.headers, name);
+    }
+
+    pub fn deinit(self: *HandshakeConnectAttempt) void {
+        const allocator = self.h3.?.allocator;
+        self.response.deinit(allocator);
+        if (self.h3) |*h3| h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(
+        self: *HandshakeConnectAttempt,
+    ) Error!HandshakeClientSession {
+        if (!self.accepted()) return error.SessionRejected;
+        var h3 = &self.h3.?;
+        try h3.detachResponseStream(self.session_id.value);
+        try webtransport.ensureDatagramsNegotiated(
+            h3.options.local_settings,
+            h3.control.settings.peer,
+        );
+        var streams = try initHandshakeStreamRegistry(
+            h3.allocator,
+            self.session_id,
+            .client,
+            h3.options.local_settings,
+            h3.control.settings.peer,
+            self.limits.max_session_streams,
+            null,
+            null,
+        );
+        errdefer streams.deinit();
+        const control = try session_control.Control.init(self.session_id);
+        const session = HandshakeClientSession{
+            .h3 = h3.*,
+            .session_id = self.session_id,
+            .response = self.response,
+            .streams = streams,
+            .control = control,
+        };
+        self.* = undefined;
+        return session;
     }
 };
 
@@ -2295,13 +2413,34 @@ pub const StatefulProtectedClientSession = struct {
         server: net.IpAddress,
         options: StatefulProtectedConnectOptions,
     ) Error!StatefulProtectedClientSession {
-        return .{ .session = try HandshakeClientSession.connectPreconfigured(
+        var attempt = try connectAttempt(
             allocator,
             io,
             local_address,
             server,
             options,
-        ) };
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+    ) Error!StatefulProtectedConnectAttempt {
+        return .{
+            .attempt = try HandshakeClientSession
+                .connectPreconfiguredAttempt(
+                allocator,
+                io,
+                local_address,
+                server,
+                options,
+            ),
+        };
     }
 
     pub fn deinit(self: *StatefulProtectedClientSession) void {
@@ -2582,6 +2721,36 @@ pub const StatefulProtectedClientSession = struct {
     }
 };
 
+pub const StatefulProtectedConnectAttempt = struct {
+    attempt: HandshakeConnectAttempt,
+
+    pub fn accepted(self: StatefulProtectedConnectAttempt) bool {
+        return self.attempt.accepted();
+    }
+
+    pub fn status(self: StatefulProtectedConnectAttempt) u16 {
+        return self.attempt.status();
+    }
+
+    pub fn responseHeader(
+        self: StatefulProtectedConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return self.attempt.responseHeader(name);
+    }
+
+    pub fn deinit(self: *StatefulProtectedConnectAttempt) void {
+        self.attempt.deinit();
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(
+        self: *StatefulProtectedConnectAttempt,
+    ) Error!StatefulProtectedClientSession {
+        return .{ .session = try self.attempt.requireAccepted() };
+    }
+};
+
 fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) http3.runtime.ProtectedConfig {
     var out = config;
     out.local_settings = webtransport.defaultSettings(out.local_settings);
@@ -2608,14 +2777,14 @@ fn webTransportHandshakeSessionOptions(
     return out;
 }
 
-fn connectStatefulSession(
+fn connectStatefulAttempt(
     h3_client: *http3.runtime.HandshakeClient,
     authority: []const u8,
     path: []const u8,
     origin: []const u8,
     additional_headers: []const http3.Qpack.HeaderField,
     limits: Limits,
-) Error!HandshakeClientSession {
+) Error!HandshakeConnectAttempt {
     const allocator = h3_client.allocator;
     var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
     const headers = try connectRequestHeadersWithAdditional(
@@ -2631,36 +2800,16 @@ fn connectStatefulSession(
         .headers = headers,
     }, null);
     var response_head =
-        try receiveHandshakeConnectResponse(h3_client, session_id);
+        try receiveHandshakeConnectAttemptResponse(h3_client, session_id);
     errdefer response_head.deinit(allocator);
-    try h3_client.detachResponseStream(session_id);
-    try webtransport.ensureDatagramsNegotiated(
-        h3_client.options.local_settings,
-        h3_client.control.settings.peer,
-    );
     const webtransport_session_id = webtransport.SessionId.init(session_id);
-    var streams = try initHandshakeStreamRegistry(
-        allocator,
-        webtransport_session_id,
-        .client,
-        h3_client.options.local_settings,
-        h3_client.control.settings.peer,
-        limits.max_session_streams,
-        null,
-        null,
-    );
-    errdefer streams.deinit();
-    const control = try session_control.Control.init(
-        webtransport_session_id,
-    );
     const owned_h3 = h3_client.*;
     h3_client.* = undefined;
     return .{
         .h3 = owned_h3,
         .session_id = webtransport_session_id,
         .response = response_head,
-        .streams = streams,
-        .control = control,
+        .limits = limits,
     };
 }
 
@@ -2754,7 +2903,7 @@ fn receiveProtectedConnectRequest(
     }
 }
 
-fn receiveHandshakeConnectResponse(
+fn receiveHandshakeConnectAttemptResponse(
     client: *http3.runtime.HandshakeClient,
     stream_id: u62,
 ) Error!http3.DecodedResponseHead {
@@ -2765,7 +2914,13 @@ fn receiveHandshakeConnectResponse(
         switch (event) {
             .head => |*head| {
                 if (head.* != .response) return error.InvalidConnect;
-                try validateConnectResponse(head.response);
+                if (head.response.status >= 200 and
+                    head.response.status < 300)
+                {
+                    try validateOptionalCapsuleProtocol(
+                        head.response.headers,
+                    );
+                }
                 const owned = head.response;
                 event = .finished;
                 return owned;
