@@ -2,6 +2,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const reconnect = @import("reconnect.zig");
 pub const broker = @import("broker.zig");
 pub const websocket_runtime = @import("websocket_runtime.zig");
 pub const tls_runtime = @import("tls_runtime.zig");
@@ -4246,6 +4247,7 @@ test "MQTT CONNECT information preference helpers use protocol defaults" {
 
 test {
     _ = runtime;
+    _ = reconnect;
     _ = broker;
     _ = websocket_runtime;
     _ = tls_runtime;
@@ -4258,6 +4260,7 @@ test {
     _ = @import("runtime/auth_tests.zig");
     _ = @import("runtime/connect_timeout_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
+    _ = @import("runtime/reconnect_tests.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/information_preferences_tests.zig");
     _ = @import("tls_runtime_tests.zig");

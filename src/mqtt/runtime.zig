@@ -1620,6 +1620,15 @@ pub const Connection = struct {
         return self.local_maximum_qos;
     }
 
+    /// Client-side Maximum QoS advertised by the connected broker.
+    pub fn peerMaximumQoS(self: *const Connection) mqtt.QoS {
+        return self.peer_maximum_qos;
+    }
+
+    pub fn peerRetainAvailable(self: *const Connection) bool {
+        return self.peer_retain_available;
+    }
+
     /// Return the proxied source IP when available, otherwise the connected
     /// transport peer. PROXY UNKNOWN/LOCAL deliberately use the latter.
     pub fn remoteAddress(self: *const Connection) net.IpAddress {
@@ -2139,6 +2148,29 @@ pub const Connection = struct {
         }
     }
 
+    /// Write client-owned durable QoS state without changing its delivery
+    /// semantics. Unlike broker fanout, reconnect replay must never silently
+    /// downgrade a previously accepted QoS.
+    pub fn writeClientSessionTransmission(
+        self: *Connection,
+        transmission: @import("session/mod.zig").Transmission,
+    ) Error!void {
+        return switch (transmission) {
+            .publish => |publish_value| {
+                if (@intFromEnum(publish_value.qos) >
+                    @intFromEnum(self.peer_maximum_qos))
+                {
+                    return error.InvalidQoS;
+                }
+                if (publish_value.retain and !self.peer_retain_available) {
+                    return error.InvalidProperty;
+                }
+                return self.writeSessionPublish(publish_value);
+            },
+            .pubrel => |pubrel| return self.writeSessionPubRel(pubrel),
+        };
+    }
+
     fn writeSessionPublish(
         self: *Connection,
         value: @import("session/mod.zig").PublishTransmission,
@@ -2186,7 +2218,7 @@ pub const Connection = struct {
         try self.writePacket(self.write_scratch.items);
     }
 
-    fn writeSessionPubRel(
+    pub fn writeSessionPubRel(
         self: *Connection,
         pubrel: @import("session/mod.zig").PubRelTransmission,
     ) Error!void {

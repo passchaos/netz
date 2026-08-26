@@ -818,6 +818,17 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "qpack_encode"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeServerSession, "qpack_encode"));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
+    try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
+    try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
+    try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ReconnectPolicy"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "completeNextPublish",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "writeClientSessionTransmission",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicName"));
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicFilter"));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicMatchesFilter"));
