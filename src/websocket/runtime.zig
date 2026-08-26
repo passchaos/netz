@@ -315,6 +315,45 @@ pub const UnixServer = struct {
         http_owned = false;
         return connection;
     }
+
+    pub fn serveConcurrent(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *Connection,
+        ) Error!void,
+        max_connections: usize,
+        options: AcceptOptions,
+    ) AsyncServeError!ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.http.allocator.alloc(
+            ?anyerror,
+            max_connections,
+        );
+        errdefer self.http.allocator.free(results);
+        @memset(results, null);
+        for (results) |*result| {
+            var connection = try self.accept(options);
+            errdefer connection.close();
+            group.async(
+                self.http.io,
+                ServeTask(HandlerContext).run,
+                .{ServeTask(HandlerContext){
+                    .connection = connection,
+                    .context = context,
+                    .handler = handler,
+                    .result = result,
+                }},
+            );
+        }
+        try group.await(self.http.io);
+        return .{
+            .allocator = self.http.allocator,
+            .errors = results,
+        };
+    }
 };
 
 /// TLS 1.3 WebSocket listener.

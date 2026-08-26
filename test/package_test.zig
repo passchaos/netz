@@ -125,6 +125,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "UnixServer"));
     try std.testing.expect(@hasDecl(
+        netz.http1.runtime.UnixServer,
+        "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
         "connectUnix",
     ));
@@ -346,6 +350,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "UnixServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.UnixServer,
+        "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,

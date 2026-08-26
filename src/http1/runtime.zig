@@ -1395,6 +1395,41 @@ pub const UnixServer = struct {
         defer connection.close();
         return connection.serve(context, handler, max_requests);
     }
+
+    pub fn serveConcurrent(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            http1.Request,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+    ) AsyncServeError!ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.allocator.alloc(
+            ?anyerror,
+            max_connections,
+        );
+        errdefer self.allocator.free(results);
+        @memset(results, null);
+        for (results) |*result| {
+            var connection = try self.accept();
+            errdefer connection.close();
+            group.async(
+                self.io,
+                ServeTask(HandlerContext).run,
+                .{ServeTask(HandlerContext){
+                    .connection = connection,
+                    .context = context,
+                    .handler = handler,
+                    .result = result,
+                }},
+            );
+        }
+        try group.await(self.io);
+        return .{ .allocator = self.allocator, .errors = results };
+    }
 };
 
 pub const TlsListenOptions = struct {

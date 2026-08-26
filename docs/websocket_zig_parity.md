@@ -59,7 +59,8 @@ IPC transport exposed by the reference. They reuse the ordinary HTTP/1 Upgrade,
 subprotocol, permessage-deflate, frame and close state machines rather than
 forking a Unix-only protocol path. The client requires an explicit HTTP Host
 authority because a filesystem socket path is not one; the listener deliberately
-does not apply the TCP-only NODELAY option. An end-to-end test negotiates a
+does not apply the TCP-only NODELAY option. Both HTTP/1 and WebSocket Unix
+listeners expose the same bounded `serveConcurrent` shape as TCP. An end-to-end test negotiates a
 subprotocol and compression, exchanges text in both directions, and closes over
 a real filesystem Unix socket.
 
