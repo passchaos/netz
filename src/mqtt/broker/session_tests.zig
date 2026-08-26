@@ -597,6 +597,10 @@ test "broker caps persistent Session lifetime across MQTT versions" {
     });
     defer threaded.deinit();
     const io = threaded.io();
+    // The bounded test server exits after the four connect/resume pairs, the
+    // zero-expiry pair, and the subscriber/source Will pair below. Keep the
+    // accept budget exact so joinServer cannot wait for a phantom client.
+    const connection_count = 10;
 
     var broker = try context.TestContext.BrokerType.listen(
         allocator,
@@ -604,7 +608,7 @@ test "broker caps persistent Session lifetime across MQTT versions" {
         .{ .ip4 = .loopback(0) },
         .{
             .limits = .{
-                .max_connections = 11,
+                .max_connections = connection_count,
                 .max_queued_deliveries_per_connection = 8,
                 .runtime = .{ .max_packet_size = 4096 },
             },
@@ -612,7 +616,10 @@ test "broker caps persistent Session lifetime across MQTT versions" {
         },
     );
     defer broker.deinit();
-    var serve = ServeState{ .broker = &broker, .connection_count = 11 };
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = connection_count,
+    };
     const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
     var joined = false;
     defer if (!joined) thread.join();
