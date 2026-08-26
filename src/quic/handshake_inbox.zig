@@ -181,16 +181,28 @@ pub const Inbox = struct {
         return self.slots.len - self.len - self.application_len;
     }
 
-    pub fn takeApplication(self: *Inbox) ?quic.runtime.OwnedBytes {
+    /// Move every early application datagram into `destination` without
+    /// allocation. The destination must reserve `applicationCount()` slots
+    /// before calling; this precondition lets dispatcher promotion remain
+    /// transactional on allocation failure.
+    pub fn drainApplicationInto(
+        self: *Inbox,
+        destination: *std.ArrayList(quic.runtime.OwnedBytes),
+    ) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.application_len == 0) return null;
-        const datagram = self.application_slots[self.application_head].?;
-        self.application_slots[self.application_head] = null;
-        self.application_head =
-            (self.application_head + 1) % self.application_slots.len;
-        self.application_len -= 1;
-        return datagram;
+        std.debug.assert(
+            destination.capacity - destination.items.len >=
+                self.application_len,
+        );
+        while (self.application_len != 0) {
+            const datagram = self.application_slots[self.application_head].?;
+            self.application_slots[self.application_head] = null;
+            self.application_head =
+                (self.application_head + 1) % self.application_slots.len;
+            self.application_len -= 1;
+            destination.appendAssumeCapacity(datagram);
+        }
     }
 
     pub fn count(self: *Inbox) usize {

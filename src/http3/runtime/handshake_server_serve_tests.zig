@@ -630,11 +630,86 @@ test "HTTP/3 handshake supervisor establishes concurrent clients" {
     client_a.join();
     client_b.join();
     clients_joined = true;
-    for (&clients) |*client| {
+    var request_ids: [clients.len]u62 = undefined;
+    for (&clients, 0..) |*client, index| {
         if (client.err) |err| return err;
+        const established = &(client.established orelse
+            return error.TestUnexpectedResult);
+        try std.testing.expectEqualStrings(
+            "h3",
+            established.negotiatedAlpn(),
+        );
+        request_ids[index] = try established.sendRequest(.{
+            .method = "GET",
+            .path = if (index == 0) "/one" else "/two",
+            .authority = "localhost",
+        });
+    }
+
+    var responses_sent: usize = 0;
+    while (responses_sent < promoted.len) {
+        var event = try dispatcher.receive(&versions);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*routed| {
+                var found = false;
+                for (&promoted) |*maybe_promoted| {
+                    const promoted_session = &(maybe_promoted.* orelse continue);
+                    if (promoted_session.handle != routed.connection_handle) continue;
+                    try promoted_session.session.processRequestPacket(
+                        &routed.packet,
+                    );
+                    try dispatcher.refreshConnectionTimer(
+                        routed.connection_handle,
+                    );
+                    while (try promoted_session.session.pollRequestEvent()) |request_value| {
+                        var request = request_value;
+                        defer request.deinit(allocator);
+                        if (request != .message) return error.TestUnexpectedResult;
+                        switch (request.message.value) {
+                            .head => |head| {
+                                if (head != .request) {
+                                    return error.TestUnexpectedResult;
+                                }
+                                const body = if (std.mem.eql(
+                                    u8,
+                                    head.request.path,
+                                    "/one",
+                                )) "response-one" else if (std.mem.eql(
+                                    u8,
+                                    head.request.path,
+                                    "/two",
+                                )) "response-two" else return error.TestUnexpectedResult;
+                                try promoted_session.session.sendResponse(
+                                    request.message.stream_id,
+                                    .{ .status = 200, .body = body },
+                                );
+                                responses_sent += 1;
+                            },
+                            .finished => {},
+                            else => return error.TestUnexpectedResult,
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+                if (!found) return error.TestUnexpectedResult;
+            },
+            .consumed, .timer, .discarded_long_header => {},
+            .pending_handshake, .new_initial, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+
+    for (&clients, request_ids, 0..) |*client, request_id, index| {
         var established = client.established orelse
             return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings("h3", established.negotiatedAlpn());
+        var response = try established.receiveResponse(request_id);
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.response.status);
+        try std.testing.expectEqualStrings(
+            if (index == 0) "response-one" else "response-two",
+            response.response.body,
+        );
         established.deinit();
         client.established = null;
     }

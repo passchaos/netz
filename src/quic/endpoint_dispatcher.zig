@@ -342,9 +342,7 @@ pub const Dispatcher = struct {
             )) catch unreachable;
             slot.value_ptr.connection_ids.appendAssumeCapacity(key);
         }
-        while (pending_inbox.takeApplication()) |datagram| {
-            self.promoted_datagrams.appendAssumeCapacity(datagram);
-        }
+        pending_inbox.drainApplicationInto(&self.promoted_datagrams);
         self.timers.armFromConnection(
             connection_handle,
             connection,
