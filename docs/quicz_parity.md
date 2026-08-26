@@ -353,6 +353,12 @@ transport state, and authenticated RETIRE_CONNECTION_ID packets remove obsolete
 routes before the next event is exposed. The per-connection route list and
 router reserve the negotiated pool maximum up front, keeping receive-time CID
 reconciliation allocation-free after state mutation.
+HTTP/3's stateful server session now exposes `processRequestPacket` plus
+`pollRequestEvent`: an endpoint owner can inject one already-authenticated QUIC
+packet and drain ready HTTP/3 events without any session attempting another UDP
+read. A two-client preconfigured-key test routes interleaved SETTINGS and
+request packets through one dispatcher/socket into two independent HTTP/3
+sessions, validating each path and each QPACK/control state independently.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server: Initial/Retry handshakes still need incremental dispatcher-owned

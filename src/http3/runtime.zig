@@ -3256,29 +3256,65 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
     ) Error!StreamingRequestEvent {
         while (true) {
-            try self.releaseStreamingRequestCapacity();
-            if (self.streaming_requests.takeFirstReset()) |reset| {
-                self.request_lifecycle.markFinished(reset.stream_id);
-                self.qpack_encode.abandonStream(reset.stream_id);
-                _ = self.outbound_bodies.finish(reset.stream_id);
-                return .{ .reset = .{
-                    .from = reset.from,
-                    .stream_id = reset.stream_id,
-                    .application_error_code = reset.application_error_code,
-                } };
-            }
-            if (try self.streaming_requests.nextRequest(
-                &self.request_streams,
-                self.qpack_decode.table,
-                self.options.local_settings.qpack_blocked_streams,
-            )) |ready| {
-                return try self.applyStreamingRequestEvent(
-                    ready.entry,
-                    ready.event,
-                );
-            }
+            if (try self.pollRequestEvent()) |event| return event;
             try self.receiveRequestPacket();
         }
+    }
+
+    /// Return the next request event already present in QUIC stream state.
+    ///
+    /// This method never reads the UDP socket. Endpoint-wide dispatchers call
+    /// `processRequestPacket` after their sole socket receive, then poll each
+    /// affected HTTP/3 session without allowing per-connection readers to race.
+    pub fn pollRequestEvent(
+        self: *HandshakeServerSession,
+    ) Error!?StreamingRequestEvent {
+        try self.releaseStreamingRequestCapacity();
+        if (self.streaming_requests.takeFirstReset()) |reset| {
+            self.request_lifecycle.markFinished(reset.stream_id);
+            self.qpack_encode.abandonStream(reset.stream_id);
+            _ = self.outbound_bodies.finish(reset.stream_id);
+            return .{ .reset = .{
+                .from = reset.from,
+                .stream_id = reset.stream_id,
+                .application_error_code = reset.application_error_code,
+            } };
+        }
+        if (try self.streaming_requests.nextRequest(
+            &self.request_streams,
+            self.qpack_decode.table,
+            self.options.local_settings.qpack_blocked_streams,
+        )) |ready| {
+            return try self.applyStreamingRequestEvent(
+                ready.entry,
+                ready.event,
+            );
+        }
+        return null;
+    }
+
+    /// Apply an already authenticated packet delivered by the endpoint-wide
+    /// QUIC dispatcher. The packet remains caller-owned. ACK policy and QPACK
+    /// feedback match the blocking receive path, but no socket read occurs.
+    pub fn processRequestPacket(
+        self: *HandshakeServerSession,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        if (self.receive_packets.ack_pending) {
+            try self.established.connection.sendAck(0);
+            self.receive_packets.ack_pending = false;
+        }
+        _ = self.established.connection.sendAckForPacketIfNeeded(
+            packet.packet.packet_number,
+            packet.frames,
+        ) catch {
+            self.receive_packets.ack_pending = true;
+        };
+        try visitStreamingServerRequestPacket(
+            self,
+            packetView(packet.*),
+        );
+        try self.flushRequestPacketFeedback();
     }
 
     pub fn readRequestData(
@@ -4144,6 +4180,10 @@ pub const HandshakeServerSession = struct {
         // Encoder-stream inserts and reset cancellations both queue decoder
         // instructions. Flush them at the packet boundary so a peer does not
         // remain artificially blocked until another HEADERS event appears.
+        try self.flushRequestPacketFeedback();
+    }
+
+    fn flushRequestPacketFeedback(self: *HandshakeServerSession) Error!void {
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback();
         }
@@ -23478,6 +23518,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 
 test {
     _ = @import("runtime/development_server_tests.zig");
+    _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/handshake_server_serve_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/informational_tests.zig");
