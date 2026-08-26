@@ -1077,7 +1077,8 @@ Raw MQTT and MQTT-over-WebSocket additionally expose Unix-domain server/client
 paths, including `PendingSource` integration with both Broker serving modes.
 They reuse the normal MQTT and WebSocket state machines while rejecting PROXY
 configuration and TCP-only NODELAY behavior on the local transport. Real socket
-tests complete MQTT 5 QoS 1 in both raw and WebSocket forms.
+tests complete MQTT 5 QoS 1 in both raw and WebSocket forms, including bounded
+concurrent serving of independent clients with per-connection result reporting.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 134
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet

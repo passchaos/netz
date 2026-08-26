@@ -127,6 +127,30 @@ pub const Server = struct {
             }.call,
         };
     }
+
+    pub fn serveConcurrent(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        max_connections: usize,
+        options: runtime.AcceptOptions,
+    ) runtime.AsyncServeError!runtime.ConcurrentServeResult {
+        return serveAcceptedConcurrent(
+            Server,
+            self,
+            self.websocket_server.http.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            options,
+        );
+    }
 };
 
 pub const ListenOptions = struct {
@@ -227,6 +251,32 @@ pub const UnixServer = struct {
                 }
             }.call,
         };
+    }
+
+    /// Accept a bounded set of Unix-domain WebSocket clients and run their
+    /// MQTT handlers concurrently through the same task lifecycle as WSS.
+    pub fn serveConcurrent(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        max_connections: usize,
+        options: runtime.AcceptOptions,
+    ) runtime.AsyncServeError!runtime.ConcurrentServeResult {
+        return serveAcceptedConcurrent(
+            UnixServer,
+            self,
+            self.websocket_server.http.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            options,
+        );
     }
 };
 
@@ -361,33 +411,17 @@ pub const TlsServer = struct {
         max_connections: usize,
         options: runtime.AcceptOptions,
     ) runtime.AsyncServeError!runtime.ConcurrentServeResult {
-        var group: std.Io.Group = .init;
-        const results = try self.allocator.alloc(
-            ?anyerror,
+        return serveAcceptedConcurrent(
+            TlsServer,
+            self,
+            self.websocket_server.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
             max_connections,
+            options,
         );
-        errdefer self.allocator.free(results);
-        @memset(results, null);
-        for (results) |*result| {
-            var accepted = try self.accept(options);
-            errdefer accepted.deinit(self.allocator);
-            group.async(
-                self.websocket_server.io,
-                TlsServeTask(HandlerContext).run,
-                .{TlsServeTask(HandlerContext){
-                    .accepted = accepted,
-                    .context = context,
-                    .handler = handler,
-                    .result = result,
-                    .allocator = self.allocator,
-                }},
-            );
-        }
-        try group.await(self.websocket_server.io);
-        return .{
-            .allocator = self.allocator,
-            .errors = results,
-        };
     }
 };
 
@@ -407,7 +441,49 @@ pub const TlsListenOptions = struct {
     allowed_origins: []const []const u8 = &.{},
 };
 
-fn TlsServeTask(comptime HandlerContext: type) type {
+/// Shared finite accept loop for WebSocket transports that have completed the
+/// MQTT CONNECT exchange. This centralizes ownership of accepted clients and
+/// keeps Unix-domain and TLS serving behavior identical.
+fn serveAcceptedConcurrent(
+    comptime ServerType: type,
+    server: *ServerType,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    comptime HandlerContext: type,
+    context: *HandlerContext,
+    comptime handler: *const fn (
+        *HandlerContext,
+        *runtime.AcceptedClient,
+    ) runtime.Error!void,
+    max_connections: usize,
+    options: runtime.AcceptOptions,
+) runtime.AsyncServeError!runtime.ConcurrentServeResult {
+    var group: std.Io.Group = .init;
+    const results = try allocator.alloc(?anyerror, max_connections);
+    errdefer allocator.free(results);
+    @memset(results, null);
+
+    for (results) |*result| {
+        var accepted = try server.accept(options);
+        errdefer accepted.deinit(allocator);
+        group.async(
+            io,
+            ServeTask(HandlerContext).run,
+            .{ServeTask(HandlerContext){
+                .accepted = accepted,
+                .context = context,
+                .handler = handler,
+                .result = result,
+                .allocator = allocator,
+            }},
+        );
+    }
+
+    try group.await(io);
+    return .{ .allocator = allocator, .errors = results };
+}
+
+fn ServeTask(comptime HandlerContext: type) type {
     return struct {
         accepted: runtime.AcceptedClient,
         context: *HandlerContext,

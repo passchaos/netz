@@ -2,13 +2,15 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
-test "MQTT client and server exchange over a Unix socket" {
+test "MQTT Unix server handles concurrent clients" {
     if (comptime @import("builtin").os.tag == .windows) {
         return error.SkipZigTest;
     }
 
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
     defer threaded.deinit();
     const io = threaded.io();
     var tmp = std.testing.tmpDir(.{});
@@ -32,37 +34,55 @@ test "MQTT client and server exchange over a Unix socket" {
 
     const Shared = struct {
         server: *runtime.UnixServer,
+        result: ?runtime.ConcurrentServeResult = null,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            var accepted = self.server.accept(.{ .protocol = .v5 }) catch |err| {
-                self.err = err;
-                return;
-            };
-            defer accepted.deinit(self.server.allocator);
-            var publish = accepted.connection.readPublish() catch |err| {
-                self.err = err;
-                return;
-            };
-            defer publish.deinit(self.server.allocator);
-            if (publish.publish.qos != mqtt.QoS.at_least_once or
-                !std.mem.eql(u8, publish.publish.topic, "unix/qos1"))
-            {
-                self.err = error.UnexpectedPacket;
-                return;
-            }
-            accepted.connection.writePubAck(
-                publish.publish.packet_id.?,
-                0,
+            self.result = self.server.serveConcurrent(
+                @This(),
+                self,
+                handle,
+                2,
+                .{ .protocol = .v5 },
             ) catch |err| {
                 self.err = err;
                 return;
             };
-            var disconnect = accepted.connection.readDisconnect() catch |err| {
-                self.err = err;
-                return;
-            };
-            disconnect.deinit(self.server.allocator);
+        }
+
+        fn handle(
+            self: *@This(),
+            accepted: *runtime.AcceptedClient,
+        ) runtime.Error!void {
+            _ = self;
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(accepted.connection.allocator);
+            const expected_payload = if (std.mem.eql(
+                u8,
+                accepted.connect.connect.client_id,
+                "mqtt-unix-one",
+            ))
+                "one"
+            else if (std.mem.eql(
+                u8,
+                accepted.connect.connect.client_id,
+                "mqtt-unix-two",
+            ))
+                "two"
+            else
+                return error.UnexpectedPacket;
+            if (publish.publish.qos != mqtt.QoS.at_least_once or
+                !std.mem.eql(u8, publish.publish.topic, "unix/qos1") or
+                !std.mem.eql(u8, publish.publish.payload, expected_payload))
+            {
+                return error.UnexpectedPacket;
+            }
+            try accepted.connection.writePubAck(
+                publish.publish.packet_id.?,
+                0,
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            disconnect.deinit(accepted.connection.allocator);
         }
     };
     var shared = Shared{ .server = &server };
@@ -70,21 +90,52 @@ test "MQTT client and server exchange over a Unix socket" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var client = try runtime.Client.connectUnix(
-        allocator,
-        io,
-        address,
-        .{ .protocol = .v5, .client_id = "mqtt-unix" },
-    );
-    defer client.close();
-    try client.publish(
-        "unix/qos1",
-        "local",
-        .{ .qos = .at_least_once },
-    );
-    try client.disconnect(0);
+    const ClientTask = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: std.Io.net.UnixAddress,
+        client_id: []const u8,
+        payload: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var client = try runtime.Client.connectUnix(
+                self.allocator,
+                self.io,
+                self.address,
+                .{ .protocol = .v5, .client_id = self.client_id },
+            );
+            defer client.close();
+            try client.publish(
+                "unix/qos1",
+                self.payload,
+                .{ .qos = .at_least_once },
+            );
+            try client.disconnect(0);
+        }
+    };
+    var clients = [_]ClientTask{
+        .{ .allocator = allocator, .io = io, .address = address, .client_id = "mqtt-unix-one", .payload = "one" },
+        .{ .allocator = allocator, .io = io, .address = address, .client_id = "mqtt-unix-two", .payload = "two" },
+    };
+    const client_one = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const client_two = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+    client_one.join();
+    client_two.join();
 
     thread.join();
     joined = true;
+    defer if (shared.result) |*result| result.deinit();
+    if (clients[0].err) |err| return err;
+    if (clients[1].err) |err| return err;
     if (shared.err) |err| return err;
+    const result = shared.result.?;
+    if (result.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), result.successCount());
 }

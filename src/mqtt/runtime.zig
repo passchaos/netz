@@ -252,26 +252,17 @@ pub const Server = struct {
         max_connections: usize,
         options: AcceptOptions,
     ) AsyncServeError!ConcurrentServeResult {
-        var group: std.Io.Group = .init;
-        const results = try self.allocator.alloc(?anyerror, max_connections);
-        errdefer self.allocator.free(results);
-        @memset(results, null);
-
-        for (results) |*result| {
-            var accepted = try self.accept(options);
-            errdefer accepted.deinit(self.allocator);
-            const task = ServeTask(HandlerContext){
-                .accepted = accepted,
-                .context = context,
-                .handler = handler,
-                .result = result,
-                .allocator = self.allocator,
-            };
-            group.async(self.io, ServeTask(HandlerContext).run, .{task});
-        }
-
-        try group.await(self.io);
-        return .{ .allocator = self.allocator, .errors = results };
+        return serveAcceptedConcurrent(
+            Server,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            options,
+        );
     }
 };
 
@@ -353,6 +344,33 @@ pub const UnixServer = struct {
             }.call,
         };
     }
+
+    /// Accept a bounded set of Unix-domain clients and run their handlers in
+    /// parallel. The result ordering matches accept order, just like the TCP
+    /// listener, so callers can inspect every connection outcome.
+    pub fn serveConcurrent(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *AcceptedClient,
+        ) Error!void,
+        max_connections: usize,
+        options: AcceptOptions,
+    ) AsyncServeError!ConcurrentServeResult {
+        return serveAcceptedConcurrent(
+            UnixServer,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            options,
+        );
+    }
 };
 
 /// Type-erased pending CONNECT source used by the shared broker core. Keeping
@@ -400,6 +418,42 @@ pub const ConcurrentServeResult = struct {
         return count;
     }
 };
+
+/// Shared finite accept loop for transports that produce `AcceptedClient`.
+/// Keeping the task ownership rules in one place prevents TCP and Unix
+/// listeners from drifting when connection teardown behavior changes.
+fn serveAcceptedConcurrent(
+    comptime ServerType: type,
+    server: *ServerType,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    comptime HandlerContext: type,
+    context: *HandlerContext,
+    comptime handler: *const fn (*HandlerContext, *AcceptedClient) Error!void,
+    max_connections: usize,
+    options: AcceptOptions,
+) AsyncServeError!ConcurrentServeResult {
+    var group: std.Io.Group = .init;
+    const results = try allocator.alloc(?anyerror, max_connections);
+    errdefer allocator.free(results);
+    @memset(results, null);
+
+    for (results) |*result| {
+        var accepted = try server.accept(options);
+        errdefer accepted.deinit(allocator);
+        const task = ServeTask(HandlerContext){
+            .accepted = accepted,
+            .context = context,
+            .handler = handler,
+            .result = result,
+            .allocator = allocator,
+        };
+        group.async(io, ServeTask(HandlerContext).run, .{task});
+    }
+
+    try group.await(io);
+    return .{ .allocator = allocator, .errors = results };
+}
 
 fn ServeTask(comptime HandlerContext: type) type {
     return struct {

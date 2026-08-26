@@ -997,6 +997,10 @@ test "public modules are reachable" {
         "pendingSource",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Client,
         "connectUnix",
     ));
@@ -1341,6 +1345,10 @@ test "public modules are reachable" {
         "pendingSource",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.UnixServer,
+        "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Client,
         "connectUnix",
     ));
@@ -1371,6 +1379,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Server,
         "pendingSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Server,
+        "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,
