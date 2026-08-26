@@ -598,8 +598,15 @@ test "WebTransport batched writes commit concurrent stream progress" {
 
     const first = try client.openBidirectionalStream();
     const second = try client.openBidirectionalStream();
+    // Once the first stream exhausts its small per-stream window, the batch
+    // scheduler must skip it even though it remains the preferred stream.
+    // Otherwise it is selected repeatedly and transport credit updates are
+    // never serviced.
+    try client.setStreamPriority(first, 10);
+    try client.setStreamPriority(second, -10);
     var offsets = [_]usize{ 0, 0 };
     var saw_two_packet_batch = false;
+    var saw_blocked_priority_skip = false;
     while (offsets[0] < first_payload.len or
         offsets[1] < second_payload.len)
     {
@@ -613,10 +620,14 @@ test "WebTransport batched writes commit concurrent stream progress" {
         try std.testing.expect(result.progressed != 0);
         saw_two_packet_batch = saw_two_packet_batch or
             result.progressed == 2;
+        saw_blocked_priority_skip = saw_blocked_priority_skip or
+            (offsets[0] < first_payload.len and
+                counts[0] == 0 and counts[1] != 0);
         offsets[0] += counts[0];
         offsets[1] += counts[1];
     }
     try std.testing.expect(saw_two_packet_batch);
+    try std.testing.expect(saw_blocked_priority_skip);
     try client.finishStream(first);
     try client.finishStream(second);
 

@@ -83,7 +83,8 @@ pub fn write(
         // a stable write array: each selection scans only the bounded packet
         // batch (currently at most 64 streams), not the payload bytes.
         while (packet_count < packet_limit) {
-            const input_index = (try nextWriteIndex(
+            const input_index = (try nextSendableWriteIndex(
+                connection,
                 registry,
                 writes,
                 input_indices[0..packet_count],
@@ -96,11 +97,14 @@ pub fn write(
                 item.stream_id,
             );
             const credit = connection.streamSendCredit(item.stream_id);
-            const packet_payload = credit.max_datagram_size -| 128;
             const count = @min(
                 item.data.len,
-                @min(packet_payload, credit.available()),
+                sendableBytes(credit),
             );
+            // `prepare` can consume the final bytes of credit while sending a
+            // stream's association prefix. The next candidate scan will now
+            // skip this stream, rather than repeatedly selecting a blocked
+            // high-priority stream and preventing transport progress.
             if (count == 0) continue;
 
             frames[packet_count][0] = .{ .stream = .{
@@ -162,6 +166,43 @@ pub fn write(
             .send_error = sent.send_error,
         };
     }
+}
+
+/// Select the highest-priority input that can contribute application bytes.
+///
+/// Flow-control and congestion availability are deliberately part of runtime
+/// selection rather than handled after priority selection. Otherwise a
+/// blocked high-priority stream is selected forever: it never enters
+/// `selected_indices`, the packet count does not advance, and the outer loop
+/// never gets a chance to service ACK/MAX_DATA/MAX_STREAM_DATA packets.
+fn nextSendableWriteIndex(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    writes: []const Write,
+    selected_indices: []const usize,
+) Error!?usize {
+    var selected_index: ?usize = null;
+    var selected_priority: i32 = std.math.minInt(i32);
+    for (writes, 0..) |item, input_index| {
+        if (item.data.len == 0 or
+            std.mem.indexOfScalar(usize, selected_indices, input_index) != null or
+            sendableBytes(connection.streamSendCredit(item.stream_id)) == 0)
+        {
+            continue;
+        }
+        const priority = try registry.priority(item.stream_id);
+        if (selected_index == null or priority > selected_priority) {
+            selected_index = input_index;
+            selected_priority = priority;
+        }
+    }
+    return selected_index;
+}
+
+fn sendableBytes(credit: quic.one_rtt.SendCredit) usize {
+    // Leave conservative room for the short-header packet and STREAM frame,
+    // matching the single-stream writer's packet sizing policy.
+    return @min(credit.max_datagram_size -| 128, credit.available());
 }
 
 fn nextWriteIndex(
