@@ -461,7 +461,11 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
         }
     }
     defer supervisor.discardCompletion(&completion);
-    try std.testing.expectError(error.InvalidEncoding, completion.result);
+    try std.testing.expect(completion.result == .failure);
+    try std.testing.expectEqual(
+        error.InvalidEncoding,
+        completion.result.failure,
+    );
     try std.testing.expectEqual(@as(usize, 0), supervisor.pendingCount());
     try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
 }

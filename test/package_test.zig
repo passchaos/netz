@@ -2164,6 +2164,10 @@ test "public modules are reachable" {
         "HandshakeSupervisor",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "PromotedHandshakeSession",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeSupervisor,
         "receive",
     ));

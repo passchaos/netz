@@ -2912,7 +2912,34 @@ pub const HandshakeAdmission = struct {
 pub const HandshakeCompletion = struct {
     handle: quic.endpoint_dispatcher.ConnectionHandle,
     admission: *HandshakeAdmission,
-    result: Error!HandshakeServerSession,
+    result: union(enum) {
+        session: HandshakeServerSession,
+        failure: Error,
+    },
+};
+
+/// Stable heap-backed session registered in the endpoint dispatcher. Moving
+/// this handle never invalidates the connection pointer retained by routing.
+/// `deinit` must run on the dispatcher-owning task.
+pub const PromotedHandshakeSession = struct {
+    dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+    allocator: std.mem.Allocator,
+    handle: quic.endpoint_dispatcher.ConnectionHandle,
+    session: *HandshakeServerSession,
+    registered: bool = true,
+
+    pub fn value(self: *PromotedHandshakeSession) *HandshakeServerSession {
+        return self.session;
+    }
+
+    pub fn deinit(self: *PromotedHandshakeSession) void {
+        if (self.registered) {
+            _ = self.dispatcher.unregisterConnection(self.handle) catch {};
+        }
+        self.session.deinit();
+        self.allocator.destroy(self.session);
+        self.* = undefined;
+    }
 };
 
 pub const HandshakeSupervisorEvent = union(enum) {
@@ -3090,19 +3117,33 @@ pub const HandshakeSupervisor = struct {
     pub fn promote(
         self: *HandshakeSupervisor,
         completion: *HandshakeCompletion,
-    ) HandshakeAdmissionError!HandshakeServerSession {
-        var session = try completion.result;
+    ) HandshakeAdmissionError!PromotedHandshakeSession {
+        const session = try self.allocator.create(HandshakeServerSession);
+        errdefer self.allocator.destroy(session);
+        session.* = switch (completion.result) {
+            .session => |value| value,
+            .failure => |err| return err,
+        };
+        // Transfer the successful value out of the completion before any later
+        // error path can ask the caller to discard that completion.
+        completion.result = .{ .failure = error.HandshakeReceiveFailed };
         errdefer session.deinit();
         try self.server.promoteAdmission(
             self.dispatcher,
             completion.admission,
             completion.handle,
-            &session,
+            session,
         );
+        const handle = completion.handle;
         completion.admission.deinit();
         self.allocator.destroy(completion.admission);
         completion.* = undefined;
-        return session;
+        return .{
+            .dispatcher = self.dispatcher,
+            .allocator = self.allocator,
+            .handle = handle,
+            .session = session,
+        };
     }
 
     pub fn discardCompletion(
@@ -3132,7 +3173,12 @@ pub const HandshakeSupervisor = struct {
         context: *HandshakeWorkerContext,
         admission: *HandshakeAdmission,
     ) std.Io.Cancelable!void {
-        const result = context.server.acceptAdmission(admission);
+        const result: @FieldType(HandshakeCompletion, "result") = blk: {
+            const session = context.server.acceptAdmission(admission) catch |err| {
+                break :blk .{ .failure = err };
+            };
+            break :blk .{ .session = session };
+        };
         context.completed.putOne(context.io, .{
             .handle = admission.handle,
             .admission = admission,
@@ -3140,7 +3186,10 @@ pub const HandshakeSupervisor = struct {
         }) catch |err| switch (err) {
             error.Canceled, error.Closed => {
                 var owned_result = result;
-                if (owned_result) |*session| session.deinit() else |_| {}
+                switch (owned_result) {
+                    .session => |*session| session.deinit(),
+                    .failure => {},
+                }
                 admission.deinit();
                 context.allocator.destroy(admission);
                 return error.Canceled;
@@ -3153,7 +3202,10 @@ pub const HandshakeSupervisor = struct {
         completion: HandshakeCompletion,
     ) void {
         var owned_result = completion.result;
-        if (owned_result) |*session| session.deinit() else |_| {}
+        switch (owned_result) {
+            .session => |*session| session.deinit(),
+            .failure => {},
+        }
         completion.admission.deinit();
         self.allocator.destroy(completion.admission);
     }
