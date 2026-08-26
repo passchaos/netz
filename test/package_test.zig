@@ -2013,6 +2013,14 @@ test "public modules are reachable" {
         netz.webtransport.runtime.ProtectedClientSession,
         "responseHeader",
     ));
+    try std.testing.expect(@hasField(
+        netz.webtransport.runtime.ConnectOptions,
+        "headers",
+    ));
+    try std.testing.expect(@hasField(
+        netz.webtransport.runtime.ProtectedConnectOptions,
+        "headers",
+    ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "connectUri",

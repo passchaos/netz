@@ -1269,8 +1269,12 @@ pub const ClientSession = struct {
         var h3_client = try http3.runtime.Client.connect(allocator, io, local_address, server, options.limits.http3);
         errdefer h3_client.deinit();
 
-        var header_buf: [3]http3.Qpack.HeaderField = undefined;
-        const headers = connectRequestHeaders(options.origin, &header_buf);
+        var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
+        const headers = try connectRequestHeadersWithAdditional(
+            options.origin,
+            options.headers,
+            &header_buf,
+        );
         var response = try h3_client.request(.{
             .method = "CONNECT",
             .path = options.path,
@@ -1835,8 +1839,12 @@ pub const ProtectedClientSession = struct {
     ) Error!ProtectedClientSession {
         var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
         errdefer h3_client.deinit();
-        var header_buf: [3]http3.Qpack.HeaderField = undefined;
-        const headers = connectRequestHeaders(options.origin, &header_buf);
+        var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
+        const headers = try connectRequestHeadersWithAdditional(
+            options.origin,
+            options.headers,
+            &header_buf,
+        );
         const session_stream_id = try h3_client.startRequest(.{
             .method = "CONNECT",
             .path = options.path,
@@ -2078,6 +2086,9 @@ pub const ConnectOptions = struct {
     authority: []const u8,
     path: []const u8 = "/",
     origin: []const u8 = "/",
+    /// Additional regular CONNECT fields. Reserved WebTransport fields are
+    /// constructed by the adapter and cannot be overridden.
+    headers: []const http3.Qpack.HeaderField = &.{},
     limits: Limits = .{},
 };
 
@@ -2085,6 +2096,9 @@ pub const ProtectedConnectOptions = struct {
     authority: []const u8,
     path: []const u8 = "/",
     origin: []const u8 = "/",
+    /// Additional regular CONNECT fields. Reserved WebTransport fields are
+    /// constructed by the adapter and cannot be overridden.
+    headers: []const http3.Qpack.HeaderField = &.{},
     limits: Limits = .{},
     config: http3.runtime.ProtectedConfig,
 };
@@ -3356,31 +3370,28 @@ test "WebTransport development runtime exposes pending admission metadata" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try http3.runtime.Client.connect(
+    var client = try ClientSession.connect(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
         server.address(),
-        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{
+            .authority = "localhost",
+            .path = "/admission",
+            .origin = "https://example.test",
+            .headers = &.{.{
+                .name = "user-agent",
+                .value = "netz-dev-client",
+            }},
+            .limits = .{
+                .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+            },
+        },
     );
     defer client.deinit();
-    var response = try client.request(.{
-        .method = "CONNECT",
-        .path = "/admission",
-        .scheme = "https",
-        .authority = "localhost",
-        .headers = &.{
-            .{ .name = ":protocol", .value = "webtransport" },
-            http3.capsule.protocol_header,
-            .{ .name = "origin", .value = "https://example.test" },
-            .{ .name = "user-agent", .value = "netz-dev-client" },
-        },
-    });
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings(
         "accepted",
-        findHeader(response.response.headers, "x-admission").?,
+        client.responseHeader("x-admission").?,
     );
 
     thread.join();
