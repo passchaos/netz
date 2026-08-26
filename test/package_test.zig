@@ -2128,6 +2128,10 @@ test "public modules are reachable" {
         "pollConnectionPacket",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receivePendingPacket",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServer,
         "acceptFromInitialSource",
     ));
