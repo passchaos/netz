@@ -378,7 +378,9 @@ starts cancelable workers, reports completions without blocking the socket
 owner, unregisters failures, and returns stable heap-backed sessions whose
 successful promotion cannot invalidate dispatcher pointers. The supervisor's
 single-owner receive API interleaves completion polling, endpoint timers, and
-UDP routing. WebTransport exposes a split handshake/admission object that can
+UDP routing. Shared endpoint sends are serialized across handshake/connection
+workers, including ECN socket state, GSO fallback state, and deterministic
+fault-injection queues. WebTransport exposes a split handshake/admission object that can
 be promoted before CONNECT polling. The remaining integration work is a
 turnkey server loop that stores and schedules established HTTP/3/WebTransport
 sessions, applies admission expiry policy, and hands completed requests to
