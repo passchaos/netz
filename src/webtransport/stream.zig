@@ -93,6 +93,9 @@ pub const StreamState = struct {
     stream_id: u62,
     direction: StreamDirection,
     locally_initiated: bool,
+    /// Application scheduling priority for this stream's send direction.
+    /// Higher values are considered first by multi-stream write batches.
+    priority: i32 = 0,
     /// Absolute QUIC stream offset, including the association prefix.
     send_offset: u64 = 0,
     prefix_sent: bool = false,
@@ -271,6 +274,41 @@ pub const StreamRegistry = struct {
         return &self.streams.items[position];
     }
 
+    /// Update the application-visible send priority. Receive-only directions
+    /// reject the operation rather than storing an unusable preference.
+    pub fn setPriority(
+        self: *StreamRegistry,
+        stream_id: u62,
+        value: i32,
+    ) webtransport.Error!void {
+        const stream_state = self.get(stream_id) orelse
+            return error.UnknownStream;
+        if (stream_state.direction == .unidirectional and
+            !stream_state.locally_initiated)
+        {
+            return error.InvalidStreamState;
+        }
+        if (stream_state.send_reset != null or
+            stream_state.stopped != null or
+            stream_state.local_fin)
+        {
+            return error.InvalidStreamState;
+        }
+        stream_state.priority = value;
+    }
+
+    pub fn priority(
+        self: *StreamRegistry,
+        stream_id: u62,
+    ) webtransport.Error!i32 {
+        const stream_state = self.get(stream_id) orelse
+            return error.UnknownStream;
+        if (stream_state.send_reset != null) {
+            return error.InvalidStreamState;
+        }
+        return stream_state.priority;
+    }
+
     /// Borrow all registered streams for allocation-free runtime polling.
     ///
     /// The slice is invalidated by the next operation that can register a
@@ -394,6 +432,39 @@ pub const StreamRegistry = struct {
         return &self.streams.items[position];
     }
 };
+
+test "WebTransport stream priority validates send direction and lifecycle" {
+    var registry = try StreamRegistry.init(
+        std.testing.allocator,
+        .init(0),
+        .client,
+        .{},
+    );
+    defer registry.deinit();
+    const local = try registry.openLocal(.unidirectional);
+    try std.testing.expectEqual(@as(i32, 0), try registry.priority(
+        local.stream_id,
+    ));
+    try registry.setPriority(local.stream_id, 42);
+    try std.testing.expectEqual(@as(i32, 42), try registry.priority(
+        local.stream_id,
+    ));
+
+    const peer = try registry.registerPeer(3, .unidirectional);
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        registry.setPriority(peer.stream_id, 1),
+    );
+    local.send_reset = .fromHttp3(7);
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        registry.priority(local.stream_id),
+    );
+    try std.testing.expectError(
+        error.UnknownStream,
+        registry.setPriority(100, 1),
+    );
+}
 
 fn validateSessionId(
     session_id: webtransport.SessionId,

@@ -2056,6 +2056,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
+        "setStreamPriority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "streamPriority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
         "sendStream",
     ));
     try std.testing.expect(@hasDecl(
@@ -2101,6 +2109,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
         "writeStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "setStreamPriority",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,

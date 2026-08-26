@@ -829,6 +829,22 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn setStreamPriority(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        priority: i32,
+    ) Error!void {
+        try self.control.ensureOpen();
+        try self.streams.setPriority(stream_id, priority);
+    }
+
+    pub fn streamPriority(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+    ) Error!i32 {
+        return self.streams.priority(stream_id);
+    }
+
     /// Submit one packet-sized slice per sendable stream in a QUIC packet
     /// batch. Counts commit only the socket-visible prefix.
     pub fn writeStreams(
@@ -1352,6 +1368,22 @@ pub const HandshakeClientSession = struct {
             stream_id,
             payload,
         );
+    }
+
+    pub fn setStreamPriority(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        priority: i32,
+    ) Error!void {
+        try self.control.ensureOpen();
+        try self.streams.setPriority(stream_id, priority);
+    }
+
+    pub fn streamPriority(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+    ) Error!i32 {
+        return self.streams.priority(stream_id);
     }
 
     /// Submit one packet-sized slice per sendable stream in a QUIC packet
@@ -2001,6 +2033,21 @@ pub const StatefulProtectedClientSession = struct {
         payload: []const u8,
     ) Error!usize {
         return self.session.writeStream(stream_id, payload);
+    }
+
+    pub fn setStreamPriority(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        priority: i32,
+    ) Error!void {
+        return self.session.setStreamPriority(stream_id, priority);
+    }
+
+    pub fn streamPriority(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+    ) Error!i32 {
+        return self.session.streamPriority(stream_id);
     }
 
     pub fn writeStreams(
@@ -3624,6 +3671,7 @@ test "WebTransport handshake session receives datagrams with std.Io async batch"
 
 test {
     _ = @import("runtime/stream_tests.zig");
+    _ = stream_batch;
     _ = @import("runtime/session_control_tests.zig");
     _ = @import("runtime/admission_tests.zig");
     _ = @import("runtime/connection_close_tests.zig");

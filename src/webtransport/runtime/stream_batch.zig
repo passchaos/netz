@@ -79,9 +79,16 @@ pub fn write(
 
     while (true) {
         var packet_count: usize = 0;
-        for (writes, 0..) |item, input_index| {
-            if (packet_count == packet_limit) break;
-            if (item.data.len == 0) continue;
+        // Preserve FIFO among equal priorities while allowing callers to keep
+        // a stable write array: each selection scans only the bounded packet
+        // batch (currently at most 64 streams), not the payload bytes.
+        while (packet_count < packet_limit) {
+            const input_index = (try nextWriteIndex(
+                registry,
+                writes,
+                input_indices[0..packet_count],
+            )) orelse break;
+            const item = writes[input_index];
             const stream = try stream_runtime.prepare(
                 connection,
                 registry,
@@ -155,4 +162,65 @@ pub fn write(
             .send_error = sent.send_error,
         };
     }
+}
+
+fn nextWriteIndex(
+    registry: *webtransport.StreamRegistry,
+    writes: []const Write,
+    selected_indices: []const usize,
+) Error!?usize {
+    var selected_index: ?usize = null;
+    var selected_priority: i32 = std.math.minInt(i32);
+    for (writes, 0..) |item, input_index| {
+        if (item.data.len == 0 or
+            std.mem.indexOfScalar(usize, selected_indices, input_index) != null)
+        {
+            continue;
+        }
+        const priority = try registry.priority(item.stream_id);
+        if (selected_index == null or priority > selected_priority) {
+            selected_index = input_index;
+            selected_priority = priority;
+        }
+    }
+    return selected_index;
+}
+
+test "WebTransport batch selects high priority streams with stable ties" {
+    const allocator = std.testing.allocator;
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{},
+    );
+    defer registry.deinit();
+    const low = (try registry.openLocal(.bidirectional)).stream_id;
+    const high_first = (try registry.openLocal(.bidirectional)).stream_id;
+    const high_second = (try registry.openLocal(.bidirectional)).stream_id;
+    try registry.setPriority(low, -4);
+    try registry.setPriority(high_first, 7);
+    try registry.setPriority(high_second, 7);
+    const writes = [_]Write{
+        .{ .stream_id = low, .data = "low" },
+        .{ .stream_id = high_first, .data = "high-a" },
+        .{ .stream_id = high_second, .data = "high-b" },
+    };
+    var selected: [3]usize = undefined;
+    selected[0] = (try nextWriteIndex(&registry, &writes, &.{})).?;
+    selected[1] = (try nextWriteIndex(
+        &registry,
+        &writes,
+        selected[0..1],
+    )).?;
+    selected[2] = (try nextWriteIndex(
+        &registry,
+        &writes,
+        selected[0..2],
+    )).?;
+    try std.testing.expectEqualSlices(
+        usize,
+        &.{ 1, 2, 0 },
+        &selected,
+    );
 }
