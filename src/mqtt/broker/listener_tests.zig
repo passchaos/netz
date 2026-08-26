@@ -851,6 +851,119 @@ test "listeners apply independent CONNECT authorization policies" {
     try std.testing.expectEqual(@as(usize, 0), broker.sessions.count());
 }
 
+test "listener can map authenticated username to Client ID" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+    const listeners = [_]mqtt.broker.Listener{.{
+        .source = server.pendingSource(),
+        .authorization = .{ .use_username_as_client_id = true },
+        .connection_count = 3,
+    }};
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 30,
+    } }};
+    var first = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "wire-client-a",
+            .clean_start = false,
+            .properties = &expiry,
+            .username = "shared-user",
+        },
+    );
+    defer first.close();
+    var suback = try first.subscribe(
+        &.{.{
+            .topic_filter = "identity/topic",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var replacement_result = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "wire-client-b",
+            .clean_start = false,
+            .properties = &expiry,
+            .username = "shared-user",
+        },
+    );
+    var replacement = replacement_result.connection;
+    defer replacement.close();
+    defer replacement_result.connack.deinit(allocator);
+    try std.testing.expect(
+        replacement_result.connack.connack.session_present,
+    );
+    var takeover = try first.readDisconnect();
+    defer takeover.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x8e),
+        takeover.disconnect.reason_code,
+    );
+
+    var refused = try runtime.Client.connectAttempt(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "missing-username",
+        },
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x87),
+        refused.connack.connack.reason_code,
+    );
+
+    try replacement.disconnect(0);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "listener packet ACLs compose with broker policy" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

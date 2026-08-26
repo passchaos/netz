@@ -39,6 +39,7 @@ const Config = struct {
     deny_will_topic: ?[]const u8 = null,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
+    use_username_as_client_id: bool = false,
     system_interval_seconds: ?u32 = null,
     persistence_path: ?[]const u8 = null,
     commit_log_path: ?[]const u8 = null,
@@ -297,6 +298,7 @@ pub fn main(init: std.process.Init) !void {
                 &broker,
                 config.connections,
                 config.ignore_connection_errors,
+                config.use_username_as_client_id,
             },
         );
         try select.concurrent(.timer, waitAutosaveInterval, .{ io, interval });
@@ -333,6 +335,7 @@ pub fn main(init: std.process.Init) !void {
             &broker,
             config.connections,
             config.ignore_connection_errors,
+            config.use_username_as_client_id,
         );
     }
     if (config.commit_log_path != null) {
@@ -686,6 +689,12 @@ fn parseArgs(
             "--queue-qos0-messages",
         )) {
             config.queue_qos0_messages = true;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--use-username-as-client-id",
+        )) {
+            config.use_username_as_client_id = true;
         } else if (std.mem.startsWith(
             u8,
             arg,
@@ -770,7 +779,19 @@ fn serveBroker(
     broker: *netz.mqtt.broker.Broker,
     connections: usize,
     ignore_connection_errors: bool,
+    use_username_as_client_id: bool,
 ) !void {
+    if (use_username_as_client_id) {
+        const listeners = [_]netz.mqtt.broker.Listener{.{
+            .source = broker.server.?.pendingSource(),
+            .authorization = .{
+                .use_username_as_client_id = true,
+            },
+            .connection_count = connections,
+        }};
+        try broker.serveListeners(&listeners);
+        return;
+    }
     if (ignore_connection_errors) {
         // Conformance/fuzz harnesses deliberately open malformed connections.
         // Serve one finite slot at a time so an expected protocol rejection
@@ -790,8 +811,14 @@ fn serveBrokerResult(
     broker: *netz.mqtt.broker.Broker,
     connections: usize,
     ignore_connection_errors: bool,
+    use_username_as_client_id: bool,
 ) ?anyerror {
-    serveBroker(broker, connections, ignore_connection_errors) catch |err|
+    serveBroker(
+        broker,
+        connections,
+        ignore_connection_errors,
+        use_username_as_client_id,
+    ) catch |err|
         return err;
     return null;
 }

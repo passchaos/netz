@@ -147,6 +147,12 @@ pub const ListenerAuthorization = struct {
     connect: ?ConnectAuthorizationHandler = null,
     connect_context: ?ConnectContextAuthorizationHandler = null,
     access_control: ?ListenerAccessControlHandler = null,
+    /// Mosquitto-compatible listener policy that uses the authenticated MQTT
+    /// username as the effective Client Identifier. CONNECT authorization is
+    /// evaluated first against the original wire identity; Session, Will,
+    /// takeover, ACL and delivery state then consistently use the username.
+    /// A missing username is refused as Not Authorized.
+    use_username_as_client_id: bool = false,
 };
 
 /// Per-listener packet policy. Every callback is optional because this is an
@@ -1637,9 +1643,16 @@ pub const Broker = struct {
                 return null;
             }
         }
+        var effective_connect = pending.connect.connect;
+        if (listener_authorization.use_username_as_client_id) {
+            effective_connect.client_id = effective_connect.username orelse {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                return null;
+            };
+        }
         const registration = try self.register(
             index,
-            pending.connect.connect,
+            effective_connect,
             listener_authorization.access_control,
         );
         const subscriber_id = registration.subscriber_id;
@@ -1649,6 +1662,10 @@ pub const Broker = struct {
             mapped.deinit();
             mapped_will = null;
         }
+        // OwnedConnect keeps all original packet storage alive; changing this
+        // borrowed view makes downstream ACLs and Will cleanup observe the
+        // same effective identity used for Session registration.
+        pending.connect.connect.client_id = effective_connect.client_id;
         accept_options.session_present = self.slots[index].session_present;
         if (self.slots[index].assigned_client_id_len != 0) {
             accept_options.assigned_client_identifier =

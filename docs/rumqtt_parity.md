@@ -1075,6 +1075,12 @@ accidentally bypass a global credential or ACL requirement. Read authorization
 is re-evaluated against the destination's current listener before retained,
 live, or resumed durable delivery. Delayed Will authorization stays broker-wide
 because a Will may outlive the borrowed listener configuration that accepted it.
+Listeners can also opt into Mosquitto-compatible
+`use_username_as_client_id`: authorization sees the original wire CONNECT,
+then Session, Will, takeover and live ACL state consistently use the required
+username as the effective Client ID. Missing usernames receive Not Authorized;
+tests prove two different wire Client IDs with one username resume/take over the
+same durable Session.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
 also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific
