@@ -10,6 +10,10 @@ const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream_batch.zig");
 
+test {
+    _ = @import("runtime/endpoint_dispatcher_tests.zig");
+}
+
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidConnect,
     SessionRejected,
@@ -1147,6 +1151,67 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
+    /// control/QPACK and unrelated requests progress while the detached
+    /// WebTransport CONNECT stream and associated streams remain available to
+    /// the session-specific pollers below.
+    pub fn processPacket(
+        self: *AcceptedHandshakeSession,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        try self.h3.processDetachedRequestPacket(
+            self.session_id.value,
+            packet,
+        );
+    }
+
+    /// Poll already-buffered associated stream state without reading UDP.
+    pub fn pollStream(
+        self: *AcceptedHandshakeSession,
+        out: []u8,
+    ) Error!?StreamRead {
+        if (out.len == 0) return error.BufferTooShort;
+        return incremental_stream.poll(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            out,
+        );
+    }
+
+    /// Poll a queued DATAGRAM for this session without reading UDP.
+    pub fn pollDatagram(
+        self: *AcceptedHandshakeSession,
+    ) Error!?OwnedHandshakeDatagram {
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return popHandshakeDatagramFromConnection(
+            &self.h3.established.connection,
+        );
+    }
+
+    /// Poll the detached CONNECT stream for DRAIN/CLOSE/reset state.
+    pub fn pollSessionEvent(
+        self: *AcceptedHandshakeSession,
+    ) Error!?SessionEvent {
+        const event = self.control.poll(
+            &self.h3.established.connection,
+        ) catch |err| switch (err) {
+            error.InvalidCapsule => {
+                try self.h3.established.connection.resetStream(
+                    self.session_id.value,
+                    http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            },
+            else => return err,
+        };
+        if (event) |value| try self.finishPolledSessionEvent(value);
+        return event;
+    }
+
     pub fn resetStream(
         self: *AcceptedHandshakeSession,
         stream_id: u62,
@@ -1213,20 +1278,17 @@ pub const AcceptedHandshakeSession = struct {
     pub fn receiveSessionEvent(
         self: *AcceptedHandshakeSession,
     ) Error!SessionEvent {
-        const event = self.control.receive(
-            &self.h3.established.connection,
-            self,
-            AcceptedHandshakeSession.receiveControlProgress,
-        ) catch |err| switch (err) {
-            error.InvalidCapsule => {
-                try self.h3.established.connection.resetStream(
-                    self.session_id.value,
-                    http3.ApplicationErrorCode.message_error,
-                );
-                return err;
-            },
-            else => return err,
+        const event = while (true) {
+            if (try self.pollSessionEvent()) |ready| break ready;
+            try self.receiveControlProgress();
         };
+        return event;
+    }
+
+    fn finishPolledSessionEvent(
+        self: *AcceptedHandshakeSession,
+        event: SessionEvent,
+    ) Error!void {
         if (event == .closed or event == .reset) {
             if (event == .closed and !self.control.local_close_sent) {
                 try self.h3.sendResponseBodyPaced(
@@ -1241,7 +1303,6 @@ pub const AcceptedHandshakeSession = struct {
                 &self.streams,
             );
         }
-        return event;
     }
 
     fn receiveControlProgress(

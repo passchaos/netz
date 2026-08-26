@@ -185,6 +185,15 @@ aggregate, versus the obsolete 26 MiB/s result from the 128-KiB connection-
 credit/4-KiB-datagram configuration. Batch validation occurs before any
 association prefix is sent, so a bad later stream cannot expose a partial batch.
 
+Accepted stateful server sessions now expose dispatcher-oriented
+`processPacket`, `pollStream`, `pollDatagram`, and `pollSessionEvent` methods.
+The poll methods never read UDP: one endpoint owner routes authenticated QUIC
+packets, after which each WebTransport session drains only its own associated
+stream, DATAGRAM, and detached CONNECT/Capsule state. A two-client shared-
+endpoint test interleaves same-numbered associated streams, DATAGRAMs, and a
+DRAIN capsule and verifies that payloads and control events remain isolated by
+QUIC connection.
+
 ## Session drain and close lifecycle
 
 Handshake sessions now keep their Extended CONNECT request/response stream open

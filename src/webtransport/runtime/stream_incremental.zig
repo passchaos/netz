@@ -94,7 +94,7 @@ pub fn stop(
     stream.stop_sent = .fromHttp3(http3_code);
 }
 
-fn poll(
+pub fn poll(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,

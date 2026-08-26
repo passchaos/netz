@@ -2307,6 +2307,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
+        "processPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "pollStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "pollDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "pollSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
         "peerCertificates",
     ));
     try std.testing.expect(@hasDecl(

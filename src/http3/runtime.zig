@@ -3401,6 +3401,30 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    /// Apply a dispatcher-owned packet while preserving bytes on one detached
+    /// Extended CONNECT stream for its protocol adapter.
+    pub fn processDetachedRequestPacket(
+        self: *HandshakeServerSession,
+        detached_stream_id: u62,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        if (self.receive_packets.ack_pending) {
+            try self.established.connection.sendAck(0);
+            self.receive_packets.ack_pending = false;
+        }
+        _ = self.established.connection.sendAckForPacketIfNeeded(
+            packet.packet.packet_number,
+            packet.frames,
+        ) catch {
+            self.receive_packets.ack_pending = true;
+        };
+        try visitDetachedServerRequestPacket(
+            .{ self, detached_stream_id },
+            packetView(packet.*),
+        );
+        try self.flushRequestPacketFeedback();
+    }
+
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(stream_id, &.{}, response);
     }
