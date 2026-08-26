@@ -347,6 +347,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_frame_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_message_bytes);
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "TlsServer",
@@ -360,12 +361,24 @@ test "public modules are reachable" {
         "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.UnixServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
         "connectUnix",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.TlsServer,
         "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.TlsServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "ServeUntilOptions",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
