@@ -453,3 +453,182 @@ test "WebTransport endpoint serve loop shuts down from a session event" {
     try std.testing.expect(shared.context.accepted);
     try std.testing.expect(shared.context.received);
 }
+
+test "WebTransport endpoint isolates accepted and rejected connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const settings = webtransport.defaultSettings(.{});
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{
+            .handshake = .{
+                .local_connection_id = "wt-policy-template",
+                .random = [_]u8{0xa1} ** 32,
+                .x25519_secret_key = [_]u8{0xa2} ** 32,
+            },
+            .session = .{ .local_settings = settings },
+        },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{
+        .max_pending_handshakes = 2,
+        .inbox_capacity = 8,
+    });
+    var endpoint_owned = true;
+    defer if (endpoint_owned) endpoint.deinit();
+
+    const ClientTask = struct {
+        io: std.Io,
+        address: net.IpAddress,
+        original_dcid: []const u8,
+        local_cid: []const u8,
+        path: []const u8,
+        expected_status: u16,
+        settings: http3.Settings,
+        random: [32]u8,
+        secret: [32]u8,
+        client: ?runtime.HandshakeClientSession = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var attempt = try runtime.HandshakeClientSession.connectAttempt(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.address,
+                .{
+                    .authority = "localhost",
+                    .path = self.path,
+                    .h3 = .{
+                        .handshake = .{
+                            .original_destination_connection_id = self.original_dcid,
+                            .local_connection_id = self.local_cid,
+                            .server_name = "localhost",
+                            .random = self.random,
+                            .x25519_secret_key = self.secret,
+                        },
+                        .session = .{ .local_settings = self.settings },
+                    },
+                },
+            );
+            if (attempt.status() != self.expected_status) {
+                attempt.deinit();
+                return error.TestUnexpectedResult;
+            }
+            if (attempt.accepted()) {
+                self.client = try attempt.requireAccepted();
+                try self.client.?.sendDatagram("accepted");
+            } else {
+                attempt.deinit();
+            }
+        }
+    };
+    var clients = [_]ClientTask{
+        .{
+            .io = io,
+            .address = server.address(),
+            .original_dcid = "wt-policy-accept",
+            .local_cid = "wt-client-accept",
+            .path = "/accept",
+            .expected_status = 200,
+            .settings = settings,
+            .random = [_]u8{0xa3} ** 32,
+            .secret = [_]u8{0xa4} ** 32,
+        },
+        .{
+            .io = io,
+            .address = server.address(),
+            .original_dcid = "wt-policy-reject",
+            .local_cid = "wt-client-reject",
+            .path = "/reject",
+            .expected_status = 403,
+            .settings = settings,
+            .random = [_]u8{0xa5} ** 32,
+            .secret = [_]u8{0xa6} ** 32,
+        },
+    };
+    const first_thread = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const second_thread = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+    var joined = false;
+    defer if (!joined) {
+        if (endpoint_owned) {
+            endpoint.deinit();
+            endpoint_owned = false;
+        }
+        first_thread.join();
+        second_thread.join();
+        for (&clients) |*client| if (client.client) |*value| value.deinit();
+    };
+
+    const versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    var handles: [2]quic.endpoint_dispatcher.ConnectionHandle = undefined;
+    var request_count: usize = 0;
+    var received_datagram = false;
+    var stream_buffer: [64]u8 = undefined;
+    while (request_count < clients.len or !received_datagram) {
+        var event = try endpoint.receive(
+            &versions,
+            .{ .clock = .awake, .raw = .fromMilliseconds(5) },
+            &stream_buffer,
+        );
+        defer event.deinit(allocator);
+        switch (event) {
+            .connected => {},
+            .handshake_failed => |failure| return failure.err,
+            .session_request => |handle| {
+                const pending = endpoint.pendingSession(handle) orelse
+                    return error.TestUnexpectedResult;
+                handles[request_count] = handle;
+                request_count += 1;
+                if (std.mem.eql(u8, pending.path(), "/accept")) {
+                    _ = try endpoint.accept(handle);
+                } else if (std.mem.eql(u8, pending.path(), "/reject")) {
+                    try endpoint.reject(handle, 403, &.{});
+                } else return error.TestUnexpectedResult;
+            },
+            .session_event => |value| switch (value.event) {
+                .datagram => |datagram| {
+                    try std.testing.expectEqualStrings(
+                        "accepted",
+                        datagram.datagram.payload,
+                    );
+                    received_datagram = true;
+                },
+                .stream, .session => return error.TestUnexpectedResult,
+            },
+            .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+
+    first_thread.join();
+    second_thread.join();
+    joined = true;
+    for (&clients) |*client| {
+        if (client.err) |err| return err;
+        if (client.client) |*value| value.deinit();
+        client.client = null;
+    }
+    try std.testing.expectEqual(@as(usize, 1), endpoint.sessionCount());
+    try std.testing.expectEqual(@as(usize, 1), endpoint.rejectedSessionCount());
+    for (handles) |handle| {
+        try std.testing.expect(endpoint.removeConnection(handle));
+    }
+    try std.testing.expectEqual(@as(usize, 0), endpoint.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint.rejectedSessionCount());
+}
