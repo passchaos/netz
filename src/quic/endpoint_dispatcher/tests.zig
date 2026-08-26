@@ -3,6 +3,9 @@ const quic = @import("../mod.zig");
 const dispatcher_mod = @import("../endpoint_dispatcher.zig");
 const one_rtt = @import("../one_rtt.zig");
 const runtime = @import("../runtime.zig");
+const ObservedBatchSend = @import(
+    "../one_rtt/tests/observed_batch_send.zig",
+).ObservedBatchSend;
 
 const ConnectionHandle = dispatcher_mod.ConnectionHandle;
 const Dispatcher = dispatcher_mod.Dispatcher;
@@ -81,9 +84,7 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     var dispatcher = Dispatcher.init(allocator, &server_endpoint);
     defer dispatcher.deinit();
     try dispatcher.registerConnection(10, &server_a);
-    try dispatcher.registerConnectionId(10, "server-a", 0);
     try dispatcher.registerConnection(20, &server_b);
-    try dispatcher.registerConnectionId(20, "server-b", 0);
 
     const ping = [_]quic.Frame{.{ .ping = {} }};
     try client_b.send(&ping);
@@ -147,6 +148,227 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     try std.testing.expect(!(try dispatcher.unregisterConnection(10)));
 }
 
+test "QUIC endpoint dispatcher synchronizes local CID rotation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "cid-zero",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .peer_active_connection_id_limit = 3,
+    });
+    defer connection.deinit();
+    var peer_connection = try one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "peer",
+        .peer_connection_id = "cid-zero",
+        .enable_pacing = false,
+    });
+    defer peer_connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &server_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(11, &connection);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+
+    try dispatcher.sendNewConnectionIdRetiringPriorTo(
+        11,
+        "cid-one",
+        [_]u8{1} ** 16,
+        0,
+    );
+    try std.testing.expectEqual(@as(usize, 2), dispatcher.routeCount());
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        (try dispatcher.router.lookup("cid-one")).?.sequence_number,
+    );
+
+    var new_cid = try peer_connection.receivePacket();
+    defer new_cid.deinit(allocator);
+    try std.testing.expect(peer_connection.switchToNextPeerConnectionId());
+    const retire = [_]quic.Frame{.{ .retire_connection_id = .{
+        .sequence_number = 0,
+    } }};
+    try peer_connection.send(&retire);
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    var retired = try dispatcher.receive(&versions);
+    defer retired.deinit(allocator);
+    try std.testing.expect(retired == .packet);
+    try std.testing.expectEqual(
+        @as(ConnectionHandle, 11),
+        retired.packet.connection_handle,
+    );
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+    try std.testing.expect((try dispatcher.router.lookup("cid-zero")) == null);
+    try std.testing.expect((try dispatcher.router.lookup("cid-one")) != null);
+}
+
+test "QUIC endpoint dispatcher rejects cross-connection CID collisions transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe6} ** quic.protection.secret_len,
+    );
+    var first = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "first",
+        .peer_connection_id = "peer-a",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .peer_active_connection_id_limit = 3,
+    });
+    defer first.deinit();
+    var second = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "second",
+        .peer_connection_id = "peer-b",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .peer_active_connection_id_limit = 3,
+    });
+    defer second.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &first);
+    try dispatcher.registerConnection(2, &second);
+
+    try dispatcher.sendNewConnectionId(
+        1,
+        "shared-cid",
+        [_]u8{1} ** 16,
+    );
+    var before_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+    const second_before_count = (try second.localConnectionIdsInto(
+        &before_storage,
+    )).len;
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        dispatcher.sendNewConnectionId(
+            2,
+            "shared-cid",
+            [_]u8{2} ** 16,
+        ),
+    );
+    var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+    const second_after = try second.localConnectionIdsInto(&active_storage);
+    try std.testing.expectEqual(second_before_count, second_after.len);
+    try std.testing.expectEqual(@as(usize, 3), dispatcher.routeCount());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try dispatcher.router.lookup("shared-cid")).?.connection_index,
+    );
+}
+
+test "QUIC endpoint dispatcher leaves no CID route after send failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe7} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "initial",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .peer_active_connection_id_limit = 3,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &connection);
+
+    var failed_send = ObservedBatchSend{
+        .delegate = endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    endpoint.io = .{
+        .userdata = &failed_send,
+        .vtable = &failed_vtable,
+    };
+    defer endpoint.io = failed_send.delegate;
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        dispatcher.sendNewConnectionId(
+            1,
+            "failed-cid",
+            [_]u8{3} ** 16,
+        ),
+    );
+    var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try connection.localConnectionIdsInto(&active_storage)).len,
+    );
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+    try std.testing.expect((try dispatcher.router.lookup("failed-cid")) == null);
+}
+
 test "QUIC endpoint dispatcher preserves unknown Initials and discards late long headers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -176,7 +398,6 @@ test "QUIC endpoint dispatcher preserves unknown Initials and discards late long
     var dispatcher = Dispatcher.init(allocator, &endpoint);
     defer dispatcher.deinit();
     try dispatcher.registerConnection(7, &connection);
-    try dispatcher.registerConnectionId(7, "established", 0);
 
     const payload = [_]u8{0} ** 1160;
     const unknown_keys = try quic.protection.deriveInitialSecretsForVersion(
@@ -413,7 +634,6 @@ test "QUIC endpoint dispatcher wakes socket receive for transport timers" {
     var dispatcher = Dispatcher.init(allocator, &endpoint);
     defer dispatcher.deinit();
     try dispatcher.registerConnection(9, &connection);
-    try dispatcher.registerConnectionId(9, "timer-local", 0);
     const ping = [_]quic.Frame{.{ .ping = {} }};
     try connection.send(&ping);
     try dispatcher.refreshConnectionTimer(9);

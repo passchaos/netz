@@ -141,52 +141,133 @@ pub const Dispatcher = struct {
         // processing is stateful, so its later timer refresh must not discover
         // OOM after the packet has already committed transport state.
         try self.timers.ensureCapacity(self.connections.count() + 1);
+        const connection_capacity = std.math.add(
+            usize,
+            self.connections.count(),
+            1,
+        ) catch return error.OutOfMemory;
+        const route_capacity = std.math.mul(
+            usize,
+            connection_capacity,
+            quic.connection_id.max_pool_size,
+        ) catch return error.OutOfMemory;
+        try self.router.ensureCapacity(route_capacity);
         const slot = try self.connections.getOrPut(self.allocator, handle);
         if (slot.found_existing) return error.DuplicateConnectionHandle;
         slot.value_ptr.* = .{ .connection = connection };
         errdefer {
             var removed = self.connections.fetchRemove(handle).?.value;
+            for (removed.connection_ids.items) |*key| {
+                _ = self.router.unregister(key.slice()) catch false;
+            }
             removed.deinit(self.allocator);
         }
+        try slot.value_ptr.connection_ids.ensureTotalCapacity(
+            self.allocator,
+            quic.connection_id.max_pool_size,
+        );
+        try self.syncConnectionIds(handle);
         try self.timers.armFromConnection(handle, connection);
     }
 
-    /// Register one currently accepted local CID for a connection. Multiple
-    /// calls attach rotated CIDs to the same stable endpoint handle.
-    pub fn registerConnectionId(
+    pub fn sendNewConnectionId(
         self: *Dispatcher,
         handle: ConnectionHandle,
         connection_id: []const u8,
-        sequence_number: u64,
+        stateless_reset_token: [16]u8,
     ) Error!void {
         const entry = self.connections.getPtr(handle) orelse
             return error.UnknownConnectionHandle;
-        const key = try connection_router.ConnectionIdKey.init(connection_id);
-        try entry.connection_ids.ensureUnusedCapacity(self.allocator, 1);
-        try self.router.register(
+        try self.ensureConnectionIdAvailable(handle, connection_id);
+        try entry.connection.sendNewConnectionId(
             connection_id,
-            entry.connection.route(handle, sequence_number),
+            stateless_reset_token,
         );
-        entry.connection_ids.appendAssumeCapacity(key);
+        try self.syncConnectionIds(handle);
+        try self.timers.armFromConnection(handle, entry.connection);
     }
 
-    pub fn unregisterConnectionId(
+    pub fn sendNewConnectionIdRetiringPriorTo(
         self: *Dispatcher,
         handle: ConnectionHandle,
         connection_id: []const u8,
-    ) Error!bool {
+        stateless_reset_token: [16]u8,
+        retire_prior_to: u64,
+    ) Error!void {
         const entry = self.connections.getPtr(handle) orelse
             return error.UnknownConnectionHandle;
-        const key = try connection_router.ConnectionIdKey.init(connection_id);
-        for (entry.connection_ids.items, 0..) |registered, index| {
-            if (!connection_router.Context.eql(.{}, registered, key)) continue;
-            if (!try self.router.unregister(connection_id)) {
+        try self.ensureConnectionIdAvailable(handle, connection_id);
+        try entry.connection.sendNewConnectionIdRetiringPriorTo(
+            connection_id,
+            stateless_reset_token,
+            retire_prior_to,
+        );
+        try self.syncConnectionIds(handle);
+        try self.timers.armFromConnection(handle, entry.connection);
+    }
+
+    /// Reconcile socket routes with the connection's authoritative local CID
+    /// pool. Registration reserves the fixed QUIC pool maximum, so packet-time
+    /// retirement and route refresh do not allocate after state has committed.
+    pub fn syncConnectionIds(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!void {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+        const active = try entry.connection.localConnectionIdsInto(
+            &active_storage,
+        );
+
+        // Reject a collision before modifying any route. Existing routes for
+        // this handle are updated below because migration policy and peer path
+        // metadata can change while the CID remains stable.
+        for (active) |id| {
+            if (try self.router.lookup(id.connection_id)) |route| {
+                if (route.connection_index != handle) {
+                    return error.DuplicateConnectionId;
+                }
+            }
+        }
+
+        for (active) |id| {
+            const key = try connection_router.ConnectionIdKey.init(
+                id.connection_id,
+            );
+            const known = containsConnectionId(
+                entry.connection_ids.items,
+                key,
+            );
+            try self.router.registerOrReplace(
+                id.connection_id,
+                entry.connection.route(handle, id.sequence_number),
+            );
+            if (!known) entry.connection_ids.appendAssumeCapacity(key);
+        }
+
+        var index = entry.connection_ids.items.len;
+        while (index != 0) {
+            index -= 1;
+            const registered = entry.connection_ids.items[index];
+            if (containsActiveId(active, registered)) continue;
+            if (!try self.router.unregister(registered.slice())) {
                 return error.StaleConnectionRoute;
             }
             _ = entry.connection_ids.swapRemove(index);
-            return true;
         }
-        return false;
+    }
+
+    fn ensureConnectionIdAvailable(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+        connection_id: []const u8,
+    ) Error!void {
+        if (try self.router.lookup(connection_id)) |route| {
+            if (route.connection_index != handle) {
+                return error.DuplicateConnectionId;
+            }
+        }
     }
 
     /// Remove every route and timer before the caller destroys the connection.
@@ -364,6 +445,7 @@ pub const Dispatcher = struct {
         errdefer packet.deinit(self.allocator);
         routed_datagram.datagram.deinit(self.allocator);
         owns_datagram = false;
+        try self.syncConnectionIds(routed.route.connection_index);
         try self.timers.armFromConnection(
             routed.route.connection_index,
             entry.connection,
@@ -375,6 +457,26 @@ pub const Dispatcher = struct {
         } };
     }
 };
+
+fn containsConnectionId(
+    registered: []const connection_router.ConnectionIdKey,
+    candidate: connection_router.ConnectionIdKey,
+) bool {
+    for (registered) |key| {
+        if (connection_router.Context.eql(.{}, key, candidate)) return true;
+    }
+    return false;
+}
+
+fn containsActiveId(
+    active: []const quic.connection_id.LocalPool.ActiveId,
+    registered: connection_router.ConnectionIdKey,
+) bool {
+    for (active) |id| {
+        if (std.mem.eql(u8, id.connection_id, registered.slice())) return true;
+    }
+    return false;
+}
 
 fn classifyUnrouted(datagram: runtime.OwnedBytes) Event {
     if (datagram.bytes.len == 0 or (datagram.bytes[0] & 0x80) == 0) {

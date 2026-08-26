@@ -346,6 +346,13 @@ route/timer before connection storage can be destroyed. Route-level migration
 blocking now permits same-IP port rebinding and rejects only address changes
 before authenticated connection processing, matching the transport's existing
 NAT-rebinding behavior.
+The dispatcher now also mirrors each connection's authoritative fixed-capacity
+local CID pool. Initial IDs are installed at registration, dispatcher-mediated
+NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
+transport state, and authenticated RETIRE_CONNECTION_ID packets remove obsolete
+routes before the next event is exposed. The per-connection route list and
+router reserve the negotiated pool maximum up front, keeping receive-time CID
+reconciliation allocation-free after state mutation.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server: Initial/Retry handshakes still need incremental dispatcher-owned

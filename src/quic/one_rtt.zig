@@ -893,6 +893,16 @@ pub const Connection = struct {
         };
     }
 
+    /// Snapshot borrowed views of every local CID that currently routes to
+    /// this connection. The endpoint owner calls this after CID issuance or a
+    /// received RETIRE_CONNECTION_ID to keep its socket-level router exact.
+    pub fn localConnectionIdsInto(
+        self: *const Connection,
+        out: []quic.connection_id.LocalPool.ActiveId,
+    ) Error![]quic.connection_id.LocalPool.ActiveId {
+        return try self.local_connection_ids.activeIdsInto(out);
+    }
+
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
         try self.sendWithEcn(frames, .not_ect);
     }
@@ -4030,6 +4040,8 @@ pub const Connection = struct {
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
         try self.validateLocalConnectionIdIssueLimit(0);
         try self.validateNextPacketNumber();
+        const pool_before = self.local_connection_ids;
+        errdefer self.local_connection_ids = pool_before;
         const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -4043,6 +4055,8 @@ pub const Connection = struct {
     ) Error!void {
         try self.validateLocalConnectionIdIssueLimit(retire_prior_to);
         try self.validateNextPacketNumber();
+        const pool_before = self.local_connection_ids;
+        errdefer self.local_connection_ids = pool_before;
         const frame = try self.local_connection_ids.issueWithRetirePriorTo(connection_id, stateless_reset_token, retire_prior_to);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -4052,6 +4066,8 @@ pub const Connection = struct {
         const key = self.config.local_stateless_reset_key orelse return error.InvalidConnectionId;
         try self.validateLocalConnectionIdIssueLimit(0);
         try self.validateNextPacketNumber();
+        const pool_before = self.local_connection_ids;
+        errdefer self.local_connection_ids = pool_before;
         const frame = try self.local_connection_ids.issueWithStaticKey(connection_id, key);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);

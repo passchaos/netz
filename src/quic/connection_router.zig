@@ -87,6 +87,17 @@ pub const Router = struct {
         self.* = undefined;
     }
 
+    pub fn ensureCapacity(
+        self: *Router,
+        capacity: usize,
+    ) std.mem.Allocator.Error!void {
+        const requested = std.math.cast(
+            @TypeOf(self.map).Size,
+            capacity,
+        ) orelse return error.OutOfMemory;
+        try self.map.ensureTotalCapacity(requested);
+    }
+
     pub fn register(self: *Router, connection_id: []const u8, route: Route) Error!void {
         const key = try ConnectionIdKey.init(connection_id);
         const entry = try self.map.getOrPut(key);

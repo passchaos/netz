@@ -5,6 +5,7 @@ pub const max_pool_size: usize = 8;
 pub const max_connection_id_len: usize = 20;
 
 pub const Error = error{
+    BufferTooShort,
     InvalidConnectionId,
     DuplicateConnectionId,
     DuplicateResetToken,
@@ -456,6 +457,32 @@ pub const LocalPool = struct {
         }
         return n;
     }
+
+    pub const ActiveId = struct {
+        sequence_number: u64,
+        connection_id: []const u8,
+    };
+
+    /// Copy borrowed views of every currently accepted local CID into caller
+    /// storage. The slices remain valid until the pool is mutated. Endpoint
+    /// dispatchers use this to mirror NEW_CONNECTION_ID/RETIRE_CONNECTION_ID
+    /// state without exposing stateless-reset keys or mutable pool entries.
+    pub fn activeIdsInto(
+        self: *const LocalPool,
+        out: []ActiveId,
+    ) Error![]ActiveId {
+        var written: usize = 0;
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) continue;
+            if (written == out.len) return error.BufferTooShort;
+            out[written] = .{
+                .sequence_number = entry.sequence_number,
+                .connection_id = entry.slice(),
+            };
+            written += 1;
+        }
+        return out[0..written];
+    }
 };
 
 test "QUIC peer CID pool stores retires and consumes IDs" {
@@ -719,6 +746,24 @@ test "QUIC local CID pool derives stateless reset tokens from static key" {
         u8,
         &quic.stateless_reset.tokenForConnectionId(key, "new-cid"),
         &frame.new_connection_id.stateless_reset_token,
+    );
+}
+
+test "QUIC local CID pool exposes every active route into caller storage" {
+    var pool = LocalPool{};
+    try pool.registerInitial("initial", [_]u8{0} ** 16);
+    _ = try pool.issue("next", [_]u8{1} ** 16);
+
+    var storage: [max_pool_size]LocalPool.ActiveId = undefined;
+    const active = try pool.activeIdsInto(&storage);
+    try std.testing.expectEqual(@as(usize, 2), active.len);
+    try std.testing.expectEqual(@as(u64, 0), active[0].sequence_number);
+    try std.testing.expectEqualStrings("initial", active[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 1), active[1].sequence_number);
+    try std.testing.expectEqualStrings("next", active[1].connection_id);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        pool.activeIdsInto(storage[0..1]),
     );
 }
 

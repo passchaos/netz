@@ -2081,6 +2081,14 @@ test "public modules are reachable" {
         "receive",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "syncConnectionIds",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "localConnectionIdsInto",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher,
         "InitialDatagram",
     ));
