@@ -540,6 +540,27 @@ pub const Dispatcher = struct {
         return self.timers.earliestDeadline();
     }
 
+    /// Return one event from state already buffered while the handshake was
+    /// promoted. A client's Finished datagram can carry its first 1-RTT
+    /// packet, so an event loop must drain this before blocking on UDP again.
+    pub fn pollConnectionPacket(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!?RoutedPacket {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        var packet = (try entry.connection.receivePendingPacket()) orelse
+            return null;
+        errdefer packet.deinit(self.allocator);
+        try self.syncConnectionIds(handle);
+        try self.timers.armFromConnection(handle, entry.connection);
+        return .{
+            .connection_handle = handle,
+            .connection_id_sequence = 0,
+            .packet = packet,
+        };
+    }
+
     /// Service at most one due connection timer. Returning null means there is
     /// no due work at `now_ns`; callers can arm their socket wait from
     /// `nextTimerDeadline`.

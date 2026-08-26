@@ -589,6 +589,23 @@ pub const HandshakeServer = struct {
         return receiveStatefulSessionRequest(&session, self.limits);
     }
 
+    /// Complete only the QUIC/TLS phase from a routed Initial and datagram
+    /// source. After this returns, promote `admission.connection()` into the
+    /// endpoint dispatcher and feed it packets until `pollSessionRequest`
+    /// yields the Extended CONNECT request. This split prevents either the
+    /// handshake worker or WebTransport admission from reading the shared UDP
+    /// socket.
+    pub fn beginSessionAdmissionFromInitialSource(
+        self: *HandshakeServer,
+        source: quic.runtime.DatagramSource,
+        initial: *quic.endpoint_dispatcher.Event,
+    ) Error!HandshakeAdmission {
+        var session = try self.h3.acceptFromInitialSource(source, initial);
+        errdefer session.deinit();
+        try session.ensureSettingsSent();
+        return .{ .h3 = session, .limits = self.limits };
+    }
+
     /// Receive and validate Extended CONNECT without deciding admission. The
     /// caller can inspect authority/path/origin/custom headers, then call one
     /// of `PendingHandshakeSession`'s accept or rejection methods.
@@ -598,6 +615,75 @@ pub const HandshakeServer = struct {
         var session = try self.h3.accept();
         errdefer session.deinit();
         return receiveStatefulSessionRequest(&session, self.limits);
+    }
+};
+
+/// In-progress WebTransport admission after QUIC/TLS has completed.
+///
+/// The caller registers `connection()` with the endpoint dispatcher, feeds
+/// routed packets through `processPacket`, and polls for the CONNECT request.
+/// Ownership of the HTTP/3 session transfers to the returned pending request.
+pub const HandshakeAdmission = struct {
+    h3: http3.runtime.HandshakeServerSession,
+    limits: Limits,
+
+    pub fn deinit(self: *HandshakeAdmission) void {
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn connection(
+        self: *HandshakeAdmission,
+    ) *quic.one_rtt.Connection {
+        return &self.h3.established.connection;
+    }
+
+    pub fn processPacket(
+        self: *HandshakeAdmission,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        try self.h3.processRequestPacket(packet);
+    }
+
+    pub fn pollSessionRequest(
+        self: *HandshakeAdmission,
+    ) Error!?PendingHandshakeSession {
+        while (try self.h3.pollRequestEvent()) |event_value| {
+            var event = event_value;
+            const allocator =
+                self.h3.established.connection.endpoint.allocator;
+            defer event.deinit(allocator);
+            switch (event) {
+                .reset => return error.InvalidConnect,
+                .message => |*message| switch (message.value) {
+                    .head => |*head| {
+                        if (head.* != .request) return error.InvalidConnect;
+                        try validateConnectRequest(head.request);
+                        try webtransport.ensureDatagramsNegotiated(
+                            self.h3.options.local_settings,
+                            self.h3.control.settings.peer,
+                        );
+                        const session_id = webtransport.SessionId.init(
+                            message.stream_id,
+                        );
+                        if (!session_id.isClientInitiatedBidirectional()) {
+                            return error.InvalidConnect;
+                        }
+                        const request = head.request;
+                        message.value = .finished;
+                        const h3 = self.h3;
+                        const limits = self.limits;
+                        self.* = undefined;
+                        return .{ .h3 = h3, .limits = limits, .request = .{
+                            .stream_id = message.stream_id,
+                            .request = request,
+                        }, .session_id = session_id };
+                    },
+                    else => return error.InvalidConnect,
+                },
+            }
+        }
+        return null;
     }
 };
 

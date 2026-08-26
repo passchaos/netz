@@ -372,9 +372,11 @@ then atomically promotes the pending route to established 1-RTT routing.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server. The low-level ownership and routing primitive is now present, but the
-HTTP/3 and WebTransport server wrappers do not yet provide a supervisor that
-creates/limits handshake workers, assigns inboxes, expires abandoned admissions,
-and promotes successful sessions automatically.
+HTTP/3 server wrapper now only exposes the source-aware handshake boundary, and
+WebTransport exposes a split handshake/admission object that can be promoted
+before CONNECT polling. Neither wrapper yet provides a supervisor that creates
+and limits workers, assigns inboxes, expires abandoned admissions, and performs
+those promotion/cleanup transitions automatically.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and

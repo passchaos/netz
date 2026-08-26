@@ -4380,6 +4380,16 @@ pub const Connection = struct {
         return pending;
     }
 
+    /// Decode one application packet retained behind the peer's Handshake
+    /// flight without performing a socket read. Endpoint dispatchers call this
+    /// immediately after promoting a completed server handshake.
+    pub fn receivePendingPacket(
+        self: *Connection,
+    ) Error!?ReceivedPacket {
+        if (self.pending_received_datagram == null) return null;
+        return try self.receivePendingPacketAt(self.monotonicNowNs());
+    }
+
     fn receivePendingPacketAt(
         self: *Connection,
         now_ns: ?u64,

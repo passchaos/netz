@@ -2124,6 +2124,22 @@ test "public modules are reachable" {
         "promotePendingHandshake",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "pollConnectionPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "acceptFromInitialSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
+        "beginSessionAdmissionFromInitialSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "HandshakeAdmission",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Event,
         "takeNewInitial",
     ));

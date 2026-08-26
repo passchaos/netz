@@ -794,3 +794,69 @@ test "QUIC endpoint dispatcher routes and promotes a pending handshake" {
     try std.testing.expectError(error.Closed, inbox.receive());
     try std.testing.expect(try dispatcher.unregisterConnection(42));
 }
+
+test "QUIC endpoint dispatcher drains a coalesced packet after promotion" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf0} ** quic.protection.secret_len,
+    );
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{ "admitted", "pending-server" },
+        peer,
+        1,
+    );
+    defer inbox.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerPendingHandshake(51, &inbox);
+
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pending-server",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 0,
+        .data = "coalesced",
+        .fin = true,
+    } }).write(&payload, allocator);
+    const buffered = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "pending-server",
+        .packet_number = 0,
+        .payload = payload.items,
+    });
+    defer allocator.free(buffered);
+    try connection.preloadReceivedDatagram(peer, buffered, .not_ect);
+
+    try dispatcher.promotePendingHandshake(51, 52, &connection);
+    var routed = (try dispatcher.pollConnectionPacket(52)) orelse
+        return error.TestUnexpectedResult;
+    defer routed.packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 52), routed.connection_handle);
+    try std.testing.expectEqualStrings(
+        "coalesced",
+        routed.packet.frames[0].stream.data,
+    );
+    try std.testing.expect((try dispatcher.pollConnectionPacket(52)) == null);
+    try std.testing.expect(try dispatcher.unregisterConnection(52));
+}

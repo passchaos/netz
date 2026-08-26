@@ -2929,10 +2929,26 @@ pub const HandshakeServer = struct {
         self: *HandshakeServer,
         initial: *quic.endpoint_dispatcher.Event,
     ) Error!HandshakeServerSession {
+        return self.acceptFromInitialSource(
+            .fromEndpoint(&self.quic_server.endpoint),
+            initial,
+        );
+    }
+
+    /// Accept a dispatcher-owned Initial while receiving every later QUIC
+    /// handshake datagram from an injected source. A shared endpoint uses a
+    /// bounded pending-handshake inbox here so this worker never competes with
+    /// the endpoint's sole UDP receive owner.
+    pub fn acceptFromInitialSource(
+        self: *HandshakeServer,
+        source: quic.runtime.DatagramSource,
+        initial: *quic.endpoint_dispatcher.Event,
+    ) Error!HandshakeServerSession {
         const datagram = initial.takeNewInitial() orelse
             return error.InvalidHandshakeFlight;
-        var established = try quic.handshake.acceptFromInitial(
+        var established = try quic.handshake.acceptFromInitialSource(
             &self.quic_server.endpoint,
+            source,
             datagram,
             self.handshake_options,
         );

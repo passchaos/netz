@@ -198,10 +198,12 @@ the dispatcher's owned Initial event, so the first packet is not reread from the
 shared socket. At the QUIC layer, subsequent Initial/Retry/0-RTT/Handshake
 datagrams can now be routed by the sole socket owner into a bounded per-handshake
 inbox, and a real handshake regression verifies completion and promotion to the
-established CID router without competing socket readers. The remaining gap is
-to expose that source through the HTTP/3/WebTransport acceptance wrappers and
-build the bounded multi-client supervisor around worker admission, expiry, and
-successful-session handoff.
+established CID router without competing socket readers. HTTP/3 now exposes
+source-aware Initial acceptance. WebTransport additionally exposes a split
+`HandshakeAdmission`: the caller completes QUIC/TLS from an inbox, promotes its
+connection, injects routed 1-RTT packets, and non-blockingly polls for the
+Extended CONNECT request. The remaining gap is a turnkey bounded multi-client
+supervisor around worker admission, expiry, promotion, and session handoff.
 
 ## Session drain and close lifecycle
 

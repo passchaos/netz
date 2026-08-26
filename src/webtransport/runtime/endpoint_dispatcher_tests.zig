@@ -294,6 +294,95 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
     }
 }
 
+test "WebTransport handshake admission polls routed CONNECT state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var transport_parameters = quic.practical_transport_parameters;
+    transport_parameters.max_datagram_frame_size = 1200;
+    const settings = webtransport.defaultSettings(.{});
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const peer = client_endpoint.address();
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer,
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-server",
+            .peer_connection_id = "wt-client",
+            .local_transport_parameters = transport_parameters,
+            .peer_transport_parameters = transport_parameters,
+        },
+    );
+    var admission = runtime.HandshakeAdmission{
+        .h3 = h3,
+        .limits = .{ .max_session_streams = 8 },
+    };
+    h3 = undefined;
+    var admission_owned = true;
+    defer if (admission_owned) admission.deinit();
+    admission.h3.control.settings.markSent(settings);
+    admission.h3.control.settings.markReceived(settings);
+    try std.testing.expect((try admission.pollSessionRequest()) == null);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Request{
+        .method = "CONNECT",
+        .scheme = "https",
+        .authority = "localhost",
+        .path = "/routed",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "webtransport" },
+            http3.capsule.protocol_header,
+        },
+    }).write(&encoded, allocator);
+    var client = try quic.one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-client",
+        .peer_connection_id = "wt-server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = encoded.items,
+        .fin = false,
+    } }};
+    try client.send(&frames);
+    var packet = try admission.h3.established.connection.receivePacket();
+    defer packet.deinit(allocator);
+    try admission.processPacket(&packet);
+
+    var pending = (try admission.pollSessionRequest()) orelse
+        return error.TestUnexpectedResult;
+    admission_owned = false;
+    defer pending.deinit();
+    try std.testing.expectEqualStrings("localhost", pending.authority().?);
+    try std.testing.expectEqualStrings("/routed", pending.path());
+}
+
 fn writeDataFrame(out: []u8, payload: []const u8) !usize {
     const frame_type = try quic.varint.encodeInto(
         out,
