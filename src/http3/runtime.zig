@@ -4659,6 +4659,22 @@ pub const HandshakeClient = struct {
         return self.established.keyUpdateAwaitingAck();
     }
 
+    pub fn peerGoAwayId(self: HandshakeClient) ?u64 {
+        return self.control.peer_goaway_id;
+    }
+
+    pub fn goAwayRetryDisposition(
+        self: HandshakeClient,
+        stream_id: u62,
+    ) GoAwayRetryDisposition {
+        const goaway_id = self.control.peer_goaway_id orelse
+            return .no_goaway;
+        return if (stream_id >= goaway_id)
+            .safe_to_retry
+        else
+            .may_have_been_processed;
+    }
+
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
@@ -6798,6 +6814,22 @@ pub const ProtectedClient = struct {
     pub fn request(self: *ProtectedClient, request_options: http3.Request) Error!OwnedProtectedResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
+    }
+
+    pub fn peerGoAwayId(self: ProtectedClient) ?u64 {
+        return self.control.peer_goaway_id;
+    }
+
+    pub fn goAwayRetryDisposition(
+        self: ProtectedClient,
+        stream_id: u62,
+    ) GoAwayRetryDisposition {
+        const goaway_id = self.control.peer_goaway_id orelse
+            return .no_goaway;
+        return if (stream_id >= goaway_id)
+            .safe_to_retry
+        else
+            .may_have_been_processed;
     }
 
     /// Send a protected request and observe ordered 1xx heads before final.
@@ -10151,6 +10183,15 @@ pub const ShutdownState = enum {
     final_goaway,
 };
 
+/// RFC 9114 §5.2 processing certainty for a client-initiated request stream.
+/// A stream at or above the server's GOAWAY identifier was not processed and
+/// may be retried on another connection, subject to application replay policy.
+pub const GoAwayRetryDisposition = enum {
+    no_goaway,
+    may_have_been_processed,
+    safe_to_retry,
+};
+
 const ServerRequestLifecycle = struct {
     const ActiveRequest = struct {
         stream_id: u62,
@@ -13313,6 +13354,36 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
     try std.testing.expect(!rejectByLocalGoAway(.{ .local_goaway_id = 0 }, .client, 4));
     try std.testing.expect(!rejectByLocalGoAway(.{ .local_goaway_id = 4 }, .server, 0));
     try std.testing.expect(rejectByLocalGoAway(.{ .local_goaway_id = 4 }, .server, 4));
+
+    const retry_client = HandshakeClient{
+        .endpoint = undefined,
+        .peer = .{ .ip4 = .loopback(443) },
+        .allocator = std.testing.allocator,
+        .established = undefined,
+        .options = .{},
+        .qpack_decode = undefined,
+        .qpack_encode = undefined,
+        .response_streams = undefined,
+        .streaming_responses = undefined,
+        .push_streams = undefined,
+        .request_lifecycle = undefined,
+        .outbound_bodies = undefined,
+    };
+    try std.testing.expectEqual(
+        GoAwayRetryDisposition.no_goaway,
+        retry_client.goAwayRetryDisposition(0),
+    );
+    var after_goaway = retry_client;
+    after_goaway.control.peer_goaway_id = 8;
+    try std.testing.expectEqual(@as(?u64, 8), after_goaway.peerGoAwayId());
+    try std.testing.expectEqual(
+        GoAwayRetryDisposition.may_have_been_processed,
+        after_goaway.goAwayRetryDisposition(4),
+    );
+    try std.testing.expectEqual(
+        GoAwayRetryDisposition.safe_to_retry,
+        after_goaway.goAwayRetryDisposition(8),
+    );
 }
 
 test "HTTP/3 client rejects server-only control frames" {

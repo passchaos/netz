@@ -687,6 +687,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "finishResponseTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendGoAway"));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "GoAwayRetryDisposition",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "peerGoAwayId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "goAwayRetryDisposition",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "goAwayRetryDisposition",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServer,
         "serveConnection",
     ));
