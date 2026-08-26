@@ -470,3 +470,177 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
     try std.testing.expectEqual(@as(usize, 0), supervisor.pendingCount());
     try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
 }
+
+test "HTTP/3 handshake supervisor establishes concurrent clients" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{
+            .handshake = .{
+                // Admission replaces this template with a unique CID before each
+                // worker starts. Keeping a fixed value here verifies that contract.
+                .local_connection_id = "server-template",
+                .random = [_]u8{0xe1} ** 32,
+                .x25519_secret_key = [_]u8{0xe2} ** 32,
+                .handshake_recovery = .{
+                    .initial_pto_ms = 20,
+                    .max_pto_ms = 40,
+                    .max_duration_ms = 2_000,
+                },
+            },
+        },
+    );
+    defer server.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server.quic_server.endpoint,
+    );
+    defer dispatcher.deinit();
+    var supervisor = try runtime.HandshakeSupervisor.init(
+        &server,
+        &dispatcher,
+        .{ .max_pending_handshakes = 2, .inbox_capacity = 8 },
+    );
+    var supervisor_owned = true;
+    defer if (supervisor_owned) supervisor.deinit();
+
+    const ClientTask = struct {
+        io: std.Io,
+        server_address: net.IpAddress,
+        original_dcid: []const u8,
+        local_cid: []const u8,
+        random: [32]u8,
+        secret: [32]u8,
+        established: ?runtime.HandshakeClient = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.established = runtime.HandshakeClient.connect(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.server_address,
+                .{ .quic = .{
+                    .max_datagram_size = 4096,
+                    .max_frames_per_datagram = 16,
+                } },
+                .{ .handshake = .{
+                    .original_destination_connection_id = self.original_dcid,
+                    .local_connection_id = self.local_cid,
+                    .server_name = "localhost",
+                    .random = self.random,
+                    .x25519_secret_key = self.secret,
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
+                } },
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var clients = [_]ClientTask{
+        .{
+            .io = io,
+            .server_address = server.address(),
+            .original_dcid = "route-one",
+            .local_cid = "client-one",
+            .random = [_]u8{0xe3} ** 32,
+            .secret = [_]u8{0xe4} ** 32,
+        },
+        .{
+            .io = io,
+            .server_address = server.address(),
+            .original_dcid = "route-two",
+            .local_cid = "client-two",
+            .random = [_]u8{0xe5} ** 32,
+            .secret = [_]u8{0xe6} ** 32,
+        },
+    };
+    const client_a = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const client_b = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+    var clients_joined = false;
+    defer if (!clients_joined) {
+        if (supervisor_owned) {
+            supervisor.deinit();
+            supervisor_owned = false;
+        }
+        client_a.join();
+        client_b.join();
+        for (&clients) |*client| {
+            if (client.established) |*established| established.deinit();
+        }
+    };
+
+    var promoted: [2]?runtime.PromotedHandshakeSession = .{ null, null };
+    defer for (&promoted) |*session| {
+        if (session.*) |*value| value.deinit();
+    };
+    var admitted: usize = 0;
+    var completed: usize = 0;
+    const versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    while (completed < promoted.len) {
+        var event = try supervisor.receive(
+            &versions,
+            .{ .clock = .awake, .raw = .fromMilliseconds(5) },
+        );
+        defer event.deinit(allocator);
+        switch (event) {
+            .consumed => unreachable,
+            .completed => {
+                var completion = event.takeCompletion().?;
+                var owned = true;
+                defer if (owned) completion.deinit();
+                promoted[completed] = try supervisor.promote(&completion);
+                owned = false;
+                completed += 1;
+            },
+            .endpoint => |*endpoint_event| switch (endpoint_event.*) {
+                .new_initial => {
+                    _ = try supervisor.admit(endpoint_event);
+                    admitted += 1;
+                },
+                .pending_handshake,
+                .discarded_long_header,
+                .consumed,
+                .timer,
+                => {},
+                .packet, .unrouted => return error.TestUnexpectedResult,
+            },
+        }
+    }
+
+    client_a.join();
+    client_b.join();
+    clients_joined = true;
+    for (&clients) |*client| {
+        if (client.err) |err| return err;
+        var established = client.established orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("h3", established.negotiatedAlpn());
+        established.deinit();
+        client.established = null;
+    }
+    try std.testing.expectEqual(@as(usize, 2), admitted);
+    try std.testing.expectEqual(@as(usize, 2), completed);
+    try std.testing.expectEqual(@as(usize, 0), supervisor.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
+    try std.testing.expectEqual(@as(usize, 2), dispatcher.connectionCount());
+}
