@@ -377,6 +377,42 @@ test "HTTP/3 handshake admission owns generated CID and Initial lifecycle" {
     );
 }
 
+test "HTTP/3 handshake supervisor exposes bounded idle receive" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "bounded-receive" } },
+    );
+    defer server.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server.quic_server.endpoint,
+    );
+    defer dispatcher.deinit();
+    var supervisor = try runtime.HandshakeSupervisor.init(
+        &server,
+        &dispatcher,
+        .{},
+    );
+    defer supervisor.deinit();
+
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expect((try supervisor.receiveOnce(
+        &.{quic.Version.version_1.wireValue()},
+        .{ .clock = .awake, .raw = .fromMilliseconds(5) },
+    )) == null);
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    try std.testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
+}
+
 test "HTTP/3 handshake supervisor bounds and reports failed workers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

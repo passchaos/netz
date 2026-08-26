@@ -143,3 +143,65 @@ test "HTTP/3 endpoint server owns concurrent handshakes and requests" {
     }
     try std.testing.expectEqual(@as(usize, 2), endpoint_server.connectionCount());
 }
+
+test "HTTP/3 endpoint transport loop observes shutdown while idle" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "endpoint-idle" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+        fn handle(
+            self: *@This(),
+            _: *runtime.EndpointServer,
+            _: *runtime.EndpointTransportEvent,
+        ) !void {
+            self.calls += 1;
+        }
+    };
+    const Shared = struct {
+        endpoint: *runtime.EndpointServer,
+        shutdown: *std.Io.Event,
+        context: Context = .{},
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.endpoint.serveTransportUntil(
+                Context,
+                &self.context,
+                Context.handle,
+                &.{quic.Version.version_1.wireValue()},
+                .{ .clock = .awake, .raw = .fromMilliseconds(2) },
+                self.shutdown,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shutdown: std.Io.Event = .unset;
+    var shared = Shared{ .endpoint = &endpoint, .shutdown = &shutdown };
+    const started = std.Io.Clock.awake.now(io);
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+    shutdown.set(io);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), shared.context.calls);
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            std.time.ns_per_s,
+    );
+}

@@ -388,8 +388,11 @@ handshake expiry policy. The remaining convenience work is a callback/task
 supervisor above this typed event loop. HTTP/3 now
 has an endpoint server that stores stable promoted sessions, routes packets and
 timers, polls requests without per-connection socket reads, and explicitly
-removes connection routes before destroying session state. A two-client real
-TLS/QUIC test exercises the full admission and promotion path on one UDP socket.
+removes connection routes before destroying session state. Its bounded
+`receiveTransportOnce` and cancellable `serveTransportUntil` APIs let protocol
+adapters retain that single receive owner without busy waiting. A two-client
+real TLS/QUIC test exercises the full admission and promotion path on one UDP
+socket.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and

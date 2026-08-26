@@ -3179,26 +3179,39 @@ pub const HandshakeSupervisor = struct {
         supported_versions: []const u32,
         poll_interval: std.Io.Clock.Duration,
     ) HandshakeAdmissionError!HandshakeSupervisorEvent {
+        while (true) {
+            if (try self.receiveOnce(
+                supported_versions,
+                poll_interval,
+            )) |event| return event;
+        }
+    }
+
+    /// Perform one bounded receive iteration. A null result means the poll
+    /// interval elapsed after pending-handshake expiry was serviced.
+    pub fn receiveOnce(
+        self: *HandshakeSupervisor,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!?HandshakeSupervisorEvent {
         if (poll_interval.raw.nanoseconds <= 0) {
             return error.InvalidHandshakeRecovery;
         }
-        while (true) {
-            if (self.pollCompleted()) |completion| {
-                return .{ .completed = completion };
-            }
-            const now = std.Io.Clock.awake.now(self.io).nanoseconds;
-            _ = self.expireAt(if (now <= 0)
-                0
-            else
-                std.math.cast(u64, now) orelse std.math.maxInt(u64));
-            return .{ .endpoint = self.dispatcher.receiveTimeout(
-                supported_versions,
-                .{ .duration = poll_interval },
-            ) catch |err| switch (err) {
-                error.Timeout => continue,
-                else => |other| return other,
-            } };
+        if (self.pollCompleted()) |completion| {
+            return .{ .completed = completion };
         }
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        _ = self.expireAt(if (now <= 0)
+            0
+        else
+            std.math.cast(u64, now) orelse std.math.maxInt(u64));
+        return .{ .endpoint = self.dispatcher.receiveTimeout(
+            supported_versions,
+            .{ .duration = poll_interval },
+        ) catch |err| switch (err) {
+            error.Timeout => return null,
+            else => |other| return other,
+        } };
     }
 
     pub fn promote(
@@ -3505,55 +3518,100 @@ pub const EndpointServer = struct {
         poll_interval: std.Io.Clock.Duration,
     ) HandshakeAdmissionError!EndpointTransportEvent {
         while (true) {
-            if (self.handshakes.pollCompleted()) |completion_value| {
-                var completion = completion_value;
-                return try self.finishTransportCompletion(&completion);
-            }
-            var event = try self.handshakes.receive(
+            if (try self.receiveTransportOnce(
                 supported_versions,
                 poll_interval,
-            );
-            switch (event) {
-                .consumed => unreachable,
-                .completed => {
-                    var completion = event.takeCompletion().?;
-                    return try self.finishTransportCompletion(&completion);
-                },
-                .endpoint => {
-                    var endpoint_event = event.takeEndpoint().?;
-                    var endpoint_owned = true;
-                    defer if (endpoint_owned) endpoint_event.deinit(
-                        self.allocator,
-                    );
-                    switch (endpoint_event) {
-                        .new_initial => {
-                            _ = self.handshakes.admit(&endpoint_event) catch |err|
-                                switch (err) {
-                                    error.PendingHandshakeLimitReached => {
-                                        endpoint_owned = false;
-                                        return .{ .unrouted = endpoint_event };
-                                    },
-                                    else => |other| return other,
-                                };
-                        },
-                        .packet => |packet| {
-                            endpoint_event = .consumed;
-                            endpoint_owned = false;
-                            return .{ .packet = packet };
-                        },
-                        .unrouted => {
-                            endpoint_owned = false;
-                            return .{ .unrouted = endpoint_event };
-                        },
-                        .pending_handshake,
-                        .discarded_long_header,
-                        .timer,
-                        .consumed,
-                        => {},
-                    }
-                },
-            }
+            )) |event| return event;
         }
+    }
+
+    /// Drive the endpoint until `shutdown` is set, exposing established
+    /// packets without interpreting their HTTP/3 request streams. This is the
+    /// safe outer-loop primitive for protocol adapters such as WebTransport.
+    pub fn serveTransportUntil(
+        self: *EndpointServer,
+        comptime Context: type,
+        context: *Context,
+        comptime handler: *const fn (
+            *Context,
+            *EndpointServer,
+            *EndpointTransportEvent,
+        ) anyerror!void,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+        shutdown: *std.Io.Event,
+    ) anyerror!void {
+        if (supported_versions.len == 0 or
+            poll_interval.raw.nanoseconds <= 0)
+        {
+            return error.InvalidHandshakeRecovery;
+        }
+        while (!shutdown.isSet()) {
+            const event_value = self.receiveTransportOnce(
+                supported_versions,
+                poll_interval,
+            ) catch |err| switch (err) {
+                error.Canceled => if (shutdown.isSet()) return else return err,
+                else => |other| return other,
+            } orelse continue;
+            var event = event_value;
+            defer event.deinit(self.allocator);
+            try handler(context, self, &event);
+        }
+    }
+
+    /// One bounded transport iteration for outer loops that also poll
+    /// application shutdown or maintenance state.
+    pub fn receiveTransportOnce(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!?EndpointTransportEvent {
+        var event = (try self.handshakes.receiveOnce(
+            supported_versions,
+            poll_interval,
+        )) orelse return null;
+        switch (event) {
+            .consumed => unreachable,
+            .completed => {
+                var completion = event.takeCompletion().?;
+                return try self.finishTransportCompletion(&completion);
+            },
+            .endpoint => {
+                var endpoint_event = event.takeEndpoint().?;
+                var endpoint_owned = true;
+                defer if (endpoint_owned) endpoint_event.deinit(
+                    self.allocator,
+                );
+                switch (endpoint_event) {
+                    .new_initial => {
+                        _ = self.handshakes.admit(&endpoint_event) catch |err|
+                            switch (err) {
+                                error.PendingHandshakeLimitReached => {
+                                    endpoint_owned = false;
+                                    return .{ .unrouted = endpoint_event };
+                                },
+                                else => |other| return other,
+                            };
+                    },
+                    .packet => |packet| {
+                        endpoint_event = .consumed;
+                        endpoint_owned = false;
+                        return .{ .packet = packet };
+                    },
+                    .unrouted => {
+                        endpoint_owned = false;
+                        return .{ .unrouted = endpoint_event };
+                    },
+                    .pending_handshake,
+                    .discarded_long_header,
+                    .timer,
+                    .consumed,
+                    => {},
+                }
+            },
+        }
+        return null;
     }
 
     fn finishTransportCompletion(
