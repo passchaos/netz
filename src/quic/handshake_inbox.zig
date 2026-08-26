@@ -27,6 +27,9 @@ pub const Inbox = struct {
     slots: []?quic.runtime.OwnedBytes,
     head: usize = 0,
     len: usize = 0,
+    application_slots: []?quic.runtime.OwnedBytes,
+    application_head: usize = 0,
+    application_len: usize = 0,
     closed: bool = false,
 
     pub fn init(
@@ -61,12 +64,19 @@ pub const Inbox = struct {
         const slots = try allocator.alloc(?quic.runtime.OwnedBytes, capacity);
         errdefer allocator.free(slots);
         @memset(slots, null);
+        const application_slots = try allocator.alloc(
+            ?quic.runtime.OwnedBytes,
+            capacity,
+        );
+        errdefer allocator.free(application_slots);
+        @memset(application_slots, null);
         return .{
             .allocator = allocator,
             .io = io,
             .connection_ids = owned_connection_ids,
             .peer = peer,
             .slots = slots,
+            .application_slots = application_slots,
         };
     }
 
@@ -78,7 +88,15 @@ pub const Inbox = struct {
                 datagram.deinit(self.allocator);
             }
         }
+        for (0..self.application_len) |offset| {
+            const index = (self.application_head + offset) %
+                self.application_slots.len;
+            if (self.application_slots[index]) |*datagram| {
+                datagram.deinit(self.allocator);
+            }
+        }
         self.allocator.free(self.slots);
+        self.allocator.free(self.application_slots);
         self.allocator.free(self.connection_ids);
         self.mutex.unlock(self.io);
         self.* = undefined;
@@ -111,7 +129,9 @@ pub const Inbox = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
-        if (self.len == self.slots.len) return error.Full;
+        if (self.len + self.application_len == self.slots.len) {
+            return error.Full;
+        }
         const index = (self.head + self.len) % self.slots.len;
         self.slots[index] = datagram;
         self.len += 1;
@@ -123,6 +143,48 @@ pub const Inbox = struct {
         self.closed = true;
         self.available.set(self.io);
         self.mutex.unlock(self.io);
+    }
+
+    /// Retain a short-header packet that arrived after Client Finished but
+    /// before the dispatcher observed handshake completion. The dispatcher
+    /// has already matched its DCID; this method keeps a separate queue so the
+    /// handshake worker cannot consume and discard application data.
+    pub fn pushApplicationRouted(
+        self: *Inbox,
+        datagram: quic.runtime.OwnedBytes,
+    ) Error!void {
+        if (datagram.bytes.len == 0 or (datagram.bytes[0] & 0x80) != 0) {
+            return error.ConnectionIdMismatch;
+        }
+        if (!sameAddress(self.peer, datagram.from)) return error.PeerMismatch;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        if (self.len + self.application_len == self.slots.len) {
+            return error.Full;
+        }
+        const index = (self.application_head + self.application_len) %
+            self.application_slots.len;
+        self.application_slots[index] = datagram;
+        self.application_len += 1;
+    }
+
+    pub fn applicationCount(self: *Inbox) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.application_len;
+    }
+
+    pub fn takeApplication(self: *Inbox) ?quic.runtime.OwnedBytes {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.application_len == 0) return null;
+        const datagram = self.application_slots[self.application_head].?;
+        self.application_slots[self.application_head] = null;
+        self.application_head =
+            (self.application_head + 1) % self.application_slots.len;
+        self.application_len -= 1;
+        return datagram;
     }
 
     pub fn count(self: *Inbox) usize {

@@ -930,6 +930,87 @@ test "QUIC endpoint dispatcher bounds pending admission and generates CIDs" {
     try std.testing.expect(try dispatcher.unregisterPendingHandshake(61));
 }
 
+test "QUIC endpoint dispatcher retains early application packets until promotion" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf1} ** quic.protection.secret_len,
+    );
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{ "admitted", "pending-server" },
+        peer,
+        2,
+    );
+    defer inbox.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerPendingHandshake(71, &inbox);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pending-server",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    for ([_][]const u8{ "early-one", "early-two" }, 0..) |body, pn| {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try (quic.Frame{ .stream = .{
+            .stream_id = 0,
+            .offset = if (pn == 0) 0 else "early-one".len,
+            .data = body,
+            .fin = pn == 1,
+        } }).write(&payload, allocator);
+        const datagram = try quic.protection.sealShortPacket(
+            allocator,
+            keys,
+            .{
+                .destination_connection_id = "pending-server",
+                .packet_number = pn,
+                .payload = payload.items,
+            },
+        );
+        var event = try dispatcher.dispatch(.{
+            .from = peer,
+            .bytes = datagram,
+        });
+        defer event.deinit(allocator);
+        try std.testing.expectEqual(
+            @as(Event, .{ .pending_handshake = 71 }),
+            event,
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 2), inbox.applicationCount());
+    try dispatcher.promotePendingHandshake(71, 72, &connection);
+
+    for ([_][]const u8{ "early-one", "early-two" }) |body| {
+        var event = try dispatcher.receive(
+            &.{quic.Version.version_1.wireValue()},
+        );
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .packet);
+        try std.testing.expectEqual(@as(usize, 72), event.packet.connection_handle);
+        try std.testing.expectEqualStrings(body, event.packet.packet.frames[0].stream.data);
+    }
+    try std.testing.expect(try dispatcher.unregisterConnection(72));
+}
+
 test "QUIC endpoint dispatcher caller timeout coexists with transport timers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

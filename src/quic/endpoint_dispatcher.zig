@@ -142,6 +142,7 @@ pub const Dispatcher = struct {
         PendingHandshakeHandle,
         PendingHandshakeEntry,
     ) = .empty,
+    promoted_datagrams: std.ArrayList(runtime.OwnedBytes) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -169,6 +170,10 @@ pub const Dispatcher = struct {
             entry.deinit(self.allocator);
         }
         self.pending_handshakes.deinit(self.allocator);
+        for (self.promoted_datagrams.items) |*datagram| {
+            datagram.deinit(self.allocator);
+        }
+        self.promoted_datagrams.deinit(self.allocator);
         self.pending_router.deinit();
         self.router.deinit();
         self.timers.deinit();
@@ -305,6 +310,10 @@ pub const Dispatcher = struct {
             self.allocator,
             quic.connection_id.max_pool_size,
         );
+        try self.promoted_datagrams.ensureUnusedCapacity(
+            self.allocator,
+            pending.inbox.applicationCount(),
+        );
         // The connection entry is fully initialized but intentionally not yet
         // routable. No packet can observe it until all pending aliases have
         // been withdrawn below.
@@ -332,6 +341,9 @@ pub const Dispatcher = struct {
                 id.sequence_number,
             )) catch unreachable;
             slot.value_ptr.connection_ids.appendAssumeCapacity(key);
+        }
+        while (pending_inbox.takeApplication()) |datagram| {
+            self.promoted_datagrams.appendAssumeCapacity(datagram);
         }
         self.timers.armFromConnection(
             connection_handle,
@@ -678,6 +690,10 @@ pub const Dispatcher = struct {
     ) ReceiveError!Event {
         const caller_deadline = timeout.toTimestamp(self.endpoint.io);
         while (true) {
+            if (self.promoted_datagrams.items.len != 0) {
+                const datagram = self.promoted_datagrams.orderedRemove(0);
+                return self.dispatch(datagram);
+            }
             if (try self.pollPendingPacket()) |packet| {
                 return .{ .packet = packet };
             }
@@ -746,12 +762,11 @@ pub const Dispatcher = struct {
         var owned = datagram;
         var owns_datagram = true;
         errdefer if (owns_datagram) owned.deinit(self.allocator);
-        // Pending handshakes are deliberately checked first for long-header
-        // packets. Their server CID is not yet present in the established
-        // router, and a retried/fragmented Initial can still use an admitted
-        // original DCID. Looking only after an established route would make
-        // this path unreachable.
-        if (owned.bytes.len != 0 and (owned.bytes[0] & 0x80) != 0) {
+        // Pending handshakes are deliberately checked first. Long headers
+        // carry the server CID explicitly. Short headers are prefix-routed and
+        // retained separately until promotion, preventing an eager client
+        // request from being misclassified as an unknown connection.
+        if (owned.bytes.len != 0) {
             const pending = self.pending_router.routeDatagramFrom(
                 owned.from,
                 owned.bytes,
@@ -763,7 +778,11 @@ pub const Dispatcher = struct {
                 const entry = self.pending_handshakes.getPtr(
                     routed_pending.route.connection_index,
                 ) orelse return error.StaleConnectionRoute;
-                entry.inbox.push(owned) catch |err| switch (err) {
+                const push_result = if ((owned.bytes[0] & 0x80) != 0)
+                    entry.inbox.push(owned)
+                else
+                    entry.inbox.pushApplicationRouted(owned);
+                push_result catch |err| switch (err) {
                     // A bounded or concurrently closed handshake must not
                     // terminate the sole endpoint receive loop. The inbox did
                     // not take ownership on failure, so drop the datagram here.
