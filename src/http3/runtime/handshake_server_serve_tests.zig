@@ -447,13 +447,18 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
 
     var completion: runtime.HandshakeCompletion = undefined;
     while (true) {
-        if (supervisor.pollCompleted()) |ready| {
-            completion = ready;
-            break;
+        var ready = try supervisor.receive(
+            &.{quic.Version.version_1.wireValue()},
+            .{ .clock = .awake, .raw = .fromMilliseconds(1) },
+        );
+        defer ready.deinit(allocator);
+        switch (ready) {
+            .completed => |value| {
+                completion = value;
+                break;
+            },
+            .endpoint => return error.TestUnexpectedResult,
         }
-        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch |err| switch (err) {
-            error.Canceled => return err,
-        };
     }
     defer supervisor.discardCompletion(&completion);
     try std.testing.expectError(error.InvalidEncoding, completion.result);

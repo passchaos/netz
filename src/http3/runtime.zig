@@ -2915,6 +2915,19 @@ pub const HandshakeCompletion = struct {
     result: Error!HandshakeServerSession,
 };
 
+pub const HandshakeSupervisorEvent = union(enum) {
+    completed: HandshakeCompletion,
+    endpoint: quic.endpoint_dispatcher.Event,
+
+    pub fn deinit(self: *HandshakeSupervisorEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .completed => {},
+            .endpoint => |*event| event.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
 const HandshakeWorkerContext = struct {
     server: *HandshakeServer,
     io: std.Io,
@@ -3047,6 +3060,31 @@ pub const HandshakeSupervisor = struct {
         const previous = self.active_workers.fetchSub(1, .acq_rel);
         std.debug.assert(previous != 0);
         return completion[0];
+    }
+
+    /// Receive and route one endpoint datagram while periodically waking to
+    /// report worker completion. A completed handshake is returned before any
+    /// later socket event so the caller can promote its CID routes promptly.
+    pub fn receive(
+        self: *HandshakeSupervisor,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!HandshakeSupervisorEvent {
+        if (poll_interval.raw.nanoseconds <= 0) {
+            return error.InvalidHandshakeRecovery;
+        }
+        while (true) {
+            if (self.pollCompleted()) |completion| {
+                return .{ .completed = completion };
+            }
+            return .{ .endpoint = self.dispatcher.receiveTimeout(
+                supported_versions,
+                .{ .duration = poll_interval },
+            ) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => |other| return other,
+            } };
+        }
     }
 
     pub fn promote(
