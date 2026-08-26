@@ -158,6 +158,11 @@ pub const Endpoint = struct {
     send_ecn_mark: quic.packet_space.EcnCodepoint = .not_ect,
     gso_send_enabled: bool = udpGsoSupported(),
     gro_receive_enabled: bool = false,
+    /// Serializes socket options and fault-injection state with the associated
+    /// send syscall. Multiple QUIC connections can share an endpoint and send
+    /// from independent workers; without this lock an ECN mark, held packet,
+    /// or first GSO capability failure could race across connections.
+    send_mutex: std.Io.Mutex = .init,
     socket_receive_mutex: std.Io.Mutex = .init,
     pending_receive_mutex: std.Io.Mutex = .init,
     pending_received: std.ArrayList(OwnedBytes) = .empty,
@@ -210,6 +215,12 @@ pub const Endpoint = struct {
     /// reject non-Not-ECT marks instead of silently pretending ECN validation
     /// can run.
     pub fn sendBytesWithEcn(self: *Endpoint, to: net.IpAddress, bytes: []const u8, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        return self.sendBytesWithEcnLocked(to, bytes, ecn);
+    }
+
+    fn sendBytesWithEcnLocked(self: *Endpoint, to: net.IpAddress, bytes: []const u8, ecn: quic.packet_space.EcnCodepoint) Error!void {
         if (bytes.len == 0) return error.EmptyDatagram;
         if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
         if (self.limits.send_interceptor) |interceptor| {
@@ -284,6 +295,12 @@ pub const Endpoint = struct {
     /// the unsent suffix. Validation and ECN setup still fail through the error
     /// union because they happen before the first datagram can be emitted.
     pub fn sendManyBytesProgress(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!SendManyBytesResult {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        return self.sendManyBytesProgressLocked(to, datagrams);
+    }
+
+    fn sendManyBytesProgressLocked(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!SendManyBytesResult {
         if (datagrams.len == 0) return .{ .sent_count = 0 };
         for (datagrams) |bytes| {
             if (bytes.len == 0) return error.EmptyDatagram;
@@ -294,7 +311,7 @@ pub const Endpoint = struct {
             // submitting individually preserves exact deterministic filtering
             // and prevents GSO from hiding segment boundaries.
             for (datagrams) |bytes| {
-                try self.sendBytesWithEcn(to, bytes, .not_ect);
+                try self.sendBytesWithEcnLocked(to, bytes, .not_ect);
             }
             // A batch ending exactly on a selected packet has no later call
             // inside this batch to release it. Flush at the batch boundary so
@@ -2730,4 +2747,65 @@ test "QUIC UDP endpoint routes protected short datagrams by DCID" {
         try std.testing.expectEqualStrings("conn-b", first.destination_connection_id);
         try std.testing.expectEqualStrings("conn-a", second.destination_connection_id);
     }
+}
+
+test "QUIC endpoint serializes concurrent sends from shared connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer sender.deinit();
+
+    const Task = struct {
+        endpoint: *Endpoint,
+        peer: net.IpAddress,
+        byte: u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var payload = [_]u8{0} ** 16;
+            @memset(&payload, self.byte);
+            self.endpoint.sendBytes(self.peer, &payload) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var tasks: [16]Task = undefined;
+    var threads: [tasks.len]std.Thread = undefined;
+    for (&tasks, 0..) |*task, index| {
+        task.* = .{
+            .endpoint = &sender,
+            .peer = receiver.address(),
+            .byte = @intCast(index + 1),
+        };
+        threads[index] = try std.Thread.spawn(.{}, Task.run, .{task});
+    }
+    for (&threads) |*thread| thread.join();
+    for (tasks) |task| if (task.err) |err| return err;
+
+    var seen = [_]bool{false} ** tasks.len;
+    for (0..tasks.len) |_| {
+        var datagram = try receiver.receiveBytes();
+        defer datagram.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 16), datagram.bytes.len);
+        const marker = datagram.bytes[0];
+        try std.testing.expect(marker >= 1 and marker <= tasks.len);
+        for (datagram.bytes) |byte| try std.testing.expectEqual(marker, byte);
+        try std.testing.expect(!seen[marker - 1]);
+        seen[marker - 1] = true;
+    }
+    for (seen) |received| try std.testing.expect(received);
 }
