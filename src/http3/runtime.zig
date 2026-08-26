@@ -2861,7 +2861,32 @@ pub const HandshakeServerOptions = struct {
 pub const HandshakeAdmissionOptions = struct {
     max_pending_handshakes: usize = 128,
     inbox_capacity: usize = 16,
+    /// Absolute lifetime for one pending TLS/QUIC handshake. Zero derives the
+    /// existing bounded PTO budget from `ServerOptions.handshake_recovery`.
+    handshake_timeout_ms: u32 = 0,
 };
+
+fn handshakeAdmissionDeadlineNs(
+    io: std.Io,
+    configured_ms: u32,
+    recovery_ms: u64,
+) u64 {
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    const now_ns = if (now <= 0)
+        0
+    else
+        std.math.cast(u64, now) orelse std.math.maxInt(u64);
+    const milliseconds = if (configured_ms != 0)
+        @as(u64, configured_ms)
+    else
+        recovery_ms;
+    const duration_ns = std.math.mul(
+        u64,
+        milliseconds,
+        std.time.ns_per_ms,
+    ) catch std.math.maxInt(u64);
+    return now_ns +| duration_ns;
+}
 
 /// Prepared dispatcher registration for one HTTP/3 handshake worker.
 ///
@@ -2874,6 +2899,7 @@ pub const HandshakeAdmission = struct {
     inbox: *quic.handshake_inbox.Inbox,
     initial: quic.runtime.OwnedBytes,
     server_connection_id: [quic.endpoint_dispatcher.default_server_connection_id_len]u8,
+    deadline_ns: u64,
     registered: bool = true,
     initial_owned: bool = true,
 
@@ -2883,6 +2909,10 @@ pub const HandshakeAdmission = struct {
 
     pub fn serverConnectionId(self: *const HandshakeAdmission) []const u8 {
         return &self.server_connection_id;
+    }
+
+    pub fn deadlineNs(self: *const HandshakeAdmission) u64 {
+        return self.deadline_ns;
     }
 
     pub fn takeInitial(self: *HandshakeAdmission) quic.runtime.OwnedBytes {
@@ -3006,6 +3036,11 @@ pub const HandshakeSupervisor = struct {
     next_handle_mutex: std.Io.Mutex = .init,
     completed_storage: []HandshakeCompletion,
     completed: *std.Io.Queue(HandshakeCompletion),
+    admissions_mutex: std.Io.Mutex = .init,
+    admissions: std.AutoHashMapUnmanaged(
+        quic.endpoint_dispatcher.PendingHandshakeHandle,
+        *HandshakeAdmission,
+    ) = .empty,
     /// Active handshake CIDs are intentionally non-migratable. Same-IP port
     /// rebinding is allowed, matching QUIC's authenticated migration rules.
     pub fn init(
@@ -3054,6 +3089,7 @@ pub const HandshakeSupervisor = struct {
             self.destroyCompletion(completion);
         }
         self.completed.close(self.io);
+        self.admissions.deinit(self.allocator);
         self.allocator.destroy(self.worker_context);
         self.allocator.destroy(self.completed);
         self.allocator.free(self.completed_storage);
@@ -3094,6 +3130,21 @@ pub const HandshakeSupervisor = struct {
             self.admission_options,
         );
         errdefer admission.deinit();
+        self.admissions_mutex.lockUncancelable(self.io);
+        self.admissions.put(
+            self.allocator,
+            handle,
+            admission,
+        ) catch |err| {
+            self.admissions_mutex.unlock(self.io);
+            return err;
+        };
+        self.admissions_mutex.unlock(self.io);
+        errdefer {
+            self.admissions_mutex.lockUncancelable(self.io);
+            _ = self.admissions.remove(handle);
+            self.admissions_mutex.unlock(self.io);
+        }
         try self.workers.concurrent(
             self.io,
             HandshakeSupervisor.runWorker,
@@ -3114,6 +3165,9 @@ pub const HandshakeSupervisor = struct {
         if (count == 0) return null;
         const previous = self.active_workers.fetchSub(1, .acq_rel);
         std.debug.assert(previous != 0);
+        self.admissions_mutex.lockUncancelable(self.io);
+        _ = self.admissions.remove(completion[0].handle);
+        self.admissions_mutex.unlock(self.io);
         return completion[0];
     }
 
@@ -3132,6 +3186,11 @@ pub const HandshakeSupervisor = struct {
             if (self.pollCompleted()) |completion| {
                 return .{ .completed = completion };
             }
+            const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+            _ = self.expireAt(if (now <= 0)
+                0
+            else
+                std.math.cast(u64, now) orelse std.math.maxInt(u64));
             return .{ .endpoint = self.dispatcher.receiveTimeout(
                 supported_versions,
                 .{ .duration = poll_interval },
@@ -3188,6 +3247,22 @@ pub const HandshakeSupervisor = struct {
 
     pub fn connectionCount(self: *const HandshakeSupervisor) usize {
         return self.dispatcher.connectionCount();
+    }
+
+    pub fn expireAt(self: *HandshakeSupervisor, now_ns: u64) usize {
+        var expired: [64]*HandshakeAdmission = undefined;
+        var expired_len: usize = 0;
+        self.admissions_mutex.lockUncancelable(self.io);
+        var iterator = self.admissions.iterator();
+        while (iterator.next()) |entry| {
+            if (now_ns < entry.value_ptr.*.deadlineNs()) continue;
+            if (expired_len == expired.len) break;
+            expired[expired_len] = entry.value_ptr.*;
+            expired_len += 1;
+        }
+        self.admissions_mutex.unlock(self.io);
+        for (expired[0..expired_len]) |admission| admission.inbox.close();
+        return expired_len;
     }
 
     fn reserveHandle(
@@ -3569,6 +3644,11 @@ pub const HandshakeServer = struct {
             .inbox = inbox,
             .initial = event.takeNewInitial().?,
             .server_connection_id = undefined,
+            .deadline_ns = handshakeAdmissionDeadlineNs(
+                self.quic_server.endpoint.io,
+                options.handshake_timeout_ms,
+                self.handshake_options.handshake_recovery.budgetMillis(),
+            ),
         };
         @memcpy(
             &result.server_connection_id,

@@ -474,6 +474,73 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
     try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
 }
 
+test "HTTP/3 handshake supervisor expires a silent pending worker" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "template-cid" } },
+    );
+    defer server.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server.quic_server.endpoint,
+    );
+    defer dispatcher.deinit();
+    var supervisor = try runtime.HandshakeSupervisor.init(
+        &server,
+        &dispatcher,
+        .{
+            .max_pending_handshakes = 1,
+            .inbox_capacity = 1,
+            .handshake_timeout_ms = 1,
+        },
+    );
+    defer supervisor.deinit();
+
+    const bytes = try allocator.dupe(u8, "partial-initial");
+    var event = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(4567) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer event.deinit(allocator);
+    _ = try supervisor.admit(&event);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        supervisor.expireAt(std.math.maxInt(u64)),
+    );
+
+    var completion: runtime.HandshakeCompletion = undefined;
+    while (true) {
+        if (supervisor.pollCompleted()) |ready| {
+            completion = ready;
+            break;
+        }
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch |err| switch (err) {
+            error.Canceled => return err,
+        };
+    }
+    defer completion.deinit();
+    try std.testing.expect(completion.result == .failure);
+    try std.testing.expect(
+        completion.result.failure == error.SocketUnconnected or
+            completion.result.failure == error.InvalidInitialPacket,
+    );
+}
+
 test "HTTP/3 handshake supervisor establishes concurrent clients" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
