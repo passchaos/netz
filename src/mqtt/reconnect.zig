@@ -18,8 +18,13 @@ pub const Error = runtime.Error || session.Error || error{
     InvalidReconnectPolicy,
     ConnectionUnavailable,
     SessionLost,
+    SubscriptionLimitExceeded,
+    SubscriptionRefused,
     OwnedPropertyLimitExceeded,
 };
+
+const OptionsError = mqtt.Error || std.mem.Allocator.Error ||
+    error{OwnedPropertyLimitExceeded};
 
 pub const Backoff = enum {
     fixed,
@@ -126,7 +131,7 @@ const OwnedConnectOptions = struct {
     fn init(
         allocator: std.mem.Allocator,
         options: runtime.ConnectOptions,
-    ) !OwnedConnectOptions {
+    ) OptionsError!OwnedConnectOptions {
         const client_id = try allocator.dupe(u8, options.client_id);
         errdefer allocator.free(client_id);
         const properties = try owned_properties.clone(
@@ -185,6 +190,34 @@ pub const ConnectEvent = struct {
     failed_attempts: usize,
 };
 
+pub const SubscriptionOptions = struct {
+    /// Maximum number of filters retained for fresh-session replay.
+    max_subscriptions: usize = 1024,
+};
+
+const OwnedSubscription = struct {
+    filter: []u8,
+    qos: mqtt.QoS,
+    no_local: bool,
+    retain_as_published: bool,
+    retain_handling: u2,
+
+    fn deinit(self: *OwnedSubscription, allocator: std.mem.Allocator) void {
+        allocator.free(self.filter);
+        self.* = undefined;
+    }
+
+    fn value(self: OwnedSubscription) mqtt.Subscription {
+        return .{
+            .topic_filter = self.filter,
+            .qos = self.qos,
+            .no_local = self.no_local,
+            .retain_as_published = self.retain_as_published,
+            .retain_handling = self.retain_handling,
+        };
+    }
+};
+
 /// A synchronous, cancellation-aware reconnecting MQTT client for TCP.
 ///
 /// Methods are single-owner: an application must serialize `connect`,
@@ -203,6 +236,8 @@ pub const Client = struct {
     outgoing: session.Store,
     outgoing_handle: session.Handle,
     outgoing_open: bool = true,
+    subscription_options: SubscriptionOptions,
+    subscriptions: std.ArrayList(OwnedSubscription) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -211,6 +246,26 @@ pub const Client = struct {
         options: runtime.ConnectOptions,
         policy: ReconnectPolicy,
         shutdown: *std.Io.Event,
+    ) Error!Client {
+        return initWithOptions(
+            allocator,
+            io,
+            address,
+            options,
+            policy,
+            shutdown,
+            .{},
+        );
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: runtime.ConnectOptions,
+        policy: ReconnectPolicy,
+        shutdown: *std.Io.Event,
+        subscription_options: SubscriptionOptions,
     ) Error!Client {
         try policy.validate();
         if (options.client_id.len == 0) return error.InvalidClientId;
@@ -235,6 +290,7 @@ pub const Client = struct {
             .options = owned_options,
             .policy = policy,
             .shutdown = shutdown,
+            .subscription_options = subscription_options,
             .outgoing = outgoing,
             .outgoing_handle = opened.handle,
         };
@@ -242,6 +298,10 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self.connection_state) |*active| active.close();
+        for (self.subscriptions.items) |*subscription| {
+            subscription.deinit(self.allocator);
+        }
+        self.subscriptions.deinit(self.allocator);
         self.outgoing.deinit();
         self.options.deinit(self.allocator);
         self.* = undefined;
@@ -318,6 +378,12 @@ pub const Client = struct {
                 self.disconnectTransport();
                 return err;
             };
+            if (!session_present) {
+                self.replaySubscriptions() catch |err| {
+                    self.disconnectTransport();
+                    return err;
+                };
+            }
             return .{
                 .session_present = session_present,
                 .failed_attempts = failed_attempts,
@@ -363,6 +429,90 @@ pub const Client = struct {
 
     pub fn outgoingStats(self: *Client) Error!session.Stats {
         return self.outgoing.stats(self.outgoing_handle);
+    }
+
+    pub fn subscriptionCount(self: *const Client) usize {
+        return self.subscriptions.items.len;
+    }
+
+    /// Subscribe and remember only filters accepted by the broker. A future
+    /// reconnect replays them when CONNACK reports that no Session survived.
+    /// Existing entries are updated transactionally after SUBACK.
+    pub fn subscribe(
+        self: *Client,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+    ) Error!runtime.OwnedSubAck {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        var staged = try self.allocator.alloc(
+            ?OwnedSubscription,
+            subscriptions.len,
+        );
+        defer self.allocator.free(staged);
+        @memset(staged, null);
+        defer for (staged) |*maybe_subscription| {
+            if (maybe_subscription.*) |*subscription| {
+                subscription.deinit(self.allocator);
+            }
+        };
+        var additions: usize = 0;
+        for (subscriptions, 0..) |subscription, index| {
+            try mqtt.validateTopicFilter(subscription.topic_filter);
+            const filter = try self.allocator.dupe(
+                u8,
+                subscription.topic_filter,
+            );
+            staged[index] = fromSubscription(filter, subscription);
+            if (self.subscriptionIndex(subscription.topic_filter) == null and
+                firstSubscriptionIndex(subscriptions, index) == null)
+            {
+                additions += 1;
+            }
+        }
+        if (additions > self.subscription_options.max_subscriptions -|
+            self.subscriptions.items.len)
+        {
+            return error.SubscriptionLimitExceeded;
+        }
+        try self.subscriptions.ensureUnusedCapacity(self.allocator, additions);
+        var suback = try active.subscribe(subscriptions, options);
+        errdefer suback.deinit(self.allocator);
+        if (suback.suback.reason_codes.len != subscriptions.len) {
+            return error.UnexpectedPacket;
+        }
+        for (staged, suback.suback.reason_codes) |*maybe_subscription, reason| {
+            if (reason >= 0x80) continue;
+            const owned = maybe_subscription.*.?;
+            maybe_subscription.* = null;
+            if (self.subscriptionIndex(owned.filter)) |index| {
+                self.subscriptions.items[index].deinit(self.allocator);
+                self.subscriptions.items[index] = owned;
+            } else {
+                self.subscriptions.appendAssumeCapacity(owned);
+            }
+        }
+        return suback;
+    }
+
+    /// Unsubscribe and remove only filters accepted by the broker.
+    pub fn unsubscribe(
+        self: *Client,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+    ) Error!runtime.OwnedUnsubAck {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        var unsuback = try active.unsubscribe(filters, options);
+        errdefer unsuback.deinit(self.allocator);
+        if (active.protocol == .v3_1_1) {
+            for (filters) |filter| self.removeSubscription(filter);
+        } else {
+            for (filters, unsuback.unsuback.reason_codes) |filter, reason| {
+                if (reason < 0x80) self.removeSubscription(filter);
+            }
+        }
+        return unsuback;
     }
 
     pub fn publish(
@@ -527,7 +677,68 @@ pub const Client = struct {
             }
         }
     }
+
+    fn replaySubscriptions(self: *Client) Error!void {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        if (self.subscriptions.items.len == 0) return;
+        const requested = try self.allocator.alloc(
+            mqtt.Subscription,
+            self.subscriptions.items.len,
+        );
+        defer self.allocator.free(requested);
+        for (self.subscriptions.items, requested) |stored, *item| {
+            item.* = stored.value();
+        }
+        var suback = try active.subscribe(requested, .{});
+        defer suback.deinit(self.allocator);
+        for (suback.suback.reason_codes) |reason| {
+            if (reason >= 0x80) {
+                return error.SubscriptionRefused;
+            }
+        }
+    }
+
+    fn subscriptionIndex(self: *const Client, filter: []const u8) ?usize {
+        for (self.subscriptions.items, 0..) |subscription, index| {
+            if (std.mem.eql(u8, subscription.filter, filter)) return index;
+        }
+        return null;
+    }
+
+    fn removeSubscription(self: *Client, filter: []const u8) void {
+        const index = self.subscriptionIndex(filter) orelse return;
+        var removed = self.subscriptions.orderedRemove(index);
+        removed.deinit(self.allocator);
+    }
 };
+
+fn firstSubscriptionIndex(
+    subscriptions: []const mqtt.Subscription,
+    end: usize,
+) ?usize {
+    for (subscriptions[0..end], 0..) |subscription, index| {
+        if (std.mem.eql(
+            u8,
+            subscription.topic_filter,
+            subscriptions[end].topic_filter,
+        )) return index;
+    }
+    return null;
+}
+
+fn fromSubscription(
+    owned_filter: []u8,
+    subscription: mqtt.Subscription,
+) OwnedSubscription {
+    return .{
+        .filter = owned_filter,
+        .qos = subscription.qos,
+        .no_local = subscription.no_local,
+        .retain_as_published = subscription.retain_as_published,
+        .retain_handling = subscription.retain_handling,
+    };
+}
 
 fn retryableConnectError(err: anyerror) bool {
     return switch (err) {

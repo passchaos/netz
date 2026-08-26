@@ -292,6 +292,121 @@ test "MQTT reconnect drops old QoS state when session is absent" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect replays accepted subscriptions only for a fresh session" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            defer first.deinit(self.server.allocator);
+            var subscription = try first.connection.readSubscribe();
+            defer subscription.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(usize, 2), subscription.subscribe.subscriptions.len);
+            try first.connection.writeSubAck(
+                subscription.subscribe.packet_id,
+                &.{ 0x01, 0x87 },
+                &.{},
+            );
+            first.connection.shutdown() catch {};
+
+            var second = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = false,
+            });
+            defer second.deinit(self.server.allocator);
+            var replay = try second.connection.readSubscribe();
+            defer replay.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(usize, 1), replay.subscribe.subscriptions.len);
+            try std.testing.expectEqualStrings(
+                "devices/+/state",
+                replay.subscribe.subscriptions[0].topic_filter,
+            );
+            try std.testing.expectEqual(
+                mqtt.QoS.at_least_once,
+                replay.subscribe.subscriptions[0].qos,
+            );
+            try second.connection.writeSubAck(
+                replay.subscribe.packet_id,
+                &.{0x01},
+                &.{},
+            );
+            second.connection.shutdown() catch {};
+
+            var third = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer third.deinit(self.server.allocator);
+            try third.connection.readPingReq();
+            try third.connection.writePingResp();
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "reconnect-subscriptions",
+            .clean_start = false,
+            .properties = &properties,
+            .connect_timeout = .fromSeconds(1),
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+        .{ .max_subscriptions = 2 },
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    var suback = try client.subscribe(&.{
+        .{ .topic_filter = "devices/+/state", .qos = .at_least_once },
+        .{ .topic_filter = "denied/#", .qos = .at_least_once },
+    }, .{});
+    defer suback.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), client.subscriptionCount());
+
+    const fresh = try client.reconnect();
+    try std.testing.expect(!fresh.session_present);
+    const resumed = try client.reconnect();
+    try std.testing.expect(resumed.session_present);
+    try client.connection().?.pingWithTimeout(.fromSeconds(1));
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect backoff is canceled promptly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
