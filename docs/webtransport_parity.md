@@ -202,8 +202,11 @@ established CID router without competing socket readers. HTTP/3 now exposes
 source-aware Initial acceptance. WebTransport additionally exposes a split
 `HandshakeAdmission`: the caller completes QUIC/TLS from an inbox, promotes its
 connection, injects routed 1-RTT packets, and non-blockingly polls for the
-Extended CONNECT request. The remaining gap is a turnkey bounded multi-client
-supervisor around worker admission, expiry, promotion, and session handoff.
+Extended CONNECT request. HTTP/3's bounded handshake supervisor owns worker
+creation, completion reporting, per-connection random CIDs, failed-admission
+cleanup, and promotion. The remaining gap is the outer WebTransport server loop
+that retains promoted admissions/sessions, applies expiry policy, and dispatches
+their CONNECT and application events.
 
 ## Session drain and close lifecycle
 
