@@ -144,6 +144,66 @@ test "HTTP/3 endpoint server owns concurrent handshakes and requests" {
     try std.testing.expectEqual(@as(usize, 2), endpoint_server.connectionCount());
 }
 
+test "HTTP/3 endpoint total connection limit releases on removal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "capacity-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{
+        .max_pending_handshakes = 2,
+        .max_connections = 1,
+        .inbox_capacity = 2,
+    });
+    defer endpoint.deinit();
+
+    var connection = try quic.one_rtt.Connection.init(
+        &server.quic_server.endpoint,
+        .{
+            .peer = .{ .ip4 = .loopback(9001) },
+            .receive_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xc1} ** quic.protection.secret_len,
+            ),
+            .send_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xc2} ** quic.protection.secret_len,
+            ),
+            .local_connection_id = "capacity-active",
+            .peer_connection_id = "capacity-peer",
+        },
+    );
+    defer connection.deinit();
+    try endpoint.dispatcher.registerConnection(99, &connection);
+
+    const bytes = try allocator.dupe(u8, "capacity-initial");
+    var initial = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(9002) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer initial.deinit(allocator);
+    try std.testing.expectError(
+        error.PendingHandshakeLimitReached,
+        endpoint.handshakes.admit(&initial),
+    );
+    try std.testing.expect(initial == .new_initial);
+    try std.testing.expect(try endpoint.dispatcher.unregisterConnection(99));
+    // The same Initial can enter the bounded inbox after a live slot is freed.
+    _ = try endpoint.handshakes.admit(&initial);
+    try std.testing.expect(initial == .consumed);
+}
+
 test "HTTP/3 endpoint transport loop observes shutdown while idle" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

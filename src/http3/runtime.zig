@@ -2860,6 +2860,9 @@ pub const HandshakeServerOptions = struct {
 
 pub const HandshakeAdmissionOptions = struct {
     max_pending_handshakes: usize = 128,
+    /// Aggregate pending plus established connection budget for the endpoint.
+    /// Zero inherits `max_pending_handshakes` for compatibility.
+    max_connections: usize = 0,
     inbox_capacity: usize = 16,
     /// Absolute lifetime for one pending TLS/QUIC handshake. Zero derives the
     /// existing bounded PTO budget from `ServerOptions.handshake_recovery`.
@@ -3100,6 +3103,12 @@ pub const HandshakeSupervisor = struct {
         self: *HandshakeSupervisor,
         event: *quic.endpoint_dispatcher.Event,
     ) HandshakeAdmissionError!quic.endpoint_dispatcher.PendingHandshakeHandle {
+        const max_connections = if (self.admission_options.max_connections == 0) self.admission_options.max_pending_handshakes else self.admission_options.max_connections;
+        if (self.dispatcher.connectionCount() +|
+            self.active_workers.load(.acquire) >= max_connections)
+        {
+            return error.PendingHandshakeLimitReached;
+        }
         var active = self.active_workers.load(.acquire);
         while (true) {
             if (active >= self.admission_options.max_pending_handshakes) {

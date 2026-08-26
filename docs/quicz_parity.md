@@ -376,7 +376,9 @@ HTTP/3 now exposes an owning admission lifecycle plus a bounded handshake
 supervisor. It generates unique per-connection server CIDs, assigns inboxes,
 starts cancelable workers, reports completions without blocking the socket
 owner, unregisters failures, and returns stable heap-backed sessions whose
-successful promotion cannot invalidate dispatcher pointers. The supervisor's
+successful promotion cannot invalidate dispatcher pointers. Admission has
+separate pending-handshake and aggregate pending-plus-established connection
+caps, releasing total capacity when a live connection is removed. The supervisor's
 single-owner receive API interleaves completion polling, endpoint timers, and
 UDP routing. Shared endpoint sends are serialized across handshake/connection
 workers, including ECN socket state, GSO fallback state, and deterministic
