@@ -2080,6 +2080,14 @@ test "public modules are reachable" {
         netz.quic.endpoint_dispatcher.Dispatcher,
         "receive",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher,
+        "InitialDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher,
+        "UnroutedKind",
+    ));
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
     try std.testing.expect(@hasDecl(netz.webtransport, "SessionState"));
     try std.testing.expect(@hasDecl(netz.webtransport, "StreamRegistry"));

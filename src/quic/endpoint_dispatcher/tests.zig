@@ -136,6 +136,10 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     var unknown = try dispatcher.receive(&versions);
     defer unknown.deinit(allocator);
     try std.testing.expect(unknown == .unrouted);
+    try std.testing.expectEqual(
+        dispatcher_mod.UnroutedKind.unknown_short_header,
+        unknown.unrouted.kind,
+    );
 
     try std.testing.expect(try dispatcher.unregisterConnection(10));
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
@@ -174,7 +178,7 @@ test "QUIC endpoint dispatcher preserves unknown Initials and discards late long
     try dispatcher.registerConnection(7, &connection);
     try dispatcher.registerConnectionId(7, "established", 0);
 
-    const payload = [_]u8{@intFromEnum(quic.FrameType.ping)};
+    const payload = [_]u8{0} ** 1160;
     const unknown_keys = try quic.protection.deriveInitialSecretsForVersion(
         quic.Version.version_1.wireValue(),
         "unknown-initial",
@@ -198,7 +202,23 @@ test "QUIC endpoint dispatcher preserves unknown Initials and discards late long
     // future edits to this test.
     unknown_datagram = undefined;
     defer unknown_event.deinit(allocator);
-    try std.testing.expect(unknown_event == .unrouted);
+    try std.testing.expect(unknown_event == .new_initial);
+    try std.testing.expectEqual(
+        quic.Version.version_1.wireValue(),
+        unknown_event.new_initial.version,
+    );
+    try std.testing.expectEqualStrings(
+        "unknown-initial",
+        unknown_event.new_initial.destination_connection_id,
+    );
+    try std.testing.expectEqualStrings(
+        "peer",
+        unknown_event.new_initial.source_connection_id,
+    );
+    try std.testing.expectEqual(
+        unknown_event.new_initial.datagram.bytes.len,
+        unknown_event.new_initial.first_packet_len,
+    );
 
     const late_keys = try quic.protection.deriveInitialSecretsForVersion(
         quic.Version.version_1.wireValue(),
@@ -211,7 +231,7 @@ test "QUIC endpoint dispatcher preserves unknown Initials and discards late long
             .destination_connection_id = "established",
             .source_connection_id = "peer",
             .packet_number = 0,
-            .payload = &payload,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
         },
     );
     var late_event = try dispatcher.dispatch(.{
@@ -222,6 +242,137 @@ test "QUIC endpoint dispatcher preserves unknown Initials and discards late long
     try std.testing.expectEqual(
         @as(Event, .{ .discarded_long_header = 7 }),
         late_event,
+    );
+}
+
+test "QUIC endpoint dispatcher admits only bounded unknown Initials" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    const from = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    const payload = [_]u8{0} ** 1160;
+
+    for ([_]quic.Version{ .version_1, .version_2 }) |version| {
+        const dcid = if (version == .version_1)
+            "admit-v1"
+        else
+            "admit-v2";
+        const secrets = try quic.protection.deriveInitialSecretsForVersion(
+            version.wireValue(),
+            dcid,
+        );
+        const bytes = try quic.protection.sealInitialPacket(
+            allocator,
+            secrets.client,
+            .{
+                .version = version.wireValue(),
+                .destination_connection_id = dcid,
+                .source_connection_id = "peer",
+                .packet_number = 0,
+                .payload = &payload,
+            },
+        );
+        var event = try dispatcher.dispatch(.{ .from = from, .bytes = bytes });
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .new_initial);
+        try std.testing.expectEqual(version.wireValue(), event.new_initial.version);
+        try std.testing.expectEqualStrings(
+            dcid,
+            event.new_initial.destination_connection_id,
+        );
+    }
+
+    const short_dcid = "short";
+    const short_secrets = try quic.protection.deriveInitialSecretsForVersion(
+        quic.Version.version_1.wireValue(),
+        short_dcid,
+    );
+    const short_initial = try quic.protection.sealInitialPacket(
+        allocator,
+        short_secrets.client,
+        .{
+            .destination_connection_id = short_dcid,
+            .source_connection_id = "peer",
+            .packet_number = 0,
+            .payload = &payload,
+        },
+    );
+    var short_event = try dispatcher.dispatch(.{
+        .from = from,
+        .bytes = short_initial,
+    });
+    defer short_event.deinit(allocator);
+    try std.testing.expectEqual(
+        dispatcher_mod.UnroutedKind.undersized_initial,
+        short_event.unrouted.kind,
+    );
+
+    const small_dcid = "small-id";
+    const small_secrets = try quic.protection.deriveInitialSecretsForVersion(
+        quic.Version.version_1.wireValue(),
+        small_dcid,
+    );
+    const small_initial = try quic.protection.sealInitialPacket(
+        allocator,
+        small_secrets.client,
+        .{
+            .destination_connection_id = small_dcid,
+            .source_connection_id = "peer",
+            .packet_number = 0,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    var small_event = try dispatcher.dispatch(.{
+        .from = from,
+        .bytes = small_initial,
+    });
+    defer small_event.deinit(allocator);
+    try std.testing.expectEqual(
+        dispatcher_mod.UnroutedKind.undersized_initial,
+        small_event.unrouted.kind,
+    );
+
+    const handshake = try quic.protection.sealHandshakePacket(
+        allocator,
+        quic.protection.deriveAes128Keys(
+            [_]u8{0xe4} ** quic.protection.secret_len,
+        ),
+        .{
+            .destination_connection_id = "handshake",
+            .source_connection_id = "peer",
+            .packet_number = 0,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    var handshake_event = try dispatcher.dispatch(.{
+        .from = from,
+        .bytes = handshake,
+    });
+    defer handshake_event.deinit(allocator);
+    try std.testing.expectEqual(
+        dispatcher_mod.UnroutedKind.non_initial_long_header,
+        handshake_event.unrouted.kind,
+    );
+
+    const malformed = try allocator.dupe(u8, &.{ 0xc0, 0, 0, 0, 1 });
+    var malformed_event = try dispatcher.dispatch(.{
+        .from = from,
+        .bytes = malformed,
+    });
+    defer malformed_event.deinit(allocator);
+    try std.testing.expectEqual(
+        dispatcher_mod.UnroutedKind.malformed_long_header,
+        malformed_event.unrouted.kind,
     );
 }
 
@@ -276,4 +427,75 @@ test "QUIC endpoint dispatcher wakes socket receive for transport timers" {
         one_rtt.TimerDeadlineKind.pto,
         event.timer.timer.kind,
     );
+}
+
+test "QUIC endpoint dispatcher negotiates versions before Initial admission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server.deinit();
+    var client = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client.deinit();
+    var dispatcher = Dispatcher.init(allocator, &server);
+    defer dispatcher.deinit();
+
+    const unsupported = [_]u8{
+        0xc0, 0xfa, 0xce, 0xb0, 0x0c,
+        3,    's',  'r',  'v',  3,
+        'c',  'l',  'i',  0,
+    };
+    try client.sendBytes(server.address(), &unsupported);
+
+    const dcid = "admit-next";
+    const secrets = try quic.protection.deriveInitialSecretsForVersion(
+        quic.Version.version_1.wireValue(),
+        dcid,
+    );
+    const initial = try quic.protection.sealInitialPacket(
+        allocator,
+        secrets.client,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = "peer",
+            .packet_number = 0,
+            .payload = &([_]u8{0} ** 1160),
+        },
+    );
+    defer allocator.free(initial);
+    try client.sendBytes(server.address(), initial);
+
+    const supported = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    var event = try dispatcher.receive(&supported);
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .new_initial);
+    try std.testing.expectEqualStrings(
+        dcid,
+        event.new_initial.destination_connection_id,
+    );
+
+    var response = try client.receiveBytes();
+    defer response.deinit(allocator);
+    var negotiation = try quic.parseVersionNegotiationPacket(
+        allocator,
+        response.bytes,
+    );
+    defer negotiation.deinit(allocator);
+    try std.testing.expectEqualStrings("cli", negotiation.destination_connection_id);
+    try std.testing.expectEqualStrings("srv", negotiation.source_connection_id);
+    try std.testing.expectEqualSlices(u32, &supported, negotiation.versions);
 }

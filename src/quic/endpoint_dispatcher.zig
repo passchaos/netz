@@ -49,6 +49,26 @@ pub const TimerEvent = struct {
     timer: one_rtt.TimerDeadline,
 };
 
+pub const InitialDatagram = struct {
+    datagram: runtime.OwnedBytes,
+    version: u32,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    first_packet_len: usize,
+};
+
+pub const UnroutedKind = enum {
+    unknown_short_header,
+    non_initial_long_header,
+    malformed_long_header,
+    undersized_initial,
+};
+
+pub const UnroutedDatagram = struct {
+    datagram: runtime.OwnedBytes,
+    kind: UnroutedKind,
+};
+
 pub const Event = union(enum) {
     packet: RoutedPacket,
     timer: TimerEvent,
@@ -56,15 +76,19 @@ pub const Event = union(enum) {
     /// belong to discarded packet-number spaces and are consumed silently by
     /// the socket owner rather than mis-decoded as short-header packets.
     discarded_long_header: ConnectionHandle,
-    /// An unknown CID is returned to the endpoint owner. It may be a new
-    /// Initial that should enter admission/handshake processing, or an old CID
-    /// for which policy elects to send a stateless reset.
-    unrouted: runtime.OwnedBytes,
+    /// A structurally valid, minimum-sized client Initial with an unknown DCID.
+    /// The endpoint owner can admit it into handshake state without reparsing
+    /// untrusted invariant-header metadata.
+    new_initial: InitialDatagram,
+    /// Unknown short headers and non-admissible long headers remain available
+    /// for stateless-reset/drop policy but never enter the handshake path.
+    unrouted: UnroutedDatagram,
 
     pub fn deinit(self: *Event, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .packet => |*event| event.packet.deinit(allocator),
-            .unrouted => |*datagram| datagram.deinit(allocator),
+            .new_initial => |*event| event.datagram.deinit(allocator),
+            .unrouted => |*event| event.datagram.deinit(allocator),
             .timer, .discarded_long_header => {},
         }
         self.* = undefined;
@@ -301,12 +325,23 @@ pub const Dispatcher = struct {
         var owned = datagram;
         var owns_datagram = true;
         errdefer if (owns_datagram) owned.deinit(self.allocator);
-        const routed = (try self.router.routeDatagramFrom(
+        const routed = self.router.routeDatagramFrom(
             owned.from,
             owned.bytes,
-        )) orelse {
+        ) catch |err| switch (err) {
+            // Header parsing happens before a route exists. Malformed unknown
+            // input is policy data, not a fatal endpoint-loop error.
+            error.InvalidPacket, error.InvalidConnectionId => {
+                owns_datagram = false;
+                return .{ .unrouted = .{
+                    .datagram = owned,
+                    .kind = .malformed_long_header,
+                } };
+            },
+            else => |other| return other,
+        } orelse {
             owns_datagram = false;
-            return .{ .unrouted = owned };
+            return classifyUnrouted(owned);
         };
         const entry = self.connections.getPtr(
             routed.route.connection_index,
@@ -340,3 +375,42 @@ pub const Dispatcher = struct {
         } };
     }
 };
+
+fn classifyUnrouted(datagram: runtime.OwnedBytes) Event {
+    if (datagram.bytes.len == 0 or (datagram.bytes[0] & 0x80) == 0) {
+        return .{ .unrouted = .{
+            .datagram = datagram,
+            .kind = .unknown_short_header,
+        } };
+    }
+    const info = quic.protection.peekProtectedLongPacketInfo(
+        datagram.bytes,
+    ) catch return .{ .unrouted = .{
+        .datagram = datagram,
+        .kind = .malformed_long_header,
+    } };
+    if (info.packet_type != .initial) {
+        return .{ .unrouted = .{
+            .datagram = datagram,
+            .kind = .non_initial_long_header,
+        } };
+    }
+    // RFC 9000 requires the UDP datagram containing a client Initial to be at
+    // least 1200 bytes and the first Initial DCID to contain at least 8 bytes.
+    // Enforce both before an attacker can consume handshake/admission state.
+    if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size or
+        info.destination_connection_id.len < 8)
+    {
+        return .{ .unrouted = .{
+            .datagram = datagram,
+            .kind = .undersized_initial,
+        } };
+    }
+    return .{ .new_initial = .{
+        .datagram = datagram,
+        .version = info.version,
+        .destination_connection_id = info.destination_connection_id,
+        .source_connection_id = info.source_connection_id,
+        .first_packet_len = info.len,
+    } };
+}

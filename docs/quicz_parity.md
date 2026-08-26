@@ -334,14 +334,18 @@ The endpoint foundation now includes a concrete single-receive-owner
 `quic.endpoint_dispatcher.Dispatcher`. It owns established-connection CID
 routes and the aggregate endpoint timer index, dispatches one UDP datagram to
 the matching `one_rtt.Connection`, refreshes that connection's deadline after
-each packet, and returns unknown-CID datagrams to handshake admission or
+each packet, and admits only structurally valid, minimum-sized v1/v2 Initials
+to the future handshake layer. Unknown short packets, malformed/undersized
+Initials, and non-Initial long headers are typed separately for drop or
 stateless-reset policy without letting connection tasks race on the socket. A
 two-client test sends to one server UDP socket, verifies exact per-connection
 delivery, services a selected PTO through the shared timer index, preserves an
-unknown datagram for admission, and removes every route/timer before connection
-storage can be destroyed. Route-level migration blocking now permits same-IP
-port rebinding and rejects only address changes before authenticated connection
-processing, matching the transport's existing NAT-rebinding behavior.
+valid unknown Initial for admission, sends Version Negotiation before admitting
+the following packet, wakes a socket wait for connection PTO, and removes every
+route/timer before connection storage can be destroyed. Route-level migration
+blocking now permits same-IP port rebinding and rejects only address changes
+before authenticated connection processing, matching the transport's existing
+NAT-rebinding behavior.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server: Initial/Retry handshakes still need incremental dispatcher-owned
