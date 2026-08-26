@@ -2010,8 +2010,24 @@ test "public modules are reachable" {
         "responseHeader",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "connectAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ConnectAttempt,
+        "requireAccepted",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
         "responseHeader",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "connectAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedConnectAttempt,
+        "requireAccepted",
     ));
     try std.testing.expect(@hasField(
         netz.webtransport.runtime.ConnectOptions,

@@ -1266,15 +1266,34 @@ pub const ClientSession = struct {
         server: net.IpAddress,
         options: ConnectOptions,
     ) Error!ClientSession {
-        var h3_client = try http3.runtime.Client.connect(allocator, io, local_address, server, options.limits.http3);
-        errdefer h3_client.deinit();
+        var attempt = try connectAttempt(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
 
+    /// Establish the underlying development transport while preserving a
+    /// non-success CONNECT response for application inspection.
+    pub fn connectAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
         const headers = try connectRequestHeadersWithAdditional(
             options.origin,
             options.headers,
             &header_buf,
         );
+        var h3_client = try http3.runtime.Client.connect(allocator, io, local_address, server, options.limits.http3);
+        errdefer h3_client.deinit();
         var response = try h3_client.request(.{
             .method = "CONNECT",
             .path = options.path,
@@ -1283,8 +1302,9 @@ pub const ClientSession = struct {
             .headers = headers,
         });
         errdefer response.deinit(allocator);
-        try validateConnectResponse(response.response);
-
+        if (response.response.successful()) {
+            try validateOptionalCapsuleProtocol(response.response.headers);
+        }
         return .{
             .h3 = h3_client,
             .session_id = .init(0),
@@ -1315,6 +1335,45 @@ pub const ClientSession = struct {
 
     pub fn receiveDatagram(self: *ClientSession) Error!OwnedDatagram {
         return receiveDatagramFromEndpoint(&self.h3.quic_client.endpoint);
+    }
+};
+
+pub const ConnectAttempt = struct {
+    h3: ?http3.runtime.Client,
+    session_id: webtransport.SessionId,
+    response: http3.runtime.OwnedResponse,
+
+    pub fn accepted(self: ConnectAttempt) bool {
+        return self.response.response.successful();
+    }
+
+    pub fn status(self: ConnectAttempt) u16 {
+        return self.response.response.status;
+    }
+
+    pub fn responseHeader(
+        self: ConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.response.response.headers, name);
+    }
+
+    pub fn deinit(self: *ConnectAttempt) void {
+        const allocator = self.h3.?.quic_client.endpoint.allocator;
+        self.response.deinit(allocator);
+        if (self.h3) |*h3| h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(self: *ConnectAttempt) Error!ClientSession {
+        if (!self.accepted()) return error.SessionRejected;
+        const session = ClientSession{
+            .h3 = self.h3.?,
+            .session_id = self.session_id,
+            .response = self.response,
+        };
+        self.* = undefined;
+        return session;
     }
 };
 
@@ -1837,14 +1896,34 @@ pub const ProtectedClientSession = struct {
         server: net.IpAddress,
         options: ProtectedConnectOptions,
     ) Error!ProtectedClientSession {
-        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
-        errdefer h3_client.deinit();
+        var attempt = try connectAttempt(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    /// Establish the preconfigured transport while preserving a non-success
+    /// CONNECT response for application inspection.
+    pub fn connectAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+    ) Error!ProtectedConnectAttempt {
         var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
         const headers = try connectRequestHeadersWithAdditional(
             options.origin,
             options.headers,
             &header_buf,
         );
+        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
+        errdefer h3_client.deinit();
         const session_stream_id = try h3_client.startRequest(.{
             .method = "CONNECT",
             .path = options.path,
@@ -1852,21 +1931,19 @@ pub const ProtectedClientSession = struct {
             .authority = options.authority,
             .headers = headers,
         }, null);
-        var response_head = try receiveProtectedConnectResponse(
+        var response_head = try receiveProtectedConnectAttemptResponse(
             &h3_client,
             session_stream_id,
         );
         errdefer response_head.deinit(allocator);
-        try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
+        if (response_head.status >= 200 and response_head.status < 300) {
+            try validateOptionalCapsuleProtocol(response_head.headers);
+            try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
+        }
         return .{
             .h3 = h3_client,
             .session_id = .init(session_stream_id),
             .response = response_head,
-            .control = protected_control.Reader.init(
-                try session_control.Control.init(
-                    .init(session_stream_id),
-                ),
-            ),
         };
     }
 
@@ -1989,6 +2066,51 @@ pub const ProtectedClientSession = struct {
             },
             else => return err,
         };
+    }
+};
+
+pub const ProtectedConnectAttempt = struct {
+    h3: ?http3.runtime.ProtectedClient,
+    session_id: webtransport.SessionId,
+    response: http3.DecodedResponseHead,
+
+    pub fn accepted(self: ProtectedConnectAttempt) bool {
+        return self.response.status >= 200 and self.response.status < 300;
+    }
+
+    pub fn status(self: ProtectedConnectAttempt) u16 {
+        return self.response.status;
+    }
+
+    pub fn responseHeader(
+        self: ProtectedConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.response.headers, name);
+    }
+
+    pub fn deinit(self: *ProtectedConnectAttempt) void {
+        const allocator = self.h3.?.quic_client.endpoint.allocator;
+        self.response.deinit(allocator);
+        if (self.h3) |*h3| h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(
+        self: *ProtectedConnectAttempt,
+    ) Error!ProtectedClientSession {
+        if (!self.accepted()) return error.SessionRejected;
+        const control = protected_control.Reader.init(
+            try session_control.Control.init(self.session_id),
+        );
+        const session = ProtectedClientSession{
+            .h3 = self.h3.?,
+            .session_id = self.session_id,
+            .response = self.response,
+            .control = control,
+        };
+        self.* = undefined;
+        return session;
     }
 };
 
@@ -2653,7 +2775,7 @@ fn receiveHandshakeConnectResponse(
     }
 }
 
-fn receiveProtectedConnectResponse(
+fn receiveProtectedConnectAttemptResponse(
     client: *http3.runtime.ProtectedClient,
     stream_id: u62,
 ) Error!http3.DecodedResponseHead {
@@ -2664,7 +2786,6 @@ fn receiveProtectedConnectResponse(
         switch (event) {
             .head => |*head| {
                 if (head.* != .response) return error.InvalidConnect;
-                try validateConnectResponse(head.response);
                 const owned = head.response;
                 event = .finished;
                 return owned;
@@ -3439,29 +3560,29 @@ test "WebTransport development runtime sends explicit rejection" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try http3.runtime.Client.connect(
+    var attempt = try ClientSession.connectAttempt(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
         server.address(),
-        .{ .quic = .{ .max_datagram_size = 4096 } },
-    );
-    defer client.deinit();
-    var response = try client.request(.{
-        .method = "CONNECT",
-        .path = "/busy",
-        .scheme = "https",
-        .authority = "localhost",
-        .headers = &.{
-            .{ .name = ":protocol", .value = "webtransport" },
-            http3.capsule.protocol_header,
+        .{
+            .authority = "localhost",
+            .path = "/busy",
+            .limits = .{
+                .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+            },
         },
-    });
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(@as(u16, 429), response.response.status);
+    );
+    defer attempt.deinit();
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u16, 429), attempt.status());
     try std.testing.expectEqualStrings(
         "5",
-        findHeader(response.response.headers, "retry-after").?,
+        attempt.responseHeader("retry-after").?,
+    );
+    try std.testing.expectError(
+        error.SessionRejected,
+        attempt.requireAccepted(),
     );
 
     thread.join();
