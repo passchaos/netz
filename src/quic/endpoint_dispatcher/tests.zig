@@ -849,14 +849,20 @@ test "QUIC endpoint dispatcher drains a coalesced packet after promotion" {
     try connection.preloadReceivedDatagram(peer, buffered, .not_ect);
 
     try dispatcher.promotePendingHandshake(51, 52, &connection);
-    var routed = (try dispatcher.pollConnectionPacket(52)) orelse
-        return error.TestUnexpectedResult;
-    defer routed.packet.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 52), routed.connection_handle);
+    var event = try dispatcher.receive(
+        &.{quic.Version.version_1.wireValue()},
+    );
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(
+        @as(usize, 52),
+        event.packet.connection_handle,
+    );
     try std.testing.expectEqualStrings(
         "coalesced",
-        routed.packet.frames[0].stream.data,
+        event.packet.packet.frames[0].stream.data,
     );
+    try std.testing.expect((try dispatcher.pollPendingPacket()) == null);
     try std.testing.expect((try dispatcher.pollConnectionPacket(52)) == null);
     try std.testing.expect(try dispatcher.unregisterConnection(52));
 }

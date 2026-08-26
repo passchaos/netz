@@ -606,6 +606,31 @@ pub const Dispatcher = struct {
         };
     }
 
+    /// Poll all registered connections once for data retained during their
+    /// handshake. This is the endpoint-loop companion to `receive`: callers
+    /// should drain it before blocking for another UDP datagram.
+    pub fn pollPendingPacket(self: *Dispatcher) Error!?RoutedPacket {
+        var iterator = self.connections.iterator();
+        while (iterator.next()) |entry| {
+            if (try entry.value_ptr.connection.receivePendingPacket()) |packet| {
+                const handle = entry.key_ptr.*;
+                var owned = packet;
+                errdefer owned.deinit(self.allocator);
+                try self.syncConnectionIds(handle);
+                try self.timers.armFromConnection(
+                    handle,
+                    entry.value_ptr.connection,
+                );
+                return .{
+                    .connection_handle = handle,
+                    .connection_id_sequence = 0,
+                    .packet = owned,
+                };
+            }
+        }
+        return null;
+    }
+
     /// Service at most one due connection timer. Returning null means there is
     /// no due work at `now_ns`; callers can arm their socket wait from
     /// `nextTimerDeadline`.
@@ -640,6 +665,9 @@ pub const Dispatcher = struct {
         supported_versions: []const u32,
     ) ReceiveError!Event {
         while (true) {
+            if (try self.pollPendingPacket()) |packet| {
+                return .{ .packet = packet };
+            }
             if (try self.serviceDueTimer()) |timer| {
                 return .{ .timer = timer };
             }

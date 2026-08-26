@@ -2132,6 +2132,10 @@ test "public modules are reachable" {
         "pollConnectionPacket",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "pollPendingPacket",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "receivePendingPacket",
     ));
