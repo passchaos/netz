@@ -46,13 +46,20 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server) Error!AcceptedSession {
+        var pending = try self.receiveSessionRequest();
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    /// Receive and validate a development-runtime Extended CONNECT before
+    /// committing an application admission decision.
+    pub fn receiveSessionRequest(self: *Server) Error!PendingSession {
         var request = try self.h3.receiveRequest();
         errdefer request.deinit(self.h3.quic_server.endpoint.allocator);
         try validateConnectRequest(request.request);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try self.h3.sendResponse(request.from, request.stream_id, connectResponse());
-        return .{ .request = request, .session_id = session_id };
+        return .{ .server = self, .request = request, .session_id = session_id };
     }
 
     pub fn receiveDatagram(self: *Server) Error!OwnedDatagram {
@@ -87,6 +94,16 @@ pub const ProtectedServer = struct {
     }
 
     pub fn accept(self: *ProtectedServer) Error!AcceptedProtectedSession {
+        var pending = try self.receiveSessionRequest();
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    /// Receive and validate a protected Extended CONNECT before deciding
+    /// whether to accept or reject the session.
+    pub fn receiveSessionRequest(
+        self: *ProtectedServer,
+    ) Error!PendingProtectedSession {
         const request = try receiveProtectedConnectRequest(&self.h3);
         var request_head = request.head;
         errdefer request_head.deinit(
@@ -95,25 +112,14 @@ pub const ProtectedServer = struct {
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        // Extended CONNECT is the session control stream. Keep both directions
-        // open; aggregate sendResponse would set FIN and terminate the
-        // WebTransport Session immediately after the handshake.
-        try self.h3.startResponse(
-            request.from,
-            request.stream_id,
-            connectResponse(),
-            null,
-        );
         return .{
+            .server = self,
             .request = .{
                 .from = request.from,
                 .stream_id = request.stream_id,
                 .request = request_head,
             },
             .session_id = session_id,
-            .control = protected_control.Reader.init(
-                try session_control.Control.init(session_id),
-            ),
         };
     }
 
@@ -187,6 +193,246 @@ pub const ProtectedServer = struct {
                 },
             }
         }
+    }
+};
+
+/// A validated development-runtime CONNECT awaiting application admission.
+/// The request keeps all received QUIC datagrams alive until this value is
+/// accepted, rejected, or explicitly destroyed.
+pub const PendingSession = struct {
+    server: *Server,
+    request: http3.runtime.OwnedRequest,
+    session_id: webtransport.SessionId,
+
+    pub fn deinit(self: *PendingSession) void {
+        self.request.deinit(
+            self.server.h3.quic_server.endpoint.allocator,
+        );
+        self.* = undefined;
+    }
+
+    pub fn peerAddress(self: PendingSession) net.IpAddress {
+        return self.request.from;
+    }
+
+    pub fn authority(self: PendingSession) ?[]const u8 {
+        return self.request.request.authority;
+    }
+
+    pub fn path(self: PendingSession) []const u8 {
+        return self.request.request.path;
+    }
+
+    pub fn origin(self: PendingSession) ?[]const u8 {
+        return findHeader(self.request.request.headers, "origin");
+    }
+
+    pub fn userAgent(self: PendingSession) ?[]const u8 {
+        return findHeader(self.request.request.headers, "user-agent");
+    }
+
+    pub fn headers(self: PendingSession) []const http3.Qpack.HeaderField {
+        return self.request.request.headers;
+    }
+
+    pub fn accept(self: *PendingSession) Error!AcceptedSession {
+        return self.acceptWithHeaders(&.{});
+    }
+
+    pub fn acceptWithHeaders(
+        self: *PendingSession,
+        additional_headers: []const http3.Qpack.HeaderField,
+    ) Error!AcceptedSession {
+        try validateAdditionalConnectHeaders(additional_headers, .response);
+        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
+        response_headers[0] = http3.capsule.protocol_header;
+        @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
+        try self.server.h3.sendResponse(
+            self.request.from,
+            self.request.stream_id,
+            connectResponseWithHeaders(
+                response_headers[0 .. additional_headers.len + 1],
+            ),
+        );
+        const request = self.request;
+        const session_id = self.session_id;
+        self.* = undefined;
+        return .{ .request = request, .session_id = session_id };
+    }
+
+    pub fn reject(
+        self: *PendingSession,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedSession {
+        if (status < 300 or status > 599) return error.InvalidStatus;
+        try validateAdditionalConnectHeaders(response_headers, .response);
+        try self.server.h3.sendResponse(
+            self.request.from,
+            self.request.stream_id,
+            .{ .status = status, .headers = response_headers },
+        );
+        const request = self.request;
+        const session_id = self.session_id;
+        self.* = undefined;
+        return .{
+            .request = request,
+            .session_id = session_id,
+            .status = status,
+        };
+    }
+
+    pub fn forbidden(self: *PendingSession) Error!RejectedSession {
+        return self.reject(403, &.{});
+    }
+
+    pub fn notFound(self: *PendingSession) Error!RejectedSession {
+        return self.reject(404, &.{});
+    }
+
+    pub fn tooManyRequests(self: *PendingSession) Error!RejectedSession {
+        return self.reject(429, &.{});
+    }
+};
+
+pub const RejectedSession = struct {
+    request: http3.runtime.OwnedRequest,
+    session_id: webtransport.SessionId,
+    status: u16,
+
+    pub fn deinit(self: *RejectedSession, allocator: std.mem.Allocator) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// A validated preconfigured-key CONNECT awaiting application admission.
+pub const PendingProtectedSession = struct {
+    server: *ProtectedServer,
+    request: OwnedProtectedConnectRequest,
+    session_id: webtransport.SessionId,
+
+    pub fn deinit(self: *PendingProtectedSession) void {
+        self.request.deinit(
+            self.server.h3.quic_server.endpoint.allocator,
+        );
+        self.* = undefined;
+    }
+
+    pub fn peerAddress(self: PendingProtectedSession) net.IpAddress {
+        return self.request.from;
+    }
+
+    pub fn authority(self: PendingProtectedSession) ?[]const u8 {
+        return self.request.request.authority;
+    }
+
+    pub fn path(self: PendingProtectedSession) []const u8 {
+        return self.request.request.path;
+    }
+
+    pub fn origin(self: PendingProtectedSession) ?[]const u8 {
+        return findHeader(self.request.request.headers, "origin");
+    }
+
+    pub fn userAgent(self: PendingProtectedSession) ?[]const u8 {
+        return findHeader(self.request.request.headers, "user-agent");
+    }
+
+    pub fn headers(
+        self: PendingProtectedSession,
+    ) []const http3.Qpack.HeaderField {
+        return self.request.request.headers;
+    }
+
+    pub fn accept(
+        self: *PendingProtectedSession,
+    ) Error!AcceptedProtectedSession {
+        return self.acceptWithHeaders(&.{});
+    }
+
+    pub fn acceptWithHeaders(
+        self: *PendingProtectedSession,
+        additional_headers: []const http3.Qpack.HeaderField,
+    ) Error!AcceptedProtectedSession {
+        try validateAdditionalConnectHeaders(additional_headers, .response);
+        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
+        response_headers[0] = http3.capsule.protocol_header;
+        @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
+        // Extended CONNECT is the session control stream. Keep both
+        // directions open; aggregate sendResponse would terminate it.
+        try self.server.h3.startResponse(
+            self.request.from,
+            self.request.stream_id,
+            connectResponseWithHeaders(
+                response_headers[0 .. additional_headers.len + 1],
+            ),
+            null,
+        );
+        const request = self.request;
+        const session_id = self.session_id;
+        self.* = undefined;
+        return .{
+            .request = request,
+            .session_id = session_id,
+            .control = protected_control.Reader.init(
+                try session_control.Control.init(session_id),
+            ),
+        };
+    }
+
+    pub fn reject(
+        self: *PendingProtectedSession,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedProtectedSession {
+        if (status < 300 or status > 599) return error.InvalidStatus;
+        try validateAdditionalConnectHeaders(response_headers, .response);
+        try self.server.h3.sendResponse(
+            self.request.from,
+            self.request.stream_id,
+            .{ .status = status, .headers = response_headers },
+        );
+        const request = self.request;
+        const session_id = self.session_id;
+        self.* = undefined;
+        return .{
+            .request = request,
+            .session_id = session_id,
+            .status = status,
+        };
+    }
+
+    pub fn forbidden(
+        self: *PendingProtectedSession,
+    ) Error!RejectedProtectedSession {
+        return self.reject(403, &.{});
+    }
+
+    pub fn notFound(
+        self: *PendingProtectedSession,
+    ) Error!RejectedProtectedSession {
+        return self.reject(404, &.{});
+    }
+
+    pub fn tooManyRequests(
+        self: *PendingProtectedSession,
+    ) Error!RejectedProtectedSession {
+        return self.reject(429, &.{});
+    }
+};
+
+pub const RejectedProtectedSession = struct {
+    request: OwnedProtectedConnectRequest,
+    session_id: webtransport.SessionId,
+    status: u16,
+
+    pub fn deinit(
+        self: *RejectedProtectedSession,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
     }
 };
 
@@ -1010,6 +1256,8 @@ pub const AcceptedHandshakeSession = struct {
 pub const ClientSession = struct {
     h3: http3.runtime.Client,
     session_id: webtransport.SessionId,
+    /// Owns the final CONNECT response, including custom admission headers.
+    response: http3.runtime.OwnedResponse,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -1030,19 +1278,31 @@ pub const ClientSession = struct {
             .authority = options.authority,
             .headers = headers,
         });
-        defer response.deinit(allocator);
+        errdefer response.deinit(allocator);
         try validateConnectResponse(response.response);
 
-        return .{ .h3 = h3_client, .session_id = .init(0) };
+        return .{
+            .h3 = h3_client,
+            .session_id = .init(0),
+            .response = response,
+        };
     }
 
     pub fn deinit(self: *ClientSession) void {
+        self.response.deinit(self.h3.quic_client.endpoint.allocator);
         self.h3.deinit();
         self.* = undefined;
     }
 
     pub fn address(self: ClientSession) net.IpAddress {
         return self.h3.address();
+    }
+
+    pub fn responseHeader(
+        self: ClientSession,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.response.response.headers, name);
     }
 
     pub fn sendDatagram(self: *ClientSession, payload: []const u8) Error!void {
@@ -1562,6 +1822,8 @@ pub const HandshakeClientSession = struct {
 pub const ProtectedClientSession = struct {
     h3: http3.runtime.ProtectedClient,
     session_id: webtransport.SessionId,
+    /// Owns the final CONNECT response, including custom admission headers.
+    response: http3.DecodedResponseHead,
     control: protected_control.Reader,
 
     pub fn connect(
@@ -1586,11 +1848,12 @@ pub const ProtectedClientSession = struct {
             &h3_client,
             session_stream_id,
         );
-        defer response_head.deinit(allocator);
+        errdefer response_head.deinit(allocator);
         try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
         return .{
             .h3 = h3_client,
             .session_id = .init(session_stream_id),
+            .response = response_head,
             .control = protected_control.Reader.init(
                 try session_control.Control.init(
                     .init(session_stream_id),
@@ -1600,8 +1863,16 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn deinit(self: *ProtectedClientSession) void {
+        self.response.deinit(self.h3.quic_client.endpoint.allocator);
         self.h3.deinit();
         self.* = undefined;
+    }
+
+    pub fn responseHeader(
+        self: ProtectedClientSession,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.response.headers, name);
     }
 
     pub fn sendDatagram(self: *ProtectedClientSession, payload: []const u8) Error!void {
@@ -3033,6 +3304,159 @@ test "WebTransport cleartext accept validates CONNECT session id direction" {
     try std.testing.expect(!webtransport.SessionId.init(3).isClientInitiatedBidirectional());
 }
 
+test "WebTransport development runtime exposes pending admission metadata" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            try std.testing.expectEqual(pending.request.from, pending.peerAddress());
+            try std.testing.expectEqualStrings("localhost", pending.authority().?);
+            try std.testing.expectEqualStrings("/admission", pending.path());
+            try std.testing.expectEqualStrings(
+                "https://example.test",
+                pending.origin().?,
+            );
+            try std.testing.expectEqualStrings(
+                "netz-dev-client",
+                pending.userAgent().?,
+            );
+            var accepted = try pending.acceptWithHeaders(&.{.{
+                .name = "x-admission",
+                .value = "accepted",
+            }});
+            pending_owned = false;
+            defer accepted.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try http3.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+    );
+    defer client.deinit();
+    var response = try client.request(.{
+        .method = "CONNECT",
+        .path = "/admission",
+        .scheme = "https",
+        .authority = "localhost",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "webtransport" },
+            http3.capsule.protocol_header,
+            .{ .name = "origin", .value = "https://example.test" },
+            .{ .name = "user-agent", .value = "netz-dev-client" },
+        },
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings(
+        "accepted",
+        findHeader(response.response.headers, "x-admission").?,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport development runtime sends explicit rejection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var rejected = try pending.reject(429, &.{.{
+                .name = "retry-after",
+                .value = "5",
+            }});
+            pending_owned = false;
+            defer rejected.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u16, 429), rejected.status);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try http3.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+    );
+    defer client.deinit();
+    var response = try client.request(.{
+        .method = "CONNECT",
+        .path = "/busy",
+        .scheme = "https",
+        .authority = "localhost",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "webtransport" },
+            http3.capsule.protocol_header,
+        },
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 429), response.response.status);
+    try std.testing.expectEqualStrings(
+        "5",
+        findHeader(response.response.headers, "retry-after").?,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
     const allocator = std.testing.allocator;
 
@@ -3123,7 +3547,22 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         }
 
         fn runFallible(server_ptr: *ProtectedServer) !void {
-            var accepted = try server_ptr.accept();
+            var pending = try server_ptr.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            try std.testing.expectEqualStrings(
+                "localhost",
+                pending.authority().?,
+            );
+            try std.testing.expectEqualStrings(
+                "/wt-protected",
+                pending.path(),
+            );
+            var accepted = try pending.acceptWithHeaders(&.{.{
+                .name = "x-protected-admission",
+                .value = "accepted",
+            }});
+            pending_owned = false;
             defer accepted.deinit(server_ptr.h3.quic_server.endpoint.allocator);
             var control_buffer: [64]u8 = undefined;
             const expected_control = "protected-client-control";
@@ -3177,6 +3616,10 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         },
     });
     defer client.deinit();
+    try std.testing.expectEqualStrings(
+        "accepted",
+        client.responseHeader("x-protected-admission").?,
+    );
 
     try client.sendSessionData("protected-client-control", false);
     const drain = try client.receiveSessionEvent();

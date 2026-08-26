@@ -1982,6 +1982,38 @@ test "public modules are reachable" {
         "receiveSessionRequest",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveSessionRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "receiveSessionRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingSession,
+        "acceptWithHeaders",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingSession,
+        "reject",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingProtectedSession,
+        "acceptWithHeaders",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingProtectedSession,
+        "reject",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "responseHeader",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "responseHeader",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "connectUri",
     ));
