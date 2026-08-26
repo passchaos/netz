@@ -2209,6 +2209,10 @@ test "public modules are reachable" {
         "serveTransportUntil",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.EndpointTransportEvent,
+        "deinit",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.EndpointServer,
         "takeSession",
     ));

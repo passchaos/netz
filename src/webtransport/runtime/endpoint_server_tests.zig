@@ -195,6 +195,7 @@ test "WebTransport endpoint server owns concurrent real sessions" {
         defer event.deinit(allocator);
         switch (event) {
             .connected => {},
+            .closed => return error.TestUnexpectedResult,
             .handshake_failed => |failure| return failure.err,
             .session_request => |handle| {
                 const pending = endpoint.pendingSession(handle) orelse
@@ -359,6 +360,7 @@ test "WebTransport endpoint serve loop shuts down from a session event" {
         ) !void {
             switch (event) {
                 .connected => {},
+                .closed => return error.TestUnexpectedResult,
                 .session_request => |pending| {
                     _ = try endpoint_server.accept(pending.handle);
                     self.accepted = true;
@@ -590,6 +592,7 @@ test "WebTransport endpoint isolates accepted and rejected connections" {
         defer event.deinit(allocator);
         switch (event) {
             .connected => {},
+            .closed => return error.TestUnexpectedResult,
             .handshake_failed => |failure| return failure.err,
             .session_request => |handle| {
                 const pending = endpoint.pendingSession(handle) orelse

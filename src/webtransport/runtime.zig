@@ -1010,6 +1010,10 @@ pub const EndpointSessionEvent = union(enum) {
 
 pub const EndpointServerEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
+    closed: struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        timer: quic.one_rtt.TimerDeadline,
+    },
     handshake_failed: struct {
         handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
         err: anyerror,
@@ -1025,7 +1029,7 @@ pub const EndpointServerEvent = union(enum) {
         switch (self.*) {
             .session_event => |*value| value.event.deinit(allocator),
             .unrouted => |*event| event.deinit(allocator),
-            .connected, .handshake_failed, .session_request => {},
+            .connected, .closed, .handshake_failed, .session_request => {},
         }
         self.* = undefined;
     }
@@ -1033,6 +1037,10 @@ pub const EndpointServerEvent = union(enum) {
 
 pub const ServeEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
+    closed: struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        timer: quic.one_rtt.TimerDeadline,
+    },
     session_request: *EndpointPendingSession,
     session_event: struct {
         session: *EndpointAcceptedSession,
@@ -1294,6 +1302,14 @@ pub const EndpointServer = struct {
                     self,
                     .{ .connected = handle },
                 ),
+                .closed => |closed| try handler(
+                    context,
+                    self,
+                    .{ .closed = .{
+                        .handle = closed.handle,
+                        .timer = closed.timer,
+                    } },
+                ),
                 .session_request => |handle| {
                     const pending = self.pendingSession(handle) orelse
                         return error.InvalidSessionState;
@@ -1362,6 +1378,23 @@ pub const EndpointServer = struct {
         defer event.deinit(self.allocator);
         switch (event) {
             .connected => |handle| return .{ .connected = handle },
+            .closed => |closed| {
+                const handle = closed.handle;
+                if (self.sessions.fetchRemove(handle)) |removed_value| {
+                    const removed = removed_value.value;
+                    removed.deinit(self.allocator);
+                    self.allocator.destroy(removed);
+                } else if (self.pending.fetchRemove(handle)) |removed_value| {
+                    const removed = removed_value.value;
+                    removed.request.deinit(self.allocator);
+                    self.allocator.destroy(removed);
+                }
+                _ = self.rejected.remove(handle);
+                return .{ .closed = .{
+                    .handle = handle,
+                    .timer = closed.timer,
+                } };
+            },
             .handshake_failed => |failure| return .{
                 .handshake_failed = .{
                     .handle = failure.handle,

@@ -212,7 +212,8 @@ transitions, dispatches associated streams, DATAGRAMs and Capsules, and removes
 protocol state before unregistering the HTTP/3 connection. A two-client real
 TLS/QUIC test accepts both sessions, checks stable pointers, isolated
 bidirectional DATAGRAM and stream echoes, exact CLOSE metadata, then verifies
-route cleanup.
+route cleanup. Endpoint timer expiry also propagates as a typed `closed` event
+after pending/accepted/rejected protocol state has been removed.
 
 ## Session drain and close lifecycle
 

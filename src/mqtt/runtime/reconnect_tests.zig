@@ -346,6 +346,14 @@ test "MQTT reconnect replays accepted subscriptions only for a fresh session" {
                 mqtt.QoS.at_least_once,
                 replay.subscribe.subscriptions[0].qos,
             );
+            try std.testing.expectEqual(
+                @as(?usize, 37),
+                mqtt.subscriptionIdentifier(replay.subscribe.properties),
+            );
+            try std.testing.expectEqualStrings(
+                "first",
+                replay.subscribe.properties[1].utf8_pair.value,
+            );
             try second.connection.writeSubAck(
                 replay.subscribe.packet_id,
                 &.{0x01},
@@ -369,6 +377,15 @@ test "MQTT reconnect replays accepted subscriptions only for a fresh session" {
 
     var shutdown: std.Io.Event = .unset;
     const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    var replay_property_value: [5]u8 = "first".*;
+    const subscribe_properties = [_]mqtt.Property{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 37 } },
+        .{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "source",
+            .value = &replay_property_value,
+        } },
+    };
     var client = try reconnect.Client.initWithOptions(
         allocator,
         io,
@@ -392,9 +409,10 @@ test "MQTT reconnect replays accepted subscriptions only for a fresh session" {
     var suback = try client.subscribe(&.{
         .{ .topic_filter = "devices/+/state", .qos = .at_least_once },
         .{ .topic_filter = "denied/#", .qos = .at_least_once },
-    }, .{});
+    }, .{ .properties = &subscribe_properties });
     defer suback.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), client.subscriptionCount());
+    @memcpy(&replay_property_value, "later");
 
     const fresh = try client.reconnect();
     try std.testing.expect(!fresh.session_present);

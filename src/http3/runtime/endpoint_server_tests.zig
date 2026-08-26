@@ -126,6 +126,7 @@ test "HTTP/3 endpoint server owns concurrent handshakes and requests" {
         defer event.deinit(allocator);
         switch (event) {
             .connected => connected += 1,
+            .closed => return error.TestUnexpectedResult,
             .handshake_failed => |failure| return failure.err,
             .request, .unrouted => return error.TestUnexpectedResult,
         }
@@ -264,4 +265,80 @@ test "HTTP/3 endpoint transport loop observes shutdown while idle" {
         started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
             std.time.ns_per_s,
     );
+}
+
+test "HTTP/3 endpoint removes a connection when its close timer expires" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "close-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    const session_ptr = try allocator.create(runtime.HandshakeServerSession);
+    var session_owned = true;
+    defer if (session_owned) {
+        session_ptr.deinit();
+        allocator.destroy(session_ptr);
+    };
+    session_ptr.* = try runtime.HandshakeServerSession.initPreconfigured(
+        &server.quic_server.endpoint,
+        .{ .ip4 = .loopback(9101) },
+        .{},
+        .{
+            .receive_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xc1} ** quic.protection.secret_len,
+            ),
+            .send_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xc2} ** quic.protection.secret_len,
+            ),
+            .local_connection_id = "close-active",
+            .peer_connection_id = "close-peer",
+        },
+    );
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 77;
+    try endpoint.dispatcher.registerConnection(
+        handle,
+        &session_ptr.established.connection,
+    );
+    const slot = try endpoint.sessions.getOrPut(allocator, handle);
+    try std.testing.expect(!slot.found_existing);
+    slot.value_ptr.* = .{
+        .dispatcher = endpoint.dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = session_ptr,
+    };
+    session_owned = false;
+
+    try session_ptr.established.connection.closeApplicationAt(
+        0,
+        "done",
+        1,
+        1,
+    );
+    try endpoint.dispatcher.refreshConnectionTimer(handle);
+    const scheduled = endpoint.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    var event = (try endpoint.receiveTransportOnce(
+        &.{quic.Version.version_1.wireValue()},
+        .{ .clock = .awake, .raw = .fromMilliseconds(1) },
+    )) orelse return error.TestUnexpectedResult;
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .closed);
+    try std.testing.expectEqual(handle, event.closed.handle);
+    try std.testing.expectEqual(
+        scheduled.timer.kind,
+        event.closed.timer.kind,
+    );
+    try std.testing.expectEqual(@as(usize, 0), endpoint.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint.dispatcher.routeCount());
 }

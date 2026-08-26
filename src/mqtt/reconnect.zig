@@ -201,9 +201,11 @@ const OwnedSubscription = struct {
     no_local: bool,
     retain_as_published: bool,
     retain_handling: u2,
+    properties: []mqtt.Property,
 
     fn deinit(self: *OwnedSubscription, allocator: std.mem.Allocator) void {
         allocator.free(self.filter);
+        owned_properties.deinit(allocator, self.properties);
         self.* = undefined;
     }
 
@@ -445,6 +447,20 @@ pub const Client = struct {
     ) Error!runtime.OwnedSubAck {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
+        var additions: usize = 0;
+        for (subscriptions, 0..) |subscription, index| {
+            try mqtt.validateTopicFilter(subscription.topic_filter);
+            if (self.subscriptionIndex(subscription.topic_filter) == null and
+                firstSubscriptionIndex(subscriptions, index) == null)
+            {
+                additions += 1;
+            }
+        }
+        if (additions > self.subscription_options.max_subscriptions -|
+            self.subscriptions.items.len)
+        {
+            return error.SubscriptionLimitExceeded;
+        }
         var staged = try self.allocator.alloc(
             ?OwnedSubscription,
             subscriptions.len,
@@ -456,24 +472,12 @@ pub const Client = struct {
                 subscription.deinit(self.allocator);
             }
         };
-        var additions: usize = 0;
         for (subscriptions, 0..) |subscription, index| {
-            try mqtt.validateTopicFilter(subscription.topic_filter);
-            const filter = try self.allocator.dupe(
-                u8,
-                subscription.topic_filter,
+            staged[index] = try cloneSubscription(
+                self.allocator,
+                subscription,
+                options.properties,
             );
-            staged[index] = fromSubscription(filter, subscription);
-            if (self.subscriptionIndex(subscription.topic_filter) == null and
-                firstSubscriptionIndex(subscriptions, index) == null)
-            {
-                additions += 1;
-            }
-        }
-        if (additions > self.subscription_options.max_subscriptions -|
-            self.subscriptions.items.len)
-        {
-            return error.SubscriptionLimitExceeded;
         }
         try self.subscriptions.ensureUnusedCapacity(self.allocator, additions);
         var suback = try active.subscribe(subscriptions, options);
@@ -681,19 +685,16 @@ pub const Client = struct {
     fn replaySubscriptions(self: *Client) Error!void {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
-        if (self.subscriptions.items.len == 0) return;
-        const requested = try self.allocator.alloc(
-            mqtt.Subscription,
-            self.subscriptions.items.len,
-        );
-        defer self.allocator.free(requested);
-        for (self.subscriptions.items, requested) |stored, *item| {
-            item.* = stored.value();
-        }
-        var suback = try active.subscribe(requested, .{});
-        defer suback.deinit(self.allocator);
-        for (suback.suback.reason_codes) |reason| {
-            if (reason >= 0x80) {
+        // MQTT 5 Subscription Identifier/User Properties are scoped to the
+        // SUBSCRIBE packet. Re-emit each accepted filter with the exact owned
+        // properties from the operation that established it.
+        for (self.subscriptions.items) |stored| {
+            const one = [_]mqtt.Subscription{stored.value()};
+            var suback = try active.subscribe(&one, .{
+                .properties = stored.properties,
+            });
+            defer suback.deinit(self.allocator);
+            if (suback.suback.reason_codes[0] >= 0x80) {
                 return error.SubscriptionRefused;
             }
         }
@@ -727,16 +728,25 @@ fn firstSubscriptionIndex(
     return null;
 }
 
-fn fromSubscription(
-    owned_filter: []u8,
+fn cloneSubscription(
+    allocator: std.mem.Allocator,
     subscription: mqtt.Subscription,
-) OwnedSubscription {
+    properties: []const mqtt.Property,
+) OptionsError!OwnedSubscription {
+    const filter = try allocator.dupe(u8, subscription.topic_filter);
+    errdefer allocator.free(filter);
+    const copied_properties = try owned_properties.clone(
+        allocator,
+        properties,
+        owned_properties.keepAll,
+    );
     return .{
-        .filter = owned_filter,
+        .filter = filter,
         .qos = subscription.qos,
         .no_local = subscription.no_local,
         .retain_as_published = subscription.retain_as_published,
         .retain_handling = subscription.retain_handling,
+        .properties = copied_properties.properties,
     };
 }
 

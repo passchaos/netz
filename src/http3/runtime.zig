@@ -3345,6 +3345,10 @@ pub const EndpointRequestEvent = struct {
 /// parsers once an Extended CONNECT has been detached.
 pub const EndpointTransportEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
+    closed: struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        timer: quic.one_rtt.TimerDeadline,
+    },
     handshake_failed: struct {
         handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
         err: Error,
@@ -3359,7 +3363,7 @@ pub const EndpointTransportEvent = union(enum) {
         switch (self.*) {
             .packet => |*packet| packet.packet.deinit(allocator),
             .unrouted => |*event| event.deinit(allocator),
-            .connected, .handshake_failed => {},
+            .connected, .closed, .handshake_failed => {},
         }
         self.* = undefined;
     }
@@ -3367,6 +3371,10 @@ pub const EndpointTransportEvent = union(enum) {
 
 pub const EndpointServerEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
+    closed: struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        timer: quic.one_rtt.TimerDeadline,
+    },
     handshake_failed: struct {
         handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
         err: Error,
@@ -3376,7 +3384,7 @@ pub const EndpointServerEvent = union(enum) {
 
     pub fn deinit(self: *EndpointServerEvent, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .connected, .handshake_failed => {},
+            .connected, .closed, .handshake_failed => {},
             .request => |*request| request.deinit(allocator),
             .unrouted => |*event| event.deinit(allocator),
         }
@@ -3496,6 +3504,10 @@ pub const EndpointServer = struct {
             defer event.deinit(self.allocator);
             switch (event) {
                 .connected => |handle| return .{ .connected = handle },
+                .closed => |closed| return .{ .closed = .{
+                    .handle = closed.handle,
+                    .timer = closed.timer,
+                } },
                 .handshake_failed => |failure| return .{
                     .handshake_failed = .{
                         .handle = failure.handle,
@@ -3612,9 +3624,23 @@ pub const EndpointServer = struct {
                         endpoint_owned = false;
                         return .{ .unrouted = endpoint_event };
                     },
+                    .timer => |timer| {
+                        const target = self.sessions.getPtr(
+                            timer.connection_handle,
+                        ) orelse return error.UnknownConnectionHandle;
+                        if (target.session.established.connection.closed()) {
+                            const closed = EndpointTransportEvent{ .closed = .{
+                                .handle = timer.connection_handle,
+                                .timer = timer.timer,
+                            } };
+                            if (!self.removeConnection(timer.connection_handle)) {
+                                return error.UnknownConnectionHandle;
+                            }
+                            return closed;
+                        }
+                    },
                     .pending_handshake,
                     .discarded_long_header,
-                    .timer,
                     .consumed,
                     => {},
                 }
