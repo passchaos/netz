@@ -382,9 +382,11 @@ UDP routing. Shared endpoint sends are serialized across handshake/connection
 workers, including ECN socket state, GSO fallback state, and deterministic
 fault-injection queues. WebTransport exposes a split handshake/admission object that can
 be promoted before CONNECT polling. The remaining integration work is a
-turnkey server loop that stores and schedules established HTTP/3/WebTransport
-sessions, applies admission expiry policy, and hands completed requests to
-application workers.
+turnkey WebTransport loop and configurable admission expiry policy. HTTP/3 now
+has an endpoint server that stores stable promoted sessions, routes packets and
+timers, polls requests without per-connection socket reads, and explicitly
+removes connection routes before destroying session state. A two-client real
+TLS/QUIC test exercises the full admission and promotion path on one UDP socket.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and

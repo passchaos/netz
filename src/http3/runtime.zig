@@ -2973,6 +2973,15 @@ pub const HandshakeSupervisorEvent = union(enum) {
         self.* = .consumed;
         return completion;
     }
+
+    pub fn takeEndpoint(
+        self: *HandshakeSupervisorEvent,
+    ) ?quic.endpoint_dispatcher.Event {
+        if (self.* != .endpoint) return null;
+        const event = self.endpoint;
+        self.* = .consumed;
+        return event;
+    }
 };
 
 const HandshakeWorkerContext = struct {
@@ -3220,6 +3229,200 @@ pub const HandshakeSupervisor = struct {
         _ = self;
         var owned = completion;
         owned.deinit();
+    }
+};
+
+pub const EndpointRequestEvent = struct {
+    connection_handle: quic.endpoint_dispatcher.ConnectionHandle,
+    request: StreamingRequestEvent,
+
+    pub fn deinit(self: *EndpointRequestEvent, allocator: std.mem.Allocator) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const EndpointServerEvent = union(enum) {
+    connected: quic.endpoint_dispatcher.ConnectionHandle,
+    handshake_failed: struct {
+        handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
+        err: Error,
+    },
+    request: EndpointRequestEvent,
+    unrouted: quic.endpoint_dispatcher.Event,
+
+    pub fn deinit(self: *EndpointServerEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .connected, .handshake_failed => {},
+            .request => |*request| request.deinit(allocator),
+            .unrouted => |*event| event.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+/// Event-driven, multi-connection HTTP/3 server over one UDP receive owner.
+///
+/// The supervisor admits Initials into bounded handshake workers, promotes
+/// successful connections into stable heap-backed sessions, routes 1-RTT
+/// packets, services connection timers, and emits application request events.
+pub const EndpointServer = struct {
+    server: *HandshakeServer,
+    allocator: std.mem.Allocator,
+    dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+    handshakes: HandshakeSupervisor,
+    sessions: std.AutoHashMapUnmanaged(
+        quic.endpoint_dispatcher.ConnectionHandle,
+        PromotedHandshakeSession,
+    ) = .empty,
+
+    pub fn init(
+        server: *HandshakeServer,
+        options: HandshakeAdmissionOptions,
+    ) HandshakeAdmissionError!EndpointServer {
+        const dispatcher = try server.allocator.create(
+            quic.endpoint_dispatcher.Dispatcher,
+        );
+        errdefer server.allocator.destroy(dispatcher);
+        dispatcher.* = .init(server.allocator, &server.quic_server.endpoint);
+        errdefer dispatcher.deinit();
+        const handshakes = try HandshakeSupervisor.init(
+            server,
+            dispatcher,
+            options,
+        );
+        return .{
+            .server = server,
+            .allocator = server.allocator,
+            .dispatcher = dispatcher,
+            .handshakes = handshakes,
+        };
+    }
+
+    pub fn deinit(self: *EndpointServer) void {
+        self.handshakes.deinit();
+        var iterator = self.sessions.valueIterator();
+        while (iterator.next()) |promoted| promoted.deinit();
+        self.sessions.deinit(self.allocator);
+        self.dispatcher.deinit();
+        self.allocator.destroy(self.dispatcher);
+        self.* = undefined;
+    }
+
+    pub fn connectionCount(self: *const EndpointServer) usize {
+        return self.sessions.count();
+    }
+
+    pub fn session(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) ?*HandshakeServerSession {
+        const promoted = self.sessions.getPtr(handle) orelse return null;
+        return promoted.session;
+    }
+
+    pub fn removeConnection(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) bool {
+        var removed = self.sessions.fetchRemove(handle) orelse return false;
+        removed.value.deinit();
+        return true;
+    }
+
+    pub fn receive(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!EndpointServerEvent {
+        while (true) {
+            var iterator = self.sessions.iterator();
+            while (iterator.next()) |entry| {
+                if (try entry.value_ptr.session.pollRequestEvent()) |request| {
+                    return .{ .request = .{
+                        .connection_handle = entry.key_ptr.*,
+                        .request = request,
+                    } };
+                }
+            }
+
+            var event = try self.handshakes.receive(
+                supported_versions,
+                poll_interval,
+            );
+            switch (event) {
+                .consumed => unreachable,
+                .completed => {
+                    var completion = event.takeCompletion().?;
+                    var completion_owned = true;
+                    defer if (completion_owned) completion.deinit();
+                    switch (completion.result) {
+                        .failure => |err| {
+                            const handle = completion.handle;
+                            completion.deinit();
+                            completion_owned = false;
+                            return .{ .handshake_failed = .{
+                                .handle = handle,
+                                .err = err,
+                            } };
+                        },
+                        .session => {},
+                    }
+                    var promoted = try self.handshakes.promote(&completion);
+                    errdefer promoted.deinit();
+                    const handle = promoted.handle;
+                    const slot = try self.sessions.getOrPut(
+                        self.allocator,
+                        handle,
+                    );
+                    if (slot.found_existing) {
+                        return error.DuplicateConnectionHandle;
+                    }
+                    slot.value_ptr.* = promoted;
+                    completion_owned = false;
+                    return .{ .connected = handle };
+                },
+                .endpoint => {
+                    var endpoint_event = event.takeEndpoint().?;
+                    var endpoint_owned = true;
+                    defer if (endpoint_owned) endpoint_event.deinit(
+                        self.allocator,
+                    );
+                    switch (endpoint_event) {
+                        .new_initial => {
+                            _ = self.handshakes.admit(&endpoint_event) catch |err|
+                                switch (err) {
+                                    error.PendingHandshakeLimitReached => {
+                                        endpoint_owned = false;
+                                        return .{ .unrouted = endpoint_event };
+                                    },
+                                    else => |other| return other,
+                                };
+                        },
+                        .packet => |*packet| {
+                            const target = self.sessions.getPtr(
+                                packet.connection_handle,
+                            ) orelse return error.UnknownConnectionHandle;
+                            try target.session.processRequestPacket(
+                                &packet.packet,
+                            );
+                            try self.dispatcher.refreshConnectionTimer(
+                                packet.connection_handle,
+                            );
+                        },
+                        .unrouted => {
+                            endpoint_owned = false;
+                            return .{ .unrouted = endpoint_event };
+                        },
+                        .pending_handshake,
+                        .discarded_long_header,
+                        .timer,
+                        .consumed,
+                        => {},
+                    }
+                },
+            }
+        }
     }
 };
 
@@ -24020,6 +24223,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 test {
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
+    _ = @import("runtime/endpoint_server_tests.zig");
     _ = @import("runtime/handshake_server_serve_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/informational_tests.zig");
