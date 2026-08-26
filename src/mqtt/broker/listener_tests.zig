@@ -695,6 +695,162 @@ test "listeners apply independent Maximum QoS policies" {
     if (shared.err) |err| return err;
 }
 
+test "listeners apply independent CONNECT authorization policies" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const GlobalPolicy = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn authorize(
+            context_ptr: *anyopaque,
+            connect: mqtt.Connect,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return connect.password != null and
+                std.mem.eql(u8, connect.password.?, "global-secret");
+        }
+    };
+    const PrivatePolicy = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn authorize(
+            context_ptr: *anyopaque,
+            connect: mqtt.Connect,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return connect.username != null and
+                std.mem.eql(u8, connect.username.?, "private-user");
+        }
+    };
+
+    var global_policy: GlobalPolicy = .{};
+    var private_policy: PrivatePolicy = .{};
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+        .connect_authorization = .{
+            .context = &global_policy,
+            .authorize = GlobalPolicy.authorize,
+        },
+    });
+    defer broker.deinit();
+    var public_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer public_server.deinit();
+    var private_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer private_server.deinit();
+
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = public_server.pendingSource(),
+            .connection_count = 1,
+        },
+        .{
+            .source = private_server.pendingSource(),
+            .authorization = .{
+                .connect = .{
+                    .context = &private_policy,
+                    .authorize = PrivatePolicy.authorize,
+                },
+            },
+            .connection_count = 2,
+        },
+    };
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    // The global policy applies to every listener, while the public endpoint
+    // has no extra credential requirement.
+    var public = try runtime.Client.connect(
+        allocator,
+        io,
+        public_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-auth-public",
+            .password = "global-secret",
+        },
+    );
+    defer public.close();
+    try public.ping();
+
+    // The same globally valid credential is refused on the private listener
+    // until its additional listener-local username policy is also satisfied.
+    var refused = try runtime.Client.connectAttempt(
+        allocator,
+        io,
+        private_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-auth-denied",
+            .username = "wrong-user",
+            .password = "global-secret",
+        },
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x87),
+        refused.connack.connack.reason_code,
+    );
+
+    var private = try runtime.Client.connect(
+        allocator,
+        io,
+        private_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-auth-private",
+            .username = "private-user",
+            .password = "global-secret",
+        },
+    );
+    defer private.close();
+    try private.ping();
+
+    try disconnectAll(&.{ &public, &private });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        global_policy.calls.load(.monotonic),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        private_policy.calls.load(.monotonic),
+    );
+    try std.testing.expectEqual(@as(usize, 0), broker.sessions.count());
+}
+
 test "durable Session delivery uses reconnect listener Maximum QoS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

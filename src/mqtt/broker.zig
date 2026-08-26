@@ -140,6 +140,14 @@ pub const ConnectContextAuthorizationHandler = struct {
     ) bool,
 };
 
+/// Optional CONNECT admission overlay for one listener. Broker-wide
+/// authorization remains mandatory when configured; listener callbacks add
+/// narrower credentials or transport requirements without weakening it.
+pub const ListenerAuthorization = struct {
+    connect: ?ConnectAuthorizationHandler = null,
+    connect_context: ?ConnectContextAuthorizationHandler = null,
+};
+
 pub const AccessControlHandler = struct {
     context: *anyopaque,
     authorize_publish: *const fn (
@@ -489,6 +497,9 @@ pub const Listener = struct {
     /// advertised capabilities listener-specific. Borrowed property strings
     /// must remain alive throughout `serveListeners`.
     accept: ?runtime.AcceptOptions = null,
+    /// Additional listener-local CONNECT authorization. Callback state is
+    /// borrowed and must remain alive throughout `serveListeners`.
+    authorization: ListenerAuthorization = .{},
     /// Finite accept count for deterministic process/test teardown.
     connection_count: usize,
 };
@@ -505,6 +516,9 @@ pub const ListenerEndpoint = struct {
     /// Null inherits `Broker.Options.accept`; borrowed values must remain alive
     /// throughout `serveListenersUntil`.
     accept: ?runtime.AcceptOptions = null,
+    /// Additional listener-local CONNECT authorization. Callback state is
+    /// borrowed and must remain alive throughout `serveListenersUntil`.
+    authorization: ListenerAuthorization = .{},
     accept_concurrency: usize = 1,
 };
 
@@ -1444,6 +1458,24 @@ pub const Broker = struct {
         namespace: listener_namespace.Namespace,
         accept_options: runtime.AcceptOptions,
     ) anyerror!void {
+        return self.servePendingWithListenerOptions(
+            pending,
+            namespace,
+            accept_options,
+            .{},
+        );
+    }
+
+    /// Admit one parsed CONNECT with explicit listener capability and
+    /// authorization policy. This is the complete boundary for external
+    /// listener orchestration that does not use `serveListeners*`.
+    pub fn servePendingWithListenerOptions(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        namespace: listener_namespace.Namespace,
+        accept_options: runtime.AcceptOptions,
+        authorization: ListenerAuthorization,
+    ) anyerror!void {
         const slot_index = try self.claimSlot();
         var slot_claimed = true;
         defer if (slot_claimed) {
@@ -1455,6 +1487,7 @@ pub const Broker = struct {
             pending,
             namespace,
             accept_options,
+            authorization,
             &result,
         ) orelse {
             slot_claimed = false;
@@ -1493,6 +1526,7 @@ pub const Broker = struct {
         pending: *runtime.PendingAcceptedClient,
         namespace: @import("listener_namespace.zig").Namespace,
         listener_accept: runtime.AcceptOptions,
+        listener_authorization: ListenerAuthorization,
         result: *?anyerror,
     ) Error!?ClientTask {
         var pending_owned = true;
@@ -1537,14 +1571,7 @@ pub const Broker = struct {
                 authorization.context,
                 pending.connect.connect,
             )) {
-                var refused = try pending.finish(.{
-                    .reason_code = switch (pending.connect.connect.protocol) {
-                        .v3_1_1 => 0x05,
-                        .v5 => 0x87,
-                    },
-                });
-                pending_owned = false;
-                refused.deinit(self.allocator);
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
             }
         }
@@ -1555,14 +1582,27 @@ pub const Broker = struct {
                 .proxy = pending.connection.proxyMetadata(),
                 .peer_certificates = pending.connection.peerCertificates(),
             })) {
-                var refused = try pending.finish(.{
-                    .reason_code = switch (pending.connect.connect.protocol) {
-                        .v3_1_1 => 0x05,
-                        .v5 => 0x87,
-                    },
-                });
-                pending_owned = false;
-                refused.deinit(self.allocator);
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                return null;
+            }
+        }
+        if (listener_authorization.connect) |authorization| {
+            if (!authorization.authorize(
+                authorization.context,
+                pending.connect.connect,
+            )) {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                return null;
+            }
+        }
+        if (listener_authorization.connect_context) |authorization| {
+            if (!authorization.authorize(authorization.context, .{
+                .connect = pending.connect.connect,
+                .remote_address = pending.connection.remoteAddress(),
+                .proxy = pending.connection.proxyMetadata(),
+                .peer_certificates = pending.connection.peerCertificates(),
+            })) {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
             }
         }
@@ -1614,6 +1654,21 @@ pub const Broker = struct {
         accepted.connect = undefined;
         accepted.connection = undefined;
         return task;
+    }
+
+    fn refuseUnauthorizedConnect(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        pending_owned: *bool,
+    ) Error!void {
+        var refused = try pending.finish(.{
+            .reason_code = switch (pending.connect.connect.protocol) {
+                .v3_1_1 => 0x05,
+                .v5 => 0x87,
+            },
+        });
+        pending_owned.* = false;
+        refused.deinit(self.allocator);
     }
 
     fn register(
@@ -3935,6 +3990,7 @@ const ListenerAcceptTask = struct {
             &pending,
             task.listener.namespace,
             task.listener.accept orelse task.broker.options.accept,
+            task.listener.authorization,
             task.result,
         ) catch |err| {
             // `preparePending` owns and closes the pending connection on every
@@ -4051,6 +4107,7 @@ const ListenerSupervisorAcceptTask = struct {
                 task.listener.namespace,
                 task.listener.accept orelse
                     task.supervisor.broker.options.accept,
+                task.listener.authorization,
                 &connection_error,
             ) catch |err| {
                 task.supervisor.report(
