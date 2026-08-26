@@ -944,6 +944,16 @@ pub const ConcurrentServeResult = struct {
     }
 };
 
+/// RFC 9113 §6.8 processing certainty for a locally initiated request stream.
+/// A stream above the peer's GOAWAY Last-Stream-ID is guaranteed not to have
+/// been processed and can be retried on a new connection. Streams at or below
+/// that boundary may already have application side effects.
+pub const GoAwayRetryDisposition = enum {
+    no_goaway,
+    may_have_been_processed,
+    safe_to_retry,
+};
+
 pub const ServeErrorStage = enum {
     accept,
     connection,
@@ -6041,6 +6051,27 @@ pub const Connection = struct {
             try self.recordPeerGoAway(goaway);
             return .{ .frame = frame, .goaway = goaway };
         }
+    }
+
+    /// Return the most restrictive Last-Stream-ID observed from peer GOAWAY.
+    /// Multiple GOAWAY frames may lower this boundary but cannot raise it.
+    pub fn peerGoAwayLastStreamId(self: Connection) ?u31 {
+        return self.peer_goaway_last_stream_id;
+    }
+
+    /// Classify whether retrying a locally initiated request is safe after the
+    /// peer's latest GOAWAY. This reports only processing certainty; callers
+    /// must still decide whether the method/body itself is replayable.
+    pub fn goAwayRetryDisposition(
+        self: Connection,
+        stream_id: u31,
+    ) GoAwayRetryDisposition {
+        const last = self.peer_goaway_last_stream_id orelse
+            return .no_goaway;
+        return if (stream_id > last)
+            .safe_to_retry
+        else
+            .may_have_been_processed;
     }
 
     pub fn sendResetStream(self: *Connection, stream_id: u31, error_code: http2.ErrorCode) Error!void {
@@ -13276,12 +13307,24 @@ test "HTTP/2 client fails active request rejected by GOAWAY" {
         .max_body_bytes = 4096,
     });
     defer client.close();
+    try std.testing.expectEqual(
+        GoAwayRetryDisposition.no_goaway,
+        client.goAwayRetryDisposition(1),
+    );
 
     try std.testing.expectError(error.ConnectionGoAway, client.request(.{
         .method = "GET",
         .path = "/goaway-reject",
         .authority = "localhost",
     }));
+    try std.testing.expectEqual(
+        @as(?u31, 0),
+        client.peerGoAwayLastStreamId(),
+    );
+    try std.testing.expectEqual(
+        GoAwayRetryDisposition.safe_to_retry,
+        client.goAwayRetryDisposition(1),
+    );
 
     thread.join();
     if (shared.err) |err| return err;
@@ -13345,6 +13388,10 @@ test "HTTP/2 client continues active request allowed by GOAWAY" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("still-ok", response.body);
+    try std.testing.expectEqual(
+        GoAwayRetryDisposition.may_have_been_processed,
+        client.goAwayRetryDisposition(1),
+    );
 }
 
 test "HTTP/2 client refuses new request after peer GOAWAY" {
