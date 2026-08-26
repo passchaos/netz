@@ -461,13 +461,16 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
             .endpoint => return error.TestUnexpectedResult,
         }
     }
-    defer supervisor.discardCompletion(&completion);
     try std.testing.expect(completion.result == .failure);
     try std.testing.expectEqual(
         error.InvalidEncoding,
         completion.result.failure,
     );
     try std.testing.expectEqual(@as(usize, 0), supervisor.pendingCount());
+    // The worker never mutates dispatcher maps. Cleanup occurs when the sole
+    // owner consumes or discards its completion.
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.pendingHandshakeCount());
+    supervisor.discardCompletion(&completion);
     try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
 }
 

@@ -3198,7 +3198,6 @@ pub const HandshakeSupervisor = struct {
     ) std.Io.Cancelable!void {
         const result: @FieldType(HandshakeCompletion, "result") = blk: {
             const session = context.server.acceptAdmission(admission) catch |err| {
-                admission.abandonRegistration();
                 break :blk .{ .failure = err };
             };
             break :blk .{ .session = session };
