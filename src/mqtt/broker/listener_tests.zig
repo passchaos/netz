@@ -555,6 +555,284 @@ test "mounted listeners keep shared subscription groups namespace-local" {
     if (shared.err) |err| return err;
 }
 
+test "listeners apply independent Maximum QoS policies" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 3,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var unrestricted_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer unrestricted_server.deinit();
+    var qos0_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer qos0_server.deinit();
+
+    var qos0_accept = broker.options.accept;
+    qos0_accept.maximum_qos = .at_most_once;
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = unrestricted_server.pendingSource(),
+            .connection_count = 2,
+        },
+        .{
+            .source = qos0_server.pendingSource(),
+            .accept = qos0_accept,
+            .connection_count = 1,
+        },
+    };
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var qos0_result = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        qos0_server.address(),
+        .{ .protocol = .v5, .client_id = "qos0-listener-subscriber" },
+    );
+    var qos0_subscriber = qos0_result.connection;
+    defer qos0_subscriber.close();
+    defer qos0_result.connack.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        mqtt.maximumQoS(qos0_result.connack.connack.properties).?,
+    );
+    var qos0_suback = try qos0_subscriber.subscribe(
+        &.{.{
+            .topic_filter = "listener/qos",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer qos0_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{@intFromEnum(mqtt.QoS.at_most_once)},
+        qos0_suback.suback.reason_codes,
+    );
+
+    var unrestricted = try runtime.Client.connect(
+        allocator,
+        io,
+        unrestricted_server.address(),
+        .{ .protocol = .v5, .client_id = "unrestricted-subscriber" },
+    );
+    defer unrestricted.close();
+    var unrestricted_suback = try unrestricted.subscribe(
+        &.{.{
+            .topic_filter = "listener/qos",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer unrestricted_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{@intFromEnum(mqtt.QoS.at_least_once)},
+        unrestricted_suback.suback.reason_codes,
+    );
+
+    var publisher = try runtime.Client.connect(
+        allocator,
+        io,
+        unrestricted_server.address(),
+        .{ .protocol = .v5, .client_id = "listener-policy-publisher" },
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "listener/qos",
+        "per-listener",
+        .{ .qos = .at_least_once },
+    );
+
+    var restricted_delivery = try qos0_subscriber.readPublish();
+    defer restricted_delivery.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        restricted_delivery.publish.qos,
+    );
+    var unrestricted_delivery = try unrestricted.readPublish();
+    defer unrestricted_delivery.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        unrestricted_delivery.publish.qos,
+    );
+    try unrestricted.writePubAck(
+        unrestricted_delivery.publish.packet_id.?,
+        0,
+    );
+
+    try disconnectAll(&.{ &qos0_subscriber, &unrestricted, &publisher });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "durable Session delivery uses reconnect listener Maximum QoS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var setup_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer setup_server.deinit();
+
+    const setup_listeners = [_]mqtt.broker.Listener{.{
+        .source = setup_server.pendingSource(),
+        .connection_count = 1,
+    }};
+    var setup_serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &setup_listeners,
+    };
+    const setup_thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&setup_serve},
+    );
+    var setup_joined = false;
+    defer if (!setup_joined) setup_thread.join();
+
+    var first = try runtime.Client.connect(
+        allocator,
+        io,
+        setup_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-qos-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer first.close();
+    var suback = try first.subscribe(
+        &.{.{
+            .topic_filter = "listener/durable",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try first.disconnect(0);
+    try waitForPeerClose(&first);
+    setup_thread.join();
+    setup_joined = true;
+    if (setup_serve.err) |err| return err;
+
+    try broker.enqueueSessionPublish(
+        "listener-qos-session",
+        .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = "listener/durable",
+            .packet_id = 1,
+            .payload = "queued",
+        },
+        .at_least_once,
+        false,
+        null,
+    );
+
+    var qos0_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer qos0_server.deinit();
+    var qos0_accept = broker.options.accept;
+    qos0_accept.maximum_qos = .at_most_once;
+    const reconnect_listeners = [_]mqtt.broker.Listener{.{
+        .source = qos0_server.pendingSource(),
+        .accept = qos0_accept,
+        .connection_count = 1,
+    }};
+    var reconnect_serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &reconnect_listeners,
+    };
+    const reconnect_thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&reconnect_serve},
+    );
+    var reconnect_joined = false;
+    defer if (!reconnect_joined) reconnect_thread.join();
+
+    var resumed_result = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        qos0_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-qos-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        mqtt.maximumQoS(resumed_result.connack.connack.properties).?,
+    );
+    var delivery = try resumed.readPublish();
+    defer delivery.deinit(allocator);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, delivery.publish.qos);
+    try std.testing.expect(delivery.publish.packet_id == null);
+    try std.testing.expectEqualStrings("queued", delivery.publish.payload);
+
+    try resumed.disconnect(0);
+    reconnect_thread.join();
+    reconnect_joined = true;
+    if (reconnect_serve.err) |err| return err;
+}
+
 test "refused listener admission releases the only broker slot" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

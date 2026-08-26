@@ -485,6 +485,10 @@ pub const SystemMetric = enum {
 pub const Listener = struct {
     source: runtime.PendingSource,
     namespace: listener_namespace.Namespace = .{},
+    /// Null inherits `Broker.Options.accept`; an override makes CONNECT and
+    /// advertised capabilities listener-specific. Borrowed property strings
+    /// must remain alive throughout `serveListeners`.
+    accept: ?runtime.AcceptOptions = null,
     /// Finite accept count for deterministic process/test teardown.
     connection_count: usize,
 };
@@ -498,6 +502,9 @@ pub const Listener = struct {
 pub const ListenerEndpoint = struct {
     source: runtime.PendingSource,
     namespace: listener_namespace.Namespace = .{},
+    /// Null inherits `Broker.Options.accept`; borrowed values must remain alive
+    /// throughout `serveListenersUntil`.
+    accept: ?runtime.AcceptOptions = null,
     accept_concurrency: usize = 1,
 };
 
@@ -758,6 +765,40 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         return self.statsLocked();
+    }
+
+    /// Enqueue a canonical publication for an existing offline Session.
+    ///
+    /// This uses the same bounded Session queue, expiry handling and journal
+    /// boundary as routed fanout. It is useful to external broker components
+    /// that restore or inject durable work without synthesizing a live client.
+    pub fn enqueueSessionPublish(
+        self: *Broker,
+        client_id: []const u8,
+        publish: mqtt.Publish,
+        qos: mqtt.QoS,
+        retain: bool,
+        subscription_identifier: ?usize,
+    ) Error!void {
+        const now = std.Io.Clock.awake.now(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        const handle = self.sessions.find(client_id, now) orelse {
+            self.state_mutex.unlock(self.io);
+            return error.SessionNotFound;
+        };
+        self.enqueueSessionDeliveryLocked(
+            handle,
+            subscription_identifier,
+            retain,
+            qos,
+            publish,
+            now,
+        ) catch |err| {
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
+        self.state_mutex.unlock(self.io);
+        try self.appendCommitIfEnabled();
     }
 
     fn statsLocked(self: Broker) Stats {
@@ -1389,6 +1430,20 @@ pub const Broker = struct {
         pending: *runtime.PendingAcceptedClient,
         namespace: listener_namespace.Namespace,
     ) anyerror!void {
+        return self.servePendingWithOptions(
+            pending,
+            namespace,
+            self.options.accept,
+        );
+    }
+
+    /// Admit one parsed CONNECT with an explicit listener policy.
+    pub fn servePendingWithOptions(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        namespace: listener_namespace.Namespace,
+        accept_options: runtime.AcceptOptions,
+    ) anyerror!void {
         const slot_index = try self.claimSlot();
         var slot_claimed = true;
         defer if (slot_claimed) {
@@ -1399,6 +1454,7 @@ pub const Broker = struct {
             slot_index,
             pending,
             namespace,
+            accept_options,
             &result,
         ) orelse {
             slot_claimed = false;
@@ -1436,6 +1492,7 @@ pub const Broker = struct {
         index: usize,
         pending: *runtime.PendingAcceptedClient,
         namespace: @import("listener_namespace.zig").Namespace,
+        listener_accept: runtime.AcceptOptions,
         result: *?anyerror,
     ) Error!?ClientTask {
         var pending_owned = true;
@@ -1447,7 +1504,7 @@ pub const Broker = struct {
         );
         defer if (mapped_will) |*mapped| mapped.deinit();
 
-        var accept_options = try pending.resolvedOptions(self.options.accept);
+        var accept_options = try pending.resolvedOptions(listener_accept);
         if (accept_options.reason_code != 0) {
             var refused = try pending.finish(accept_options);
             pending_owned = false;
@@ -2162,7 +2219,7 @@ pub const Broker = struct {
             var granted = subscription;
             granted.qos = minQos(
                 granted.qos,
-                self.maximumQoS(),
+                connection.localMaximumQoS(),
             );
             const session_existed = self.sessions.setSubscription(
                 session_handle,
@@ -2746,10 +2803,15 @@ pub const Broker = struct {
                 )
             else
                 false;
-            // Persisted Sessions can outlive a broker configuration change.
-            // Cap the route even if the stored subscription predates the
-            // listener's current Maximum QoS setting.
-            route.qos = minQos(route.qos, self.maximumQoS());
+            // Live Sessions use the current destination listener policy. An
+            // offline Session has no listener until it reconnects, so retain
+            // its granted QoS and cap it immediately before a later write.
+            if (online) {
+                route.qos = minQos(
+                    route.qos,
+                    destination.?.connection.?.localMaximumQoS(),
+                );
+            }
             if (!self.deliveryAuthorized(.{
                 .client_id = try self.sessions.clientId(handle),
                 .topic = publish.topic,
@@ -2909,7 +2971,7 @@ pub const Broker = struct {
                     match.subscription.qos
                 else
                     minQos(publish.qos, match.subscription.qos),
-                self.maximumQoS(),
+                destination.connection.?.localMaximumQoS(),
             );
             if (duplicate) |delivery| {
                 try delivery.appendSubscriptionIdentifier(
@@ -3088,13 +3150,6 @@ pub const Broker = struct {
         return (self.sessions.routeId(handle) catch return false) == route_id;
     }
 
-    fn maximumQoS(self: Broker) mqtt.QoS {
-        // MQTT 3.1.1 cannot advertise this limit in CONNACK, but Mosquitto
-        // still applies its listener-wide cap to subscription grants and
-        // forwarded deliveries.
-        return self.options.accept.maximum_qos orelse .exactly_once;
-    }
-
     fn problemInformationForReason(
         self: Broker,
         protocol: mqtt.ProtocolVersion,
@@ -3212,7 +3267,7 @@ pub const Broker = struct {
                 try self.appendCommitIfEnabled();
                 slot.connection.?.writeSessionTransmission(
                     packet.transmission,
-                    self.maximumQoS(),
+                    slot.connection.?.localMaximumQoS(),
                 ) catch |err| switch (err) {
                     error.OutgoingPacketTooLarge => {
                         if (packet.encoded.kind == .pubrel) return err;
@@ -3425,7 +3480,7 @@ pub const Broker = struct {
                 self.allocator,
                 connection.protocol,
                 transmission,
-                self.maximumQoS(),
+                connection.localMaximumQoS(),
             ) catch |err| {
                 switch (transmission) {
                     .publish => |publish| self.sessions.retryUnsentPublish(
@@ -3861,7 +3916,7 @@ const ListenerAcceptTask = struct {
 
     fn run(task: ListenerAcceptTask) std.Io.Cancelable!void {
         var pending = task.listener.source.acceptPending(
-            task.broker.options.accept,
+            task.listener.accept orelse task.broker.options.accept,
         ) catch |err| {
             task.result.* = err;
             return;
@@ -3879,6 +3934,7 @@ const ListenerAcceptTask = struct {
             slot_index,
             &pending,
             task.listener.namespace,
+            task.listener.accept orelse task.broker.options.accept,
             task.result,
         ) catch |err| {
             // `preparePending` owns and closes the pending connection on every
@@ -3950,7 +4006,8 @@ const ListenerSupervisorAcceptTask = struct {
     fn run(task: ListenerSupervisorAcceptTask) std.Io.Cancelable!void {
         while (!task.supervisor.shouldStop()) {
             var pending = task.listener.source.acceptPending(
-                task.supervisor.broker.options.accept,
+                task.listener.accept orelse
+                    task.supervisor.broker.options.accept,
             ) catch |err| {
                 if (err == error.Canceled or task.supervisor.shouldStop()) {
                     return error.Canceled;
@@ -3992,6 +4049,8 @@ const ListenerSupervisorAcceptTask = struct {
                 slot_index,
                 &pending,
                 task.listener.namespace,
+                task.listener.accept orelse
+                    task.supervisor.broker.options.accept,
                 &connection_error,
             ) catch |err| {
                 task.supervisor.report(

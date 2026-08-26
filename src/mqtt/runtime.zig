@@ -1305,6 +1305,12 @@ pub const Connection = struct {
         return self.topic_namespace.prefix;
     }
 
+    /// Server-side Maximum QoS negotiated for this Network Connection.
+    /// Listener-aware brokers use it for subscription grants and delivery.
+    pub fn localMaximumQoS(self: *const Connection) mqtt.QoS {
+        return self.local_maximum_qos;
+    }
+
     /// Return the proxied source IP when available, otherwise the connected
     /// transport peer. PROXY UNKNOWN/LOCAL deliberately use the latter.
     pub fn remoteAddress(self: *const Connection) net.IpAddress {

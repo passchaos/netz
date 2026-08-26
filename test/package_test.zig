@@ -938,6 +938,18 @@ test "public modules are reachable" {
         netz.mqtt.broker.Broker,
         "servePending",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "servePendingWithOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "enqueueSessionPublish",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Listener,
+        "accept",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Listener"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker,
@@ -998,6 +1010,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "readBrokerEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "localMaximumQoS",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
