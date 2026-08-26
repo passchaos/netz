@@ -336,3 +336,221 @@ test "broker drops retained replay that expired before subscribe" {
     try disconnectAll(&.{ &publisher, &subscriber });
     try joinServer(thread, &joined, &serve);
 }
+
+test "broker rechecks retained source authorization at replay" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        allow_source: std.atomic.Value(bool) = .init(true),
+
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Subscription,
+        ) bool {
+            return true;
+        }
+
+        fn retainedSource(
+            context_ptr: *anyopaque,
+            publication: context.RetainedSourceAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            return self.allow_source.load(.acquire) or
+                !std.mem.eql(u8, publication.client_id, "revoked-writer");
+        }
+    };
+    var policy = Policy{};
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .access_control = .{
+                .context = &policy,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+                .authorize_retained_source = Policy.retainedSource,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 3 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "revoked-writer",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "retained/source-check",
+        "stored",
+        .{ .retain = true },
+    );
+    policy.allow_source.store(false, .release);
+
+    var denied = try connect(
+        allocator,
+        io,
+        broker,
+        "retained-source-denied",
+        &.{},
+    );
+    defer denied.close();
+    var denied_suback = try denied.subscribe(
+        &.{.{ .topic_filter = "retained/source-check" }},
+        .{},
+    );
+    defer denied_suback.deinit(allocator);
+    // PINGRESP is ordered behind any retained replay, so receiving it directly
+    // proves the source check suppressed the stored Application Message.
+    try denied.ping();
+
+    broker.state_mutex.lockUncancelable(io);
+    broker.options.check_retain_source = false;
+    broker.state_mutex.unlock(io);
+    var unchecked = try connect(
+        allocator,
+        io,
+        broker,
+        "retained-source-unchecked",
+        &.{},
+    );
+    defer unchecked.close();
+    var unchecked_suback = try unchecked.subscribe(
+        &.{.{ .topic_filter = "retained/source-check" }},
+        .{},
+    );
+    defer unchecked_suback.deinit(allocator);
+    var replay = try unchecked.readPublish();
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "stored",
+        replay.publish.payload,
+    );
+
+    try disconnectAll(&.{ &publisher, &denied, &unchecked });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker retains QoS 2 source identity through PUBREL" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Policy = struct {
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Subscription,
+        ) bool {
+            return true;
+        }
+
+        fn retainedSource(
+            _: *anyopaque,
+            publication: context.RetainedSourceAuthorization,
+        ) bool {
+            return !std.mem.eql(
+                u8,
+                publication.client_id,
+                "qos2-retained-writer",
+            );
+        }
+    };
+    var policy_context: u8 = 0;
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .access_control = .{
+                .context = &policy_context,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+                .authorize_retained_source = Policy.retainedSource,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "qos2-retained-writer",
+        &.{},
+    );
+    defer publisher.close();
+    const packet_id = (try publisher.writePublish(
+        "retained/qos2-source",
+        "stored",
+        .{ .qos = .exactly_once, .retain = true },
+    )).?;
+    var pubrec = try publisher.readPubRec();
+    defer pubrec.deinit(allocator);
+    try publisher.writePubRel(packet_id, 0);
+    var pubcomp = try publisher.readPubComp();
+    defer pubcomp.deinit(allocator);
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "qos2-retained-reader",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "retained/qos2-source" }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try subscriber.ping();
+
+    try disconnectAll(&.{ &publisher, &subscriber });
+    try joinServer(thread, &joined, &serve);
+}

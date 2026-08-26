@@ -14,6 +14,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -123,11 +124,13 @@ class NetzBroker:
         executable: Path,
         connections: int = 1,
         ignore_errors: bool = False,
+        restore: bool = False,
         extra_args: tuple[str, ...] = (),
     ):
         self.executable = executable
         self.connections = connections
         self.ignore_errors = ignore_errors
+        self.restore = restore
         self.extra_args = extra_args
         self.port = free_port()
         self.process: subprocess.Popen[str] | None = None
@@ -140,9 +143,10 @@ class NetzBroker:
             "--max-queued-deliveries=1024",
             "--max-outgoing-inflight=64",
             "--connect-timeout-ms=5000",
-            "--no-restore",
             *self.extra_args,
         ]
+        if not self.restore:
+            command.append("--no-restore")
         if self.ignore_errors:
             command.append("--ignore-connection-errors")
         self.process = subprocess.Popen(
@@ -831,6 +835,90 @@ def unsubscribe_delivery_access_control(
             subscriber.sendall(mqtt_packets.gen_puback(1))
             subscriber.sendall(mqtt_packets.gen_disconnect())
             publisher.sendall(mqtt_packets.gen_disconnect())
+
+
+def retained_source_access_control(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire shape of Mosquitto 04-retain-check-source.py. Retained state
+    # is accepted first; later broker processes restore its source identity and
+    # apply changed policy. The second replay covers the explicit opt-out.
+    topic = "retain/check-source"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        snapshot = Path(tmpdir) / "retained-source.db"
+        with NetzBroker(
+            executable,
+            restore=True,
+            extra_args=(
+                f"--persistence={snapshot}",
+                "--no-check-retain-source",
+            ),
+        ) as broker:
+            with broker.connect() as publisher:
+                connect_v5(
+                    publisher, mqtt_packets, "retained-source-writer"
+                )
+                publisher.sendall(mqtt_packets.gen_publish(
+                    topic, qos=1, mid=1, payload="stored", retain=True,
+                    proto_ver=5,
+                ))
+                expect_packet(
+                    publisher, mqtt_packets.gen_puback(
+                        1, proto_ver=5, reason_code=0x10
+                    ),
+                    "retained source publisher PUBACK",
+                )
+                publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+        cases = (
+            ("unchecked", (), True),
+            ("checked", (
+                "--deny-retained-source-client-id=retained-source-writer",
+            ), False),
+            ("opt-out", (
+                "--deny-retained-source-client-id=retained-source-writer",
+                "--no-check-retain-source",
+            ), True),
+        )
+        for label, policy_args, expect_replay in cases:
+            case_snapshot = Path(tmpdir) / f"retained-source-{label}.db"
+            case_snapshot.write_bytes(snapshot.read_bytes())
+            with NetzBroker(
+                executable,
+                restore=True,
+                extra_args=(
+                    f"--persistence={case_snapshot}",
+                    *policy_args,
+                ),
+            ) as broker:
+                with broker.connect() as subscriber:
+                    connect_v5(
+                        subscriber, mqtt_packets,
+                        f"retained-source-{label}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_subscribe(
+                        1, topic, 0, proto_ver=5
+                    ))
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                        f"retained source {label} SUBACK",
+                    )
+                    if expect_replay:
+                        expect_packet(
+                            subscriber, mqtt_packets.gen_publish(
+                                topic, qos=0, payload="stored", retain=True,
+                                proto_ver=5,
+                            ), f"retained source {label} replay",
+                        )
+                    subscriber.sendall(mqtt_packets.gen_pingreq())
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_pingresp(),
+                        f"retained source {label} PINGRESP",
+                    )
+                    subscriber.sendall(
+                        mqtt_packets.gen_disconnect(proto_ver=5)
+                    )
 
 
 def will_access_control(executable: Path, mqtt_packets, mqtt5_props) -> None:
@@ -5838,6 +5926,9 @@ def main() -> None:
     unsubscribe_delivery_access_control(
         args.broker, mqtt_packets, mqtt5_props
     )
+    retained_source_access_control(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     will_access_control(args.broker, mqtt_packets, mqtt5_props)
     duplicate_client_takeover(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
@@ -5853,7 +5944,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 138 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 141 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

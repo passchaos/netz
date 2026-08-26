@@ -35,6 +35,7 @@ pub const ClientId = u64;
 pub const DeliveryContext = struct {
     subscription_existed: bool = false,
     subscriber_id: ?ClientId = null,
+    subscriber_client_id: ?[]const u8 = null,
     subscription_identifier: ?usize = null,
     /// Mosquitto-compatible, non-standard policy: raise a retained message to
     /// the subscription QoS instead of applying the MQTT min(source, grant).
@@ -47,6 +48,10 @@ pub const Match = struct {
     qos: mqtt.QoS,
     properties: []const mqtt.Property,
     publisher_id: ?ClientId,
+    /// Client Identifier of the original retained publisher. Unlike
+    /// `publisher_id`, this identity remains meaningful after its Session is
+    /// removed and can therefore be re-authorized at replay time.
+    source_client_id: ?[]const u8,
     /// Remaining MQTT 5 Message Expiry Interval at this lookup instant.
     message_expiry_interval: ?u32,
 };
@@ -55,8 +60,10 @@ pub const Delivery = struct {
     topic: []const u8,
     payload: []const u8,
     qos: mqtt.QoS,
+    source_qos: mqtt.QoS,
     retain: bool,
     properties: []const mqtt.Property,
+    source_client_id: ?[]const u8,
     subscription_identifier: ?usize,
     /// Remaining MQTT 5 Message Expiry Interval at this delivery instant.
     /// Encoders can replace the stored property value with this value.
@@ -121,12 +128,14 @@ const Entry = struct {
     qos: mqtt.QoS,
     properties: []mqtt.Property,
     publisher_id: ?ClientId,
+    source_client_id: ?[]u8,
     stored_at_ns: i96,
     expiry_interval: ?u32,
     allocation_bytes: usize,
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         owned_properties.deinit(allocator, self.properties);
+        if (self.source_client_id) |value| allocator.free(value);
         allocator.free(self.payload);
         allocator.free(self.topic);
         self.* = undefined;
@@ -204,6 +213,18 @@ pub const Store = struct {
                 u64,
                 entry.publisher_id,
             );
+            try persistence.appendBool(
+                out,
+                allocator,
+                entry.source_client_id != null,
+            );
+            if (entry.source_client_id) |source_client_id| {
+                try persistence.appendBlob(
+                    out,
+                    allocator,
+                    source_client_id,
+                );
+            }
             try persistence.appendOptionalInt(
                 out,
                 allocator,
@@ -235,6 +256,10 @@ pub const Store = struct {
                 try cursor.readInt(u8),
             );
             const publisher_id = try cursor.readOptionalInt(u64);
+            const source_client_id = if (try cursor.readBool())
+                try cursor.readBlob()
+            else
+                null;
             const saved_remaining_ns = try cursor.readOptionalInt(u64);
             const properties = try cursor.readProperties(self.allocator);
             defer self.allocator.free(properties);
@@ -260,6 +285,7 @@ pub const Store = struct {
                     .qos = qos,
                     .properties = properties,
                     .publisher_id = publisher_id,
+                    .source_client_id = source_client_id,
                     .now = restore_now,
                 },
             );
@@ -299,6 +325,7 @@ pub const Store = struct {
             qos: mqtt.QoS = .at_most_once,
             properties: []const mqtt.Property = &.{},
             publisher_id: ?ClientId = null,
+            source_client_id: ?[]const u8 = null,
             now: std.Io.Timestamp,
         },
     ) Error!StoreResult {
@@ -326,6 +353,7 @@ pub const Store = struct {
             options.qos,
             options.properties,
             options.publisher_id,
+            options.source_client_id,
             options.now.nanoseconds,
         );
         errdefer new_entry.deinit(self.allocator);
@@ -395,6 +423,7 @@ pub const Store = struct {
         self: *Store,
         publish: mqtt.Publish,
         publisher_id: ?ClientId,
+        source_client_id: ?[]const u8,
         now: std.Io.Timestamp,
     ) Error!StoreResult {
         return self.applyPublish(
@@ -405,6 +434,7 @@ pub const Store = struct {
                 .qos = publish.qos,
                 .properties = publish.properties,
                 .publisher_id = publisher_id,
+                .source_client_id = source_client_id,
                 .now = now,
             },
         );
@@ -677,12 +707,18 @@ fn cloneEntry(
     qos: mqtt.QoS,
     properties: []const mqtt.Property,
     publisher_id: ?ClientId,
+    source_client_id: ?[]const u8,
     now_ns: i96,
 ) Error!Entry {
     const topic_owned = try allocator.dupe(u8, topic);
     errdefer allocator.free(topic_owned);
     const payload_owned = try allocator.dupe(u8, payload);
     errdefer allocator.free(payload_owned);
+    const source_client_id_owned = if (source_client_id) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (source_client_id_owned) |value| allocator.free(value);
     const property_result = owned_properties.clone(
         allocator,
         properties,
@@ -697,7 +733,8 @@ fn cloneEntry(
     );
     const allocation_bytes = std.math.add(
         usize,
-        topic_owned.len + payload_owned.len,
+        topic_owned.len + payload_owned.len +
+            if (source_client_id_owned) |value| value.len else 0,
         property_result.allocation_bytes,
     ) catch return error.RetainedLimitExceeded;
     return .{
@@ -706,6 +743,7 @@ fn cloneEntry(
         .qos = qos,
         .properties = property_result.properties,
         .publisher_id = publisher_id,
+        .source_client_id = source_client_id_owned,
         .stored_at_ns = now_ns,
         .expiry_interval = mqtt.messageExpiryInterval(properties),
         .allocation_bytes = allocation_bytes,
@@ -760,6 +798,7 @@ fn matchForEntry(entry: Entry, remaining: ?u32) Match {
         .qos = entry.qos,
         .properties = entry.properties,
         .publisher_id = entry.publisher_id,
+        .source_client_id = entry.source_client_id,
         .message_expiry_interval = remaining,
     };
 }
@@ -778,10 +817,12 @@ fn deliveryForEntry(
             subscription_qos
         else
             minQos(entry.qos, subscription_qos),
+        .source_qos = entry.qos,
         // Retained messages sent because of a subscription always carry
         // RETAIN=1, independent of Retain As Published.
         .retain = true,
         .properties = entry.properties,
+        .source_client_id = entry.source_client_id,
         .subscription_identifier = subscription_identifier,
         .message_expiry_interval = remaining,
     };
@@ -793,6 +834,15 @@ fn skipNoLocal(
     context: DeliveryContext,
 ) bool {
     if (!subscription.no_local) return false;
+    if (context.subscriber_client_id) |subscriber_client_id| {
+        if (entry.source_client_id) |source_client_id| {
+            return std.mem.eql(
+                u8,
+                subscriber_client_id,
+                source_client_id,
+            );
+        }
+    }
     const subscriber_id = context.subscriber_id orelse return false;
     const publisher_id = entry.publisher_id orelse return false;
     return subscriber_id == publisher_id;

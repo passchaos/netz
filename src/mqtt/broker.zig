@@ -79,6 +79,10 @@ pub const Options = struct {
     /// while a persistent Session is offline. The MQTT-oriented default drops
     /// those messages because delivery has no reliability guarantee.
     queue_qos0_messages: bool = false,
+    /// Re-evaluate the original publisher's current write authorization before
+    /// replaying a retained Application Message. Mosquitto enables this by
+    /// default to prevent a retained write from surviving later ACL revocation.
+    check_retain_source: bool = true,
     /// Mosquitto-compatible administrative upper bound for a durable
     /// Session's offline lifetime. Null leaves the protocol value unchanged.
     /// This also bounds MQTT 3.1.1 CleanSession=0, whose native lifetime is
@@ -215,6 +219,10 @@ pub const AccessControlHandler = struct {
         context: *anyopaque,
         publication: WillAuthorization,
     ) bool = null,
+    authorize_retained_source: ?*const fn (
+        context: *anyopaque,
+        publication: RetainedSourceAuthorization,
+    ) bool = null,
 };
 
 /// Borrowed recipient and Application Message metadata for an outgoing ACL.
@@ -233,6 +241,18 @@ pub const DeliveryAuthorization = struct {
 /// The callback runs when the Will becomes due, not when CONNECT registers it,
 /// so a policy update during Will Delay can suppress publication.
 pub const WillAuthorization = struct {
+    client_id: []const u8,
+    topic: []const u8,
+    payload: []const u8,
+    qos: mqtt.QoS,
+    retain: bool,
+    properties: []const mqtt.Property,
+};
+
+/// Original retained publisher and Application Message metadata for replay-
+/// time write authorization. The Client Identifier is owned by retained state
+/// and remains available after disconnect, Session expiry, and snapshot load.
+pub const RetainedSourceAuthorization = struct {
     client_id: []const u8,
     topic: []const u8,
     payload: []const u8,
@@ -926,6 +946,7 @@ pub const Broker = struct {
                     .properties = &.{},
                     .payload = payload,
                 },
+                null,
                 std.Io.Clock.awake.now(self.io),
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
@@ -2424,6 +2445,9 @@ pub const Broker = struct {
                 .{
                     .subscription_existed = existed,
                     .subscriber_id = sessionSubscriberId(session_route_id),
+                    .subscriber_client_id = try self.sessions.clientId(
+                        session_handle,
+                    ),
                     .subscription_identifier = subscription_identifier,
                     .upgrade_outgoing_qos = self.options.upgrade_outgoing_qos,
                 },
@@ -2477,6 +2501,7 @@ pub const Broker = struct {
             return error.SessionNotFound;
         const client_id = try self.sessions.clientId(handle);
         for (deliveries) |delivery| {
+            if (!self.retainedSourceAuthorized(delivery)) continue;
             var properties: std.ArrayList(mqtt.Property) = .empty;
             defer properties.deinit(self.allocator);
             try properties.ensureTotalCapacity(
@@ -2693,6 +2718,7 @@ pub const Broker = struct {
             publisher_id,
             publisher,
             canonical_publish,
+            connect.client_id,
             true,
         );
     }
@@ -2796,6 +2822,7 @@ pub const Broker = struct {
         self: *Broker,
         publisher_id: router_mod.SubscriberId,
         publisher: *runtime.Connection,
+        source_client_id: []const u8,
         ack: mqtt.AckPacket,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
@@ -2842,6 +2869,7 @@ pub const Broker = struct {
                 publisher_id,
                 publisher,
                 publish,
+                source_client_id,
                 false,
             );
         }
@@ -2861,12 +2889,14 @@ pub const Broker = struct {
         publisher_id: router_mod.SubscriberId,
         publisher: *runtime.Connection,
         publish: mqtt.Publish,
+        source_client_id: []const u8,
         acknowledge_qos1: bool,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
         const plan = self.enqueuePublishLocked(
             publisher_id,
             publish,
+            source_client_id,
             std.Io.Clock.awake.now(self.io),
         ) catch |err| {
             self.state_mutex.unlock(self.io);
@@ -2904,11 +2934,14 @@ pub const Broker = struct {
     ///
     /// Will publication reuses this exact route without a publisher
     /// Connection, while client PUBLISH adds its acknowledgement after the
-    /// lock is released.
+    /// lock is released. `source_client_id` is copied only when the PUBLISH
+    /// creates retained state, preserving provenance independently of the
+    /// Session route used for No Local matching.
     fn enqueuePublishLocked(
         self: *Broker,
         publisher_id: ?router_mod.SubscriberId,
         publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
         now: std.Io.Timestamp,
     ) Error!RoutePlan {
         _ = self.pruneExpiredSessionRoutesLocked(now);
@@ -2919,6 +2952,7 @@ pub const Broker = struct {
         _ = self.retained.applyParsedPublish(
             publish,
             route_publisher_id,
+            source_client_id,
             now,
         ) catch |err| return err;
         const matches = self.router.matchAllocForPublisher(
@@ -3451,6 +3485,24 @@ pub const Broker = struct {
         return authorize(access.context, delivery);
     }
 
+    fn retainedSourceAuthorized(
+        self: Broker,
+        delivery: retained_mod.Delivery,
+    ) bool {
+        if (!self.options.check_retain_source) return true;
+        const source_client_id = delivery.source_client_id orelse return true;
+        const access = self.options.access_control orelse return true;
+        const authorize = access.authorize_retained_source orelse return true;
+        return authorize(access.context, .{
+            .client_id = source_client_id,
+            .topic = delivery.topic,
+            .payload = delivery.payload,
+            .qos = delivery.source_qos,
+            .retain = true,
+            .properties = delivery.properties,
+        });
+    }
+
     fn releaseRouteReservations(
         self: *Broker,
         plan: []const router_mod.Match,
@@ -3922,6 +3974,7 @@ pub const Broker = struct {
         const plan = try self.enqueuePublishLocked(
             publisher_id,
             publish,
+            will.client_id,
             now,
         );
         defer self.allocator.free(plan.storage);
@@ -4091,6 +4144,7 @@ const ClientTask = struct {
                     try task.broker.handlePubRel(
                         task.subscriber_id,
                         connection,
+                        connect.client_id,
                         owned.ack,
                     );
                 },

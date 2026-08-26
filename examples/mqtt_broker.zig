@@ -37,6 +37,8 @@ const Config = struct {
     deny_unsubscribe_filter: ?[]const u8 = null,
     deny_delivery_topic: ?[]const u8 = null,
     deny_will_topic: ?[]const u8 = null,
+    deny_retained_source_client_id: ?[]const u8 = null,
+    check_retain_source: bool = true,
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     use_username_as_client_id: bool = false,
@@ -110,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
         deny_unsubscribe_filter: ?[]const u8,
         deny_delivery_topic: ?[]const u8,
         deny_will_topic: ?[]const u8,
+        deny_retained_source_client_id: ?[]const u8,
 
         fn authorizePublish(
             context: *anyopaque,
@@ -158,6 +161,16 @@ pub fn main(init: std.process.Init) !void {
             const denied = self.deny_will_topic orelse return true;
             return !std.mem.eql(u8, publication.topic, denied);
         }
+
+        fn authorizeRetainedSource(
+            context: *anyopaque,
+            publication: netz.mqtt.broker.RetainedSourceAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const denied = self.deny_retained_source_client_id orelse
+                return true;
+            return !std.mem.eql(u8, publication.client_id, denied);
+        }
     };
     var access_policy = AccessPolicy{
         .deny_publish_topic = config.deny_publish_topic,
@@ -165,19 +178,22 @@ pub fn main(init: std.process.Init) !void {
         .deny_unsubscribe_filter = config.deny_unsubscribe_filter,
         .deny_delivery_topic = config.deny_delivery_topic,
         .deny_will_topic = config.deny_will_topic,
+        .deny_retained_source_client_id = config.deny_retained_source_client_id,
     };
     const access_control: ?netz.mqtt.broker.AccessControlHandler =
         if (config.deny_publish_topic != null or
         config.deny_subscribe_filter != null or
         config.deny_unsubscribe_filter != null or
         config.deny_delivery_topic != null or
-        config.deny_will_topic != null) .{
+        config.deny_will_topic != null or
+        config.deny_retained_source_client_id != null) .{
             .context = &access_policy,
             .authorize_publish = AccessPolicy.authorizePublish,
             .authorize_subscribe = AccessPolicy.authorizeSubscribe,
             .authorize_unsubscribe = AccessPolicy.authorizeUnsubscribe,
             .authorize_delivery = AccessPolicy.authorizeDelivery,
             .authorize_will = AccessPolicy.authorizeWill,
+            .authorize_retained_source = AccessPolicy.authorizeRetainedSource,
         } else null;
 
     var problem_information: [2]netz.mqtt.Property = undefined;
@@ -242,6 +258,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
+            .check_retain_source = config.check_retain_source,
             .persistent_session_expiry_seconds = config.persistent_session_expiry_seconds,
             .system_stats_interval = if (config.system_interval_seconds) |seconds|
                 .fromSeconds(seconds)
@@ -679,6 +696,26 @@ fn parseArgs(
             }
             try netz.mqtt.validateTopicName(topic);
             config.deny_will_topic = topic;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--deny-retained-source-client-id=",
+        )) {
+            const client_id =
+                arg["--deny-retained-source-client-id=".len..];
+            if (client_id.len == 0 or
+                config.deny_retained_source_client_id != null)
+            {
+                return error.InvalidArgument;
+            }
+            try netz.mqtt.validateUtf8String(client_id);
+            config.deny_retained_source_client_id = client_id;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--no-check-retain-source",
+        )) {
+            config.check_retain_source = false;
         } else if (std.mem.eql(
             u8,
             arg,

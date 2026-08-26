@@ -1126,6 +1126,22 @@ test "public modules are reachable" {
         netz.mqtt.broker.Options,
         "persistent_session_expiry_seconds",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Options,
+        "check_retain_source",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.AccessControlHandler,
+        "authorize_retained_source",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "RetainedSourceAuthorization",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.retained.Match,
+        "source_client_id",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "acceptPending",

@@ -11,6 +11,8 @@ pub const TestContext = struct {
     pub const DeliveryAuthorization = broker_mod.DeliveryAuthorization;
     pub const ConnectContext = broker_mod.ConnectContext;
     pub const WillAuthorization = broker_mod.WillAuthorization;
+    pub const RetainedSourceAuthorization =
+        broker_mod.RetainedSourceAuthorization;
     pub const runtime_mod = runtime;
     pub const ServeStateType = ServeState;
 

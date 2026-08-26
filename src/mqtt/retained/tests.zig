@@ -359,6 +359,72 @@ test "retained delivery applies no-local using stored publisher identity" {
     );
 }
 
+test "retained store owns and exposes source client identity" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    var source = [_]u8{ 'w', 'r', 'i', 't', 'e', 'r' };
+    _ = try store.applyPublish("source/state", "value", .{
+        .retain = true,
+        .source_client_id = &source,
+        .now = .zero,
+    });
+    source[0] = 'X';
+
+    var matches: [1]Match = undefined;
+    const matched = try store.matchInto(
+        "source/state",
+        .zero,
+        &matches,
+    );
+    try std.testing.expectEqualStrings(
+        "writer",
+        matched[0].source_client_id.?,
+    );
+    var deliveries: [1]Delivery = undefined;
+    const replay = try store.deliveriesInto(
+        .{ .topic_filter = "source/#" },
+        .{},
+        .zero,
+        &deliveries,
+    );
+    try std.testing.expectEqualStrings(
+        "writer",
+        replay[0].source_client_id.?,
+    );
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        replay[0].source_qos,
+    );
+}
+
+test "retained no-local survives a stable route identity change" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    _ = try store.applyPublish("source/no-local", "value", .{
+        .retain = true,
+        .publisher_id = 7,
+        .source_client_id = "same-client",
+        .now = .zero,
+    });
+
+    var deliveries: [1]Delivery = undefined;
+    const replay = try store.deliveriesInto(
+        .{
+            .topic_filter = "source/no-local",
+            .no_local = true,
+        },
+        .{
+            .subscriber_id = 99,
+            .subscriber_client_id = "same-client",
+        },
+        .zero,
+        &deliveries,
+    );
+    try std.testing.expectEqual(@as(usize, 0), replay.len);
+}
+
 test "retained matchInto is allocation free and exact capacity" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});

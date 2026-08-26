@@ -14,7 +14,7 @@ pub const codec = @import("codec.zig");
 pub const commit_log = @import("commit_log.zig");
 
 const magic = "netz-mqtt-db\x00\x01";
-const version: u32 = 3;
+const version: u32 = 4;
 const max_section_bytes: usize = 1024 * 1024 * 1024;
 pub const max_snapshot_bytes: usize = 4 *| max_section_bytes +| 192;
 
@@ -278,7 +278,8 @@ pub fn decode(
     if (!std.mem.eql(u8, found_magic, magic)) {
         return error.CorruptSnapshot;
     }
-    if (try cursor.readInt(u32) != version) {
+    const found_version = try cursor.readInt(u32);
+    if (found_version != version) {
         return error.UnsupportedSnapshotVersion;
     }
     const saved_realtime_ns = try cursor.readInt(i64);

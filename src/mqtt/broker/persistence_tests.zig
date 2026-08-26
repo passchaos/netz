@@ -98,6 +98,7 @@ test "MQTT broker snapshot restores retained and durable Session state" {
         .{
             .retain = true,
             .qos = .at_least_once,
+            .source_client_id = "persist-retained-writer",
             .now = now,
         },
     );
@@ -125,6 +126,10 @@ test "MQTT broker snapshot restores retained and durable Session state" {
     );
     try std.testing.expectEqual(@as(usize, 1), matches.len);
     try std.testing.expectEqualStrings("value", matches[0].payload);
+    try std.testing.expectEqualStrings(
+        "persist-retained-writer",
+        matches[0].source_client_id.?,
+    );
 
     const handle = restored.sessions.find(
         "durable",
