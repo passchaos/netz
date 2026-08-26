@@ -2274,6 +2274,38 @@ test "public modules are reachable" {
         "RejectedHandshakeSession",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "EndpointServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "EndpointServerEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointServer,
+        "acceptWithHeaders",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointServer,
+        "removeConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "sendDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "sendStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "receiveSessionRequest",
     ));

@@ -381,8 +381,11 @@ single-owner receive API interleaves completion polling, endpoint timers, and
 UDP routing. Shared endpoint sends are serialized across handshake/connection
 workers, including ECN socket state, GSO fallback state, and deterministic
 fault-injection queues. WebTransport exposes a split handshake/admission object that can
-be promoted before CONNECT polling. The remaining integration work is a
-turnkey WebTransport loop and configurable admission expiry policy. HTTP/3 now
+be promoted before CONNECT polling. Its endpoint server now retains stable
+pending and accepted sessions around HTTP/3's sole-receiver transport loop,
+dispatches CONNECT, stream, DATAGRAM and Capsule events, and shares HTTP/3's
+handshake expiry policy. The remaining convenience work is a callback/task
+supervisor above this typed event loop. HTTP/3 now
 has an endpoint server that stores stable promoted sessions, routes packets and
 timers, polls requests without per-connection socket reads, and explicitly
 removes connection routes before destroying session state. A two-client real

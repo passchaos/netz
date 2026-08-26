@@ -204,10 +204,15 @@ source-aware Initial acceptance. WebTransport additionally exposes a split
 connection, injects routed 1-RTT packets, and non-blockingly polls for the
 Extended CONNECT request. HTTP/3's bounded handshake supervisor owns worker
 creation, completion reporting, per-connection random CIDs, failed-admission
-cleanup, and stable heap-backed promotion while its receive API remains the
-sole UDP owner. The remaining gap is the outer WebTransport server loop that
-retains promoted admissions/sessions, applies expiry policy, and dispatches
-their CONNECT and application events.
+cleanup, expiry, and stable heap-backed promotion while its receive API remains
+the sole UDP owner. `webtransport.runtime.EndpointServer` now composes that
+transport loop without moving a registered QUIC connection: it owns pending
+CONNECT policy state and stable accepted-session objects, supports accept/reject
+transitions, dispatches associated streams, DATAGRAMs and Capsules, and removes
+protocol state before unregistering the HTTP/3 connection. A two-client real
+TLS/QUIC test accepts both sessions, checks stable pointers, isolated
+bidirectional DATAGRAM and stream echoes, exact CLOSE metadata, then verifies
+route cleanup.
 
 ## Session drain and close lifecycle
 
@@ -254,13 +259,17 @@ lightweight protected transport does not own a stateful recovery connection.
 
 ## Remaining gaps
 
-1. Expose associated bidi/uni stream APIs on preconfigured protected and
+1. The endpoint also exposes a synchronous `serveUntil` callback loop with
+   bounded receive polling and external shutdown. Add independent per-session
+   handler tasks only if profiling shows that serialized callback dispatch is
+   insufficient; QUIC/HTTP/3 state remains intentionally single-owner.
+2. Expose associated bidi/uni stream APIs on preconfigured protected and
    development runtimes. Protected CONNECT/Capsule lifecycle is now
    long-lived, but the lightweight protected HTTP/3 runtime deliberately lacks
    a full `one_rtt.Connection`; association streams must not be advertised
    until ACK, recovery, flow control and reset/stop state share one connection
    owner.
-2. Expand browser coverage beyond Chromium. The checked-in Chrome gate now
+3. Expand browser coverage beyond Chromium. The checked-in Chrome gate now
    covers real browser CONNECT, DATAGRAM, bidirectional/unidirectional streams,
    exact mapped RESET_STREAM and STOP_SENDING codes, sibling reuse, and close.
    The wtransport gate also covers both client/server directions across
@@ -276,7 +285,7 @@ lightweight protected transport does not own a stateful recovery connection.
    wtransport-server half
    checks netz's peer QUIC application-close code and reason handling. Firefox
    and Safari browser automation remain separate gaps.
-3. Add larger long-run stream-churn distributions; concurrent packet-batched
+4. Add larger long-run stream-churn distributions; concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The
    same benchmark now accepts `--reset-every` and `--reset-after-bytes`, raises

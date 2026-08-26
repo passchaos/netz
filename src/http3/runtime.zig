@@ -3317,6 +3317,32 @@ pub const EndpointRequestEvent = struct {
     }
 };
 
+/// Endpoint-level transport progress before an application protocol consumes
+/// a routed packet. HTTP/3 and WebTransport share handshake ownership and CID
+/// routing, but must apply established packets through different stream
+/// parsers once an Extended CONNECT has been detached.
+pub const EndpointTransportEvent = union(enum) {
+    connected: quic.endpoint_dispatcher.ConnectionHandle,
+    handshake_failed: struct {
+        handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
+        err: Error,
+    },
+    packet: quic.endpoint_dispatcher.RoutedPacket,
+    unrouted: quic.endpoint_dispatcher.Event,
+
+    pub fn deinit(
+        self: *EndpointTransportEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .packet => |*packet| packet.packet.deinit(allocator),
+            .unrouted => |*event| event.deinit(allocator),
+            .connected, .handshake_failed => {},
+        }
+        self.* = undefined;
+    }
+};
+
 pub const EndpointServerEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
     handshake_failed: struct {
@@ -3396,6 +3422,16 @@ pub const EndpointServer = struct {
         return promoted.session;
     }
 
+    /// Return the stable promoted-session owner without moving it. Higher
+    /// protocol adapters can build state around `session` while the dispatcher
+    /// continues to point at the same heap-resident QUIC connection.
+    pub fn promotedSession(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) ?*PromotedHandshakeSession {
+        return self.sessions.getPtr(handle);
+    }
+
     pub fn removeConnection(
         self: *EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -3431,6 +3467,48 @@ pub const EndpointServer = struct {
                 }
             }
 
+            var event = try self.receiveTransport(
+                supported_versions,
+                poll_interval,
+            );
+            defer event.deinit(self.allocator);
+            switch (event) {
+                .connected => |handle| return .{ .connected = handle },
+                .handshake_failed => |failure| return .{
+                    .handshake_failed = .{
+                        .handle = failure.handle,
+                        .err = failure.err,
+                    },
+                },
+                .packet => |*packet| {
+                    const target = self.sessions.getPtr(
+                        packet.connection_handle,
+                    ) orelse return error.UnknownConnectionHandle;
+                    try target.session.processRequestPacket(&packet.packet);
+                },
+                .unrouted => {
+                    const unrouted = event.unrouted;
+                    event = .{ .connected = 0 };
+                    return .{ .unrouted = unrouted };
+                },
+            }
+        }
+    }
+
+    /// Drive handshakes, timers, and the single UDP receive owner without
+    /// interpreting established STREAM frames. Protocol adapters must process
+    /// `.packet` before releasing the event; the dispatcher timer is already
+    /// refreshed by its receive path.
+    pub fn receiveTransport(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!EndpointTransportEvent {
+        while (true) {
+            if (self.handshakes.pollCompleted()) |completion_value| {
+                var completion = completion_value;
+                return try self.finishTransportCompletion(&completion);
+            }
             var event = try self.handshakes.receive(
                 supported_versions,
                 poll_interval,
@@ -3439,33 +3517,7 @@ pub const EndpointServer = struct {
                 .consumed => unreachable,
                 .completed => {
                     var completion = event.takeCompletion().?;
-                    var completion_owned = true;
-                    defer if (completion_owned) completion.deinit();
-                    switch (completion.result) {
-                        .failure => |err| {
-                            const handle = completion.handle;
-                            completion.deinit();
-                            completion_owned = false;
-                            return .{ .handshake_failed = .{
-                                .handle = handle,
-                                .err = err,
-                            } };
-                        },
-                        .session => {},
-                    }
-                    var promoted = try self.handshakes.promote(&completion);
-                    errdefer promoted.deinit();
-                    const handle = promoted.handle;
-                    const slot = try self.sessions.getOrPut(
-                        self.allocator,
-                        handle,
-                    );
-                    if (slot.found_existing) {
-                        return error.DuplicateConnectionHandle;
-                    }
-                    slot.value_ptr.* = promoted;
-                    completion_owned = false;
-                    return .{ .connected = handle };
+                    return try self.finishTransportCompletion(&completion);
                 },
                 .endpoint => {
                     var endpoint_event = event.takeEndpoint().?;
@@ -3484,16 +3536,10 @@ pub const EndpointServer = struct {
                                     else => |other| return other,
                                 };
                         },
-                        .packet => |*packet| {
-                            const target = self.sessions.getPtr(
-                                packet.connection_handle,
-                            ) orelse return error.UnknownConnectionHandle;
-                            try target.session.processRequestPacket(
-                                &packet.packet,
-                            );
-                            try self.dispatcher.refreshConnectionTimer(
-                                packet.connection_handle,
-                            );
+                        .packet => |packet| {
+                            endpoint_event = .consumed;
+                            endpoint_owned = false;
+                            return .{ .packet = packet };
                         },
                         .unrouted => {
                             endpoint_owned = false;
@@ -3508,6 +3554,34 @@ pub const EndpointServer = struct {
                 },
             }
         }
+    }
+
+    fn finishTransportCompletion(
+        self: *EndpointServer,
+        completion: *HandshakeCompletion,
+    ) HandshakeAdmissionError!EndpointTransportEvent {
+        var completion_owned = true;
+        defer if (completion_owned) completion.deinit();
+        switch (completion.result) {
+            .failure => |err| {
+                const handle = completion.handle;
+                completion.deinit();
+                completion_owned = false;
+                return .{ .handshake_failed = .{
+                    .handle = handle,
+                    .err = err,
+                } };
+            },
+            .session => {},
+        }
+        var promoted = try self.handshakes.promote(completion);
+        errdefer promoted.deinit();
+        const handle = promoted.handle;
+        const slot = try self.sessions.getOrPut(self.allocator, handle);
+        if (slot.found_existing) return error.DuplicateConnectionHandle;
+        slot.value_ptr.* = promoted;
+        completion_owned = false;
+        return .{ .connected = handle };
     }
 };
 
