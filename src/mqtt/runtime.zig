@@ -39,7 +39,11 @@ pub const Error = packet_transport.Error || error{
     RedirectRejected,
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
-} || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
+    net.IpAddress.ListenError || net.IpAddress.ConnectError ||
+    net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
+    net.Server.AcceptError || net.Stream.Reader.Error ||
+    net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
@@ -268,6 +272,86 @@ pub const Server = struct {
 
         try group.await(self.io);
         return .{ .allocator = self.allocator, .errors = results };
+    }
+};
+
+/// MQTT listener over a Unix-domain stream socket.
+///
+/// It shares the TCP packet/runtime state machine and the Broker's type-erased
+/// `PendingSource` boundary. PROXY protocol is rejected because Unix-domain
+/// peers already carry local kernel identity rather than an IP hop preface.
+pub const UnixServer = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    listener: net.Server,
+    limits: Limits = .{},
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        limits: Limits,
+    ) Error!UnixServer {
+        if (limits.proxy_protocol != null or
+            limits.proxy_v2_require_tls or
+            limits.proxy_v2_require_client_certificate)
+        {
+            return error.InvalidProperty;
+        }
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .listener = try address.listen(io, .{}),
+            .limits = limits,
+        };
+    }
+
+    pub fn deinit(self: *UnixServer) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn accept(
+        self: *UnixServer,
+        options: AcceptOptions,
+    ) Error!AcceptedClient {
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPending(
+        self: *UnixServer,
+        options: AcceptOptions,
+    ) Error!PendingAcceptedClient {
+        const stream = try self.listener.accept(self.io);
+        var connection = Connection{
+            .allocator = self.allocator,
+            .transport = .initTcp(self.io, stream),
+            .protocol = options.protocol,
+            .limits = self.limits,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
+            .incoming_topic_alias_maximum = options.topic_alias_maximum,
+        };
+        errdefer connection.close();
+        return connection.acceptPending(options);
+    }
+
+    pub fn pendingSource(self: *UnixServer) PendingSource {
+        return .{
+            .context = self,
+            .accept_pending = struct {
+                fn call(
+                    context: *anyopaque,
+                    options: AcceptOptions,
+                ) anyerror!PendingAcceptedClient {
+                    const server: *UnixServer = @ptrCast(
+                        @alignCast(context),
+                    );
+                    return server.acceptPending(options);
+                }
+            }.call,
+        };
     }
 };
 
@@ -648,6 +732,62 @@ pub const Client = struct {
         stream_owned = false;
         errdefer connection.close();
 
+        return connection.establishClient(options);
+    }
+
+    pub fn connectUnix(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) Error!Connection {
+        var result = try connectUnixWithConnAck(
+            allocator,
+            io,
+            address,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUnixWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) Error!ConnectResult {
+        var attempt = try connectUnixAttempt(allocator, io, address, options);
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUnixAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        const stream = try address.connect(io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var limits = options.limits;
+        limits.tcp_nodelay = false;
+        var connection = Connection{
+            .allocator = allocator,
+            .transport = .initTcp(io, stream),
+            .protocol = options.protocol,
+            .limits = limits,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
+            .max_incoming_inflight = mqtt.receiveMaximum(
+                options.properties,
+            ) orelse options.max_outgoing_inflight,
+            .incoming_topic_alias_maximum = options.topic_alias_maximum,
+            .peer_maximum_qos = options.peer_maximum_qos,
+            .peer_retain_available = options.peer_retain_available,
+        };
+        stream_owned = false;
+        errdefer connection.close();
         return connection.establishClient(options);
     }
 

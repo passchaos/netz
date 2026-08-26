@@ -11,7 +11,7 @@ and equal-wire broker results are kept separate.
 
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
-| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
+| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; TCP, Unix-domain, WebSocket and secure listeners auto-detect both versions. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
 | Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, TLS or WS/WSS Upgrade, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
@@ -19,7 +19,7 @@ and equal-wire broker results are kept separate.
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
-| Listener topic namespaces | Heterogeneous TCP/TLS/WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener |
+| Listener topic namespaces | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
@@ -1055,7 +1055,8 @@ mount points. It validates literal UTF-8 prefixes, enforces MQTT's u16 wire
 limit after concatenation, preserves the `$share/{group}/` wrapper while
 prefixing only its nested Topic Filter, maps PUBLISH/Will topics into canonical
 broker space, and refuses to expose a canonical topic outside a destination
-namespace. `Broker.init` plus `serveListeners` runs finite TCP/TLS/WS/WSS
+namespace. `Broker.init` plus `serveListeners` runs finite
+TCP/Unix/TLS/WS/Unix-WS/WSS
 accept counts concurrently over one router, retained store, Session store, Will
 scheduler and deadline driver. `serveListenersUntil` adds a long-running,
 gracefully cancellable supervisor with configurable per-listener concurrency
@@ -1072,6 +1073,11 @@ replay, namespaced Will publication, durable reconnects and shared groups.
 also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific
 egress against Mosquitto's independent wire-packet helpers.
+Raw MQTT and MQTT-over-WebSocket additionally expose Unix-domain server/client
+paths, including `PendingSource` integration with both Broker serving modes.
+They reuse the normal MQTT and WebSocket state machines while rejecting PROXY
+configuration and TCP-only NODELAY behavior on the local transport. Real socket
+tests complete MQTT 5 QoS 1 in both raw and WebSocket forms.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 134
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet

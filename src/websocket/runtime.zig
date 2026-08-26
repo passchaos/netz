@@ -297,10 +297,12 @@ pub const UnixServer = struct {
         self: *UnixServer,
         options: AcceptOptions,
     ) Error!Connection {
-        const http_connection = try self.http.accept();
+        var http_connection = try self.http.accept();
+        var http_owned = true;
+        errdefer if (http_owned) http_connection.close();
         var limits = self.limits;
         limits.tcp_nodelay = false;
-        return acceptTransport(
+        const connection = try acceptTransport(
             self.http.allocator,
             self.http.io,
             .{ .tcp = .{
@@ -310,6 +312,8 @@ pub const UnixServer = struct {
             limits,
             options,
         );
+        http_owned = false;
+        return connection;
     }
 };
 

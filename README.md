@@ -451,11 +451,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   connection, Session, subscription, retained, queue, inflight, QoS 2 and Will
   state and retained `$SYS` gauge publication through the normal routing/ACL
   path, integrated into one live
-  TCP broker listener that auto-detects MQTT 3.1.1/5 per connection, exposes
+  TCP and Unix-domain broker listeners that auto-detect MQTT 3.1.1/5 per connection, exposes
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
   WSS application handshakes, with trusted source, destination, transport and
   v2 TLV metadata,
-  heterogeneous TCP/TLS/WS/WSS listener sources sharing one broker core, with
+  heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS listener sources sharing one broker core, with
   finite deterministic batches plus a graceful-shutdown production supervisor
   that continuously replaces disconnected clients, and
   Mosquitto-compatible mount-point namespaces with inbound PUBLISH/Will and

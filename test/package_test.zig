@@ -971,6 +971,15 @@ test "public modules are reachable" {
         netz.mqtt.runtime.Server,
         "acceptPending",
     ));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime, "UnixServer"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "pendingSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUnix",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "pendingSource",
@@ -1298,6 +1307,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,
         "TlsServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime,
+        "UnixServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.UnixServer,
+        "pendingSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUnix",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.TlsServer,

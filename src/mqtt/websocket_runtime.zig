@@ -136,6 +136,100 @@ pub const ListenOptions = struct {
     allowed_origins: []const []const u8 = &.{},
 };
 
+/// MQTT-over-WebSocket listener on a Unix-domain stream socket.
+pub const UnixServer = struct {
+    allocator: std.mem.Allocator,
+    websocket_server: websocket_runtime.UnixServer,
+    limits: runtime.Limits,
+    allowed_origins: []const []const u8,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ListenOptions,
+    ) runtime.Error!UnixServer {
+        try runtime.validateProxyPolicy(options.limits);
+        if (options.limits.proxy_protocol != null or
+            options.limits.proxy_v2_require_tls or
+            options.limits.proxy_v2_require_client_certificate)
+        {
+            return error.InvalidProperty;
+        }
+        var websocket_limits = websocketLimits(
+            options.limits,
+            options.max_head_bytes,
+        );
+        websocket_limits.tcp_nodelay = false;
+        return .{
+            .allocator = allocator,
+            .websocket_server = try .listen(
+                allocator,
+                io,
+                address,
+                websocket_limits,
+            ),
+            .limits = options.limits,
+            .allowed_origins = options.allowed_origins,
+        };
+    }
+
+    pub fn deinit(self: *UnixServer) void {
+        self.websocket_server.deinit();
+        self.* = undefined;
+    }
+
+    pub fn accept(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+    ) runtime.Error!runtime.AcceptedClient {
+        var pending = try self.acceptPending(options);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPending(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        var ws = try self.websocket_server.accept(.{
+            .protocols = &.{mqtt_subprotocol},
+            .require_subprotocol = true,
+            .allowed_origins = self.allowed_origins,
+        });
+        var ws_owned = true;
+        errdefer if (ws_owned) ws.close();
+        var connection = runtime.Connection.initWebSocket(
+            self.allocator,
+            ws,
+            options.protocol,
+            self.limits,
+            options.max_outgoing_inflight,
+            options.topic_alias_maximum,
+        );
+        ws_owned = false;
+        errdefer connection.close();
+        return connection.acceptPending(options);
+    }
+
+    pub fn pendingSource(self: *UnixServer) runtime.PendingSource {
+        return .{
+            .context = self,
+            .accept_pending = struct {
+                fn call(
+                    context: *anyopaque,
+                    options: runtime.AcceptOptions,
+                ) anyerror!runtime.PendingAcceptedClient {
+                    const server: *UnixServer = @ptrCast(
+                        @alignCast(context),
+                    );
+                    return server.acceptPending(options);
+                }
+            }.call,
+        };
+    }
+};
+
 /// MQTT-over-WSS listener.
 ///
 /// TLS 1.3 termination and optional client authentication are delegated to the
@@ -378,6 +472,53 @@ pub const Client = struct {
             io,
             address,
             websocketConnectOptions(options),
+        );
+        return connectWebSocketAttempt(allocator, ws, options.mqtt);
+    }
+
+    pub fn connectUnix(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectUnixWithConnAck(
+            allocator,
+            io,
+            address,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUnixWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectUnixAttempt(allocator, io, address, options);
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUnixAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (options.client_identity != null or options.use_vail_tls) {
+            return error.UnsupportedScheme;
+        }
+        var ws_options = websocketConnectOptions(options);
+        ws_options.tcp_nodelay = false;
+        const ws = try websocket_runtime.Client.connectUnix(
+            allocator,
+            io,
+            address,
+            ws_options,
         );
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }

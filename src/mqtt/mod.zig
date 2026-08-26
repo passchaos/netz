@@ -4258,9 +4258,11 @@ test {
     _ = @import("runtime/auth_tests.zig");
     _ = @import("runtime/connect_timeout_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
+    _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/information_preferences_tests.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");
+    _ = @import("runtime/websocket_unix_tests.zig");
     _ = @import("websocket_keep_alive_tests.zig");
     _ = persistence.commit_log;
     _ = redirect;

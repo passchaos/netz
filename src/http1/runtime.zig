@@ -34,7 +34,14 @@ pub const Error = http1.Error || tls_stream.Error || error{
     TimedReadUnsupported,
     TooManyInformationalResponses,
     PostHandshakeTlsUnavailable,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
+} || net.IpAddress.ListenError || net.IpAddress.ConnectError ||
+    net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
+    net.HostName.ValidateError || net.HostName.ConnectError ||
+    net.Server.AcceptError || net.Stream.Reader.Error ||
+    net.Stream.Writer.Error || tls.Client.InitError ||
+    CertificateBundle.RescanError || std.Io.RandomSecureError ||
+    std.Io.Reader.ShortError || std.Io.Writer.Error ||
+    std.Thread.SpawnError;
 
 fn setTcpNoDelay(stream: net.Stream) Error!void {
     socket_options.setTcpNoDelay(stream) catch return error.SocketOptionFailed;
