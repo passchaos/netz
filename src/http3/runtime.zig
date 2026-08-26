@@ -2085,12 +2085,24 @@ fn findQpackStaticName(name: []const u8) ?u64 {
 pub const Server = struct {
     quic_server: quic.runtime.Server,
     limits: Limits = .{},
+    request_receive_mutex: std.Io.Mutex = .init,
+    request_streams: DevelopmentRequestStreamSet,
+    response_send_mutex: std.Io.Mutex = .init,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
-        return .{ .quic_server = try .bind(allocator, io, bind_address, limits.quic), .limits = limits };
+        return .{
+            .quic_server = try .bind(allocator, io, bind_address, limits.quic),
+            .limits = limits,
+            .request_streams = .init(
+                allocator,
+                limits.max_stream_buffer,
+                limits.max_concurrent_request_streams,
+            ),
+        };
     }
 
     pub fn deinit(self: *Server) void {
+        self.request_streams.deinit();
         self.quic_server.deinit();
         self.* = undefined;
     }
@@ -2100,7 +2112,22 @@ pub const Server = struct {
     }
 
     pub fn receiveRequest(self: *Server) Error!OwnedRequest {
-        var assembled = try receiveRuntimeStreamBytes(&self.quic_server.endpoint, null, self.limits.max_stream_buffer);
+        self.request_receive_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+
+        var assembled = while (true) {
+            if (try self.request_streams.takeReady()) |ready| break ready;
+            var datagram = try self.quic_server.receive();
+            var owned = true;
+            defer if (owned) datagram.deinit(
+                self.quic_server.endpoint.allocator,
+            );
+            if (try self.request_streams.insertDatagram(&datagram)) {
+                owned = false;
+            }
+        };
         errdefer assembled.deinit(self.quic_server.endpoint.allocator);
         var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, assembled.bytes);
         errdefer request.deinit(self.quic_server.endpoint.allocator);
@@ -2117,14 +2144,13 @@ pub const Server = struct {
 
     pub fn receiveRequestsConcurrent(self: *Server, count: usize) Error!OwnedRequestBatch {
         var group: std.Io.Group = .init;
-        const requests = try self.quic_server.endpoint.allocator.alloc(?OwnedRequest, count);
-        errdefer self.quic_server.endpoint.allocator.free(requests);
-        @memset(requests, null);
-        const errors = try self.quic_server.endpoint.allocator.alloc(?anyerror, count);
-        errdefer self.quic_server.endpoint.allocator.free(errors);
-        @memset(errors, null);
+        var batch = try OwnedRequestBatch.init(
+            self.quic_server.endpoint.allocator,
+            count,
+        );
+        errdefer batch.deinit();
 
-        for (requests, errors) |*request, *err_slot| {
+        for (batch.requests, batch.errors) |*request, *err_slot| {
             const task = RequestTask{
                 .server = self,
                 .request = request,
@@ -2134,7 +2160,52 @@ pub const Server = struct {
         }
 
         try group.await(self.quic_server.endpoint.io);
-        return .{ .allocator = self.quic_server.endpoint.allocator, .requests = requests, .errors = errors };
+        return batch;
+    }
+
+    /// Receive, handle, and respond to exactly `count` requests with bounded
+    /// concurrency. Each worker owns one request for the whole callback/send
+    /// cycle, while the returned result retains that request so callers can
+    /// correlate handler or transport failures with peer and stream metadata.
+    ///
+    /// The same `context` may be entered concurrently. Applications that
+    /// mutate it must provide their own synchronization. The `OwnedRequest`
+    /// passed by value is borrowed from the result: the handler must not
+    /// deinitialize it or retain slices after the result is deinitialized.
+    pub fn serveConcurrent(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!http3.Response,
+        count: usize,
+    ) Error!ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        var result = try OwnedRequestBatch.init(
+            self.quic_server.endpoint.allocator,
+            count,
+        );
+        errdefer result.deinit();
+
+        for (result.requests, result.errors) |*request, *err_slot| {
+            const task = ServeRequestTask(HandlerContext){
+                .server = self,
+                .context = context,
+                .handler = handler,
+                .request = request,
+                .err = err_slot,
+            };
+            group.async(
+                self.quic_server.endpoint.io,
+                ServeRequestTask(HandlerContext).run,
+                .{task},
+            );
+        }
+
+        try group.await(self.quic_server.endpoint.io);
+        return result;
     }
 
     pub fn sendResponse(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
@@ -2151,6 +2222,13 @@ pub const Server = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
         try http3.writeResponseSequence(&encoded, self.quic_server.endpoint.allocator, informational, response);
+        // A response may span several UDP datagrams. Keep its STREAM frames
+        // contiguous on the shared development endpoint and protect mutable
+        // send-interceptor state from concurrent serving workers.
+        self.response_send_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
         try sendRuntimeStreamMessage(&self.quic_server.endpoint, to, stream_id, encoded.items, self.limits.max_stream_frame_data);
     }
 };
@@ -2168,6 +2246,40 @@ const RequestTask = struct {
         task.err.* = null;
     }
 };
+
+fn ServeRequestTask(comptime HandlerContext: type) type {
+    return struct {
+        server: *Server,
+        context: *HandlerContext,
+        handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!http3.Response,
+        request: *?OwnedRequest,
+        err: *?anyerror,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            task.request.* = task.server.receiveRequest() catch |err| {
+                task.err.* = err;
+                return;
+            };
+            const request = task.request.*.?;
+            const response = task.handler(task.context, request) catch |err| {
+                task.err.* = err;
+                return;
+            };
+            task.server.sendResponse(
+                request.from,
+                request.stream_id,
+                response,
+            ) catch |err| {
+                task.err.* = err;
+                return;
+            };
+            task.err.* = null;
+        }
+    };
+}
 
 pub const Client = struct {
     quic_client: quic.runtime.Client,
@@ -2354,10 +2466,185 @@ pub const OwnedRequest = struct {
     }
 };
 
+/// Cleartext development-runtime request assembly keyed by both peer address
+/// and stream ID. UDP clients all start at stream zero, so the stream ID alone
+/// cannot identify a request when one server endpoint serves several peers.
+/// The server serializes mutation of this set but releases the lock before
+/// invoking application handlers.
+const DevelopmentRequestStreamSet = struct {
+    const Entry = struct {
+        from: net.IpAddress,
+        receive: quic.stream_state.RecvState,
+        datagrams: std.ArrayList(quic.runtime.OwnedDatagram) = .empty,
+
+        fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
+            self.receive.deinit();
+            for (self.datagrams.items) |*datagram| {
+                datagram.deinit(allocator);
+            }
+            self.datagrams.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+    max_stream_buffer: usize,
+    max_streams: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_stream_buffer: usize,
+        max_streams: usize,
+    ) DevelopmentRequestStreamSet {
+        return .{
+            .allocator = allocator,
+            .max_stream_buffer = max_stream_buffer,
+            .max_streams = max_streams,
+        };
+    }
+
+    fn deinit(self: *DevelopmentRequestStreamSet) void {
+        for (self.entries.items) |*entry| entry.deinit(self.allocator);
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// Insert every request/response STREAM frame from one datagram. Returns
+    /// whether ownership of the datagram moved into a request entry. The dev
+    /// framing used here emits one stream per datagram, but rejecting a second
+    /// relevant stream prevents ambiguous ownership if a caller crafts one.
+    fn insertDatagram(
+        self: *DevelopmentRequestStreamSet,
+        datagram: *quic.runtime.OwnedDatagram,
+    ) Error!bool {
+        var selected_stream_id: ?u62 = null;
+        for (datagram.frames) |frame| {
+            if (frame != .stream) continue;
+            switch (try messageStreamDisposition(frame.stream.stream_id)) {
+                .ignore => continue,
+                .request_response => {},
+            }
+            const stream_id: u62 = @intCast(frame.stream.stream_id);
+            if (selected_stream_id) |selected| {
+                if (selected != stream_id) return error.UnexpectedStream;
+            } else {
+                selected_stream_id = stream_id;
+            }
+            const entry = try self.getOrCreate(
+                datagram.from,
+                stream_id,
+            );
+            entry.receive.insert(frame.stream) catch |err| {
+                self.discard(datagram.from, stream_id);
+                return err;
+            };
+        }
+        const stream_id = selected_stream_id orelse return false;
+        const entry = self.find(datagram.from, stream_id).?;
+        entry.datagrams.append(self.allocator, datagram.*) catch |err| {
+            // Without the diagnostic/ownership datagram, a completed request
+            // cannot satisfy OwnedRequest's non-empty datagram invariant.
+            self.discard(datagram.from, stream_id);
+            return err;
+        };
+        return true;
+    }
+
+    fn takeReady(
+        self: *DevelopmentRequestStreamSet,
+    ) Error!?RuntimeAssembledStream {
+        for (self.entries.items, 0..) |*entry, index| {
+            const final_size = entry.receive.final_size orelse continue;
+            if (entry.receive.contiguous_end < final_size) continue;
+
+            const bytes = try self.allocator.dupe(
+                u8,
+                entry.receive.buffer.items[0..final_size],
+            );
+            errdefer self.allocator.free(bytes);
+            const datagrams = try entry.datagrams.toOwnedSlice(self.allocator);
+            const from = entry.from;
+            const stream_id: u62 = @intCast(entry.receive.stream_id);
+            entry.receive.deinit();
+            _ = self.entries.swapRemove(index);
+            return .{
+                .from = from,
+                .stream_id = stream_id,
+                .bytes = bytes,
+                .datagrams = datagrams,
+            };
+        }
+        return null;
+    }
+
+    fn getOrCreate(
+        self: *DevelopmentRequestStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!*Entry {
+        if (self.find(from, stream_id)) |entry| return entry;
+        if (self.entries.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.append(self.allocator, .{
+            .from = from,
+            .receive = .init(
+                self.allocator,
+                stream_id,
+                self.max_stream_buffer,
+            ),
+        });
+        return &self.entries.items[self.entries.items.len - 1];
+    }
+
+    fn find(
+        self: *DevelopmentRequestStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) ?*Entry {
+        for (self.entries.items) |*entry| {
+            if (entry.receive.stream_id == stream_id and
+                entry.from.eql(&from)) return entry;
+        }
+        return null;
+    }
+
+    fn discard(
+        self: *DevelopmentRequestStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) void {
+        for (self.entries.items, 0..) |*entry, index| {
+            if (entry.receive.stream_id != stream_id or
+                !entry.from.eql(&from)) continue;
+            entry.deinit(self.allocator);
+            _ = self.entries.swapRemove(index);
+            return;
+        }
+    }
+};
+
 pub const OwnedRequestBatch = struct {
     allocator: std.mem.Allocator,
     requests: []?OwnedRequest,
     errors: []?anyerror,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        count: usize,
+    ) std.mem.Allocator.Error!OwnedRequestBatch {
+        const requests = try allocator.alloc(?OwnedRequest, count);
+        errdefer allocator.free(requests);
+        @memset(requests, null);
+        const errors = try allocator.alloc(?anyerror, count);
+        @memset(errors, null);
+        return .{
+            .allocator = allocator,
+            .requests = requests,
+            .errors = errors,
+        };
+    }
 
     pub fn deinit(self: *OwnedRequestBatch) void {
         for (self.requests) |*request| {
@@ -2382,7 +2669,22 @@ pub const OwnedRequestBatch = struct {
         }
         return count;
     }
+
+    /// Number of workers that received a request, completed the handler, and
+    /// sent the response. For a receive-only batch this is the number of
+    /// successfully decoded requests.
+    pub fn successCount(self: OwnedRequestBatch) usize {
+        var count: usize = 0;
+        for (self.errors) |err| {
+            if (err == null) count += 1;
+        }
+        return count;
+    }
 };
+
+/// Bounded serving keeps the decoded requests alongside per-worker errors so
+/// callers can inspect failures without losing the request that caused them.
+pub const ConcurrentServeResult = OwnedRequestBatch;
 
 pub const OwnedResponse = struct {
     datagram: quic.runtime.OwnedDatagram,
@@ -22816,6 +23118,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 }
 
 test {
+    _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/informational_tests.zig");
     _ = @import("runtime/response_scheduler_tests.zig");
