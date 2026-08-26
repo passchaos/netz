@@ -238,6 +238,121 @@ test "HTTP/1 TLS graceful shutdown drains the active request" {
     try std.testing.expectEqual(@as(usize, 1), shared.served);
 }
 
+test "HTTP/1 TLS server handles concurrent clients" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{
+                .key_pair = key_pair,
+            } },
+        } },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        fn handle(
+            _: *@This(),
+            request: http1.Request,
+        ) runtime.Error!runtime.ResponseOptions {
+            if (std.mem.eql(u8, request.target, "/one")) {
+                return .{ .body = "one" };
+            }
+            if (std.mem.eql(u8, request.target, "/two")) {
+                return .{ .body = "two" };
+            }
+            return error.InvalidResponse;
+        }
+    };
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        context: Context = .{},
+        result: ?runtime.ConcurrentServeResult = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.result = self.server.serveConcurrent(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+
+    const ClientTask = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        port: u16,
+        target: []const u8,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var client = try runtime.Client.connectTlsHost(
+                self.allocator,
+                self.io,
+                "localhost",
+                self.port,
+                .{},
+                .{ .verify_host = false },
+            );
+            defer client.close();
+            var response = try client.request(.{ .target = self.target });
+            defer response.deinit(self.allocator);
+            try std.testing.expectEqualStrings(
+                self.expected,
+                response.response.body,
+            );
+        }
+    };
+    var clients = [_]ClientTask{
+        .{ .allocator = allocator, .io = io, .port = server.address().ip4.port, .target = "/one", .expected = "one" },
+        .{ .allocator = allocator, .io = io, .port = server.address().ip4.port, .target = "/two", .expected = "two" },
+    };
+    const client_one = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const client_two = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+    client_one.join();
+    client_two.join();
+    server_thread.join();
+    server_joined = true;
+    defer if (shared.result) |*result| result.deinit();
+
+    if (clients[0].err) |err| return err;
+    if (clients[1].err) |err| return err;
+    if (shared.err) |err| return err;
+    const result = shared.result.?;
+    if (result.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), result.successCount());
+}
+
 test "HTTP/1 graceful shutdown overrides conflicting keep-alive header" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -1306,30 +1306,16 @@ pub const Server = struct {
         comptime handler: *const fn (*HandlerContext, http1.Request) Error!ResponseOptions,
         max_connections: usize,
     ) AsyncServeError!ConcurrentServeResult {
-        var group: std.Io.Group = .init;
-        const results = try self.allocator.alloc(?anyerror, max_connections);
-        errdefer self.allocator.free(results);
-        @memset(results, null);
-
-        for (results, 0..) |*result, index| {
-            var connection = try self.accept();
-            errdefer connection.close();
-
-            const task = ServeTask(HandlerContext){
-                .connection = connection,
-                .context = context,
-                .handler = handler,
-                .result = result,
-            };
-            // `std.Io.Group.async` copies the task context into the selected
-            // std.Io backend.  The connection stream ownership transfers to the
-            // task; each task closes its own stream after writing a response.
-            group.async(self.io, ServeTask(HandlerContext).run, .{task});
-            _ = index;
-        }
-
-        try group.await(self.io);
-        return .{ .allocator = self.allocator, .errors = results };
+        return serveAcceptedConcurrent(
+            Server,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+        );
     }
 };
 
@@ -1406,29 +1392,16 @@ pub const UnixServer = struct {
         ) Error!ResponseOptions,
         max_connections: usize,
     ) AsyncServeError!ConcurrentServeResult {
-        var group: std.Io.Group = .init;
-        const results = try self.allocator.alloc(
-            ?anyerror,
+        return serveAcceptedConcurrent(
+            UnixServer,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
             max_connections,
         );
-        errdefer self.allocator.free(results);
-        @memset(results, null);
-        for (results) |*result| {
-            var connection = try self.accept();
-            errdefer connection.close();
-            group.async(
-                self.io,
-                ServeTask(HandlerContext).run,
-                .{ServeTask(HandlerContext){
-                    .connection = connection,
-                    .context = context,
-                    .handler = handler,
-                    .result = result,
-                }},
-            );
-        }
-        try group.await(self.io);
-        return .{ .allocator = self.allocator, .errors = results };
     }
 };
 
@@ -1518,6 +1491,28 @@ pub const TlsServer = struct {
             .tls_server_conn = tls_connection,
         };
     }
+
+    pub fn serveConcurrent(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            http1.Request,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+    ) AsyncServeError!ConcurrentServeResult {
+        return serveAcceptedConcurrent(
+            TlsServer,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+        );
+    }
 };
 
 pub const AsyncServeError = Error || std.Io.Cancelable;
@@ -1546,6 +1541,43 @@ pub const ConcurrentServeResult = struct {
         return count;
     }
 };
+
+/// Shared bounded accept loop for TCP, Unix-domain, and TLS listeners.
+/// Each accepted connection moves into exactly one task, which owns teardown
+/// after either the handler response or a connection-local failure.
+fn serveAcceptedConcurrent(
+    comptime ServerType: type,
+    server: *ServerType,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    comptime HandlerContext: type,
+    context: *HandlerContext,
+    comptime handler: *const fn (
+        *HandlerContext,
+        http1.Request,
+    ) Error!ResponseOptions,
+    max_connections: usize,
+) AsyncServeError!ConcurrentServeResult {
+    var group: std.Io.Group = .init;
+    const results = try allocator.alloc(?anyerror, max_connections);
+    errdefer allocator.free(results);
+    @memset(results, null);
+
+    for (results) |*result| {
+        var connection = try server.accept();
+        errdefer connection.close();
+        const task = ServeTask(HandlerContext){
+            .connection = connection,
+            .context = context,
+            .handler = handler,
+            .result = result,
+        };
+        group.async(io, ServeTask(HandlerContext).run, .{task});
+    }
+
+    try group.await(io);
+    return .{ .allocator = allocator, .errors = results };
+}
 
 fn ServeTask(comptime HandlerContext: type) type {
     return struct {
