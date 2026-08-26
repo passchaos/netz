@@ -61,7 +61,7 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     InvalidAlpn,
 };
 pub const HandshakeAdmissionError = Error ||
-    quic.endpoint_dispatcher.Error;
+    quic.endpoint_dispatcher.Error || std.Io.ConcurrentError;
 
 const client_control_stream_id: u62 = 2;
 const client_qpack_encoder_stream_id: u62 = 6;
@@ -2906,6 +2906,218 @@ pub const HandshakeAdmission = struct {
         self.inbox.deinit();
         allocator.destroy(self.inbox);
         self.* = undefined;
+    }
+};
+
+pub const HandshakeCompletion = struct {
+    handle: quic.endpoint_dispatcher.ConnectionHandle,
+    admission: *HandshakeAdmission,
+    result: Error!HandshakeServerSession,
+};
+
+const HandshakeWorkerContext = struct {
+    server: *HandshakeServer,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    completed: *std.Io.Queue(HandshakeCompletion),
+};
+
+/// Owns bounded HTTP/3 handshake workers while the caller remains the sole
+/// UDP receive owner. `pollCompleted` never blocks: the endpoint loop routes a
+/// packet, then drains completions and promotes successful connections.
+pub const HandshakeSupervisor = struct {
+    server: *HandshakeServer,
+    dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    admission_options: HandshakeAdmissionOptions,
+    next_handle: quic.endpoint_dispatcher.ConnectionHandle = 1,
+    workers: std.Io.Group = .init,
+    worker_context: *HandshakeWorkerContext,
+    active_workers: std.atomic.Value(usize) = .init(0),
+    next_handle_mutex: std.Io.Mutex = .init,
+    completed_storage: []HandshakeCompletion,
+    completed: *std.Io.Queue(HandshakeCompletion),
+
+    pub fn init(
+        server: *HandshakeServer,
+        dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+        options: HandshakeAdmissionOptions,
+    ) HandshakeAdmissionError!HandshakeSupervisor {
+        if (options.max_pending_handshakes == 0 or
+            options.inbox_capacity == 0)
+        {
+            return error.PendingHandshakeLimitReached;
+        }
+        const storage = try server.allocator.alloc(
+            HandshakeCompletion,
+            options.max_pending_handshakes,
+        );
+        errdefer server.allocator.free(storage);
+        const completed = try server.allocator.create(
+            std.Io.Queue(HandshakeCompletion),
+        );
+        errdefer server.allocator.destroy(completed);
+        completed.* = .init(storage);
+        const context = try server.allocator.create(HandshakeWorkerContext);
+        errdefer server.allocator.destroy(context);
+        const supervisor: HandshakeSupervisor = .{
+            .server = server,
+            .dispatcher = dispatcher,
+            .allocator = server.allocator,
+            .io = server.quic_server.endpoint.io,
+            .admission_options = options,
+            .worker_context = context,
+            .completed_storage = storage,
+            .completed = completed,
+        };
+        context.* = .{
+            .server = server,
+            .io = supervisor.io,
+            .allocator = supervisor.allocator,
+            .completed = completed,
+        };
+        return supervisor;
+    }
+
+    pub fn deinit(self: *HandshakeSupervisor) void {
+        self.workers.cancel(self.io);
+        while (self.pollCompleted()) |completion| {
+            self.destroyCompletion(completion);
+        }
+        self.completed.close(self.io);
+        self.allocator.destroy(self.worker_context);
+        self.allocator.destroy(self.completed);
+        self.allocator.free(self.completed_storage);
+        self.* = undefined;
+    }
+
+    pub fn admit(
+        self: *HandshakeSupervisor,
+        event: *quic.endpoint_dispatcher.Event,
+    ) HandshakeAdmissionError!quic.endpoint_dispatcher.PendingHandshakeHandle {
+        var active = self.active_workers.load(.acquire);
+        while (true) {
+            if (active >= self.admission_options.max_pending_handshakes) {
+                return error.PendingHandshakeLimitReached;
+            }
+            if (self.active_workers.cmpxchgWeak(
+                active,
+                active + 1,
+                .acq_rel,
+                .acquire,
+            )) |observed| {
+                active = observed;
+                continue;
+            }
+            break;
+        }
+        errdefer {
+            const previous = self.active_workers.fetchSub(1, .acq_rel);
+            std.debug.assert(previous != 0);
+        }
+        const handle = self.reserveHandle();
+        const admission = try self.allocator.create(HandshakeAdmission);
+        errdefer self.allocator.destroy(admission);
+        admission.* = try self.server.beginHandshakeAdmission(
+            self.dispatcher,
+            handle,
+            event,
+            self.admission_options,
+        );
+        errdefer admission.deinit();
+        try self.workers.concurrent(
+            self.io,
+            HandshakeSupervisor.runWorker,
+            .{ self.worker_context, admission },
+        );
+        return handle;
+    }
+
+    pub fn pollCompleted(
+        self: *HandshakeSupervisor,
+    ) ?HandshakeCompletion {
+        var completion: [1]HandshakeCompletion = undefined;
+        const count = self.completed.get(
+            self.io,
+            &completion,
+            0,
+        ) catch return null;
+        if (count == 0) return null;
+        const previous = self.active_workers.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
+        return completion[0];
+    }
+
+    pub fn promote(
+        self: *HandshakeSupervisor,
+        completion: *HandshakeCompletion,
+    ) HandshakeAdmissionError!HandshakeServerSession {
+        var session = try completion.result;
+        errdefer session.deinit();
+        try self.server.promoteAdmission(
+            self.dispatcher,
+            completion.admission,
+            completion.handle,
+            &session,
+        );
+        completion.admission.deinit();
+        self.allocator.destroy(completion.admission);
+        completion.* = undefined;
+        return session;
+    }
+
+    pub fn discardCompletion(
+        self: *HandshakeSupervisor,
+        completion: *HandshakeCompletion,
+    ) void {
+        self.destroyCompletion(completion.*);
+        completion.* = undefined;
+    }
+
+    pub fn pendingCount(self: *const HandshakeSupervisor) usize {
+        return self.active_workers.load(.acquire);
+    }
+
+    fn reserveHandle(
+        self: *HandshakeSupervisor,
+    ) quic.endpoint_dispatcher.ConnectionHandle {
+        self.next_handle_mutex.lockUncancelable(self.io);
+        defer self.next_handle_mutex.unlock(self.io);
+        const handle = self.next_handle;
+        self.next_handle +%= 1;
+        if (self.next_handle == 0) self.next_handle = 1;
+        return handle;
+    }
+
+    fn runWorker(
+        context: *HandshakeWorkerContext,
+        admission: *HandshakeAdmission,
+    ) std.Io.Cancelable!void {
+        const result = context.server.acceptAdmission(admission);
+        context.completed.putOne(context.io, .{
+            .handle = admission.handle,
+            .admission = admission,
+            .result = result,
+        }) catch |err| switch (err) {
+            error.Canceled, error.Closed => {
+                var owned_result = result;
+                if (owned_result) |*session| session.deinit() else |_| {}
+                admission.deinit();
+                context.allocator.destroy(admission);
+                return error.Canceled;
+            },
+        };
+    }
+
+    fn destroyCompletion(
+        self: *HandshakeSupervisor,
+        completion: HandshakeCompletion,
+    ) void {
+        var owned_result = completion.result;
+        if (owned_result) |*session| session.deinit() else |_| {}
+        completion.admission.deinit();
+        self.allocator.destroy(completion.admission);
     }
 };
 

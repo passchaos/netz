@@ -2160,6 +2160,10 @@ test "public modules are reachable" {
         "HandshakeAdmissionOptions",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeSupervisor",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "beginSessionAdmissionFromInitialSource",
     ));
