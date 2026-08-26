@@ -591,6 +591,16 @@ test "public modules are reachable" {
     const goaway_error: netz.http2.runtime.Error = error.ConnectionGoAway;
     try std.testing.expect(goaway_error == error.ConnectionGoAway);
     try std.testing.expectEqual(@as(u64, 0x01), netz.http3.FrameType.headers);
+    try std.testing.expect(@hasField(netz.http3.Response, "request_method"));
+    try std.testing.expect(@hasField(netz.http3.Response, "extended_connect"));
+    try std.testing.expect(@hasField(
+        netz.http3.ResponseDecodeOptions,
+        "request_method",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3,
+        "applyResponseHeadRequestSemantics",
+    ));
     try std.testing.expect(@hasDecl(netz.http3, "firstHttp3AltSvc"));
     try std.testing.expect(@hasDecl(netz.http3, "firstHttp3AltSvcHeader"));
     try std.testing.expect(@hasDecl(netz.http3, "firstHttp3AltSvcTarget"));

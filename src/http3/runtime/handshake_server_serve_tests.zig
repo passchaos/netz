@@ -38,7 +38,14 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
         ) runtime.Error!http3.Response {
             self.calls += 1;
             if (std.mem.eql(u8, request.request.path, "/first")) {
-                return .{ .status = 201, .body = "first-response" };
+                return .{
+                    .status = 200,
+                    .headers = &.{.{
+                        .name = "content-length",
+                        .value = "14",
+                    }},
+                    .body = "representation",
+                };
             }
             if (std.mem.eql(u8, request.request.path, "/second")) {
                 return .{
@@ -95,13 +102,18 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     defer client.deinit();
 
     var first = try client.request(.{
-        .method = "GET",
+        .method = "HEAD",
         .path = "/first",
         .authority = "localhost",
     });
     defer first.deinit(allocator);
-    try std.testing.expectEqual(@as(u16, 201), first.response.status);
-    try std.testing.expectEqualStrings("first-response", first.response.body);
+    try std.testing.expectEqual(@as(u16, 200), first.response.status);
+    try std.testing.expectEqualStrings("", first.response.body);
+    try std.testing.expectEqualStrings(
+        "14",
+        responseHeader(first.response.headers, "content-length") orelse
+            return error.MissingHeader,
+    );
 
     var second = try client.request(.{
         .method = "POST",
@@ -133,6 +145,98 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(?usize, 2), shared.served);
     try std.testing.expectEqual(@as(usize, 2), shared.context.calls);
+}
+
+fn responseHeader(
+    headers: []const http3.Qpack.HeaderField,
+    name: []const u8,
+) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
+}
+
+test "HTTP/3 handshake client rejects DATA on a HEAD response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
+    const client_cid = [_]u8{ 0x89, 0x8a, 0x8b, 0x8c };
+    const server_cid = [_]u8{ 0x8d, 0x8e, 0x8f, 0x90 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x91} ** 32,
+            .x25519_secret_key = [_]u8{0x92} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *runtime.HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings("HEAD", request.request.method);
+            // Bypass the request-aware serving helper to emulate a peer that
+            // violates HEAD semantics with an actual DATA frame.
+            try session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "illegal",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x93} ** 32,
+            .x25519_secret_key = [_]u8{0x94} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+        .method = "HEAD",
+        .path = "/illegal-head-data",
+        .authority = "localhost",
+    }));
+    server_thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake serveOne propagates handler failure" {

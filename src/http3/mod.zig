@@ -2299,9 +2299,42 @@ pub const Response = struct {
     headers: []const Qpack.HeaderField = &.{},
     body: []const u8 = &.{},
     trailers: []const Qpack.HeaderField = &.{},
+    /// Optional originating request method for method-specific response
+    /// semantics. Server convenience loops populate this automatically. HEAD
+    /// responses advertise the representation length without DATA, while a
+    /// successful traditional CONNECT cannot carry HTTP message body bytes.
+    request_method: ?[]const u8 = null,
+    /// True for SETTINGS-negotiated extended CONNECT. Traditional CONNECT
+    /// enters tunnel mode at a successful final response; extended CONNECT
+    /// retains HTTP DATA semantics for the selected protocol.
+    extended_connect: bool = false,
 
     pub fn successful(self: Response) bool {
         return self.status >= 200 and self.status < 300;
+    }
+
+    pub fn suppressesBody(self: Response) bool {
+        return responseSuppressesBody(self.status, responseSemantics(self));
+    }
+
+    /// Validate status- and request-method-specific body rules without writing
+    /// bytes. Runtime streaming helpers use this before separating HEADERS,
+    /// DATA, and trailers into independent transport operations.
+    pub fn validateBodySemantics(self: Response) Error!void {
+        const declared_content_length = try contentLength(self.headers);
+        try validateResponseBodyForStatusWithLength(
+            self.status,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateResponseBodyForRequestSemanticsWithLength(
+            self.status,
+            responseSemantics(self),
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
     }
 
     pub fn headerFields(self: Response, out: []Qpack.HeaderField, status_buf: *[3]u8) Error![]Qpack.HeaderField {
@@ -2323,9 +2356,12 @@ pub const Response = struct {
         var status_buf: [3]u8 = undefined;
         var fields = try self.headerFields(&fields_buf, &status_buf);
         var content_length_buf: [32]u8 = undefined;
+        const semantics = responseSemantics(self);
+        try stripSuccessfulConnectContentLength(&fields, self.status, semantics);
         var declared_content_length = try contentLength(fields);
         if (responseShouldDefaultContentLengthValue(
             self.status,
+            semantics,
             declared_content_length,
             self.body.len,
         )) {
@@ -2345,12 +2381,26 @@ pub const Response = struct {
             self.body,
             self.trailers,
         );
-        try validateContentLengthForStatusValue(
+        try validateResponseBodyForRequestSemanticsWithLength(
             self.status,
+            semantics,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthForRequestSemantics(
+            self.status,
+            semantics,
             declared_content_length,
             self.body.len,
         );
-        try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
+        try writeHeadersAndData(
+            list,
+            allocator,
+            fields,
+            if (responseSuppressesBody(self.status, semantics)) &.{} else self.body,
+            if (responseSuppressesBody(self.status, semantics)) &.{} else self.trailers,
+        );
     }
 
     pub fn writeDynamic(
@@ -2365,9 +2415,12 @@ pub const Response = struct {
         var status_buf: [3]u8 = undefined;
         var fields = try self.headerFields(&fields_buf, &status_buf);
         var content_length_buf: [32]u8 = undefined;
+        const semantics = responseSemantics(self);
+        try stripSuccessfulConnectContentLength(&fields, self.status, semantics);
         var declared_content_length = try contentLength(fields);
         if (responseShouldDefaultContentLengthValue(
             self.status,
+            semantics,
             declared_content_length,
             self.body.len,
         )) {
@@ -2394,8 +2447,16 @@ pub const Response = struct {
             self.body,
             self.trailers,
         );
-        try validateContentLengthForStatusValue(
+        try validateResponseBodyForRequestSemanticsWithLength(
             self.status,
+            semantics,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthForRequestSemantics(
+            self.status,
+            semantics,
             declared_content_length,
             self.body.len,
         );
@@ -2403,8 +2464,8 @@ pub const Response = struct {
             list,
             allocator,
             fields,
-            self.body,
-            self.trailers,
+            if (responseSuppressesBody(self.status, semantics)) &.{} else self.body,
+            if (responseSuppressesBody(self.status, semantics)) &.{} else self.trailers,
             stream_id,
             encoder,
         );
@@ -2428,15 +2489,46 @@ pub const Response = struct {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var status_buf: [3]u8 = undefined;
         var fields = try self.headerFields(&fields_buf, &status_buf);
-        const body_forbidden = self.status == 204 or self.status == 304;
+        const semantics = responseSemantics(self);
+        const body_forbidden = responseSuppressesBody(
+            self.status,
+            semantics,
+        );
         if (body_forbidden) {
-            const declared_content_length = try contentLength(fields);
-            if (self.status == 204 and declared_content_length != null) {
-                return error.InvalidContentLength;
+            if (!semantics.head) {
+                if (body_length) |length| {
+                    if (length != 0) return error.InvalidContentLength;
+                }
             }
-            if (body_length) |length| {
-                if (length != 0) return error.InvalidContentLength;
-            }
+            try stripSuccessfulConnectContentLength(
+                &fields,
+                self.status,
+                semantics,
+            );
+            var content_length_buf: [32]u8 = undefined;
+            const declared_content_length = if ((semantics.head or
+                self.status == 304) and body_length != null)
+                try applyStreamingContentLength(
+                    &fields_buf,
+                    &fields,
+                    body_length,
+                    &content_length_buf,
+                )
+            else
+                try contentLength(fields);
+            try validateResponseBodyForRequestSemanticsWithLength(
+                self.status,
+                semantics,
+                declared_content_length,
+                &.{},
+                &.{},
+            );
+            try validateContentLengthForRequestSemantics(
+                self.status,
+                semantics,
+                declared_content_length,
+                body_length orelse 0,
+            );
             try validateHeaderBlock(fields, .response);
             try validateFieldSectionSize(
                 fields,
@@ -2512,9 +2604,111 @@ fn applyStreamingContentLength(
     return expected;
 }
 
-fn responseShouldDefaultContentLengthValue(status: u16, declared_content_length: ?usize, body_len: usize) bool {
+pub const ResponseSemantics = struct {
+    head: bool = false,
+    traditional_connect: bool = false,
+};
+
+fn responseSemantics(response: Response) ResponseSemantics {
+    return responseSemanticsForRequest(
+        response.request_method,
+        response.extended_connect,
+    );
+}
+
+pub fn responseSemanticsForRequest(
+    method: ?[]const u8,
+    extended_connect: bool,
+) ResponseSemantics {
+    const value = method orelse return .{};
+    return .{
+        .head = std.mem.eql(u8, value, "HEAD"),
+        .traditional_connect = std.mem.eql(u8, value, "CONNECT") and
+            !extended_connect,
+    };
+}
+
+fn responseSuppressesBody(
+    status: u16,
+    semantics: ResponseSemantics,
+) bool {
+    if ((status >= 100 and status < 200) or status == 204 or status == 304) {
+        return true;
+    }
+    if (semantics.head) return true;
+    return semantics.traditional_connect and status >= 200 and status < 300;
+}
+
+fn stripSuccessfulConnectContentLength(
+    fields: *[]Qpack.HeaderField,
+    status: u16,
+    semantics: ResponseSemantics,
+) Error!void {
+    if (!semantics.traditional_connect or status < 200 or status >= 300) {
+        return;
+    }
+    const declared = try contentLength(fields.*) orelse return;
+    if (declared != 0) return error.InvalidContentLength;
+
+    var write_index: usize = 0;
+    for (fields.*) |field| {
+        if (std.ascii.eqlIgnoreCase(field.name, "content-length")) continue;
+        fields.*[write_index] = field;
+        write_index += 1;
+    }
+    fields.* = fields.*[0..write_index];
+}
+
+fn validateResponseBodyForRequestSemanticsWithLength(
+    status: u16,
+    semantics: ResponseSemantics,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+) Error!void {
+    if (semantics.head) {
+        if (trailers.len != 0) return error.InvalidContentLength;
+        if (declared_content_length) |length| {
+            if (body.len != 0 and body.len != length) {
+                return error.InvalidContentLength;
+            }
+        }
+        return;
+    }
+    if (semantics.traditional_connect and status >= 200 and status < 300) {
+        if (body.len != 0 or trailers.len != 0 or
+            (declared_content_length orelse 0) != 0)
+        {
+            return error.InvalidContentLength;
+        }
+    }
+}
+
+fn validateContentLengthForRequestSemantics(
+    status: u16,
+    semantics: ResponseSemantics,
+    declared_content_length: ?usize,
+    body_len: usize,
+) Error!void {
+    if (semantics.head) return;
+    if (semantics.traditional_connect and status >= 200 and status < 300) {
+        return;
+    }
+    try validateContentLengthForStatusValue(
+        status,
+        declared_content_length,
+        body_len,
+    );
+}
+
+fn responseShouldDefaultContentLengthValue(
+    status: u16,
+    semantics: ResponseSemantics,
+    declared_content_length: ?usize,
+    body_len: usize,
+) bool {
     if (body_len == 0) return false;
-    if ((status >= 100 and status < 200) or status == 204 or status == 304) return false;
+    if (responseSuppressesBody(status, semantics)) return false;
     return declared_content_length == null;
 }
 
@@ -2686,6 +2880,11 @@ pub const ResponseDecodeOptions = struct {
     max_informational_responses: usize =
         default_max_informational_responses,
     informational: ?InformationalObserver = null,
+    /// Optional originating method for HEAD and successful traditional
+    /// CONNECT response validation. Generic decoders leave this null when the
+    /// request context is unavailable; runtime clients always provide it.
+    request_method: ?[]const u8 = null,
+    extended_connect: bool = false,
 };
 
 pub const DecodedRequestHead = struct {
@@ -2883,6 +3082,19 @@ pub fn decodeResponseHeadWithDynamicTableAndOptions(
             if (offset >= bytes.len) return error.BufferTooShort;
             continue;
         }
+        const semantics = responseSemanticsForRequest(
+            options.request_method,
+            options.extended_connect,
+        );
+        try validateDecodedResponseHeadSemantics(
+            head.status,
+            head.content_length,
+            semantics,
+        );
+        head.body_allowed = !responseSuppressesBody(
+            head.status,
+            semantics,
+        );
         head.consumed = offset;
         head.qpack_section_acknowledgments = acknowledgments;
         return head;
@@ -2924,6 +3136,23 @@ pub fn decodeResponseHeadFieldSectionWithDynamicTable(
         .consumed = 0,
         .qpack_section_acknowledgments = @intFromBool(decoded.requires_acknowledgment),
     };
+}
+
+/// Apply originating-request semantics to an already decoded final response
+/// head. Streaming runtimes use this after QPACK decoding because the generic
+/// field-section decoder intentionally has no request-stream context.
+pub fn applyResponseHeadRequestSemantics(
+    head: *DecodedResponseHead,
+    method: ?[]const u8,
+    extended_connect: bool,
+) Error!void {
+    const semantics = responseSemanticsForRequest(method, extended_connect);
+    try validateDecodedResponseHeadSemantics(
+        head.status,
+        head.content_length,
+        semantics,
+    );
+    head.body_allowed = !responseSuppressesBody(head.status, semantics);
 }
 
 const FirstHeaders = struct {
@@ -3188,14 +3417,26 @@ fn decodeResponseWithFieldDecoder(
     const lookup = message.response_lookup orelse
         try responseHeaderLookup(message.headers);
     const final_status = lookup.status orelse return error.MissingStatus;
+    const semantics = responseSemanticsForRequest(
+        options.request_method,
+        options.extended_connect,
+    );
     try validateResponseBodyForStatusWithLength(
         final_status,
         lookup.content_length,
         message.body,
         message.trailers,
     );
-    try validateContentLengthForStatusValue(
+    try validateDecodedResponseRequestSemantics(
         final_status,
+        semantics,
+        lookup.content_length,
+        message.body,
+        message.trailers,
+    );
+    try validateContentLengthForRequestSemantics(
+        final_status,
+        semantics,
         lookup.content_length,
         message.body.len,
     );
@@ -3209,6 +3450,40 @@ fn decodeResponseWithFieldDecoder(
         .consumed = message.consumed,
         .qpack_section_acknowledgments = message.qpack_section_acknowledgments,
     };
+}
+
+fn validateDecodedResponseHeadSemantics(
+    status: u16,
+    content_length: ?usize,
+    semantics: ResponseSemantics,
+) Error!void {
+    if (semantics.traditional_connect and status >= 200 and status < 300 and
+        (content_length orelse 0) != 0)
+    {
+        return error.InvalidContentLength;
+    }
+}
+
+fn validateDecodedResponseRequestSemantics(
+    status: u16,
+    semantics: ResponseSemantics,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+) Error!void {
+    if (semantics.head) {
+        if (body.len != 0 or trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        return;
+    }
+    if (semantics.traditional_connect and status >= 200 and status < 300) {
+        if (body.len != 0 or trailers.len != 0 or
+            (declared_content_length orelse 0) != 0)
+        {
+            return error.InvalidContentLength;
+        }
+    }
 }
 
 const DecodedMessage = struct {
@@ -6418,6 +6693,82 @@ test "HTTP/3 response encode decode" {
         .status = 304,
         .headers = &.{.{ .name = "content-length", .value = "123" }},
     }).write(&encoded, allocator);
+}
+
+test "HTTP/3 response honors HEAD and CONNECT request semantics" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try (Response{
+        .status = 200,
+        .headers = &.{.{ .name = "content-length", .value = "14" }},
+        .body = "representation",
+        .request_method = "HEAD",
+    }).write(&encoded, allocator);
+    var head = try decodeResponseWithOptions(
+        allocator,
+        encoded.items,
+        .{ .request_method = "HEAD" },
+    );
+    defer head.deinit(allocator);
+    try std.testing.expectEqualStrings("", head.body);
+    try std.testing.expectEqualStrings(
+        "14",
+        findHeader(head.headers, "content-length") orelse
+            return error.MissingHeader,
+    );
+
+    var illegal_head: std.ArrayList(u8) = .empty;
+    defer illegal_head.deinit(allocator);
+    try (Response{
+        .status = 200,
+        .body = "illegal",
+    }).write(&illegal_head, allocator);
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        decodeResponseWithOptions(allocator, illegal_head.items, .{
+            .request_method = "HEAD",
+        }),
+    );
+
+    encoded.clearRetainingCapacity();
+    try (Response{
+        .status = 200,
+        .headers = &.{.{ .name = "content-length", .value = "0" }},
+        .request_method = "CONNECT",
+    }).write(&encoded, allocator);
+    var connect = try decodeResponseWithOptions(
+        allocator,
+        encoded.items,
+        .{ .request_method = "CONNECT" },
+    );
+    defer connect.deinit(allocator);
+    try std.testing.expect(findHeader(connect.headers, "content-length") == null);
+
+    try std.testing.expectError(error.InvalidContentLength, (Response{
+        .status = 200,
+        .body = "not-http-body",
+        .request_method = "CONNECT",
+    }).write(&encoded, allocator));
+
+    encoded.clearRetainingCapacity();
+    try (Response{
+        .status = 200,
+        .body = "extended-data",
+        .request_method = "CONNECT",
+        .extended_connect = true,
+    }).write(&encoded, allocator);
+    var extended = try decodeResponseWithOptions(
+        allocator,
+        encoded.items,
+        .{
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        },
+    );
+    defer extended.deinit(allocator);
+    try std.testing.expectEqualStrings("extended-data", extended.body);
 }
 
 test {

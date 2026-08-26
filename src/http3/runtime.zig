@@ -896,6 +896,8 @@ pub const StreamingMessageReader = struct {
     informational_count: usize = 0,
     max_informational_responses: usize =
         http3.default_max_informational_responses,
+    response_request_method: ?[]const u8 = null,
+    response_extended_connect: bool = false,
     /// Absolute HTTP/3 stream offset already returned to QUIC flow control.
     credited_offset: usize = 0,
 
@@ -1027,6 +1029,11 @@ pub const StreamingMessageReader = struct {
                                     self.settings,
                                     table,
                                 );
+                                try http3.applyResponseHeadRequestSemantics(
+                                    &head,
+                                    self.response_request_method,
+                                    self.response_extended_connect,
+                                );
                                 head.consumed =
                                     header.header_length +
                                     header.payload_length;
@@ -1048,7 +1055,10 @@ pub const StreamingMessageReader = struct {
                                     }
                                 }
                                 if (final_head) {
-                                    self.content_length = head.content_length;
+                                    self.content_length = if (head.body_allowed)
+                                        head.content_length
+                                    else
+                                        null;
                                     self.body_allowed = head.body_allowed;
                                 }
                                 break :blk StreamingEvent{
@@ -2264,10 +2274,16 @@ fn ServeRequestTask(comptime HandlerContext: type) type {
                 return;
             };
             const request = task.request.*.?;
-            const response = task.handler(task.context, request) catch |err| {
+            var response = task.handler(task.context, request) catch |err| {
                 task.err.* = err;
                 return;
             };
+            if (response.request_method == null) {
+                response.request_method = request.request.method;
+                response.extended_connect = requestHasProtocol(
+                    request.request.headers,
+                );
+            }
             task.server.sendResponse(
                 request.from,
                 request.stream_id,
@@ -2327,6 +2343,10 @@ pub const Client = struct {
             .{
                 .max_informational_responses = self.limits.max_informational_responses,
                 .informational = informational,
+                .request_method = request_options.method,
+                .extended_connect = requestHasProtocol(
+                    request_options.headers,
+                ),
             },
         );
         errdefer response.deinit(self.quic_client.endpoint.allocator);
@@ -3188,7 +3208,13 @@ pub const HandshakeServerSession = struct {
         defer request.deinit(
             self.established.connection.endpoint.allocator,
         );
-        const response = try handler(context, request);
+        var response = try handler(context, request);
+        if (response.request_method == null) {
+            response.request_method = request.request.method;
+            response.extended_connect = requestHasProtocol(
+                request.request.headers,
+            );
+        }
         try self.sendResponsePaced(request.stream_id, response);
         return request.stream_id;
     }
@@ -3351,19 +3377,25 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         response: http3.Response,
     ) Error!void {
+        try response.validateBodySemantics();
         try self.startResponse(
             stream_id,
-            .{ .status = response.status, .headers = response.headers },
+            .{
+                .status = response.status,
+                .headers = response.headers,
+                .request_method = response.request_method,
+                .extended_connect = response.extended_connect,
+            },
             response.body.len,
         );
-        if (response.body.len != 0) {
+        if (!response.suppressesBody() and response.body.len != 0) {
             try self.sendResponseBodyPaced(
                 stream_id,
                 response.body,
                 response.trailers.len == 0,
             );
         }
-        if (response.trailers.len != 0) {
+        if (!response.suppressesBody() and response.trailers.len != 0) {
             try self.finishResponseTrailersPaced(
                 stream_id,
                 response.trailers,
@@ -4648,7 +4680,11 @@ pub const HandshakeClient = struct {
     ) Error!u62 {
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
-        try self.request_lifecycle.open(stream_id);
+        try self.request_lifecycle.open(
+            stream_id,
+            request_options.method,
+            requestHasProtocol(request_options.headers),
+        );
         errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         const reserved = try self.reserveClientBidirectionalStreamId();
         std.debug.assert(reserved == stream_id);
@@ -4689,7 +4725,11 @@ pub const HandshakeClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
-        try self.request_lifecycle.open(stream_id);
+        try self.request_lifecycle.open(
+            stream_id,
+            request_options.method,
+            requestHasProtocol(request_options.headers),
+        );
         errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         const reserved = try self.reserveClientBidirectionalStreamId();
         std.debug.assert(reserved == stream_id);
@@ -4960,9 +5000,14 @@ pub const HandshakeClient = struct {
             assembled.bytes,
             self.control.settings.local,
             self.qpack_decode.table,
-            .{
-                .max_informational_responses = self.options.max_informational_responses,
-                .informational = informational,
+            blk: {
+                var options = self.request_lifecycle.responseDecodeOptions(
+                    stream_id,
+                );
+                options.max_informational_responses =
+                    self.options.max_informational_responses;
+                options.informational = informational;
+                break :blk options;
             },
         );
         errdefer response.deinit(self.established.connection.endpoint.allocator);
@@ -5105,6 +5150,10 @@ pub const HandshakeClient = struct {
             &self.response_streams,
             stream_id,
         );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &entry.reader,
+        );
         if (try entry.reader.next(self.qpack_decode.table)) |event| {
             var owned_event = event;
             errdefer owned_event.deinit(
@@ -5135,6 +5184,10 @@ pub const HandshakeClient = struct {
         }
         const active = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &active.reader,
+        );
         if (try active.reader.next(self.qpack_decode.table)) |event| {
             var owned_event = event;
             errdefer owned_event.deinit(
@@ -5471,10 +5524,32 @@ pub const HandshakeClient = struct {
                 &self.response_streams,
                 self.qpack_decode.table,
                 self.options.local_settings.qpack_blocked_streams,
-            )) |ready| {
+            )) |ready_value| {
+                var ready = ready_value;
                 const stream_id: u62 = @intCast(
                     ready.entry.reader.receive.stream_id,
                 );
+                self.request_lifecycle.applyResponseReaderSemantics(
+                    stream_id,
+                    &ready.entry.reader,
+                );
+                // `nextResponse` decoded this head before the request context
+                // was applied. Revalidate the owned event immediately so the
+                // caller never observes HEAD/CONNECT DATA semantics.
+                if (ready.event == .head and
+                    ready.event.head == .response)
+                {
+                    try http3.applyResponseHeadRequestSemantics(
+                        &ready.event.head.response,
+                        ready.entry.reader.response_request_method,
+                        ready.entry.reader.response_extended_connect,
+                    );
+                    ready.entry.reader.body_allowed =
+                        ready.event.head.response.body_allowed;
+                    if (!ready.entry.reader.body_allowed) {
+                        ready.entry.reader.content_length = null;
+                    }
+                }
                 var owned_event = ready.event;
                 errdefer owned_event.deinit(
                     self.established.connection.endpoint.allocator,
@@ -6741,7 +6816,11 @@ pub const ProtectedClient = struct {
     ) Error!u62 {
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
-        try self.request_lifecycle.open(stream_id);
+        try self.request_lifecycle.open(
+            stream_id,
+            request_options.method,
+            requestHasProtocol(request_options.headers),
+        );
         errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         self.next_stream_id += 4;
 
@@ -6785,7 +6864,11 @@ pub const ProtectedClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
-        try self.request_lifecycle.open(stream_id);
+        try self.request_lifecycle.open(
+            stream_id,
+            request_options.method,
+            requestHasProtocol(request_options.headers),
+        );
         errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         self.next_stream_id += 4;
         try sendProtectedSettings(
@@ -6979,9 +7062,14 @@ pub const ProtectedClient = struct {
             assembled.bytes,
             self.control.settings.local,
             self.qpack_decode.table,
-            .{
-                .max_informational_responses = self.config.max_informational_responses,
-                .informational = informational,
+            blk: {
+                var options = self.request_lifecycle.responseDecodeOptions(
+                    stream_id,
+                );
+                options.max_informational_responses =
+                    self.config.max_informational_responses;
+                options.informational = informational;
+                break :blk options;
             },
         );
         errdefer response.deinit(self.quic_client.endpoint.allocator);
@@ -7075,6 +7163,10 @@ pub const ProtectedClient = struct {
             &self.response_streams,
             stream_id,
         );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &entry.reader,
+        );
         if (try entry.reader.next(self.qpack_decode.table)) |event| {
             var owned_event = event;
             errdefer owned_event.deinit(
@@ -7093,6 +7185,10 @@ pub const ProtectedClient = struct {
         }
         const active = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &active.reader,
+        );
         if (try active.reader.next(self.qpack_decode.table)) |event| {
             var owned_event = event;
             errdefer owned_event.deinit(
@@ -7131,10 +7227,29 @@ pub const ProtectedClient = struct {
                 &self.response_streams,
                 self.qpack_decode.table,
                 self.config.local_settings.qpack_blocked_streams,
-            )) |ready| {
+            )) |ready_value| {
+                var ready = ready_value;
                 const stream_id: u62 = @intCast(
                     ready.entry.reader.receive.stream_id,
                 );
+                self.request_lifecycle.applyResponseReaderSemantics(
+                    stream_id,
+                    &ready.entry.reader,
+                );
+                if (ready.event == .head and
+                    ready.event.head == .response)
+                {
+                    try http3.applyResponseHeadRequestSemantics(
+                        &ready.event.head.response,
+                        ready.entry.reader.response_request_method,
+                        ready.entry.reader.response_extended_connect,
+                    );
+                    ready.entry.reader.body_allowed =
+                        ready.event.head.response.body_allowed;
+                    if (!ready.entry.reader.body_allowed) {
+                        ready.entry.reader.content_length = null;
+                    }
+                }
                 var owned_event = ready.event;
                 errdefer owned_event.deinit(
                     self.quic_client.endpoint.allocator,
@@ -7935,6 +8050,15 @@ fn requestPriority(
         }
     }
     return .{};
+}
+
+fn requestHasProtocol(
+    headers: []const http3.Qpack.HeaderField,
+) bool {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, ":protocol")) return true;
+    }
+    return false;
 }
 
 pub const OwnedProtectedRequest = struct {
@@ -9696,9 +9820,16 @@ fn bufferedHasResponse(
 }
 
 const ClientRequestLifecycle = struct {
+    const Semantics = struct {
+        stream_id: u62,
+        method: []u8,
+        extended_connect: bool,
+    };
+
     allocator: std.mem.Allocator,
     outstanding: std.ArrayList(u62) = .empty,
     outstanding_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    semantics: std.ArrayList(Semantics) = .empty,
     finished: std.AutoHashMapUnmanaged(u62, void) = .empty,
     max_streams: usize,
 
@@ -9710,16 +9841,27 @@ const ClientRequestLifecycle = struct {
     }
 
     fn deinit(self: *ClientRequestLifecycle) void {
+        for (self.semantics.items) |entry| {
+            self.allocator.free(entry.method);
+        }
         self.outstanding.deinit(self.allocator);
         self.outstanding_index.deinit(self.allocator);
+        self.semantics.deinit(self.allocator);
         self.finished.deinit(self.allocator);
         self.* = undefined;
     }
 
-    fn open(self: *ClientRequestLifecycle, stream_id: u62) Error!void {
+    fn open(
+        self: *ClientRequestLifecycle,
+        stream_id: u62,
+        method: []const u8,
+        extended_connect: bool,
+    ) Error!void {
         if (self.outstanding.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
+        const method_copy = try self.allocator.dupe(u8, method);
+        errdefer self.allocator.free(method_copy);
         const slot = try self.outstanding_index.getOrPut(
             self.allocator,
             stream_id,
@@ -9728,6 +9870,12 @@ const ClientRequestLifecycle = struct {
         errdefer _ = self.outstanding_index.remove(stream_id);
         const index = self.outstanding.items.len;
         try self.outstanding.append(self.allocator, stream_id);
+        errdefer _ = self.outstanding.pop();
+        try self.semantics.append(self.allocator, .{
+            .stream_id = stream_id,
+            .method = method_copy,
+            .extended_connect = extended_connect,
+        });
         slot.value_ptr.* = index;
     }
 
@@ -9740,6 +9888,30 @@ const ClientRequestLifecycle = struct {
         return self.finished.count() != 0 and self.finished.contains(stream_id);
     }
 
+    fn responseDecodeOptions(
+        self: ClientRequestLifecycle,
+        stream_id: u62,
+    ) http3.ResponseDecodeOptions {
+        const index = self.outstanding_index.get(stream_id) orelse return .{};
+        if (index >= self.semantics.items.len or
+            self.semantics.items[index].stream_id != stream_id) return .{};
+        const value = self.semantics.items[index];
+        return .{
+            .request_method = value.method,
+            .extended_connect = value.extended_connect,
+        };
+    }
+
+    fn applyResponseReaderSemantics(
+        self: ClientRequestLifecycle,
+        stream_id: u62,
+        reader: *StreamingMessageReader,
+    ) void {
+        const options = self.responseDecodeOptions(stream_id);
+        reader.response_request_method = options.request_method;
+        reader.response_extended_connect = options.extended_connect;
+    }
+
     fn finish(self: *ClientRequestLifecycle, stream_id: u62) Error!bool {
         if (self.outstanding_index.count() == 0) return false;
         const index = self.outstanding_index.get(stream_id) orelse return false;
@@ -9747,10 +9919,14 @@ const ClientRequestLifecycle = struct {
         errdefer _ = self.finished.remove(stream_id);
         const last_index = self.outstanding.items.len - 1;
         const removed = self.outstanding.swapRemove(index);
+        const removed_semantics = self.semantics.swapRemove(index);
+        std.debug.assert(removed_semantics.stream_id == removed);
+        self.allocator.free(removed_semantics.method);
         _ = self.outstanding_index.remove(removed);
         if (index != last_index) {
             const moved = self.outstanding.items[index];
             self.outstanding_index.getPtr(moved).?.* = index;
+            std.debug.assert(self.semantics.items[index].stream_id == moved);
         }
         return true;
     }
@@ -9761,13 +9937,21 @@ test "HTTP/3 client request lifecycle indexes outstanding streams" {
     var lifecycle = ClientRequestLifecycle.init(allocator, 3);
     defer lifecycle.deinit();
 
-    try lifecycle.open(0);
-    try lifecycle.open(4);
-    try lifecycle.open(8);
+    try lifecycle.open(0, "GET", false);
+    try lifecycle.open(4, "HEAD", false);
+    try lifecycle.open(8, "CONNECT", true);
     try std.testing.expect(lifecycle.contains(0));
     try std.testing.expect(lifecycle.contains(4));
     try std.testing.expect(lifecycle.contains(8));
-    try std.testing.expectError(error.ExcessiveLoad, lifecycle.open(12));
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        lifecycle.open(12, "GET", false),
+    );
+    try std.testing.expectEqualStrings(
+        "HEAD",
+        lifecycle.responseDecodeOptions(4).request_method.?,
+    );
+    try std.testing.expect(lifecycle.responseDecodeOptions(8).extended_connect);
 
     // Removing from the middle uses swapRemove; the moved stream must keep a
     // valid index because send/receive body paths call contains() frequently.
@@ -9777,7 +9961,7 @@ test "HTTP/3 client request lifecycle indexes outstanding streams" {
     try std.testing.expect(try lifecycle.finish(8));
     try std.testing.expect(!lifecycle.contains(8));
 
-    try lifecycle.open(12);
+    try lifecycle.open(12, "POST", false);
     try std.testing.expect(lifecycle.contains(12));
     try std.testing.expect(!try lifecycle.finish(4));
     try std.testing.expect(try lifecycle.finish(0));
