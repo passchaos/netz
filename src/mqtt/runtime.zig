@@ -264,6 +264,31 @@ pub const Server = struct {
             options,
         );
     }
+
+    pub fn serveUntil(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *AcceptedClient,
+        ) Error!void,
+        max_connections: usize,
+        accept_options: AcceptOptions,
+        serve_options: ServeUntilOptions,
+    ) anyerror!void {
+        return serveSourceUntil(
+            self.pendingSource(),
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            accept_options,
+            serve_options,
+        );
+    }
 };
 
 /// MQTT listener over a Unix-domain stream socket.
@@ -371,6 +396,31 @@ pub const UnixServer = struct {
             options,
         );
     }
+
+    pub fn serveUntil(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *AcceptedClient,
+        ) Error!void,
+        max_connections: usize,
+        accept_options: AcceptOptions,
+        serve_options: ServeUntilOptions,
+    ) anyerror!void {
+        return serveSourceUntil(
+            self.pendingSource(),
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            accept_options,
+            serve_options,
+        );
+    }
 };
 
 /// Type-erased pending CONNECT source used by the shared broker core. Keeping
@@ -419,6 +469,37 @@ pub const ConcurrentServeResult = struct {
     }
 };
 
+pub const ServeErrorStage = enum {
+    accept,
+    connection,
+};
+
+pub const ServeErrorPolicy = enum {
+    continue_serving,
+    stop,
+};
+
+pub const ServeErrorEvent = struct {
+    stage: ServeErrorStage,
+    err: anyerror,
+};
+
+pub const ServeErrorObserver = struct {
+    context: *anyopaque,
+    /// May be invoked concurrently by independent connection workers.
+    observe: *const fn (context: *anyopaque, event: ServeErrorEvent) void,
+};
+
+pub const ServeUntilOptions = struct {
+    /// Setting this event cancels pending accepts and active handler I/O.
+    shutdown: *std.Io.Event,
+    accept_error_policy: ServeErrorPolicy = .continue_serving,
+    connection_error_policy: ServeErrorPolicy = .continue_serving,
+    /// Prevent a failed listener from becoming an unbounded retry loop.
+    accept_error_backoff: std.Io.Duration = .fromMilliseconds(10),
+    error_observer: ?ServeErrorObserver = null,
+};
+
 /// Shared finite accept loop for transports that produce `AcceptedClient`.
 /// Keeping the task ownership rules in one place prevents TCP and Unix
 /// listeners from drifting when connection teardown behavior changes.
@@ -453,6 +534,180 @@ fn serveAcceptedConcurrent(
 
     try group.await(io);
     return .{ .allocator = allocator, .errors = results };
+}
+
+const ServeSupervisorState = struct {
+    io: std.Io,
+    options: ServeUntilOptions,
+    stopping: std.atomic.Value(bool) = .init(false),
+    failed: std.Io.Event = .unset,
+    error_mutex: std.Io.Mutex = .init,
+    first_error: ?anyerror = null,
+
+    fn shouldStop(self: *@This()) bool {
+        return self.stopping.load(.acquire) or self.options.shutdown.isSet();
+    }
+
+    fn report(self: *@This(), stage: ServeErrorStage, err: anyerror) void {
+        if (self.options.error_observer) |observer| {
+            observer.observe(observer.context, .{ .stage = stage, .err = err });
+        }
+        const policy = switch (stage) {
+            .accept => self.options.accept_error_policy,
+            .connection => self.options.connection_error_policy,
+        };
+        if (policy != .stop) return;
+        self.error_mutex.lockUncancelable(self.io);
+        if (self.first_error == null) self.first_error = err;
+        self.error_mutex.unlock(self.io);
+        self.stopping.store(true, .release);
+        self.failed.set(self.io);
+    }
+
+    fn firstError(self: *@This()) ?anyerror {
+        self.error_mutex.lockUncancelable(self.io);
+        defer self.error_mutex.unlock(self.io);
+        return self.first_error;
+    }
+};
+
+/// Run a long-lived bounded service over any MQTT pending source. Public
+/// transport wrappers use this boundary so TCP, Unix, TLS, WS and WSS share
+/// identical cancellation and error-isolation behavior.
+pub fn serveSourceUntil(
+    source: PendingSource,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    comptime HandlerContext: type,
+    context: *HandlerContext,
+    comptime handler: *const fn (
+        *HandlerContext,
+        *AcceptedClient,
+    ) Error!void,
+    max_connections: usize,
+    accept_options: AcceptOptions,
+    options: ServeUntilOptions,
+) anyerror!void {
+    if (max_connections == 0 or
+        options.accept_error_backoff.nanoseconds < 0)
+    {
+        return error.InvalidProperty;
+    }
+    var group: std.Io.Group = .init;
+    var supervisor = ServeSupervisorState{ .io = io, .options = options };
+    var group_finished = false;
+    defer if (!group_finished) {
+        supervisor.stopping.store(true, .release);
+        group.cancel(io);
+    };
+    for (0..max_connections) |_| {
+        try group.concurrent(
+            io,
+            ServeUntilTask(HandlerContext, handler).run,
+            .{ServeUntilTask(HandlerContext, handler){
+                .supervisor = &supervisor,
+                .source = source,
+                .context = context,
+                .allocator = allocator,
+                .accept_options = accept_options,
+            }},
+        );
+    }
+
+    const Wake = union(enum) {
+        shutdown: std.Io.Cancelable!void,
+        failure: std.Io.Cancelable!void,
+    };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer select.cancelDiscard();
+    try select.concurrent(
+        .shutdown,
+        waitForServeEvent,
+        .{ options.shutdown, io },
+    );
+    try select.concurrent(
+        .failure,
+        waitForServeEvent,
+        .{ &supervisor.failed, io },
+    );
+    switch (try select.await()) {
+        .shutdown => |result| try result,
+        .failure => |result| try result,
+    }
+
+    supervisor.stopping.store(true, .release);
+    group.cancel(io);
+    group_finished = true;
+    select.cancelDiscard();
+    if (supervisor.firstError()) |err| return err;
+}
+
+fn ServeUntilTask(
+    comptime HandlerContext: type,
+    comptime handler: *const fn (
+        *HandlerContext,
+        *AcceptedClient,
+    ) Error!void,
+) type {
+    return struct {
+        supervisor: *ServeSupervisorState,
+        source: PendingSource,
+        context: *HandlerContext,
+        allocator: std.mem.Allocator,
+        accept_options: AcceptOptions,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            while (!task.supervisor.shouldStop()) {
+                var pending = task.source.acceptPending(
+                    task.accept_options,
+                ) catch |err| {
+                    if (err == error.Canceled or
+                        task.supervisor.shouldStop())
+                    {
+                        return error.Canceled;
+                    }
+                    task.supervisor.report(.accept, err);
+                    if (task.supervisor.shouldStop()) return;
+                    const backoff =
+                        task.supervisor.options.accept_error_backoff;
+                    if (backoff.nanoseconds > 0) {
+                        std.Io.sleep(
+                            task.supervisor.io,
+                            backoff,
+                            .awake,
+                        ) catch |sleep_err| switch (sleep_err) {
+                            error.Canceled => return error.Canceled,
+                        };
+                    }
+                    continue;
+                };
+                var accepted = pending.finish(
+                    task.accept_options,
+                ) catch |err| {
+                    pending.deinit(task.allocator);
+                    if (err == error.Canceled and
+                        task.supervisor.shouldStop()) return;
+                    task.supervisor.report(.accept, err);
+                    if (task.supervisor.shouldStop()) return;
+                    continue;
+                };
+                defer accepted.deinit(task.allocator);
+                handler(task.context, &accepted) catch |err| {
+                    if (err == error.Canceled and
+                        task.supervisor.shouldStop()) return;
+                    task.supervisor.report(.connection, err);
+                };
+            }
+        }
+    };
+}
+
+fn waitForServeEvent(
+    event: *std.Io.Event,
+    io: std.Io,
+) std.Io.Cancelable!void {
+    try event.wait(io);
 }
 
 fn ServeTask(comptime HandlerContext: type) type {
@@ -5529,4 +5784,136 @@ test "MQTT async std.Io server handles concurrent clients" {
     const result = shared.result.?;
     if (result.firstError()) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
+}
+
+test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Observer = struct {
+        io: std.Io,
+        observed: std.Io.Event = .unset,
+        count: std.atomic.Value(usize) = .init(0),
+        stage: ServeErrorStage = .connection,
+
+        fn observe(context_ptr: *anyopaque, event: ServeErrorEvent) void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.stage = event.stage;
+            _ = self.count.fetchAdd(1, .release);
+            self.observed.set(self.io);
+        }
+    };
+    const Context = struct {
+        io: std.Io,
+        shutdown: *std.Io.Event,
+        handled: std.atomic.Value(usize) = .init(0),
+
+        fn handle(
+            self: *@This(),
+            accepted: *AcceptedClient,
+        ) Error!void {
+            var event = try accepted.connection.readBrokerEvent();
+            defer event.deinit(accepted.connection.allocator);
+            if (event != .pingreq) return error.UnexpectedPacket;
+            try accepted.connection.writePingResp();
+            _ = self.handled.fetchAdd(1, .release);
+            if (std.mem.eql(
+                u8,
+                accepted.connect.connect.client_id,
+                "mqtt-supervisor-stop",
+            )) {
+                self.shutdown.set(self.io);
+            }
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        shutdown: std.Io.Event = .unset,
+        observer: Observer,
+        context: Context,
+        err: ?anyerror = null,
+
+        fn init(server_ptr: *Server, io_value: std.Io) @This() {
+            var shared: @This() = undefined;
+            shared.server = server_ptr;
+            shared.shutdown = .unset;
+            shared.observer = .{ .io = io_value };
+            shared.context = .{
+                .io = io_value,
+                .shutdown = &shared.shutdown,
+            };
+            shared.err = null;
+            return shared;
+        }
+
+        fn run(self: *@This()) void {
+            self.context.shutdown = &self.shutdown;
+            self.server.serveUntil(
+                Context,
+                &self.context,
+                Context.handle,
+                1,
+                .{ .protocol = .v5 },
+                .{
+                    .shutdown = &self.shutdown,
+                    .error_observer = .{
+                        .context = &self.observer,
+                        .observe = Observer.observe,
+                    },
+                },
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared.init(&server, io);
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.shutdown.set(io);
+        server_thread.join();
+    };
+
+    const malformed = try server.address().connect(io, .{ .mode = .stream });
+    const malformed_bytes = [_]u8{ 0xc0, 0x00 };
+    var malformed_writer = malformed.writer(io, &.{});
+    try malformed_writer.interface.writeAll(&malformed_bytes);
+    malformed.close(io);
+    try shared.observer.observed.wait(io);
+    try std.testing.expectEqual(ServeErrorStage.accept, shared.observer.stage);
+
+    for ([_][]const u8{ "mqtt-supervisor-one", "mqtt-supervisor-stop" }) |client_id| {
+        var client = try Client.connect(
+            allocator,
+            io,
+            server.address(),
+            .{ .protocol = .v5, .client_id = client_id },
+        );
+        defer client.close();
+        try client.ping();
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        shared.context.handled.load(.acquire),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        shared.observer.count.load(.acquire),
+    );
 }

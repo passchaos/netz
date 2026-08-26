@@ -151,6 +151,31 @@ pub const Server = struct {
             options,
         );
     }
+
+    pub fn serveUntil(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        max_connections: usize,
+        accept_options: runtime.AcceptOptions,
+        serve_options: runtime.ServeUntilOptions,
+    ) anyerror!void {
+        return runtime.serveSourceUntil(
+            self.pendingSource(),
+            self.websocket_server.http.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            accept_options,
+            serve_options,
+        );
+    }
 };
 
 pub const ListenOptions = struct {
@@ -276,6 +301,31 @@ pub const UnixServer = struct {
             handler,
             max_connections,
             options,
+        );
+    }
+
+    pub fn serveUntil(
+        self: *UnixServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        max_connections: usize,
+        accept_options: runtime.AcceptOptions,
+        serve_options: runtime.ServeUntilOptions,
+    ) anyerror!void {
+        return runtime.serveSourceUntil(
+            self.pendingSource(),
+            self.websocket_server.http.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            accept_options,
+            serve_options,
         );
     }
 };
@@ -421,6 +471,31 @@ pub const TlsServer = struct {
             handler,
             max_connections,
             options,
+        );
+    }
+
+    pub fn serveUntil(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        max_connections: usize,
+        accept_options: runtime.AcceptOptions,
+        serve_options: runtime.ServeUntilOptions,
+    ) anyerror!void {
+        return runtime.serveSourceUntil(
+            self.pendingSource(),
+            self.websocket_server.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            accept_options,
+            serve_options,
         );
     }
 };

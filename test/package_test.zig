@@ -919,6 +919,7 @@ test "public modules are reachable" {
         "proxy_header_timeout",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(netz.mqtt, "broker"));
     try std.testing.expect(@hasDecl(netz.mqtt, "proxy_protocol"));
     try std.testing.expect(@hasDecl(netz.mqtt, "listener_namespace"));
@@ -1049,6 +1050,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.UnixServer,
         "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "ServeUntilOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "serveSourceUntil",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Client,
@@ -1266,6 +1279,10 @@ test "public modules are reachable" {
         "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Server,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.tls_runtime,
         "ServerIdentity",
     ));
@@ -1399,12 +1416,24 @@ test "public modules are reachable" {
         "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Server,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.UnixServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Client,
         "connectUnix",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.TlsServer,
         "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.TlsServer,
+        "serveUntil",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.TlsServer,

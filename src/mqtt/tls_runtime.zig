@@ -179,6 +179,31 @@ pub const Server = struct {
             .errors = results,
         };
     }
+
+    pub fn serveUntil(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *mqtt_runtime.AcceptedClient,
+        ) mqtt_runtime.Error!void,
+        max_connections: usize,
+        accept_options: mqtt_runtime.AcceptOptions,
+        serve_options: mqtt_runtime.ServeUntilOptions,
+    ) anyerror!void {
+        return mqtt_runtime.serveSourceUntil(
+            self.pendingSource(),
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            accept_options,
+            serve_options,
+        );
+    }
 };
 
 pub const ListenOptions = struct {
