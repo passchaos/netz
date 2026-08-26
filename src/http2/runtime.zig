@@ -36,6 +36,7 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || erro
     PriorityCapacityExceeded,
     InvalidAlpn,
     PostHandshakeTlsUnavailable,
+    InvalidServeOptions,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -542,25 +543,41 @@ pub const Server = struct {
         comptime handler: *const fn (*HandlerContext, OwnedRequest) Error!ResponseOptions,
         max_connections: usize,
     ) AsyncServeError!ConcurrentServeResult {
-        var group: std.Io.Group = .init;
-        const results = try self.allocator.alloc(?anyerror, max_connections);
-        errdefer self.allocator.free(results);
-        @memset(results, null);
+        return serveAcceptedConcurrent(
+            Server,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+        );
+    }
 
-        for (results) |*result| {
-            var connection = try self.accept();
-            errdefer connection.close();
-            const task = ServeTask(HandlerContext){
-                .connection = connection,
-                .context = context,
-                .handler = handler,
-                .result = result,
-            };
-            group.async(self.io, ServeTask(HandlerContext).run, .{task});
-        }
-
-        try group.await(self.io);
-        return .{ .allocator = self.allocator, .errors = results };
+    pub fn serveUntil(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+        max_requests_per_connection: usize,
+        options: ServeUntilOptions,
+    ) anyerror!void {
+        return serveAcceptedUntil(
+            Server,
+            self,
+            self.io,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            max_requests_per_connection,
+            options,
+        );
     }
 };
 
@@ -742,6 +759,53 @@ pub const TlsServer = struct {
             self.limits,
         );
     }
+
+    pub fn serveConcurrent(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+    ) AsyncServeError!ConcurrentServeResult {
+        return serveAcceptedConcurrent(
+            TlsServer,
+            self,
+            self.io,
+            self.allocator,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+        );
+    }
+
+    pub fn serveUntil(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_connections: usize,
+        max_requests_per_connection: usize,
+        options: ServeUntilOptions,
+    ) anyerror!void {
+        return serveAcceptedUntil(
+            TlsServer,
+            self,
+            self.io,
+            HandlerContext,
+            context,
+            handler,
+            max_connections,
+            max_requests_per_connection,
+            options,
+        );
+    }
 };
 
 pub const AsyncServeError = Error || std.Io.Cancelable;
@@ -770,6 +834,223 @@ pub const ConcurrentServeResult = struct {
         return count;
     }
 };
+
+pub const ServeErrorStage = enum {
+    accept,
+    connection,
+};
+
+pub const ServeErrorPolicy = enum {
+    continue_serving,
+    stop,
+};
+
+pub const ServeErrorEvent = struct {
+    stage: ServeErrorStage,
+    err: anyerror,
+};
+
+pub const ServeErrorObserver = struct {
+    context: *anyopaque,
+    /// May be invoked concurrently by independent connection workers.
+    observe: *const fn (context: *anyopaque, event: ServeErrorEvent) void,
+};
+
+pub const ServeUntilOptions = struct {
+    /// Setting this event cancels pending accepts and active frame reads.
+    shutdown: *std.Io.Event,
+    accept_error_policy: ServeErrorPolicy = .continue_serving,
+    connection_error_policy: ServeErrorPolicy = .continue_serving,
+    /// Prevent a failed listener from becoming an unbounded retry loop.
+    accept_error_backoff: std.Io.Duration = .fromMilliseconds(10),
+    error_observer: ?ServeErrorObserver = null,
+};
+
+fn serveAcceptedConcurrent(
+    comptime ServerType: type,
+    server: *ServerType,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    comptime HandlerContext: type,
+    context: *HandlerContext,
+    comptime handler: *const fn (
+        *HandlerContext,
+        OwnedRequest,
+    ) Error!ResponseOptions,
+    max_connections: usize,
+) AsyncServeError!ConcurrentServeResult {
+    var group: std.Io.Group = .init;
+    const results = try allocator.alloc(?anyerror, max_connections);
+    errdefer allocator.free(results);
+    @memset(results, null);
+    for (results) |*result| {
+        var connection = try server.accept();
+        errdefer connection.close();
+        const task = ServeTask(HandlerContext){
+            .connection = connection,
+            .context = context,
+            .handler = handler,
+            .result = result,
+        };
+        group.async(io, ServeTask(HandlerContext).run, .{task});
+    }
+    try group.await(io);
+    return .{ .allocator = allocator, .errors = results };
+}
+
+const ServeSupervisorState = struct {
+    io: std.Io,
+    options: ServeUntilOptions,
+    stopping: std.atomic.Value(bool) = .init(false),
+    failed: std.Io.Event = .unset,
+    error_mutex: std.Io.Mutex = .init,
+    first_error: ?anyerror = null,
+
+    fn shouldStop(self: *@This()) bool {
+        return self.stopping.load(.acquire) or self.options.shutdown.isSet();
+    }
+
+    fn report(self: *@This(), stage: ServeErrorStage, err: anyerror) void {
+        if (self.options.error_observer) |observer| {
+            observer.observe(observer.context, .{ .stage = stage, .err = err });
+        }
+        const policy = switch (stage) {
+            .accept => self.options.accept_error_policy,
+            .connection => self.options.connection_error_policy,
+        };
+        if (policy != .stop) return;
+        self.error_mutex.lockUncancelable(self.io);
+        if (self.first_error == null) self.first_error = err;
+        self.error_mutex.unlock(self.io);
+        self.stopping.store(true, .release);
+        self.failed.set(self.io);
+    }
+
+    fn firstError(self: *@This()) ?anyerror {
+        self.error_mutex.lockUncancelable(self.io);
+        defer self.error_mutex.unlock(self.io);
+        return self.first_error;
+    }
+};
+
+fn serveAcceptedUntil(
+    comptime ServerType: type,
+    server: *ServerType,
+    io: std.Io,
+    comptime HandlerContext: type,
+    context: *HandlerContext,
+    comptime handler: *const fn (
+        *HandlerContext,
+        OwnedRequest,
+    ) Error!ResponseOptions,
+    max_connections: usize,
+    max_requests_per_connection: usize,
+    options: ServeUntilOptions,
+) anyerror!void {
+    if (max_connections == 0 or max_requests_per_connection == 0 or
+        options.accept_error_backoff.nanoseconds < 0)
+    {
+        return error.InvalidServeOptions;
+    }
+    var group: std.Io.Group = .init;
+    var supervisor = ServeSupervisorState{ .io = io, .options = options };
+    var group_finished = false;
+    defer if (!group_finished) {
+        supervisor.stopping.store(true, .release);
+        group.cancel(io);
+    };
+    for (0..max_connections) |_| {
+        try group.concurrent(
+            io,
+            ServeUntilTask(ServerType, HandlerContext, handler).run,
+            .{ServeUntilTask(ServerType, HandlerContext, handler){
+                .supervisor = &supervisor,
+                .server = server,
+                .context = context,
+                .max_requests_per_connection = max_requests_per_connection,
+            }},
+        );
+    }
+
+    const Wake = union(enum) {
+        shutdown: std.Io.Cancelable!void,
+        failure: std.Io.Cancelable!void,
+    };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer select.cancelDiscard();
+    try select.concurrent(.shutdown, waitForServeEvent, .{ options.shutdown, io });
+    try select.concurrent(.failure, waitForServeEvent, .{ &supervisor.failed, io });
+    switch (try select.await()) {
+        .shutdown => |result| try result,
+        .failure => |result| try result,
+    }
+    supervisor.stopping.store(true, .release);
+    group.cancel(io);
+    group_finished = true;
+    select.cancelDiscard();
+    if (supervisor.firstError()) |err| return err;
+}
+
+fn ServeUntilTask(
+    comptime ServerType: type,
+    comptime HandlerContext: type,
+    comptime handler: *const fn (
+        *HandlerContext,
+        OwnedRequest,
+    ) Error!ResponseOptions,
+) type {
+    return struct {
+        supervisor: *ServeSupervisorState,
+        server: *ServerType,
+        context: *HandlerContext,
+        max_requests_per_connection: usize,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            while (!task.supervisor.shouldStop()) {
+                var connection = task.server.accept() catch |err| {
+                    if (err == error.Canceled or
+                        task.supervisor.shouldStop())
+                    {
+                        return error.Canceled;
+                    }
+                    task.supervisor.report(.accept, err);
+                    if (task.supervisor.shouldStop()) return;
+                    const backoff =
+                        task.supervisor.options.accept_error_backoff;
+                    if (backoff.nanoseconds > 0) {
+                        std.Io.sleep(
+                            task.supervisor.io,
+                            backoff,
+                            .awake,
+                        ) catch |sleep_err| switch (sleep_err) {
+                            error.Canceled => return error.Canceled,
+                        };
+                    }
+                    continue;
+                };
+                defer connection.close();
+                _ = connection.serve(
+                    HandlerContext,
+                    task.context,
+                    handler,
+                    task.max_requests_per_connection,
+                ) catch |err| {
+                    if (err == error.Canceled and
+                        task.supervisor.shouldStop()) return;
+                    task.supervisor.report(.connection, err);
+                };
+            }
+        }
+    };
+}
+
+fn waitForServeEvent(
+    event: *std.Io.Event,
+    io: std.Io,
+) std.Io.Cancelable!void {
+    try event.wait(io);
+}
 
 fn ServeTask(comptime HandlerContext: type) type {
     return struct {
@@ -17485,4 +17766,5 @@ test {
     _ = @import("runtime/request_writer_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
+    _ = @import("runtime/server_lifecycle_tests.zig");
 }
