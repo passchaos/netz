@@ -362,13 +362,19 @@ sessions, validating each path and each QPACK/control state independently.
 The integrated QUIC server handshake can now consume the first client Initial
 already owned by that dispatcher, and HTTP/3/WebTransport expose corresponding
 `acceptFromInitial` entry points. This removes a second socket read at admission
-and preserves explicit datagram ownership, while later Handshake packets still
-require the pending-CID inbox described below.
+and preserves explicit datagram ownership. The QUIC layer now also provides a
+bounded thread-safe pending-handshake inbox and a type-erased datagram source.
+One dispatcher/socket owner routes later Initial, Retry, 0-RTT, and Handshake
+datagrams by the admitted original/server CID and peer tuple while handshake
+workers consume only their inbox. A real three-party regression (client, sole
+socket owner, handshake worker) completes TLS without a second socket reader,
+then atomically promotes the pending route to established 1-RTT routing.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
-server: Initial/Retry handshakes still need incremental dispatcher-owned
-state, bounded admission, and HTTP/3 session scheduling on top of this
-established-connection receive/timer foundation.
+server. The low-level ownership and routing primitive is now present, but the
+HTTP/3 and WebTransport server wrappers do not yet provide a supervisor that
+creates/limits handshake workers, assigns inboxes, expires abandoned admissions,
+and promotes successful sessions automatically.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and

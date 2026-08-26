@@ -195,8 +195,13 @@ DRAIN capsule and verifies that payloads and control events remain isolated by
 QUIC connection.
 The handshake server can additionally begin HTTP/3/WebTransport admission from
 the dispatcher's owned Initial event, so the first packet is not reread from the
-shared socket. Subsequent TLS Handshake-space packets still need endpoint-owned
-pending-handshake inbox routing before multiple real handshakes can overlap.
+shared socket. At the QUIC layer, subsequent Initial/Retry/0-RTT/Handshake
+datagrams can now be routed by the sole socket owner into a bounded per-handshake
+inbox, and a real handshake regression verifies completion and promotion to the
+established CID router without competing socket readers. The remaining gap is
+to expose that source through the HTTP/3/WebTransport acceptance wrappers and
+build the bounded multi-client supervisor around worker admission, expiry, and
+successful-session handoff.
 
 ## Session drain and close lifecycle
 
