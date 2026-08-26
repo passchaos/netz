@@ -2148,6 +2148,18 @@ test "public modules are reachable" {
         "acceptFromInitialSource",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "beginHandshakeAdmission",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "promoteAdmission",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeAdmissionOptions",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "beginSessionAdmissionFromInitialSource",
     ));

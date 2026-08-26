@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const quic = @import("../../quic/mod.zig");
 
 const net = std.Io.net;
 
@@ -324,4 +325,54 @@ test "HTTP/3 handshake serveOne propagates handler failure" {
     });
     server_thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 handshake admission owns generated CID and Initial lifecycle" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "template-cid" } },
+    );
+    defer server.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server.quic_server.endpoint,
+    );
+    const bytes = try allocator.dupe(u8, "owned-initial");
+    var event = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(4567) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer event.deinit(allocator);
+    var admission = try server.beginHandshakeAdmission(
+        &dispatcher,
+        101,
+        &event,
+        .{ .max_pending_handshakes = 1, .inbox_capacity = 2 },
+    );
+    defer dispatcher.deinit();
+    defer admission.deinit();
+
+    try std.testing.expect(event == .consumed);
+    try std.testing.expectEqual(
+        @as(usize, quic.endpoint_dispatcher.default_server_connection_id_len),
+        admission.serverConnectionId().len,
+    );
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.pendingHandshakeCount());
+    try std.testing.expectEqualStrings(
+        "owned-initial",
+        admission.initial.bytes,
+    );
 }

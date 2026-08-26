@@ -60,6 +60,8 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     InvalidUri,
     InvalidAlpn,
 };
+pub const HandshakeAdmissionError = Error ||
+    quic.endpoint_dispatcher.Error;
 
 const client_control_stream_id: u62 = 2;
 const client_qpack_encoder_stream_id: u62 = 6;
@@ -2856,6 +2858,53 @@ pub const HandshakeServerOptions = struct {
     session: HandshakeSessionOptions = .{},
 };
 
+pub const HandshakeAdmissionOptions = struct {
+    max_pending_handshakes: usize = 128,
+    inbox_capacity: usize = 16,
+};
+
+/// Prepared dispatcher registration for one HTTP/3 handshake worker.
+///
+/// `beginHandshakeAdmission` allocates stable inbox storage and chooses a
+/// unique server CID. The caller transfers `initial` to a worker, passing
+/// `datagramSource()`, and must call `deinit` after promotion or failure.
+pub const HandshakeAdmission = struct {
+    dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+    handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
+    inbox: *quic.handshake_inbox.Inbox,
+    initial: quic.runtime.OwnedBytes,
+    server_connection_id: [quic.endpoint_dispatcher.default_server_connection_id_len]u8,
+    registered: bool = true,
+    initial_owned: bool = true,
+
+    pub fn datagramSource(self: *HandshakeAdmission) quic.runtime.DatagramSource {
+        return self.inbox.datagramSource();
+    }
+
+    pub fn serverConnectionId(self: *const HandshakeAdmission) []const u8 {
+        return &self.server_connection_id;
+    }
+
+    pub fn takeInitial(self: *HandshakeAdmission) quic.runtime.OwnedBytes {
+        std.debug.assert(self.initial_owned);
+        self.initial_owned = false;
+        return self.initial;
+    }
+
+    pub fn deinit(self: *HandshakeAdmission) void {
+        const allocator = self.inbox.allocator;
+        if (self.registered) {
+            _ = self.dispatcher.unregisterPendingHandshake(
+                self.handle,
+            ) catch {};
+        }
+        if (self.initial_owned) self.initial.deinit(allocator);
+        self.inbox.deinit();
+        allocator.destroy(self.inbox);
+        self.* = undefined;
+    }
+};
+
 pub const HandshakeClientOptions = struct {
     handshake: quic.handshake.ClientOptions,
     session: HandshakeSessionOptions = .{},
@@ -2957,6 +3006,79 @@ pub const HandshakeServer = struct {
             established,
             self.session_options,
         );
+    }
+
+    /// Bound and register one dispatcher-produced Initial for a handshake
+    /// worker. This method transfers Initial ownership only after admission
+    /// succeeds and overrides the per-connection server CID with the unique
+    /// value registered in the dispatcher.
+    pub fn beginHandshakeAdmission(
+        self: *HandshakeServer,
+        dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+        handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
+        event: *quic.endpoint_dispatcher.Event,
+        options: HandshakeAdmissionOptions,
+    ) HandshakeAdmissionError!HandshakeAdmission {
+        if (event.* != .new_initial) return error.InvalidHandshakeFlight;
+        const admitted = event.new_initial;
+        const inbox = try dispatcher.admitPendingHandshake(
+            handle,
+            admitted,
+            options.max_pending_handshakes,
+            options.inbox_capacity,
+        );
+        errdefer {
+            _ = dispatcher.unregisterPendingHandshake(handle) catch false;
+            inbox.deinit();
+            self.allocator.destroy(inbox);
+        }
+        var result = HandshakeAdmission{
+            .dispatcher = dispatcher,
+            .handle = handle,
+            .inbox = inbox,
+            .initial = event.takeNewInitial().?,
+            .server_connection_id = undefined,
+        };
+        @memcpy(
+            &result.server_connection_id,
+            inbox.connectionIds()[1].slice(),
+        );
+        return result;
+    }
+
+    pub fn acceptAdmission(
+        self: *HandshakeServer,
+        admission: *HandshakeAdmission,
+    ) Error!HandshakeServerSession {
+        var options = self.handshake_options;
+        options.local_connection_id = admission.serverConnectionId();
+        var established = try quic.handshake.acceptFromInitialSource(
+            &self.quic_server.endpoint,
+            admission.datagramSource(),
+            admission.takeInitial(),
+            options,
+        );
+        errdefer established.deinit();
+        return HandshakeServerSession.initEstablished(
+            established,
+            self.session_options,
+        );
+    }
+
+    pub fn promoteAdmission(
+        self: *HandshakeServer,
+        dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+        admission: *HandshakeAdmission,
+        connection_handle: quic.endpoint_dispatcher.ConnectionHandle,
+        session: *HandshakeServerSession,
+    ) HandshakeAdmissionError!void {
+        _ = self;
+        try dispatcher.promotePendingHandshake(
+            admission.handle,
+            connection_handle,
+            &session.established.connection,
+        );
+        admission.registered = false;
     }
 
     /// Accept one authenticated QUIC connection and serve up to
