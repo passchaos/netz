@@ -2901,6 +2901,31 @@ pub const HandshakeServer = struct {
             self.session_options,
         );
     }
+
+    /// Accept one authenticated QUIC connection and serve up to
+    /// `max_requests` HTTP/3 requests on it. The handler runs serially because
+    /// a `HandshakeServerSession` owns one mutable QUIC/QPACK state machine;
+    /// multiplexed applications that need independent scheduling can retain
+    /// the lower-level request-event APIs.
+    pub fn serveConnection(
+        self: *HandshakeServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedHandshakeRequest,
+        ) Error!http3.Response,
+        max_requests: usize,
+    ) Error!usize {
+        var session = try self.accept();
+        defer session.deinit();
+        return session.serve(
+            HandlerContext,
+            context,
+            handler,
+            max_requests,
+        );
+    }
 };
 
 pub const HandshakeServerSession = struct {
@@ -3146,6 +3171,57 @@ pub const HandshakeServerSession = struct {
         };
     }
 
+    /// Receive one complete request, invoke the handler, and send its complete
+    /// response. Request storage remains valid for the duration of the handler
+    /// and is released after the response has been copied into QUIC recovery
+    /// storage. Use the streaming APIs for bodies that should not be aggregated.
+    pub fn serveOne(
+        self: *HandshakeServerSession,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedHandshakeRequest,
+        ) Error!http3.Response,
+    ) Error!u62 {
+        var request = try self.receiveRequest();
+        defer request.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        const response = try handler(context, request);
+        try self.sendResponsePaced(request.stream_id, response);
+        return request.stream_id;
+    }
+
+    /// Serve a bounded number of requests on one authenticated connection and
+    /// then send the two-phase HTTP/3 GOAWAY sequence. Existing accepted
+    /// requests finish normally; a peer cannot start a later request stream
+    /// after the final GOAWAY identifier.
+    pub fn serve(
+        self: *HandshakeServerSession,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedHandshakeRequest,
+        ) Error!http3.Response,
+        max_requests: usize,
+    ) Error!usize {
+        if (max_requests == 0) return 0;
+        var served: usize = 0;
+        while (served < max_requests) : (served += 1) {
+            _ = try self.serveOne(HandlerContext, context, handler);
+        }
+        // Announce graceful shutdown only after the bounded loop has accepted
+        // its last request. Sending the maximum-ID GOAWAY up front is useful
+        // for externally-triggered shutdown, but may legitimately cause a
+        // client to stop creating requests before this convenience loop has
+        // reached its caller-selected count.
+        try self.initiateShutdown();
+        try self.completeShutdown();
+        return served;
+    }
+
     /// Poll one event from any multiplexed request stream without aggregating
     /// DATA payloads. The returned stream ID is then used with
     /// `readRequestData`, matching tquic's poll/recv_body split while retaining
@@ -3265,6 +3341,34 @@ pub const HandshakeServerSession = struct {
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(stream_id, &.{}, response);
+    }
+
+    /// Blocking aggregate-response helper for convenience serving loops. It
+    /// sends the response body in bounded chunks and pumps ACK and MAX_*
+    /// packets whenever body or trailer transmission exhausts peer credit.
+    pub fn sendResponsePaced(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+    ) Error!void {
+        try self.startResponse(
+            stream_id,
+            .{ .status = response.status, .headers = response.headers },
+            response.body.len,
+        );
+        if (response.body.len != 0) {
+            try self.sendResponseBodyPaced(
+                stream_id,
+                response.body,
+                response.trailers.len == 0,
+            );
+        }
+        if (response.trailers.len != 0) {
+            try self.finishResponseTrailersPaced(
+                stream_id,
+                response.trailers,
+            );
+        }
     }
 
     pub fn sendResponseWithPush(
@@ -23119,6 +23223,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 
 test {
     _ = @import("runtime/development_server_tests.zig");
+    _ = @import("runtime/handshake_server_serve_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/informational_tests.zig");
     _ = @import("runtime/response_scheduler_tests.zig");

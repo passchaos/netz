@@ -111,7 +111,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   multiple DATA chunks with empty-open/finish lookup skips, single-lookup chunk accounting plus cached FIN cleanup and enforcing declared Content-Length at FIN.
   Handshake-backed clients and server sessions additionally expose negotiated
   TLS cipher-suite/transcript-hash metadata and QUIC key-update control/counts,
-  and expose
+  bounded `serveOne`/`serveConnection` request-response loops with automatic
+  paced aggregate responses and two-phase GOAWAY completion, and expose
   `sendRequestBodyBatchPaced`/`sendResponseBodyBatchPaced`: one DATA
   contribution per stream is packet-size checked, protected through the
   stateful QUIC batch path, and committed only for the socket-visible prefix,
