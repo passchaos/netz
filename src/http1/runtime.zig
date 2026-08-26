@@ -1326,6 +1326,70 @@ pub const Server = struct {
     }
 };
 
+/// HTTP/1 listener over a Unix-domain stream socket.
+///
+/// Parsing, body framing, pipelining and response handling are delegated to
+/// the same `Connection` used by TCP. Only the accept/address lifecycle is
+/// Unix-specific. The socket path itself remains caller-owned; applications
+/// are responsible for removing a filesystem socket after `deinit`.
+pub const UnixServer = struct {
+    io: std.Io,
+    listener: net.Server,
+    allocator: std.mem.Allocator,
+    limits: Limits = .{},
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        limits: Limits,
+    ) Error!UnixServer {
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .listener = try address.listen(io, .{}),
+            .limits = limits,
+        };
+    }
+
+    pub fn deinit(self: *UnixServer) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn accept(self: *UnixServer) Error!Connection {
+        const stream = try self.listener.accept(self.io);
+        errdefer stream.close(self.io);
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = stream,
+            .limits = self.limits,
+        };
+    }
+
+    pub fn serveOne(
+        self: *UnixServer,
+        context: anytype,
+        comptime handler: anytype,
+    ) Error!void {
+        var connection = try self.accept();
+        defer connection.close();
+        try connection.serveOne(context, handler);
+    }
+
+    pub fn serveConnection(
+        self: *UnixServer,
+        context: anytype,
+        comptime handler: anytype,
+        max_requests: usize,
+    ) Error!usize {
+        var connection = try self.accept();
+        defer connection.close();
+        return connection.serve(context, handler, max_requests);
+    }
+};
+
 pub const TlsListenOptions = struct {
     identity: vail.tls.auth.ServerIdentity,
     limits: Limits = .{},
@@ -1501,6 +1565,29 @@ pub const Client = struct {
             .allocator = allocator,
             .stream = stream,
             .limits = limits,
+        };
+    }
+
+    /// Connect over a Unix-domain socket while retaining ordinary HTTP/1 Host
+    /// semantics. `host` is copied because later requests may omit it and use
+    /// the connection default. TCP_NODELAY is deliberately not applied.
+    pub fn connectUnix(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        host: []const u8,
+        limits: Limits,
+    ) Error!Client {
+        const stream = try address.connect(io);
+        errdefer stream.close(io);
+        const owned_host = try allocator.dupe(u8, host);
+        errdefer allocator.free(owned_host);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_host,
         };
     }
 
@@ -7341,6 +7428,7 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
 }
 
 test {
+    _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");

@@ -9,7 +9,7 @@ superiority.
 
 | Area | netz | `websocket.zig` reference |
 | --- | --- | --- |
-| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, strict duplicate critical-header checks, upgrade-body rejection, and optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes | Covered with configurable handshake parsing, handler callbacks, and a server-side handshake timeout |
+| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, strict duplicate critical-header checks, upgrade-body rejection, and optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes | Covered with configurable handshake parsing, handler callbacks, a Unix listener, and a server-side handshake timeout |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
@@ -53,6 +53,15 @@ The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration
 (shared HTTP/TLS APIs and RFC 8441), but those are different strengths rather
 than proof that every server workload is faster.
+
+`websocket.runtime.UnixServer` and `Client.connectUnix` now cover the local
+IPC transport exposed by the reference. They reuse the ordinary HTTP/1 Upgrade,
+subprotocol, permessage-deflate, frame and close state machines rather than
+forking a Unix-only protocol path. The client requires an explicit HTTP Host
+authority because a filesystem socket path is not one; the listener deliberately
+does not apply the TCP-only NODELAY option. An end-to-end test negotiates a
+subprotocol and compression, exchanges text in both directions, and closes over
+a real filesystem Unix socket.
 
 ## Direct frame hot-path evidence
 

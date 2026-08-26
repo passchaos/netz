@@ -410,7 +410,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unsupported extension parameters/window sizes, framed 101 upgrade responses,
   compressed fragmented sends that stream discontiguous plaintext directly
   into DEFLATE with constant-space cross-fragment UTF-8 validation, serialized connection writes, a blocking TCP
-  client/server runtime over HTTP/1 Upgrade with optional absolute WS/WSS
+  client/server runtime over HTTP/1 Upgrade, Unix-domain listener/client
+  transports using the same handshake and framing state machine, optional absolute WS/WSS
   opening-handshake deadlines, shared absolute TLS 1.3 handshake budgets for
   WSS listeners and client-identity connections, and a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus

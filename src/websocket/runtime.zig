@@ -262,6 +262,57 @@ pub const Server = struct {
     }
 };
 
+/// Cleartext WebSocket listener over a Unix-domain stream socket.
+///
+/// This has the same opening-handshake and frame semantics as `Server`; only
+/// socket creation differs. The path remains caller-owned and is not removed
+/// automatically on shutdown.
+pub const UnixServer = struct {
+    http: http1_runtime.UnixServer,
+    limits: Limits = .{},
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        limits: Limits,
+    ) Error!UnixServer {
+        return .{
+            .http = try .listen(allocator, io, address, .{
+                .max_head_bytes = limits.max_head_bytes,
+                .max_body_bytes = 0,
+                // Unix sockets do not implement TCP_NODELAY.
+                .tcp_nodelay = false,
+            }),
+            .limits = limits,
+        };
+    }
+
+    pub fn deinit(self: *UnixServer) void {
+        self.http.deinit();
+        self.* = undefined;
+    }
+
+    pub fn accept(
+        self: *UnixServer,
+        options: AcceptOptions,
+    ) Error!Connection {
+        const http_connection = try self.http.accept();
+        var limits = self.limits;
+        limits.tcp_nodelay = false;
+        return acceptTransport(
+            self.http.allocator,
+            self.http.io,
+            .{ .tcp = .{
+                .io = self.http.io,
+                .stream = http_connection.stream,
+            } },
+            limits,
+            options,
+        );
+    }
+};
+
 /// TLS 1.3 WebSocket listener.
 ///
 /// TLS termination is performed before the same strict HTTP/1 Upgrade parser
@@ -667,6 +718,35 @@ pub const Client = struct {
         const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| return err;
         errdefer stream.close(io);
         return connectStream(allocator, io, stream, null, options);
+    }
+
+    /// Connect a cleartext WebSocket over a Unix-domain stream socket.
+    /// `options.host` remains the HTTP Host authority and must be supplied by
+    /// the caller because a filesystem path is not an HTTP authority.
+    pub fn connectUnix(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) Error!Connection {
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
+        if (options.host.len == 0) return error.InvalidUri;
+        const stream = try address.connect(io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var connect_options = options;
+        connect_options.tcp_nodelay = false;
+        const connection = try connectStream(
+            allocator,
+            io,
+            stream,
+            null,
+            connect_options,
+        );
+        stream_owned = false;
+        return connection;
     }
 
     pub fn connectHost(
@@ -6300,6 +6380,7 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 }
 
 test {
+    _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/error_close_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
