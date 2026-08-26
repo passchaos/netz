@@ -929,3 +929,27 @@ test "QUIC endpoint dispatcher bounds pending admission and generates CIDs" {
     );
     try std.testing.expect(try dispatcher.unregisterPendingHandshake(61));
 }
+
+test "QUIC endpoint dispatcher caller timeout coexists with transport timers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+
+    try std.testing.expectError(error.Timeout, dispatcher.receiveTimeout(
+        &.{quic.Version.version_1.wireValue()},
+        .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(1),
+        } },
+    ));
+}

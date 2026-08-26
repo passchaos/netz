@@ -664,6 +664,19 @@ pub const Dispatcher = struct {
         self: *Dispatcher,
         supported_versions: []const u32,
     ) ReceiveError!Event {
+        return self.receiveTimeout(supported_versions, .none);
+    }
+
+    /// `receive` with an additional endpoint-loop wakeup deadline. Connection
+    /// transport timers still take precedence when they expire first. This is
+    /// used by supervisors that must also poll handshake completions without
+    /// introducing another UDP receiver.
+    pub fn receiveTimeout(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) ReceiveError!Event {
+        const caller_deadline = timeout.toTimestamp(self.endpoint.io);
         while (true) {
             if (try self.pollPendingPacket()) |packet| {
                 return .{ .packet = packet };
@@ -671,21 +684,29 @@ pub const Dispatcher = struct {
             if (try self.serviceDueTimer()) |timer| {
                 return .{ .timer = timer };
             }
-            const timeout: std.Io.Timeout = if (self.timers.earliestDeadline()) |scheduled| .{ .deadline = .{
-                .clock = .awake,
-                .raw = .fromNanoseconds(
-                    std.math.cast(i96, scheduled.timer.deadline_ns) orelse
-                        std.math.maxInt(i96),
-                ),
-            } } else .none;
-            var datagram = self.endpoint.receiveBytesTimeout(timeout) catch |err|
+            const receive_timeout = earliestReceiveTimeout(
+                self.timers.earliestDeadline(),
+                caller_deadline,
+            );
+            var datagram = self.endpoint.receiveBytesTimeout(
+                receive_timeout,
+            ) catch |err|
                 switch (err) {
-                    error.Timeout => continue,
+                    error.Timeout => {
+                        if (caller_deadline) |deadline| {
+                            if (deadline.durationFromNow(self.endpoint.io)
+                                .raw.nanoseconds <= 0)
+                            {
+                                return error.Timeout;
+                            }
+                        }
+                        continue;
+                    },
                     // A backend without timed network waits remains usable
                     // when no transport timer is armed. Once a connection has
                     // a deadline, falling back to an unbounded receive would
                     // silently starve PTO/ACK/idle work.
-                    error.ConcurrencyUnavailable => if (timeout == .none)
+                    error.ConcurrencyUnavailable => if (receive_timeout == .none)
                         try self.endpoint.receiveBytes()
                     else
                         return error.ConcurrencyUnavailable,
@@ -814,6 +835,33 @@ pub const Dispatcher = struct {
         } };
     }
 };
+
+fn earliestReceiveTimeout(
+    scheduled: ?endpoint_timers.EndpointTimerDeadline,
+    caller_deadline: ?std.Io.Clock.Timestamp,
+) std.Io.Timeout {
+    const timer_deadline: ?std.Io.Clock.Timestamp = if (scheduled) |value| .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(
+            std.math.cast(i96, value.timer.deadline_ns) orelse
+                std.math.maxInt(i96),
+        ),
+    } else null;
+    if (timer_deadline) |timer| {
+        if (caller_deadline) |caller| {
+            return .{ .deadline = if (timer.raw.nanoseconds <
+                caller.raw.nanoseconds)
+                timer
+            else
+                caller };
+        }
+        return .{ .deadline = timer };
+    }
+    return if (caller_deadline) |deadline|
+        .{ .deadline = deadline }
+    else
+        .none;
+}
 
 fn containsConnectionId(
     registered: []const connection_router.ConnectionIdKey,
