@@ -2178,6 +2178,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "EndpointServer"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "EndpointServerEvent"));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.EndpointServer,
+        "takeSession",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "beginSessionAdmissionFromInitialSource",
     ));

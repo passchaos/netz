@@ -3330,6 +3330,16 @@ pub const EndpointServer = struct {
         return true;
     }
 
+    /// Transfer one promoted HTTP/3 session to a higher-level protocol
+    /// adapter while retaining its dispatcher registration. The caller must
+    /// later unregister `handle` before destroying the moved session.
+    pub fn takeSession(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) ?PromotedHandshakeSession {
+        return (self.sessions.fetchRemove(handle) orelse return null).value;
+    }
+
     pub fn receive(
         self: *EndpointServer,
         supported_versions: []const u32,
