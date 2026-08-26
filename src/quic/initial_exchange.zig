@@ -271,6 +271,7 @@ pub fn receiveInitialCrypto(
 
 pub const receiveInitialCryptoFlight = flight.receive;
 pub const openInitialCryptoFlight = flight.open;
+pub const openInitialCryptoFlightFrom = flight.openFrom;
 
 pub fn sendHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,

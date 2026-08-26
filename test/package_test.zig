@@ -2110,6 +2110,20 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "acceptFromInitial"));
     try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptFromInitialSource",
+    ));
+    try std.testing.expect(@hasDecl(netz.quic, "handshake_inbox"));
+    try std.testing.expect(@hasDecl(netz.quic.handshake_inbox, "Inbox"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "registerPendingHandshake",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "promotePendingHandshake",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Event,
         "takeNewInitial",
     ));

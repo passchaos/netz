@@ -10,6 +10,7 @@ const std = @import("std");
 const quic = @import("mod.zig");
 const connection_router = @import("connection_router.zig");
 const endpoint_timers = @import("endpoint_timers.zig");
+const handshake_inbox = @import("handshake_inbox.zig");
 const one_rtt = @import("one_rtt.zig");
 const runtime = @import("runtime.zig");
 
@@ -18,9 +19,10 @@ test {
 }
 
 pub const ConnectionHandle = usize;
+pub const PendingHandshakeHandle = usize;
 
 pub const Error = runtime.Error || one_rtt.Error ||
-    connection_router.Error || endpoint_timers.Error || error{
+    connection_router.Error || endpoint_timers.Error || handshake_inbox.Error || error{
     DuplicateConnectionHandle,
     UnknownConnectionHandle,
     ConnectionEndpointMismatch,
@@ -33,6 +35,19 @@ const ConnectionEntry = struct {
     connection_ids: std.ArrayList(connection_router.ConnectionIdKey) = .empty,
 
     fn deinit(self: *ConnectionEntry, allocator: std.mem.Allocator) void {
+        self.connection_ids.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const PendingHandshakeEntry = struct {
+    inbox: *handshake_inbox.Inbox,
+    connection_ids: std.ArrayList(connection_router.ConnectionIdKey) = .empty,
+
+    fn deinit(
+        self: *PendingHandshakeEntry,
+        allocator: std.mem.Allocator,
+    ) void {
         self.connection_ids.deinit(allocator);
         self.* = undefined;
     }
@@ -77,6 +92,8 @@ pub const Event = union(enum) {
     /// belong to discarded packet-number spaces and are consumed silently by
     /// the socket owner rather than mis-decoded as short-header packets.
     discarded_long_header: ConnectionHandle,
+    /// A long-header datagram was transferred to a registered handshake inbox.
+    pending_handshake: PendingHandshakeHandle,
     /// A structurally valid, minimum-sized client Initial with an unknown DCID.
     /// The endpoint owner can admit it into handshake state without reparsing
     /// untrusted invariant-header metadata.
@@ -90,7 +107,11 @@ pub const Event = union(enum) {
             .packet => |*event| event.packet.deinit(allocator),
             .new_initial => |*event| event.datagram.deinit(allocator),
             .unrouted => |*event| event.datagram.deinit(allocator),
-            .consumed, .timer, .discarded_long_header => {},
+            .consumed,
+            .timer,
+            .discarded_long_header,
+            .pending_handshake,
+            => {},
         }
         self.* = undefined;
     }
@@ -114,6 +135,11 @@ pub const Dispatcher = struct {
         ConnectionHandle,
         ConnectionEntry,
     ) = .empty,
+    pending_router: connection_router.Router,
+    pending_handshakes: std.AutoHashMapUnmanaged(
+        PendingHandshakeHandle,
+        PendingHandshakeEntry,
+    ) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -124,6 +150,7 @@ pub const Dispatcher = struct {
             .endpoint = endpoint,
             .router = .init(allocator),
             .timers = .init(allocator),
+            .pending_router = .init(allocator),
         };
     }
 
@@ -134,9 +161,180 @@ pub const Dispatcher = struct {
         var iterator = self.connections.valueIterator();
         while (iterator.next()) |entry| entry.deinit(self.allocator);
         self.connections.deinit(self.allocator);
+        var pending_iterator = self.pending_handshakes.valueIterator();
+        while (pending_iterator.next()) |entry| {
+            entry.inbox.close();
+            entry.deinit(self.allocator);
+        }
+        self.pending_handshakes.deinit(self.allocator);
+        self.pending_router.deinit();
         self.router.deinit();
         self.timers.deinit();
         self.* = undefined;
+    }
+
+    /// Register every CID accepted by one pending handshake inbox. The inbox
+    /// remains caller-owned and must outlive registration.
+    pub fn registerPendingHandshake(
+        self: *Dispatcher,
+        handle: PendingHandshakeHandle,
+        inbox: *handshake_inbox.Inbox,
+    ) Error!void {
+        const connection_ids = inbox.connectionIds();
+        for (connection_ids) |connection_id| {
+            if ((try self.router.lookup(connection_id.slice())) != null or
+                (try self.pending_router.lookup(connection_id.slice())) != null)
+            {
+                return error.DuplicateConnectionId;
+            }
+        }
+        try self.pending_router.ensureCapacity(
+            self.pending_router.count() + connection_ids.len,
+        );
+        const slot = try self.pending_handshakes.getOrPut(
+            self.allocator,
+            handle,
+        );
+        if (slot.found_existing) return error.DuplicateConnectionHandle;
+        slot.value_ptr.* = .{ .inbox = inbox };
+        errdefer {
+            var removed = self.pending_handshakes.fetchRemove(handle).?.value;
+            for (removed.connection_ids.items) |*key| {
+                _ = self.pending_router.unregister(key.slice()) catch false;
+            }
+            removed.deinit(self.allocator);
+        }
+        try slot.value_ptr.connection_ids.ensureTotalCapacity(
+            self.allocator,
+            connection_ids.len,
+        );
+        for (connection_ids) |key| {
+            try self.pending_router.register(key.slice(), .{
+                .connection_index = handle,
+                .peer_address = inbox.peer,
+                .active_migration_disabled = true,
+            });
+            slot.value_ptr.connection_ids.appendAssumeCapacity(key);
+        }
+    }
+
+    pub fn unregisterPendingHandshake(
+        self: *Dispatcher,
+        handle: PendingHandshakeHandle,
+    ) Error!bool {
+        const entry = self.pending_handshakes.getPtr(handle) orelse
+            return false;
+        var stale_route = false;
+        for (entry.connection_ids.items) |*key| {
+            if (!try self.pending_router.unregister(key.slice())) {
+                stale_route = true;
+            }
+        }
+        var removed = self.pending_handshakes.fetchRemove(handle).?.value;
+        removed.inbox.close();
+        removed.deinit(self.allocator);
+        if (stale_route) return error.StaleConnectionRoute;
+        return true;
+    }
+
+    /// Atomically replace pending-handshake routes with the established
+    /// connection's local CID set. The connection and inbox remain owned by
+    /// the caller; successful promotion closes the inbox to wake any waiter.
+    pub fn promotePendingHandshake(
+        self: *Dispatcher,
+        pending_handle: PendingHandshakeHandle,
+        connection_handle: ConnectionHandle,
+        connection: *one_rtt.Connection,
+    ) Error!void {
+        const pending = self.pending_handshakes.getPtr(pending_handle) orelse
+            return error.UnknownConnectionHandle;
+        if (connection.endpoint != self.endpoint) {
+            return error.ConnectionEndpointMismatch;
+        }
+        for (pending.connection_ids.items) |*key| {
+            const route = (try self.pending_router.lookup(key.slice())) orelse
+                return error.StaleConnectionRoute;
+            if (route.connection_index != pending_handle) {
+                return error.StaleConnectionRoute;
+            }
+        }
+
+        var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+        const active = try connection.localConnectionIdsInto(&active_storage);
+        for (active) |id| {
+            if ((try self.router.lookup(id.connection_id)) != null) {
+                return error.DuplicateConnectionId;
+            }
+            if (try self.pending_router.lookup(id.connection_id)) |route| {
+                if (route.connection_index != pending_handle) {
+                    return error.DuplicateConnectionId;
+                }
+            }
+        }
+
+        // Reserve every operation that can allocate before removing pending
+        // routes. Once removal begins, the rest of promotion is infallible
+        // unless the dispatcher's internal route metadata is already stale.
+        try self.timers.ensureCapacity(self.connections.count() + 1);
+        const connection_capacity = std.math.add(
+            usize,
+            self.connections.count(),
+            1,
+        ) catch return error.OutOfMemory;
+        const route_capacity = std.math.mul(
+            usize,
+            connection_capacity,
+            quic.connection_id.max_pool_size,
+        ) catch return error.OutOfMemory;
+        try self.router.ensureCapacity(route_capacity);
+        const slot = try self.connections.getOrPut(
+            self.allocator,
+            connection_handle,
+        );
+        if (slot.found_existing) return error.DuplicateConnectionHandle;
+        slot.value_ptr.* = .{ .connection = connection };
+        errdefer {
+            var removed = self.connections.fetchRemove(
+                connection_handle,
+            ).?.value;
+            removed.deinit(self.allocator);
+        }
+        try slot.value_ptr.connection_ids.ensureTotalCapacity(
+            self.allocator,
+            quic.connection_id.max_pool_size,
+        );
+        // The connection entry is fully initialized but intentionally not yet
+        // routable. No packet can observe it until all pending aliases have
+        // been withdrawn below.
+
+        // `fetchRemove` below can invalidate `pending`, so retain the only
+        // caller-owned pointer needed after route removal.
+        const pending_inbox = pending.inbox;
+        for (pending.connection_ids.items) |*key| {
+            std.debug.assert(try self.pending_router.unregister(key.slice()));
+        }
+        var removed_pending = self.pending_handshakes.fetchRemove(
+            pending_handle,
+        ).?.value;
+        defer removed_pending.deinit(self.allocator);
+        pending_inbox.close();
+
+        for (active) |id| {
+            const key = try connection_router.ConnectionIdKey.init(
+                id.connection_id,
+            );
+            // Capacity and CID validity were checked above, so these cannot
+            // fail in a consistent dispatcher.
+            self.router.register(id.connection_id, connection.route(
+                connection_handle,
+                id.sequence_number,
+            )) catch unreachable;
+            slot.value_ptr.connection_ids.appendAssumeCapacity(key);
+        }
+        self.timers.armFromConnection(
+            connection_handle,
+            connection,
+        ) catch unreachable;
     }
 
     pub fn registerConnection(
@@ -146,6 +344,13 @@ pub const Dispatcher = struct {
     ) Error!void {
         if (connection.endpoint != self.endpoint) {
             return error.ConnectionEndpointMismatch;
+        }
+        var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+        const active = try connection.localConnectionIdsInto(&active_storage);
+        for (active) |id| {
+            if ((try self.pending_router.lookup(id.connection_id)) != null) {
+                return error.DuplicateConnectionId;
+            }
         }
         // Reserve the timer slot before publishing the connection. Packet
         // processing is stateful, so its later timer refresh must not discover
@@ -239,6 +444,9 @@ pub const Dispatcher = struct {
                     return error.DuplicateConnectionId;
                 }
             }
+            if ((try self.pending_router.lookup(id.connection_id)) != null) {
+                return error.DuplicateConnectionId;
+            }
         }
 
         for (active) |id| {
@@ -278,6 +486,9 @@ pub const Dispatcher = struct {
                 return error.DuplicateConnectionId;
             }
         }
+        if ((try self.pending_router.lookup(connection_id)) != null) {
+            return error.DuplicateConnectionId;
+        }
     }
 
     /// Remove every route and timer before the caller destroys the connection.
@@ -306,6 +517,10 @@ pub const Dispatcher = struct {
 
     pub fn routeCount(self: *const Dispatcher) usize {
         return self.router.count();
+    }
+
+    pub fn pendingHandshakeCount(self: *const Dispatcher) usize {
+        return self.pending_handshakes.count();
     }
 
     /// Refresh timer state after application code sends or otherwise mutates a
@@ -416,6 +631,44 @@ pub const Dispatcher = struct {
         var owned = datagram;
         var owns_datagram = true;
         errdefer if (owns_datagram) owned.deinit(self.allocator);
+        // Pending handshakes are deliberately checked first for long-header
+        // packets. Their server CID is not yet present in the established
+        // router, and a retried/fragmented Initial can still use an admitted
+        // original DCID. Looking only after an established route would make
+        // this path unreachable.
+        if (owned.bytes.len != 0 and (owned.bytes[0] & 0x80) != 0) {
+            const pending = self.pending_router.routeDatagramFrom(
+                owned.from,
+                owned.bytes,
+            ) catch |err| switch (err) {
+                error.InvalidPacket, error.InvalidConnectionId => null,
+                else => |other| return other,
+            };
+            if (pending) |routed_pending| {
+                const entry = self.pending_handshakes.getPtr(
+                    routed_pending.route.connection_index,
+                ) orelse return error.StaleConnectionRoute;
+                entry.inbox.push(owned) catch |err| switch (err) {
+                    // A bounded or concurrently closed handshake must not
+                    // terminate the sole endpoint receive loop. The inbox did
+                    // not take ownership on failure, so drop the datagram here.
+                    error.Full,
+                    error.Closed,
+                    error.PeerMismatch,
+                    error.ConnectionIdMismatch,
+                    => {
+                        owned.deinit(self.allocator);
+                        owns_datagram = false;
+                        return .consumed;
+                    },
+                    else => |other| return other,
+                };
+                owns_datagram = false;
+                return .{
+                    .pending_handshake = routed_pending.route.connection_index,
+                };
+            }
+        }
         const routed = self.router.routeDatagramFrom(
             owned.from,
             owned.bytes,

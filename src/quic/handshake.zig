@@ -1580,7 +1580,12 @@ fn connectAttempt(
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
-    return acceptInternal(endpoint, null, options);
+    return acceptInternal(
+        endpoint,
+        .fromEndpoint(endpoint),
+        null,
+        options,
+    );
 }
 
 /// Continue a server handshake from an Initial already received by the sole
@@ -1593,11 +1598,28 @@ pub fn acceptFromInitial(
     initial_datagram: quic.runtime.OwnedBytes,
     options: ServerOptions,
 ) Error!EstablishedConnection {
-    return acceptInternal(endpoint, initial_datagram, options);
+    return acceptInternal(
+        endpoint,
+        .fromEndpoint(endpoint),
+        initial_datagram,
+        options,
+    );
+}
+
+/// Dispatcher-owned variant that takes the first Initial directly and obtains
+/// all later packets from the supplied pending-handshake inbox/source.
+pub fn acceptFromInitialSource(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    initial_datagram: quic.runtime.OwnedBytes,
+    options: ServerOptions,
+) Error!EstablishedConnection {
+    return acceptInternal(endpoint, source, initial_datagram, options);
 }
 
 fn acceptInternal(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     first_datagram: ?quic.runtime.OwnedBytes,
     options: ServerOptions,
 ) Error!EstablishedConnection {
@@ -1642,6 +1664,7 @@ fn acceptInternal(
     var client_initial = if (owned_first) |datagram| blk: {
         const opened = try openClientInitialDatagram(
             endpoint,
+            source,
             datagram,
             0,
             options.max_crypto_buffer,
@@ -1705,6 +1728,7 @@ fn acceptInternal(
         // with an Initial protected by the Retry SCID-derived keys.
         client_initial = try receiveRetriedClientInitial(
             endpoint,
+            source,
             options.max_crypto_buffer,
             rscid,
             options.version,
@@ -1916,6 +1940,7 @@ fn acceptInternal(
         if (pending_early_data == null) {
             pending_early_data = try receiveStandaloneClientEarlyData(
                 endpoint,
+                source,
                 client_initial.from,
                 early_data_keys.?.packet,
                 0,
@@ -1938,6 +1963,7 @@ fn acceptInternal(
     } else if (client_offered_early_data) {
         try discardClientEarlyData(
             endpoint,
+            source,
             client_initial.coalesced_tail,
         );
     } else if (client_initial.coalesced_tail.len != 0) {
@@ -2110,8 +2136,9 @@ fn acceptInternal(
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
     };
-    var client_handshake_datagram = try retransmit.sendAndReceiveMatching(
+    var client_handshake_datagram = try retransmit.sendAndReceiveMatchingFrom(
         endpoint,
+        source,
         options.handshake_recovery,
         &send_context,
         retransmit.InitialHandshakeFlight.send,
@@ -2568,6 +2595,7 @@ fn receiveClientInitial(
     defer datagram.deinit(endpoint.allocator);
     return openClientInitialDatagram(
         endpoint,
+        .fromEndpoint(endpoint),
         datagram,
         expected_packet_number,
         max_crypto_buffer,
@@ -2579,6 +2607,7 @@ fn receiveClientInitial(
 
 fn openClientInitialDatagram(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     datagram: quic.runtime.OwnedBytes,
     expected_packet_number: u64,
     max_crypto_buffer: usize,
@@ -2611,8 +2640,9 @@ fn openClientInitialDatagram(
             allow_zero_fixed_bit,
         );
     if (initial_info.packet_type != .initial) return error.InvalidInitialPacket;
-    var flight = try quic.initial_exchange.openInitialCryptoFlight(
+    var flight = try quic.initial_exchange.openInitialCryptoFlightFrom(
         endpoint,
+        source,
         datagram.from,
         datagram.bytes[0..initial_info.len],
         initial_secrets.client,
@@ -2640,13 +2670,14 @@ fn openClientInitialDatagram(
 
 fn receiveRetriedClientInitial(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     max_crypto_buffer: usize,
     retry_destination_connection_id: []const u8,
     version: quic.Version,
     allow_zero_fixed_bit: bool,
 ) Error!ReceivedClientInitial {
     while (true) {
-        var datagram = try endpoint.receiveBytes();
+        var datagram = try receiveFromSource(source);
         defer datagram.deinit(endpoint.allocator);
         if (datagram.bytes.len <
             quic.initial_exchange.min_initial_udp_datagram_size)
@@ -2675,8 +2706,9 @@ fn receiveRetriedClientInitial(
                 version.wireValue(),
                 retry_destination_connection_id,
             );
-        var flight = try quic.initial_exchange.openInitialCryptoFlight(
+        var flight = try quic.initial_exchange.openInitialCryptoFlightFrom(
             endpoint,
+            source,
             datagram.from,
             datagram.bytes[0..info.len],
             initial_secrets.client,
@@ -3050,6 +3082,7 @@ fn openClientEarlyData(
 
 fn receiveStandaloneClientEarlyData(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     expected_from: net.IpAddress,
     keys: quic.protection.PacketProtectionKeys,
     expected_packet_number: u64,
@@ -3058,7 +3091,7 @@ fn receiveStandaloneClientEarlyData(
     expected_source_connection_id: []const u8,
     allow_zero_fixed_bit: bool,
 ) Error!quic.zero_rtt.Packet {
-    var datagram = try endpoint.receiveBytes();
+    var datagram = try receiveFromSource(source);
     defer datagram.deinit(endpoint.allocator);
     if (!datagram.from.eql(&expected_from)) {
         return error.InvalidHandshakeFlight;
@@ -3078,12 +3111,13 @@ fn receiveStandaloneClientEarlyData(
 
 fn discardClientEarlyData(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     coalesced_tail: []const u8,
 ) Error!void {
     if (coalesced_tail.len != 0) {
         return validateRejectedEarlyData(coalesced_tail);
     }
-    var datagram = try endpoint.receiveBytes();
+    var datagram = try receiveFromSource(source);
     defer datagram.deinit(endpoint.allocator);
     try validateRejectedEarlyData(datagram.bytes);
 }
@@ -3095,6 +3129,16 @@ fn validateRejectedEarlyData(bytes: []const u8) Error!void {
     }
     // RFC 9001 permits rejecting 0-RTT while continuing PSK resumption. The
     // authenticated-length packet is deliberately left undecrypted.
+}
+
+fn receiveFromSource(
+    source: quic.runtime.DatagramSource,
+) Error!quic.runtime.OwnedBytes {
+    return source.receive() catch |err| switch (err) {
+        error.Timeout => unreachable,
+        error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
+        else => |other| @errorCast(other),
+    };
 }
 
 fn validateClientInitialTail(

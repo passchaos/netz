@@ -135,6 +135,24 @@ pub fn sendAndReceiveMatching(
     send_fn: SendFn,
     accept_fn: AcceptFn,
 ) Error!quic.runtime.OwnedBytes {
+    return sendAndReceiveMatchingFrom(
+        endpoint,
+        quic.runtime.DatagramSource.fromEndpoint(endpoint),
+        config,
+        context,
+        send_fn,
+        accept_fn,
+    );
+}
+
+pub fn sendAndReceiveMatchingFrom(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    config: Config,
+    context: *anyopaque,
+    send_fn: SendFn,
+    accept_fn: AcceptFn,
+) Error!quic.runtime.OwnedBytes {
     try config.validate();
     var retransmission: u8 = 0;
     var transmitted: u8 = 0;
@@ -156,7 +174,7 @@ pub fn sendAndReceiveMatching(
             hard_deadline,
         );
         while (true) {
-            var datagram = endpoint.receiveBytesTimeout(deadline) catch |err|
+            var datagram = source.receiveTimeout(deadline) catch |err|
                 switch (err) {
                     error.Timeout => {
                         if (retryBudgetExhausted(
@@ -180,6 +198,61 @@ pub fn sendAndReceiveMatching(
             }
         }
     }
+}
+
+test "handshake PTO receives from an injected datagram source" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(4433) };
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{"server"},
+        peer,
+        1,
+    );
+    defer inbox.deinit();
+    const payload = try allocator.dupe(
+        u8,
+        &.{ 0xc0, 0, 0, 0, 1, 6, 's', 'e', 'r', 'v', 'e', 'r', 0 },
+    );
+    try inbox.push(.{ .from = peer, .bytes = payload });
+
+    const Context = struct {
+        calls: usize = 0,
+        fn send(context: *anyopaque, _: u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+        }
+        fn accept(_: []const u8) bool {
+            return true;
+        }
+    };
+    var context = Context{};
+    var datagram = try sendAndReceiveMatchingFrom(
+        &endpoint,
+        inbox.datagramSource(),
+        .{ .initial_pto_ms = 10, .max_pto_ms = 10 },
+        &context,
+        Context.send,
+        Context.accept,
+    );
+    defer datagram.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), context.calls);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xc0, 0, 0, 0, 1, 6, 's', 'e', 'r', 'v', 'e', 'r', 0 },
+        datagram.bytes,
+    );
 }
 
 /// Context-aware counterpart for response classifiers that must validate

@@ -719,3 +719,78 @@ test "QUIC endpoint dispatcher negotiates versions before Initial admission" {
     try std.testing.expectEqualStrings("srv", negotiation.source_connection_id);
     try std.testing.expectEqualSlices(u32, &supported, negotiation.versions);
 }
+
+test "QUIC endpoint dispatcher routes and promotes a pending handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{ "admitted", "pending-server" },
+        peer,
+        2,
+    );
+    defer inbox.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerPendingHandshake(41, &inbox);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.pendingHandshakeCount());
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xef} ** quic.protection.secret_len,
+    );
+    for ([_][]const u8{ "admitted", "pending-server" }) |cid| {
+        const datagram = try quic.protection.sealHandshakePacket(
+            allocator,
+            keys,
+            .{
+                .destination_connection_id = cid,
+                .source_connection_id = "peer",
+                .packet_number = 0,
+                .payload = &.{@intFromEnum(quic.FrameType.ping)},
+            },
+        );
+        var event = try dispatcher.dispatch(.{
+            .from = peer,
+            .bytes = datagram,
+        });
+        defer event.deinit(allocator);
+        try std.testing.expectEqual(
+            @as(Event, .{ .pending_handshake = 41 }),
+            event,
+        );
+        var received = try inbox.receive();
+        defer received.deinit(allocator);
+        const info = try quic.protection.peekProtectedLongPacketInfo(
+            received.bytes,
+        );
+        try std.testing.expectEqualStrings(cid, info.destination_connection_id);
+    }
+
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pending-server",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    try dispatcher.promotePendingHandshake(41, 42, &connection);
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+    try std.testing.expectError(error.Closed, inbox.receive());
+    try std.testing.expect(try dispatcher.unregisterConnection(42));
+}

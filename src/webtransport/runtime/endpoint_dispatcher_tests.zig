@@ -289,7 +289,7 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
                 }
             },
             .consumed, .timer => {},
-            .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
     }
 }

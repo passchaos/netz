@@ -187,7 +187,7 @@ test "HTTP/3 sessions consume dispatcher packets without socket races" {
                 }
             },
             .consumed, .timer => {},
-            .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
     }
     try std.testing.expect(server_a.control.settings.received);

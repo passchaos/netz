@@ -1475,6 +1475,45 @@ pub const OwnedBytes = struct {
     }
 };
 
+/// Type-erased source for owned QUIC datagrams.
+///
+/// Handshake state machines use this instead of assuming they own the UDP
+/// socket. The ordinary endpoint adapter preserves existing behavior, while a
+/// multi-connection endpoint can supply a CID-routed per-handshake inbox.
+pub const DatagramSource = struct {
+    context: *anyopaque,
+    receive_timeout_fn: *const fn (
+        context: *anyopaque,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes,
+
+    pub fn fromEndpoint(endpoint: *Endpoint) DatagramSource {
+        return .{
+            .context = endpoint,
+            .receive_timeout_fn = endpointReceiveTimeout,
+        };
+    }
+
+    pub fn receive(self: DatagramSource) ReceiveTimeoutError!OwnedBytes {
+        return self.receiveTimeout(.none);
+    }
+
+    pub fn receiveTimeout(
+        self: DatagramSource,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.receive_timeout_fn(self.context, timeout);
+    }
+
+    fn endpointReceiveTimeout(
+        context: *anyopaque,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
+        const endpoint: *Endpoint = @ptrCast(@alignCast(context));
+        return endpoint.receiveBytesTimeout(timeout);
+    }
+};
+
 pub const ReceivedBytesView = struct {
     from: net.IpAddress,
     bytes: []u8,

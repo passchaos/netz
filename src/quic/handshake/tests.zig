@@ -230,6 +230,181 @@ test "QUIC server handshake consumes a dispatcher-owned Initial" {
     if (shared.err) |err| return err;
 }
 
+test "QUIC server handshake receives its later flight from one socket owner" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "dispatch";
+    const client_cid = "client";
+    const server_cid = "server";
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{ original_dcid, server_cid },
+        client_endpoint.address(),
+        8,
+    );
+    defer inbox.deinit();
+
+    const Client = struct {
+        endpoint: *quic.runtime.Endpoint,
+        server: std.Io.net.IpAddress,
+        done: std.atomic.Value(bool) = .init(false),
+        established: ?handshake.EstablishedConnection = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.established = handshake.connect(self.endpoint, self.server, .{
+                .original_destination_connection_id = original_dcid,
+                .local_connection_id = client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xac} ** 32,
+                .x25519_secret_key = [_]u8{0xad} ** 32,
+                .handshake_recovery = .{
+                    .initial_pto_ms = 20,
+                    .max_pto_ms = 40,
+                    .max_duration_ms = 2_000,
+                },
+            }) catch |err| {
+                self.err = err;
+                self.done.store(true, .release);
+                return;
+            };
+            self.done.store(true, .release);
+        }
+    };
+    const Server = struct {
+        endpoint: *quic.runtime.Endpoint,
+        inbox: *quic.handshake_inbox.Inbox,
+        initial: quic.runtime.OwnedBytes,
+        done: std.atomic.Value(bool) = .init(false),
+        established: ?handshake.EstablishedConnection = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.established = handshake.acceptFromInitialSource(
+                self.endpoint,
+                self.inbox.datagramSource(),
+                self.initial,
+                .{
+                    .local_connection_id = server_cid,
+                    .random = [_]u8{0xae} ** 32,
+                    .x25519_secret_key = [_]u8{0xaf} ** 32,
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
+                },
+            ) catch |err| {
+                self.err = err;
+                self.done.store(true, .release);
+                return;
+            };
+            self.done.store(true, .release);
+        }
+    };
+
+    var client = Client{
+        .endpoint = &client_endpoint,
+        .server = server_endpoint.address(),
+    };
+    const client_thread = try std.Thread.spawn(.{}, Client.run, .{&client});
+
+    const versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    var admission = try dispatcher.receive(&versions);
+    defer admission.deinit(allocator);
+    try std.testing.expect(admission == .new_initial);
+    const initial = admission.takeNewInitial() orelse
+        return error.TestUnexpectedResult;
+    try dispatcher.registerPendingHandshake(71, &inbox);
+    var server = Server{
+        .endpoint = &server_endpoint,
+        .inbox = &inbox,
+        .initial = initial,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+
+    var owner_err: ?anyerror = null;
+    owner: while (!server.done.load(.acquire)) {
+        var datagram = server_endpoint.receiveBytesTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(20),
+            },
+        }) catch |err| switch (err) {
+            // Periodic wakeups bound this owner loop even when a peer exits
+            // early and no further UDP datagram can arrive.
+            error.Timeout => continue,
+            else => {
+                owner_err = err;
+                break :owner;
+            },
+        };
+        var event = dispatcher.dispatch(datagram) catch |err| {
+            // `dispatch` consumes or frees its owned input on every error.
+            datagram = undefined;
+            owner_err = err;
+            break :owner;
+        };
+        datagram = undefined;
+        if (event != .pending_handshake) {
+            event.deinit(allocator);
+            owner_err = error.TestUnexpectedResult;
+            break :owner;
+        }
+        event.deinit(allocator);
+    }
+
+    // Closing the pending source gives the server thread a deterministic exit
+    // if the client failed before sending its Finished flight.
+    if (!server.done.load(.acquire)) inbox.close();
+    client_thread.join();
+    server_thread.join();
+    if (owner_err) |err| return err;
+    if (client.err) |err| return err;
+    if (server.err) |err| return err;
+    var client_established = client.established orelse
+        return error.TestUnexpectedResult;
+    defer client_established.deinit();
+    var server_established = server.established orelse
+        return error.TestUnexpectedResult;
+    defer server_established.deinit();
+    try dispatcher.promotePendingHandshake(
+        71,
+        72,
+        &server_established.connection,
+    );
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    try std.testing.expect(try dispatcher.unregisterConnection(72));
+}
+
 test "QUIC server handshake releases an invalid injected Initial" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

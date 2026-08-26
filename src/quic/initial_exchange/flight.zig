@@ -240,6 +240,24 @@ pub fn open(
     keys: quic.protection.PacketProtectionKeys,
     options: ReceiveOptions,
 ) Error!Received {
+    return openFrom(
+        endpoint,
+        quic.runtime.DatagramSource.fromEndpoint(endpoint),
+        first_from,
+        first_bytes,
+        keys,
+        options,
+    );
+}
+
+pub fn openFrom(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    first_from: net.IpAddress,
+    first_bytes: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    options: ReceiveOptions,
+) Error!Received {
     if (options.max_crypto_buffer == 0 or options.max_datagrams == 0) {
         return error.InvalidCryptoRange;
     }
@@ -271,7 +289,11 @@ pub fn open(
         const datagram_from, const datagram_bytes = if (packet_count == 0)
             .{ first_from, first_bytes }
         else blk: {
-            received = try endpoint.receiveBytes();
+            received = source.receive() catch |err| switch (err) {
+                error.Timeout => unreachable,
+                error.ConcurrencyUnavailable => return error.Unexpected,
+                else => |other| return @errorCast(other),
+            };
             break :blk .{ received.?.from, received.?.bytes };
         };
 
