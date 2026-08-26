@@ -123,14 +123,27 @@ test "public modules are reachable" {
     try std.testing.expectEqualStrings("258EAFA5-E914-47DA-95CA-C5AB0DC85B11", netz.websocket.handshake_guid);
     try std.testing.expectEqual(@as(usize, 64 * 1024), (netz.http1.runtime.Limits{}).max_head_bytes);
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "UnixServer"));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.UnixServer,
         "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http1.runtime.UnixServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime.TlsServer,
         "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.TlsServer,
+        "serveUntil",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "ServeUntilOptions",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
