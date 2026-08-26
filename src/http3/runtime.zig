@@ -2891,13 +2891,17 @@ pub const HandshakeAdmission = struct {
         return self.initial;
     }
 
+    fn abandonRegistration(self: *HandshakeAdmission) void {
+        if (!self.registered) return;
+        _ = self.dispatcher.unregisterPendingHandshake(
+            self.handle,
+        ) catch {};
+        self.registered = false;
+    }
+
     pub fn deinit(self: *HandshakeAdmission) void {
         const allocator = self.inbox.allocator;
-        if (self.registered) {
-            _ = self.dispatcher.unregisterPendingHandshake(
-                self.handle,
-            ) catch {};
-        }
+        self.abandonRegistration();
         if (self.initial_owned) self.initial.deinit(allocator);
         self.inbox.deinit();
         allocator.destroy(self.inbox);
@@ -3052,12 +3056,15 @@ pub const HandshakeServer = struct {
     ) Error!HandshakeServerSession {
         var options = self.handshake_options;
         options.local_connection_id = admission.serverConnectionId();
-        var established = try quic.handshake.acceptFromInitialSource(
+        var established = quic.handshake.acceptFromInitialSource(
             &self.quic_server.endpoint,
             admission.datagramSource(),
             admission.takeInitial(),
             options,
-        );
+        ) catch |err| {
+            admission.abandonRegistration();
+            return err;
+        };
         errdefer established.deinit();
         return HandshakeServerSession.initEstablished(
             established,
