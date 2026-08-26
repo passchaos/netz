@@ -1442,7 +1442,7 @@ imports upstream `mqtt_packets.py`/`mqtt5_props.py`, and compares complete wire
 packets. Four additional wire cases verify absent/zero/one Request Response
 Information plus both the default-enabled diagnostic path and Request Problem
 Information suppression while preserving an exact negative PUBACK reason; all
-134 scenarios pass. This is deliberately described as a selected
+138 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1471,5 +1471,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 134 passing packet-vector scenarios do not cover
+   persistence semantics. The 138 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.
