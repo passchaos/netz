@@ -851,6 +851,381 @@ test "listeners apply independent CONNECT authorization policies" {
     try std.testing.expectEqual(@as(usize, 0), broker.sessions.count());
 }
 
+test "listener packet ACLs compose with broker policy" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const GlobalPolicy = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn publish(
+            context_ptr: *anyopaque,
+            _: mqtt.Connect,
+            message: mqtt.Publish,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return !std.mem.eql(u8, message.topic, "acl/global-denied");
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Subscription,
+        ) bool {
+            return true;
+        }
+    };
+    const PrivatePolicy = struct {
+        publish_calls: std.atomic.Value(usize) = .init(0),
+        delivery_calls: std.atomic.Value(usize) = .init(0),
+
+        fn publish(
+            context_ptr: *anyopaque,
+            _: mqtt.Connect,
+            message: mqtt.Publish,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = self.publish_calls.fetchAdd(1, .monotonic);
+            return !std.mem.eql(u8, message.topic, "acl/private-denied");
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            subscription: mqtt.Subscription,
+        ) bool {
+            return !std.mem.eql(
+                u8,
+                subscription.topic_filter,
+                "acl/private-denied",
+            );
+        }
+
+        fn unsubscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            topic_filter: []const u8,
+        ) bool {
+            return !std.mem.eql(u8, topic_filter, "acl/kept");
+        }
+
+        fn delivery(
+            context_ptr: *anyopaque,
+            authorization: mqtt.broker.DeliveryAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = self.delivery_calls.fetchAdd(1, .monotonic);
+            return !std.mem.eql(
+                u8,
+                authorization.topic,
+                "acl/private-hidden",
+            );
+        }
+    };
+    var global_policy: GlobalPolicy = .{};
+    var private_policy: PrivatePolicy = .{};
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 4,
+            .max_queued_deliveries_per_connection = 16,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+        .access_control = .{
+            .context = &global_policy,
+            .authorize_publish = GlobalPolicy.publish,
+            .authorize_subscribe = GlobalPolicy.subscribe,
+        },
+    });
+    defer broker.deinit();
+    var public_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer public_server.deinit();
+    var private_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer private_server.deinit();
+
+    const private_access = mqtt.broker.ListenerAccessControlHandler{
+        .context = &private_policy,
+        .authorize_publish = PrivatePolicy.publish,
+        .authorize_subscribe = PrivatePolicy.subscribe,
+        .authorize_unsubscribe = PrivatePolicy.unsubscribe,
+        .authorize_delivery = PrivatePolicy.delivery,
+    };
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = public_server.pendingSource(),
+            .connection_count = 1,
+        },
+        .{
+            .source = private_server.pendingSource(),
+            .authorization = .{ .access_control = private_access },
+            .connection_count = 1,
+        },
+    };
+    var shared = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&shared},
+    );
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var public = try runtime.Client.connect(
+        allocator,
+        io,
+        public_server.address(),
+        .{ .protocol = .v5, .client_id = "listener-acl-public" },
+    );
+    defer public.close();
+    var private = try runtime.Client.connect(
+        allocator,
+        io,
+        private_server.address(),
+        .{ .protocol = .v5, .client_id = "listener-acl-private" },
+    );
+    defer private.close();
+
+    var private_suback = try private.subscribe(
+        &.{
+            .{ .topic_filter = "acl/private-denied" },
+            .{ .topic_filter = "acl/kept" },
+            .{ .topic_filter = "acl/private-hidden" },
+        },
+        .{},
+    );
+    defer private_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x87, 0x00, 0x00 },
+        private_suback.suback.reason_codes,
+    );
+
+    // The global and listener policies are both evaluated for an allowed
+    // packet; the counters make this visible without relying on a concurrent
+    // reader or packet-order timing.
+    try private.publish("acl/allowed", "allowed", .{});
+    try std.testing.expectError(
+        error.PublishRefused,
+        private.publish(
+            "acl/global-denied",
+            "global",
+            .{ .qos = .at_least_once },
+        ),
+    );
+    try std.testing.expectError(
+        error.PublishRefused,
+        private.publish(
+            "acl/private-denied",
+            "private",
+            .{ .qos = .at_least_once },
+        ),
+    );
+    var private_unsuback = try private.unsubscribe(
+        &.{"acl/kept"},
+        .{},
+    );
+    defer private_unsuback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{0x87},
+        private_unsuback.unsuback.reason_codes,
+    );
+    try public.publish("acl/private-hidden", "hidden", .{});
+    // A PING response as the next packet proves the destination listener's
+    // read policy suppressed the matching live delivery.
+    try private.ping();
+
+    try disconnectAll(&.{ &public, &private });
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        global_policy.calls.load(.monotonic),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        private_policy.publish_calls.load(.monotonic),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        private_policy.delivery_calls.load(.monotonic),
+    );
+}
+
+test "durable delivery uses reconnect listener ACL" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn delivery(
+            context_ptr: *anyopaque,
+            authorization: mqtt.broker.DeliveryAuthorization,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return !std.mem.eql(u8, authorization.topic, "listener/hidden");
+        }
+    };
+    var policy: Policy = .{};
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var setup_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer setup_server.deinit();
+
+    const setup_listeners = [_]mqtt.broker.Listener{.{
+        .source = setup_server.pendingSource(),
+        .connection_count = 1,
+    }};
+    var setup_serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &setup_listeners,
+    };
+    const setup_thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&setup_serve},
+    );
+    var setup_joined = false;
+    defer if (!setup_joined) setup_thread.join();
+
+    var first = try runtime.Client.connect(
+        allocator,
+        io,
+        setup_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-acl-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer first.close();
+    try first.disconnect(0);
+    try waitForPeerClose(&first);
+    setup_thread.join();
+    setup_joined = true;
+    if (setup_serve.err) |err| return err;
+
+    for ([_]struct { topic: []const u8, payload: []const u8 }{
+        .{ .topic = "listener/hidden", .payload = "drop" },
+        .{ .topic = "listener/visible", .payload = "deliver" },
+    }) |message| {
+        try broker.enqueueSessionPublish(
+            "listener-acl-session",
+            .{
+                .dup = false,
+                .qos = .at_least_once,
+                .retain = false,
+                .topic = message.topic,
+                .packet_id = 1,
+                .properties = &.{},
+                .payload = message.payload,
+            },
+            .at_least_once,
+            false,
+            null,
+        );
+    }
+
+    var reconnect_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer reconnect_server.deinit();
+    const reconnect_listeners = [_]mqtt.broker.Listener{.{
+        .source = reconnect_server.pendingSource(),
+        .authorization = .{
+            .access_control = .{
+                .context = &policy,
+                .authorize_delivery = Policy.delivery,
+            },
+        },
+        .connection_count = 1,
+    }};
+    var reconnect_serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &reconnect_listeners,
+    };
+    const reconnect_thread = try std.Thread.spawn(
+        .{},
+        ListenerServeState.run,
+        .{&reconnect_serve},
+    );
+    var reconnect_joined = false;
+    defer if (!reconnect_joined) reconnect_thread.join();
+
+    var resumed_result = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        reconnect_server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "listener-acl-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    try std.testing.expect(resumed_result.connack.connack.session_present);
+    var visible = try resumed.readPublish();
+    defer visible.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "listener/visible",
+        visible.publish.topic,
+    );
+    try std.testing.expectEqualStrings("deliver", visible.publish.payload);
+    try resumed.writePubAck(visible.publish.packet_id.?, 0);
+    try resumed.ping();
+
+    try resumed.disconnect(0);
+    reconnect_thread.join();
+    reconnect_joined = true;
+    if (reconnect_serve.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        policy.calls.load(.monotonic),
+    );
+}
+
 test "durable Session delivery uses reconnect listener Maximum QoS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

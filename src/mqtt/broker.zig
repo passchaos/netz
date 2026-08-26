@@ -146,6 +146,34 @@ pub const ConnectContextAuthorizationHandler = struct {
 pub const ListenerAuthorization = struct {
     connect: ?ConnectAuthorizationHandler = null,
     connect_context: ?ConnectContextAuthorizationHandler = null,
+    access_control: ?ListenerAccessControlHandler = null,
+};
+
+/// Per-listener packet policy. Every callback is optional because this is an
+/// overlay: configured broker-wide ACL callbacks are always evaluated first.
+/// Delayed Wills intentionally remain broker-scoped because they can outlive
+/// both the listener serve call and its borrowed callback context.
+pub const ListenerAccessControlHandler = struct {
+    context: *anyopaque,
+    authorize_publish: ?*const fn (
+        context: *anyopaque,
+        connect: mqtt.Connect,
+        publish: mqtt.Publish,
+    ) bool = null,
+    authorize_subscribe: ?*const fn (
+        context: *anyopaque,
+        connect: mqtt.Connect,
+        subscription: mqtt.Subscription,
+    ) bool = null,
+    authorize_unsubscribe: ?*const fn (
+        context: *anyopaque,
+        connect: mqtt.Connect,
+        topic_filter: []const u8,
+    ) bool = null,
+    authorize_delivery: ?*const fn (
+        context: *anyopaque,
+        delivery: DeliveryAuthorization,
+    ) bool = null,
 };
 
 pub const AccessControlHandler = struct {
@@ -318,6 +346,9 @@ const ClientSlot = struct {
     assigned_client_id_len: u8 = 0,
     assigned_client_id: [client_id_mod.max_len]u8 = undefined,
     graceful_disconnect: bool = false,
+    /// Borrowed from the active listener descriptor. It is cleared before the
+    /// slot can be reused and is never persisted with a durable Session.
+    listener_access_control: ?ListenerAccessControlHandler = null,
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
     queue_head: usize = 0,
@@ -1609,6 +1640,7 @@ pub const Broker = struct {
         const registration = try self.register(
             index,
             pending.connect.connect,
+            listener_authorization.access_control,
         );
         const subscriber_id = registration.subscriber_id;
         // The Will scheduler now owns its canonical topic. Restore the parsed
@@ -1675,6 +1707,7 @@ pub const Broker = struct {
         self: *Broker,
         slot_index: usize,
         connect: mqtt.Connect,
+        listener_access_control: ?ListenerAccessControlHandler,
     ) Error!Registration {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
@@ -1691,6 +1724,8 @@ pub const Broker = struct {
         slot.session_persistent = false;
         slot.assigned_client_id_len = 0;
         slot.graceful_disconnect = false;
+        slot.listener_access_control = listener_access_control;
+        errdefer slot.listener_access_control = null;
         // The configured queue count is also the memory bound. Reserve it once
         // during setup so routing performs no destination queue allocation
         // while holding the global router lock.
@@ -1998,6 +2033,7 @@ pub const Broker = struct {
         slot.session_handle = null;
         slot.session_present = false;
         slot.session_persistent = false;
+        slot.listener_access_control = null;
         slot.will_handle = null;
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);
@@ -2155,6 +2191,7 @@ pub const Broker = struct {
         slot.session_handle = null;
         slot.session_present = false;
         slot.session_persistent = false;
+        slot.listener_access_control = null;
     }
 
     fn handleDisconnect(
@@ -2239,24 +2276,18 @@ pub const Broker = struct {
             mapped_subscriptions.len,
         );
         defer self.allocator.free(reasons);
+        const slot = try self.slotForSubscriber(id);
         for (mapped_subscriptions, reasons) |subscription, *reason| {
-            reason.* = if (self.options.access_control) |access|
-                if (access.authorize_subscribe(
-                    access.context,
-                    connect,
-                    subscription,
-                ))
-                    0xff
-                else
-                    subscriptionDeniedReason(connection.protocol)
-            else
-                0xff;
+            reason.* = if (self.subscribeAuthorized(
+                slot.listener_access_control,
+                connect,
+                subscription,
+            )) 0xff else subscriptionDeniedReason(connection.protocol);
         }
         const subscription_identifier = mqtt.subscriptionIdentifier(
             subscribe.properties,
         );
         const now = std.Io.Clock.awake.now(self.io);
-        const slot = try self.slotForSubscriber(id);
         const session_handle = slot.session_handle orelse
             return error.SessionNotFound;
         const session_route_id = try self.sessions.routeId(
@@ -2383,7 +2414,7 @@ pub const Broker = struct {
                 .properties = properties.items,
                 .payload = delivery.payload,
             };
-            if (!self.deliveryAuthorized(.{
+            if (!self.deliveryAuthorized(slot.listener_access_control, .{
                 .client_id = client_id,
                 .topic = publish.topic,
                 .payload = publish.payload,
@@ -2463,15 +2494,15 @@ pub const Broker = struct {
         const slot = try self.slotForSubscriber(id);
         self.state_mutex.lockUncancelable(self.io);
         for (mapped_filters, 0..) |filter, index| {
-            if (self.options.access_control) |access| {
-                if (access.authorize_unsubscribe) |authorize| {
-                    if (!authorize(access.context, connect, filter)) {
-                        reasons[index] = unsubscribeDeniedReason(
-                            connection.protocol,
-                        );
-                        continue;
-                    }
-                }
+            if (!self.unsubscribeAuthorized(
+                slot.listener_access_control,
+                connect,
+                filter,
+            )) {
+                reasons[index] = unsubscribeDeniedReason(
+                    connection.protocol,
+                );
+                continue;
             }
             const session_handle = slot.session_handle orelse {
                 self.state_mutex.unlock(self.io);
@@ -2538,19 +2569,18 @@ pub const Broker = struct {
         defer self.allocator.free(mapped_topic);
         var canonical_publish = publish;
         canonical_publish.topic = mapped_topic;
-        if (self.options.access_control) |access| {
-            if (!access.authorize_publish(
-                access.context,
-                connect,
+        const publisher_slot = try self.slotForSubscriber(publisher_id);
+        if (!self.publishAuthorized(
+            publisher_slot.listener_access_control,
+            connect,
+            canonical_publish,
+        )) {
+            return self.rejectPublish(
+                publisher_id,
+                publisher,
                 canonical_publish,
-            )) {
-                return self.rejectPublish(
-                    publisher_id,
-                    publisher,
-                    canonical_publish,
-                    0x87,
-                );
-            }
+                0x87,
+            );
         }
         if (self.payloadTooLarge(canonical_publish.payload)) {
             return self.rejectPublish(
@@ -2867,7 +2897,10 @@ pub const Broker = struct {
                     destination.?.connection.?.localMaximumQoS(),
                 );
             }
-            if (!self.deliveryAuthorized(.{
+            if (!self.deliveryAuthorized(if (online)
+                destination.?.listener_access_control
+            else
+                null, .{
                 .client_id = try self.sessions.clientId(handle),
                 .topic = publish.topic,
                 .payload = publish.payload,
@@ -3228,11 +3261,71 @@ pub const Broker = struct {
         return &.{};
     }
 
+    fn publishAuthorized(
+        self: Broker,
+        listener_access: ?ListenerAccessControlHandler,
+        connect: mqtt.Connect,
+        publish: mqtt.Publish,
+    ) bool {
+        if (self.options.access_control) |access| {
+            if (!access.authorize_publish(
+                access.context,
+                connect,
+                publish,
+            )) return false;
+        }
+        const access = listener_access orelse return true;
+        const authorize = access.authorize_publish orelse return true;
+        return authorize(access.context, connect, publish);
+    }
+
+    fn subscribeAuthorized(
+        self: Broker,
+        listener_access: ?ListenerAccessControlHandler,
+        connect: mqtt.Connect,
+        subscription: mqtt.Subscription,
+    ) bool {
+        if (self.options.access_control) |access| {
+            if (!access.authorize_subscribe(
+                access.context,
+                connect,
+                subscription,
+            )) return false;
+        }
+        const access = listener_access orelse return true;
+        const authorize = access.authorize_subscribe orelse return true;
+        return authorize(access.context, connect, subscription);
+    }
+
+    fn unsubscribeAuthorized(
+        self: Broker,
+        listener_access: ?ListenerAccessControlHandler,
+        connect: mqtt.Connect,
+        topic_filter: []const u8,
+    ) bool {
+        if (self.options.access_control) |access| {
+            if (access.authorize_unsubscribe) |authorize| {
+                if (!authorize(access.context, connect, topic_filter)) {
+                    return false;
+                }
+            }
+        }
+        const access = listener_access orelse return true;
+        const authorize = access.authorize_unsubscribe orelse return true;
+        return authorize(access.context, connect, topic_filter);
+    }
+
     fn deliveryAuthorized(
         self: Broker,
+        listener_access: ?ListenerAccessControlHandler,
         delivery: DeliveryAuthorization,
     ) bool {
-        const access = self.options.access_control orelse return true;
+        if (self.options.access_control) |access| {
+            if (access.authorize_delivery) |authorize| {
+                if (!authorize(access.context, delivery)) return false;
+            }
+        }
+        const access = listener_access orelse return true;
         const authorize = access.authorize_delivery orelse return true;
         return authorize(access.context, delivery);
     }
@@ -3494,7 +3587,7 @@ pub const Broker = struct {
             if (transmissions.len == 0) return null;
             const transmission = transmissions[0];
             if (transmission == .publish and
-                !self.deliveryAuthorized(.{
+                !self.deliveryAuthorized(slot.listener_access_control, .{
                     .client_id = client_id,
                     .topic = transmission.publish.topic,
                     .payload = transmission.publish.payload,

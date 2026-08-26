@@ -19,7 +19,7 @@ and equal-wire broker results are kept separate.
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
-| Listener topic namespaces and policy | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery. Each listener may override CONNECT/CONNACK policy and add CONNECT authorization on top of mandatory broker-wide policy; its negotiated Maximum QoS controls subscription grants plus live and durable delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener; Maximum QoS, authentication and selected limits may be listener-scoped with `per_listener_settings` |
+| Listener topic namespaces and policy | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery. Each listener may override CONNECT/CONNACK policy and add CONNECT plus live publish/subscribe/unsubscribe/delivery authorization on top of mandatory broker-wide policy; its negotiated Maximum QoS controls subscription grants plus live and durable delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener; Maximum QoS, authentication and selected limits may be listener-scoped with `per_listener_settings` |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
@@ -1069,9 +1069,12 @@ projected into its namespace, while queued topics outside that listener's view
 are dropped rather than leaking names or blocking later delivery. Cross-listener
 tests cover TCP/WSS routing, mounted/global subscription visibility, retained
 replay, namespaced Will publication, durable reconnects and shared groups.
-Listener-local CONNECT authorization composes as an additional gate after
-broker-wide authorization, so exposing one less-restricted endpoint cannot
-accidentally bypass a global credential requirement.
+Listener-local CONNECT and packet authorization compose as additional gates
+after broker-wide policy, so exposing one less-restricted endpoint cannot
+accidentally bypass a global credential or ACL requirement. Read authorization
+is re-evaluated against the destination's current listener before retained,
+live, or resumed durable delivery. Delayed Will authorization stays broker-wide
+because a Will may outlive the borrowed listener configuration that accepted it.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
 also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific

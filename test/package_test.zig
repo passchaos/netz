@@ -972,6 +972,10 @@ test "public modules are reachable" {
         "ListenerAuthorization",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "ListenerAccessControlHandler",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "servePendingWithListenerOptions",
     ));
