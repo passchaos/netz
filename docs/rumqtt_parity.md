@@ -1080,7 +1080,9 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session.
+same durable Session. The 135-scenario Mosquitto-derived wire gate runs the
+same policy through the standalone broker option, including exact Session
+Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
 also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific
@@ -1095,7 +1097,7 @@ Standalone TCP, Unix, TLS, WS, and WSS servers also share a long-running
 `serveUntil` worker supervisor with cancellation, connection reuse, error
 observation, and independent accept/connection failure policies.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 134
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 135
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the

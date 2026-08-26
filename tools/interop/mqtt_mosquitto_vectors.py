@@ -539,6 +539,68 @@ def username_password_authorization(
                 ))
 
 
+def username_as_client_id(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # Direct wire shape of Mosquitto's use_username_as_clientid listener
+    # option. Distinct wire Client IDs carrying one username must address the
+    # same durable Session and trigger normal takeover semantics.
+    session_expiry = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.SESSION_EXPIRY_INTERVAL, 60
+    )
+    with NetzBroker(
+        executable,
+        connections=3,
+        extra_args=("--use-username-as-client-id",),
+    ) as broker:
+        with (
+            broker.connect() as first,
+            broker.connect() as replacement,
+            broker.connect() as refused,
+        ):
+            first.sendall(mqtt_packets.gen_connect(
+                "wire-client-a", clean_session=False, proto_ver=5,
+                username="shared-user", properties=session_expiry,
+            ))
+            expect_packet(
+                first, expected_connack(mqtt_packets, mqtt5_props),
+                "username Client ID initial CONNACK",
+            )
+
+            replacement.sendall(mqtt_packets.gen_connect(
+                "wire-client-b", clean_session=False, proto_ver=5,
+                username="shared-user", properties=session_expiry,
+            ))
+            expect_packet(
+                replacement, expected_connack(
+                    mqtt_packets, mqtt5_props, session_present=True
+                ),
+                "username Client ID resumed CONNACK",
+            )
+            expect_packet(
+                first, mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.SESSION_TAKEN_OVER, proto_ver=5
+                ),
+                "username Client ID takeover DISCONNECT",
+            )
+            replacement.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                replacement, mqtt_packets.gen_pingresp(),
+                "username Client ID replacement PINGRESP",
+            )
+
+            refused.sendall(mqtt_packets.gen_connect(
+                "missing-username", proto_ver=5
+            ))
+            expect_packet(
+                refused, mqtt_packets.gen_connack(
+                    rc=0x87, proto_ver=5, properties=None
+                ),
+                "username Client ID missing username refusal",
+            )
+            replacement.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def publish_subscribe_access_control(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -5648,6 +5710,9 @@ def main() -> None:
     username_password_authorization(
         args.broker, mqtt_packets, mqtt5_props
     )
+    username_as_client_id(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     publish_subscribe_access_control(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -5666,7 +5731,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 134 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 135 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
