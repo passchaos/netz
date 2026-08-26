@@ -1132,6 +1132,125 @@ def disconnect_session_expiry(
             removed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def persistent_session_expiry_cap(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Mosquitto's persistent_client_expiration is an administrative maximum
+    # over the final Session lifetime. Cover MQTT 3.1.1's otherwise-unbounded
+    # Session and ensure a v5 DISCONNECT override cannot bypass the cap.
+    with NetzBroker(
+        executable,
+        connections=6,
+        extra_args=("--persistent-session-expiry-seconds=1",),
+    ) as broker:
+        cases = (
+            ("persistent-cap-v311", 4, None),
+            ("persistent-cap-v5-disconnect", 5, 120),
+        )
+        for client_id, proto_ver, disconnect_expiry in cases:
+            with broker.connect() as first:
+                first.sendall(
+                    mqtt_packets.gen_connect(
+                        client_id,
+                        clean_session=False,
+                        proto_ver=proto_ver,
+                        session_expiry=60 if proto_ver == 5 else None,
+                    )
+                )
+                expect_packet(
+                    first,
+                    expected_connack(mqtt_packets, mqtt5_props)
+                    if proto_ver == 5
+                    else mqtt_packets.gen_connack(proto_ver=4),
+                    f"persistent expiry initial CONNACK v{proto_ver}",
+                )
+                properties = (
+                    mqtt5_props.gen_uint32_prop(
+                        mqtt5_props.SESSION_EXPIRY_INTERVAL,
+                        disconnect_expiry,
+                    )
+                    if disconnect_expiry is not None
+                    else b""
+                )
+                first.sendall(
+                    mqtt_packets.gen_disconnect(
+                        proto_ver=proto_ver, properties=properties
+                    )
+                )
+                if first.recv(1) != b"":
+                    raise AssertionError(
+                        "broker sent data after capped Session DISCONNECT"
+                    )
+
+            time.sleep(1.2)
+            with broker.connect() as expired:
+                expired.sendall(
+                    mqtt_packets.gen_connect(
+                        client_id,
+                        clean_session=False,
+                        proto_ver=proto_ver,
+                        session_expiry=60 if proto_ver == 5 else None,
+                    )
+                )
+                expect_packet(
+                    expired,
+                    expected_connack(mqtt_packets, mqtt5_props)
+                    if proto_ver == 5
+                    else mqtt_packets.gen_connack(proto_ver=4),
+                    f"persistent expiry capped CONNACK v{proto_ver}",
+                )
+                expired.sendall(
+                    mqtt_packets.gen_disconnect(proto_ver=proto_ver)
+                )
+
+        topic = "persistent-cap/will"
+        connect_properties = mqtt5_props.gen_uint32_prop(
+            mqtt5_props.SESSION_EXPIRY_INTERVAL, 60
+        )
+        will_properties = mqtt5_props.gen_uint32_prop(
+            mqtt5_props.WILL_DELAY_INTERVAL, 60
+        )
+        with broker.connect() as subscriber, broker.connect() as source:
+            connect_v5(
+                subscriber, mqtt_packets, "persistent-cap-will-subscriber"
+            )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_suback(1, 0, proto_ver=5),
+                "persistent expiry Will SUBACK",
+            )
+            source.sendall(
+                mqtt_packets.gen_connect(
+                    "persistent-cap-will-source",
+                    clean_session=False,
+                    proto_ver=5,
+                    properties=connect_properties,
+                    will_topic=topic,
+                    will_payload=b"capped will",
+                    will_properties=will_properties,
+                )
+            )
+            expect_packet(
+                source,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "persistent expiry Will source CONNACK",
+            )
+            source.sendall(
+                mqtt_packets.gen_disconnect(reason_code=4, proto_ver=5)
+            )
+            expect_packet(
+                subscriber,
+                mqtt_packets.gen_publish(
+                    topic, qos=0, payload="capped will", proto_ver=5
+                ),
+                "persistent expiry capped Will",
+            )
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def idle_session_expiry_releases_qos2_quota(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -5727,11 +5846,14 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
+    persistent_session_expiry_cap(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     idle_session_expiry_releases_qos2_quota(
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 135 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 138 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

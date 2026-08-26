@@ -1029,6 +1029,18 @@ test "broker rejects non-positive system statistics interval" {
     );
 }
 
+test "broker rejects zero persistent Session expiry cap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        Broker.init(allocator, threaded.io(), .{
+            .persistent_session_expiry_seconds = 0,
+        }),
+    );
+}
+
 test {
     _ = @import("broker/listener_tests.zig");
     _ = @import("broker/unix_listener_tests.zig");

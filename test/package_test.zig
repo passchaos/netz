@@ -1122,6 +1122,10 @@ test "public modules are reachable" {
         "netz-",
         (netz.mqtt.broker.Options{}).auto_client_id_prefix,
     );
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Options,
+        "persistent_session_expiry_seconds",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "acceptPending",

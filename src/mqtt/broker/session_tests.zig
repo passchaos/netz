@@ -590,6 +590,215 @@ test "broker Session Expiry override removes restored subscriptions" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker caps persistent Session lifetime across MQTT versions" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try context.TestContext.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 11,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .persistent_session_expiry_seconds = 1,
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{ .broker = &broker, .connection_count = 11 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const v5_long_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+        const client_id = if (protocol == .v3_1_1)
+            "global-expiry-v311"
+        else
+            "global-expiry-v5";
+        const properties: []const mqtt.Property = if (protocol == .v5)
+            &v5_long_expiry
+        else
+            &.{};
+        var first = try mqtt.runtime.Client.connect(
+            allocator,
+            io,
+            broker.address(),
+            .{
+                .protocol = protocol,
+                .client_id = client_id,
+                .clean_start = false,
+                .properties = properties,
+            },
+        );
+        defer first.close();
+        try first.disconnect(0);
+        try waitForPeerClose(&first);
+
+        // The configured global cap shortens both MQTT 3.1.1's otherwise
+        // unbounded persistent Session and MQTT 5's longer requested expiry.
+        try std.Io.sleep(io, .fromMilliseconds(1200), .awake);
+        var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
+            allocator,
+            io,
+            broker.address(),
+            .{
+                .protocol = protocol,
+                .client_id = client_id,
+                .clean_start = false,
+                .properties = properties,
+            },
+        );
+        var resumed = resumed_result.connection;
+        defer resumed.close();
+        defer resumed_result.connack.deinit(allocator);
+        try std.testing.expect(
+            !resumed_result.connack.connack.session_present,
+        );
+        try resumed.disconnect(0);
+        try waitForPeerClose(&resumed);
+    }
+
+    // A shorter MQTT 5 request remains authoritative; the administrative cap
+    // must not lengthen it.
+    const short_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 0,
+    } }};
+    var transient = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "global-expiry-zero",
+            .clean_start = false,
+            .properties = &short_expiry,
+        },
+    );
+    defer transient.close();
+    try transient.disconnect(0);
+    try waitForPeerClose(&transient);
+    var transient_again = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "global-expiry-zero",
+            .clean_start = false,
+            .properties = &short_expiry,
+        },
+    );
+    defer transient_again.connection.close();
+    defer transient_again.connack.deinit(allocator);
+    try std.testing.expect(!transient_again.connack.connack.session_present);
+    try transient_again.connection.disconnect(0);
+    try waitForPeerClose(&transient_again.connection);
+
+    // A DISCONNECT Session Expiry property replaces the CONNECT value, but
+    // it still cannot exceed the broker-wide administrative maximum. This is
+    // the important edge that would otherwise bypass a CONNECT-only cap.
+    const disconnect_long_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 120,
+    } }};
+    var overridden = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "global-expiry-disconnect",
+            .clean_start = false,
+            .properties = &v5_long_expiry,
+        },
+    );
+    defer overridden.close();
+    try overridden.writeDisconnectWithProperties(
+        0,
+        &disconnect_long_expiry,
+    );
+    try waitForPeerClose(&overridden);
+    try std.Io.sleep(io, .fromMilliseconds(1200), .awake);
+
+    var override_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "global-expiry-disconnect",
+            .clean_start = false,
+            .properties = &v5_long_expiry,
+        },
+    );
+    defer override_result.connection.close();
+    defer override_result.connack.deinit(allocator);
+    try std.testing.expect(!override_result.connack.connack.session_present);
+    try override_result.connection.disconnect(0);
+    try waitForPeerClose(&override_result.connection);
+
+    // The same effective expiry bounds Will Delay. Otherwise the Session
+    // would disappear at the administrative deadline while its Will remained
+    // hidden until the longer client-requested delay.
+    var will_subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "global-expiry-will-subscriber",
+        &.{},
+    );
+    defer will_subscriber.close();
+    var will_suback = try will_subscriber.subscribe(
+        &.{.{ .topic_filter = "global-expiry/will" }},
+        .{},
+    );
+    defer will_suback.deinit(allocator);
+    var delayed_will_properties = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .will_delay_interval,
+        .value = 60,
+    } }};
+    var will_source = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "global-expiry-will",
+            .clean_start = false,
+            .properties = &v5_long_expiry,
+            .will = .{
+                .topic = "global-expiry/will",
+                .payload = "expired",
+                .properties = &delayed_will_properties,
+            },
+        },
+    );
+    defer will_source.close();
+    try will_source.writeDisconnectWithProperties(0x04, &.{});
+    var delivered_will = try will_subscriber.readPublish();
+    defer delivered_will.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "expired",
+        delivered_will.publish.payload,
+    );
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+    try will_subscriber.disconnect(0);
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker actively expires idle Session routing and QoS2 state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -1080,7 +1080,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 135-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 138-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -1097,7 +1097,7 @@ Standalone TCP, Unix, TLS, WS, and WSS servers also share a long-running
 `serveUntil` worker supervisor with cancellation, connection reuse, error
 observation, and independent accept/connection failure policies.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 135
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 138
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
@@ -1315,6 +1315,13 @@ The Session Expiry case ports the timing-observable core of Mosquitto's
 present beyond the one-second CONNECT value, the Session is absent after the
 new deadline, and a zero DISCONNECT override removes the replacement
 immediately. Exact CONNACK bytes distinguish every Session Present transition.
+The broker also exposes Mosquitto's administrative
+`persistent_client_expiration` behavior as
+`persistent_session_expiry_seconds`: it caps a longer MQTT 5 Session Expiry and
+also gives MQTT 3.1.1 CleanSession=0 an otherwise unavailable finite lifetime,
+without lengthening a client's shorter or zero MQTT 5 expiry. The cap is
+applied again to MQTT 5 DISCONNECT overrides and to the Session lifetime used
+to bound Will Delay, so neither path can bypass the administrative maximum.
 An additional idle-expiry case constrains the broker to one pending inbound
 QoS 2 transaction, leaves that transaction owned by a disconnected one-second
 Session, and keeps an unrelated connection online without CONNECT/PUBLISH

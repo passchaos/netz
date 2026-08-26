@@ -40,6 +40,7 @@ const Config = struct {
     upgrade_outgoing_qos: bool = false,
     queue_qos0_messages: bool = false,
     use_username_as_client_id: bool = false,
+    persistent_session_expiry_seconds: ?u32 = null,
     system_interval_seconds: ?u32 = null,
     persistence_path: ?[]const u8 = null,
     commit_log_path: ?[]const u8 = null,
@@ -241,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
             .queue_qos0_messages = config.queue_qos0_messages,
+            .persistent_session_expiry_seconds = config.persistent_session_expiry_seconds,
             .system_stats_interval = if (config.system_interval_seconds) |seconds|
                 .fromSeconds(seconds)
             else
@@ -695,6 +697,20 @@ fn parseArgs(
             "--use-username-as-client-id",
         )) {
             config.use_username_as_client_id = true;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--persistent-session-expiry-seconds=",
+        )) {
+            config.persistent_session_expiry_seconds =
+                try std.fmt.parseInt(
+                    u32,
+                    arg["--persistent-session-expiry-seconds=".len..],
+                    10,
+                );
+            if (config.persistent_session_expiry_seconds.? == 0) {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.startsWith(
             u8,
             arg,

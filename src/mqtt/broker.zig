@@ -79,6 +79,14 @@ pub const Options = struct {
     /// while a persistent Session is offline. The MQTT-oriented default drops
     /// those messages because delivery has no reliability guarantee.
     queue_qos0_messages: bool = false,
+    /// Mosquitto-compatible administrative upper bound for a durable
+    /// Session's offline lifetime. Null leaves the protocol value unchanged.
+    /// This also bounds MQTT 3.1.1 CleanSession=0, whose native lifetime is
+    /// otherwise unlimited. The cap applies to CONNECT, a later MQTT 5
+    /// DISCONNECT override, and the Session lifetime that bounds Will Delay.
+    /// Zero is rejected because it would silently turn every persistent
+    /// request into a transient Session.
+    persistent_session_expiry_seconds: ?u32 = null,
     /// Publish retained `$SYS` gauge snapshots at this interval. Null disables
     /// periodic publication. Explicit `publishSystemStats` remains available.
     system_stats_interval: ?std.Io.Duration = null,
@@ -680,6 +688,9 @@ pub const Broker = struct {
         }
         if (options.system_stats_interval) |interval| {
             if (interval.nanoseconds <= 0) return error.InvalidProperty;
+        }
+        if (options.persistent_session_expiry_seconds == 0) {
+            return error.InvalidProperty;
         }
         try mqtt.validateUtf8String(options.auto_client_id_prefix);
         if (options.accept.response_information) |value| {
@@ -1784,8 +1795,10 @@ pub const Broker = struct {
                 null
         else
             null;
-        const opened_session = self.sessions.openConnect(
-            effective_connect,
+        const opened_session = self.sessions.open(
+            effective_connect.client_id,
+            effective_connect.clean_start,
+            self.sessionExpiryForConnect(effective_connect),
             now,
         ) catch |err| {
             slot.active = false;
@@ -1839,8 +1852,9 @@ pub const Broker = struct {
         const previous_handle = self.wills.handleForClient(
             effective_connect.client_id,
         );
-        const accepted_will = self.wills.acceptConnect(
+        const accepted_will = self.wills.acceptConnectWithSessionExpiry(
             effective_connect,
+            self.sessionExpiryForConnect(effective_connect),
             now,
         ) catch |err| {
             self.rollbackOpenedSessionLocked(
@@ -1895,6 +1909,37 @@ pub const Broker = struct {
             slot.assigned_client_id_len = @intCast(id.len);
             return id;
         }
+    }
+
+    fn sessionExpiryForConnect(
+        self: Broker,
+        connect: mqtt.Connect,
+    ) u32 {
+        const requested = session_mod.Store.expiryForConnect(
+            connect.protocol,
+            connect.clean_start,
+            connect.properties,
+        );
+        return self.capPersistentSessionExpiry(requested);
+    }
+
+    fn sessionExpiryForDisconnect(
+        self: Broker,
+        protocol: mqtt.ProtocolVersion,
+        disconnect: mqtt.Disconnect,
+    ) ?u32 {
+        if (protocol != .v5) return null;
+        const requested = mqtt.sessionExpiryInterval(
+            disconnect.properties,
+        ) orelse return null;
+        return self.capPersistentSessionExpiry(requested);
+    }
+
+    fn capPersistentSessionExpiry(self: Broker, requested: u32) u32 {
+        const maximum = self.options.persistent_session_expiry_seconds orelse
+            return requested;
+        if (requested == 0) return 0;
+        return @min(requested, maximum);
     }
 
     /// Roll back a Session generation opened before CONNACK commits.
@@ -1980,10 +2025,35 @@ pub const Broker = struct {
         disconnect: mqtt.Disconnect,
         now: std.Io.Timestamp,
     ) Error!void {
+        const session_expiry_override = if (slot.connection) |connection|
+            self.sessionExpiryForDisconnect(
+                connection.protocol,
+                disconnect,
+            )
+        else if (mqtt.sessionExpiryInterval(disconnect.properties)) |requested|
+            self.capPersistentSessionExpiry(requested)
+        else
+            null;
+        return self.closeWillForDisconnectWithExpiryLocked(
+            slot,
+            disconnect,
+            session_expiry_override,
+            now,
+        );
+    }
+
+    fn closeWillForDisconnectWithExpiryLocked(
+        self: *Broker,
+        slot: *ClientSlot,
+        disconnect: mqtt.Disconnect,
+        session_expiry_override: ?u32,
+        now: std.Io.Timestamp,
+    ) Error!void {
         const handle = slot.will_handle orelse return;
-        const result = self.wills.closeDisconnect(
+        const result = self.wills.closeDisconnectWithSessionExpiry(
             handle,
             disconnect,
+            session_expiry_override,
             now,
         ) catch |err| {
             if (err == error.WillNotFound and
@@ -2216,11 +2286,17 @@ pub const Broker = struct {
         slot: *ClientSlot,
         disconnect: mqtt.Disconnect,
     ) Error!void {
+        const now = std.Io.Clock.awake.now(self.io);
+        const session_expiry_override = self.sessionExpiryForDisconnect(
+            slot.connection.?.protocol,
+            disconnect,
+        );
         self.state_mutex.lockUncancelable(self.io);
-        self.closeWillForDisconnectLocked(
+        self.closeWillForDisconnectWithExpiryLocked(
             slot,
             disconnect,
-            std.Io.Clock.awake.now(self.io),
+            session_expiry_override,
+            now,
         ) catch |err| {
             self.state_mutex.unlock(self.io);
             return err;
@@ -2230,11 +2306,10 @@ pub const Broker = struct {
             if (route_id) |value| {
                 _ = self.session_owners.remove(value);
             }
-            self.sessions.disconnectPacket(
+            self.sessions.disconnect(
                 handle,
-                slot.connection.?.protocol,
-                disconnect,
-                std.Io.Clock.awake.now(self.io),
+                session_expiry_override,
+                now,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
                 return err;
@@ -3121,20 +3196,49 @@ pub const Broker = struct {
         self: *Broker,
         now: std.Io.Timestamp,
     ) usize {
+        const RemovalContext = struct {
+            broker: *Broker,
+            now: std.Io.Timestamp,
+        };
+        var context = RemovalContext{ .broker = self, .now = now };
         return self.sessions.pruneExpiredWithContext(
             now,
-            self,
+            &context,
             struct {
-                fn removed(broker: *Broker, route_id: u64) void {
-                    _ = broker.pending_qos2.removePublisher(
+                fn removed(ctx: *RemovalContext, route_id: u64) void {
+                    ctx.broker.expireWillForSessionRouteLocked(
+                        route_id,
+                        ctx.now,
+                    );
+                    _ = ctx.broker.pending_qos2.removePublisher(
                         sessionSubscriberId(route_id),
                     );
-                    _ = broker.router.removeSubscriber(
+                    _ = ctx.broker.router.removeSubscriber(
                         sessionSubscriberId(route_id),
                     ) catch {};
                 }
             }.removed,
         );
+    }
+
+    fn expireWillForSessionRouteLocked(
+        self: *Broker,
+        route_id: u64,
+        now: std.Io.Timestamp,
+    ) void {
+        const session_id = sessionSubscriberId(route_id);
+        // Will handles are generation-safe but the Session store reports its
+        // stable route on expiry. The publisher map is therefore the sole
+        // authoritative bridge from Session lifetime to delayed Will state.
+        var iterator = self.will_publishers.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.* != session_id) continue;
+            _ = self.wills.close(
+                entry.key_ptr.*,
+                .session_ended,
+                now,
+            ) catch {};
+        }
     }
 
     fn enqueueSessionDeliveryLocked(

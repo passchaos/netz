@@ -50,6 +50,12 @@ pub const CloseResult = enum {
     due_now,
 };
 
+pub const AcceptResult = struct {
+    previous: CloseResult,
+    previous_due: ?Handle,
+    current: ?Handle,
+};
+
 pub const Due = struct {
     client_id: []const u8,
     topic: []const u8,
@@ -446,11 +452,23 @@ pub const Scheduler = struct {
         self: *Scheduler,
         connect: mqtt.Connect,
         now: std.Io.Timestamp,
-    ) Error!struct {
-        previous: CloseResult,
-        previous_due: ?Handle,
-        current: ?Handle,
-    } {
+    ) Error!AcceptResult {
+        return self.acceptConnectWithSessionExpiry(
+            connect,
+            connectSessionExpiry(connect),
+            now,
+        );
+    }
+
+    /// Install a CONNECT Will using the broker's effective Session Expiry.
+    /// Administrative Session limits must also bound Will Delay because MQTT
+    /// publishes a delayed Will no later than the end of its Session.
+    pub fn acceptConnectWithSessionExpiry(
+        self: *Scheduler,
+        connect: mqtt.Connect,
+        session_expiry_interval: u32,
+        now: std.Io.Timestamp,
+    ) Error!AcceptResult {
         const previous_index = self.client_index.get(connect.client_id);
         const previous_handle = if (previous_index) |index| blk: {
             const entry = self.entries.items[index].?;
@@ -483,7 +501,7 @@ pub const Scheduler = struct {
             break :blk try self.prepare(
                 connect.client_id,
                 message,
-                connectSessionExpiry(connect),
+                session_expiry_interval,
                 final_count,
                 final_base_bytes,
             );
@@ -606,9 +624,25 @@ pub const Scheduler = struct {
         packet: mqtt.Disconnect,
         now: std.Io.Timestamp,
     ) Error!CloseResult {
+        return self.closeDisconnectWithSessionExpiry(
+            handle,
+            packet,
+            mqtt.sessionExpiryInterval(packet.properties),
+            now,
+        );
+    }
+
+    /// Apply DISCONNECT with an already policy-limited Session Expiry value.
+    pub fn closeDisconnectWithSessionExpiry(
+        self: *Scheduler,
+        handle: Handle,
+        packet: mqtt.Disconnect,
+        session_expiry_override: ?u32,
+        now: std.Io.Timestamp,
+    ) Error!CloseResult {
         const entry = try self.getEntry(handle);
         if (entry.state == .connected) {
-            if (mqtt.sessionExpiryInterval(packet.properties)) |new_expiry| {
+            if (session_expiry_override) |new_expiry| {
                 // MQTT-3.14.2-2 forbids increasing a zero CONNECT interval in
                 // DISCONNECT. The Session Store enforces the same invariant.
                 if (entry.session_expiry_interval == 0 and new_expiry != 0) {
