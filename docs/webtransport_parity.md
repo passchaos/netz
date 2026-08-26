@@ -193,6 +193,10 @@ stream, DATAGRAM, and detached CONNECT/Capsule state. A two-client shared-
 endpoint test interleaves same-numbered associated streams, DATAGRAMs, and a
 DRAIN capsule and verifies that payloads and control events remain isolated by
 QUIC connection.
+The handshake server can additionally begin HTTP/3/WebTransport admission from
+the dispatcher's owned Initial event, so the first packet is not reread from the
+shared socket. Subsequent TLS Handshake-space packets still need endpoint-owned
+pending-handshake inbox routing before multiple real handshakes can overlap.
 
 ## Session drain and close lifecycle
 

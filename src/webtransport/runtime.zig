@@ -578,6 +578,17 @@ pub const HandshakeServer = struct {
         return pending.accept();
     }
 
+    /// Start WebTransport admission from an Initial received by the shared
+    /// QUIC endpoint dispatcher instead of reading that first datagram again.
+    pub fn receiveSessionRequestFromInitial(
+        self: *HandshakeServer,
+        initial: *quic.endpoint_dispatcher.Event,
+    ) Error!PendingHandshakeSession {
+        var session = try self.h3.acceptFromInitial(initial);
+        errdefer session.deinit();
+        return receiveStatefulSessionRequest(&session, self.limits);
+    }
+
     /// Receive and validate Extended CONNECT without deciding admission. The
     /// caller can inspect authority/path/origin/custom headers, then call one
     /// of `PendingHandshakeSession`'s accept or rejection methods.

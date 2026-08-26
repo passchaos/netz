@@ -70,6 +70,7 @@ pub const UnroutedDatagram = struct {
 };
 
 pub const Event = union(enum) {
+    consumed,
     packet: RoutedPacket,
     timer: TimerEvent,
     /// Late Initial/Handshake packets routed to an established connection
@@ -89,9 +90,18 @@ pub const Event = union(enum) {
             .packet => |*event| event.packet.deinit(allocator),
             .new_initial => |*event| event.datagram.deinit(allocator),
             .unrouted => |*event| event.datagram.deinit(allocator),
-            .timer, .discarded_long_header => {},
+            .consumed, .timer, .discarded_long_header => {},
         }
         self.* = undefined;
+    }
+
+    /// Transfer the datagram behind a new-connection event. The event becomes
+    /// inert so its normal deferred deinit remains safe.
+    pub fn takeNewInitial(self: *Event) ?runtime.OwnedBytes {
+        if (self.* != .new_initial) return null;
+        const datagram = self.new_initial.datagram;
+        self.* = .consumed;
+        return datagram;
     }
 };
 

@@ -706,6 +706,10 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeServer,
         "serveConnection",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "acceptFromInitial",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendMaxPushId"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendGoAway"));
@@ -2104,6 +2108,11 @@ test "public modules are reachable" {
         netz.quic.endpoint_dispatcher,
         "UnroutedKind",
     ));
+    try std.testing.expect(@hasDecl(netz.quic.handshake, "acceptFromInitial"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Event,
+        "takeNewInitial",
+    ));
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
     try std.testing.expect(@hasDecl(netz.webtransport, "SessionState"));
     try std.testing.expect(@hasDecl(netz.webtransport, "StreamRegistry"));
@@ -2176,6 +2185,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "receiveSessionRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
+        "receiveSessionRequestFromInitial",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.Server,

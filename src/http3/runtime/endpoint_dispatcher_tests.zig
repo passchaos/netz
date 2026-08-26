@@ -186,7 +186,7 @@ test "HTTP/3 sessions consume dispatcher packets without socket races" {
                     }
                 }
             },
-            .timer => {},
+            .consumed, .timer => {},
             .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
     }

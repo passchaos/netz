@@ -1580,6 +1580,29 @@ fn connectAttempt(
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
+    return acceptInternal(endpoint, null, options);
+}
+
+/// Continue a server handshake from an Initial already received by the sole
+/// endpoint dispatcher. Ownership of `initial_datagram` is consumed on every
+/// return path. Subsequent handshake packets still use the endpoint receive
+/// path; a fully concurrent server supplies those through the pending-handshake
+/// inbox layer rather than running this blocking helper in parallel.
+pub fn acceptFromInitial(
+    endpoint: *quic.runtime.Endpoint,
+    initial_datagram: quic.runtime.OwnedBytes,
+    options: ServerOptions,
+) Error!EstablishedConnection {
+    return acceptInternal(endpoint, initial_datagram, options);
+}
+
+fn acceptInternal(
+    endpoint: *quic.runtime.Endpoint,
+    first_datagram: ?quic.runtime.OwnedBytes,
+    options: ServerOptions,
+) Error!EstablishedConnection {
+    var owned_first = first_datagram;
+    defer if (owned_first) |*datagram| datagram.deinit(endpoint.allocator);
     try validateConfiguredVersions(options.version, options.available_versions);
     try options.handshake_recovery.validate();
     if (options.psk) |psk| {
@@ -1616,7 +1639,21 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         .server,
     );
 
-    var client_initial = try receiveClientInitial(
+    var client_initial = if (owned_first) |datagram| blk: {
+        const opened = try openClientInitialDatagram(
+            endpoint,
+            datagram,
+            0,
+            options.max_crypto_buffer,
+            options.retry_source_connection_id,
+            options.version,
+            accept_zero_fixed_bit,
+        );
+        owned_first = null;
+        var consumed = datagram;
+        consumed.deinit(endpoint.allocator);
+        break :blk opened;
+    } else try receiveClientInitial(
         endpoint,
         0,
         options.max_crypto_buffer,
@@ -2529,6 +2566,26 @@ fn receiveClientInitial(
             supported_wire_versions,
         );
     defer datagram.deinit(endpoint.allocator);
+    return openClientInitialDatagram(
+        endpoint,
+        datagram,
+        expected_packet_number,
+        max_crypto_buffer,
+        retry_destination_connection_id,
+        version,
+        allow_zero_fixed_bit,
+    );
+}
+
+fn openClientInitialDatagram(
+    endpoint: *quic.runtime.Endpoint,
+    datagram: quic.runtime.OwnedBytes,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+    retry_destination_connection_id: []const u8,
+    version: quic.Version,
+    allow_zero_fixed_bit: bool,
+) Error!ReceivedClientInitial {
     if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
 
     const header = try quic.LongHeader.parseWithFixedBitPolicy(

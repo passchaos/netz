@@ -359,6 +359,11 @@ packet and drain ready HTTP/3 events without any session attempting another UDP
 read. A two-client preconfigured-key test routes interleaved SETTINGS and
 request packets through one dispatcher/socket into two independent HTTP/3
 sessions, validating each path and each QPACK/control state independently.
+The integrated QUIC server handshake can now consume the first client Initial
+already owned by that dispatcher, and HTTP/3/WebTransport expose corresponding
+`acceptFromInitial` entry points. This removes a second socket read at admission
+and preserves explicit datagram ownership, while later Handshake packets still
+require the pending-CID inbox described below.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server: Initial/Retry handshakes still need incremental dispatcher-owned

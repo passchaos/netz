@@ -288,7 +288,7 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
                     saw_drain_a = true;
                 }
             },
-            .timer => {},
+            .consumed, .timer => {},
             .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
     }

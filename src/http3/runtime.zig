@@ -2922,6 +2922,27 @@ pub const HandshakeServer = struct {
         );
     }
 
+    /// Accept from a client Initial already received/classified by the shared
+    /// QUIC endpoint dispatcher. This prevents the HTTP/3 accept path from
+    /// performing a second read for the first datagram.
+    pub fn acceptFromInitial(
+        self: *HandshakeServer,
+        initial: *quic.endpoint_dispatcher.Event,
+    ) Error!HandshakeServerSession {
+        const datagram = initial.takeNewInitial() orelse
+            return error.InvalidHandshakeFlight;
+        var established = try quic.handshake.acceptFromInitial(
+            &self.quic_server.endpoint,
+            datagram,
+            self.handshake_options,
+        );
+        errdefer established.deinit();
+        return HandshakeServerSession.initEstablished(
+            established,
+            self.session_options,
+        );
+    }
+
     /// Accept one authenticated QUIC connection and serve up to
     /// `max_requests` HTTP/3 requests on it. The handler runs serially because
     /// a `HandshakeServerSession` owns one mutable QUIC/QPACK state machine;

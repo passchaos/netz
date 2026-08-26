@@ -149,6 +149,117 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
 }
 
+test "QUIC server handshake consumes a dispatcher-owned Initial" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "dispatch";
+    const client_cid = "client";
+    const server_cid = "server";
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+                allocator,
+                self.endpoint,
+            );
+            defer dispatcher.deinit();
+            const versions = [_]u32{
+                quic.Version.version_1.wireValue(),
+                quic.Version.version_2.wireValue(),
+            };
+            var event = try dispatcher.receive(&versions);
+            defer event.deinit(allocator);
+            try std.testing.expect(event == .new_initial);
+            const initial = event.takeNewInitial() orelse
+                return error.TestUnexpectedResult;
+            var established = try handshake.acceptFromInitial(
+                self.endpoint,
+                initial,
+                .{
+                    .local_connection_id = server_cid,
+                    .random = [_]u8{0xa8} ** 32,
+                    .x25519_secret_key = [_]u8{0xa9} ** 32,
+                },
+            );
+            defer established.deinit();
+            try std.testing.expectEqualStrings("h3", established.alpn);
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xaa} ** 32,
+            .x25519_secret_key = [_]u8{0xab} ** 32,
+        },
+    );
+    defer established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "QUIC server handshake releases an invalid injected Initial" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const bytes = try allocator.alloc(
+        u8,
+        quic.initial_exchange.min_initial_udp_datagram_size,
+    );
+    @memset(bytes, 0);
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        handshake.acceptFromInitial(
+            &endpoint,
+            .{
+                .from = .{ .ip4 = .loopback(4444) },
+                .bytes = bytes,
+            },
+            .{ .local_connection_id = "server" },
+        ),
+    );
+}
+
 test "QUIC integrated handshake recovers dropped client and server flights" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
