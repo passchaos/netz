@@ -2978,7 +2978,6 @@ pub const HandshakeSupervisorEvent = union(enum) {
 const HandshakeWorkerContext = struct {
     server: *HandshakeServer,
     io: std.Io,
-    allocator: std.mem.Allocator,
     completed: *std.Io.Queue(HandshakeCompletion),
 };
 
@@ -3034,7 +3033,6 @@ pub const HandshakeSupervisor = struct {
         context.* = .{
             .server = server,
             .io = supervisor.io,
-            .allocator = supervisor.allocator,
             .completed = completed,
         };
         return supervisor;
@@ -3195,25 +3193,19 @@ pub const HandshakeSupervisor = struct {
     ) std.Io.Cancelable!void {
         const result: @FieldType(HandshakeCompletion, "result") = blk: {
             const session = context.server.acceptAdmission(admission) catch |err| {
+                admission.abandonRegistration();
                 break :blk .{ .failure = err };
             };
             break :blk .{ .session = session };
         };
-        context.completed.putOne(context.io, .{
+        context.completed.putOneUncancelable(context.io, .{
             .handle = admission.handle,
             .admission = admission,
             .result = result,
         }) catch |err| switch (err) {
-            error.Canceled, error.Closed => {
-                var owned_result = result;
-                switch (owned_result) {
-                    .session => |*session| session.deinit(),
-                    .failure => {},
-                }
-                admission.deinit();
-                context.allocator.destroy(admission);
-                return error.Canceled;
-            },
+            // The queue is closed only after `workers.cancel` has joined every
+            // worker, so closure here violates supervisor ownership.
+            error.Closed => unreachable,
         };
     }
 
@@ -3374,15 +3366,12 @@ pub const HandshakeServer = struct {
     ) Error!HandshakeServerSession {
         var options = self.handshake_options;
         options.local_connection_id = admission.serverConnectionId();
-        var established = quic.handshake.acceptFromInitialSource(
+        var established = try quic.handshake.acceptFromInitialSource(
             &self.quic_server.endpoint,
             admission.datagramSource(),
             admission.takeInitial(),
             options,
-        ) catch |err| {
-            admission.abandonRegistration();
-            return err;
-        };
+        );
         errdefer established.deinit();
         return HandshakeServerSession.initEstablished(
             established,
