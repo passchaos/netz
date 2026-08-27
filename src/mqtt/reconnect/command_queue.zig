@@ -1,9 +1,9 @@
 //! Bounded multi-producer command channel for the reconnect event loop.
 //!
 //! Synchronous requests borrow their payload until completion. Asynchronous
-//! PUBLISH, SUBSCRIBE, and UNSUBSCRIBE requests instead deep-copy all variable
-//! data, so producers may return immediately while one loop retains exclusive
-//! transport ownership.
+//! PUBLISH, SUBSCRIBE, UNSUBSCRIBE, and DISCONNECT requests instead deep-copy
+//! all variable data, so producers may return immediately while one loop
+//! retains exclusive transport ownership.
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
@@ -202,6 +202,58 @@ pub const CommandQueue = struct {
         return command_id;
     }
 
+    /// Gracefully disconnect through the loop that owns the transport. The
+    /// property slice is borrowed until this synchronous call returns.
+    pub fn disconnect(
+        self: *CommandQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        var command = Command{ .operation = .{ .disconnect = .{
+            .reason_code = reason_code,
+            .properties = properties,
+        } } };
+        try self.submit(&command);
+    }
+
+    /// Deep-copy MQTT 5 properties and enqueue a graceful disconnect. A
+    /// successful command stops the owning reconnect loop after its completion
+    /// callback returns; queued commands behind it fail during queue shutdown.
+    pub fn disconnectAsync(
+        self: *CommandQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+    ) Error!u64 {
+        self.allocator_mutex.lockUncancelable(self.io);
+        defer self.allocator_mutex.unlock(self.io);
+        const command = try self.allocator.create(Command);
+        errdefer self.allocator.destroy(command);
+        const copied_properties = try owned_properties.clone(
+            self.allocator,
+            properties,
+            owned_properties.keepAll,
+        );
+        errdefer owned_properties.deinit(
+            self.allocator,
+            copied_properties.properties,
+        );
+        const command_id = try self.nextCommandId();
+        command.* = .{
+            .operation = .{ .disconnect_owned = .{
+                .reason_code = reason_code,
+                .properties = copied_properties.properties,
+            } },
+            .async_completion = .{
+                .command_id = command_id,
+                .handler = completion,
+            },
+            .owner = self,
+        };
+        try self.enqueueOwned(command);
+        return command_id;
+    }
+
     pub fn flushPending(self: *CommandQueue) Error!void {
         var command = Command{ .operation = .flush_pending };
         try self.submit(&command);
@@ -286,6 +338,16 @@ pub const CommandQueue = struct {
 };
 
 pub const Command = struct {
+    pub const Disconnect = struct {
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    };
+
+    pub const OwnedDisconnect = struct {
+        reason_code: u8,
+        properties: []mqtt.Property,
+    };
+
     pub const Operation = union(enum) {
         publish: struct {
             topic: []const u8,
@@ -308,6 +370,8 @@ pub const Command = struct {
             filters: [][]const u8,
             properties: []mqtt.Property,
         },
+        disconnect: Disconnect,
+        disconnect_owned: OwnedDisconnect,
         flush_pending,
         begin_reauthentication: []const mqtt.Property,
     };
@@ -392,6 +456,18 @@ pub const Command = struct {
         self.deinitOwnedFromIo(io);
     }
 
+    pub fn finishDisconnect(self: *Command, io: std.Io) void {
+        if (self.async_completion) |completion| {
+            completion.handler.complete(completion.handler.context, .{
+                .command_id = completion.command_id,
+                .result = .{ .disconnect = {} },
+            });
+            self.deinitOwnedFromIo(io);
+            return;
+        }
+        self.completed.set(io);
+    }
+
     fn deinitOwnedFromIo(self: *Command, _: std.Io) void {
         const owner = self.owner.?;
         self.deinitOwned(owner);
@@ -426,6 +502,12 @@ pub const Command = struct {
                 );
                 deinitStrings(owner.allocator, unsubscribe.filters);
             },
+            .disconnect_owned => |disconnect_command| {
+                owned_properties.deinit(
+                    owner.allocator,
+                    disconnect_command.properties,
+                );
+            },
             else => {},
         }
         const previous = owner.async_commands.fetchSub(1, .release);
@@ -442,6 +524,7 @@ pub const Completion = struct {
         publish: ?u16,
         subscribe: Ack,
         unsubscribe: Ack,
+        disconnect: void,
     };
 
     pub const Ack = struct {
@@ -465,6 +548,7 @@ pub const OwnedCompletion = struct {
         publish: ?u16,
         subscribe: Ack,
         unsubscribe: Ack,
+        disconnect: void,
     };
 
     pub const Ack = struct {
@@ -508,6 +592,7 @@ pub const OwnedCompletion = struct {
             .unsubscribe => |ack| .{
                 .unsubscribe = try cloneAck(allocator, ack),
             },
+            .disconnect => .{ .disconnect = {} },
         };
     }
 
@@ -537,6 +622,7 @@ pub const OwnedCompletion = struct {
             .publish => {},
             .subscribe => |ack| deinitAck(owner.allocator, ack),
             .unsubscribe => |ack| deinitAck(owner.allocator, ack),
+            .disconnect => {},
         } else |_| {}
         const previous = owner.outstanding.fetchSub(1, .release);
         std.debug.assert(previous != 0);
@@ -707,8 +793,8 @@ pub const CompletionHandler = struct {
 
 const TestCompletion = struct {
     calls: usize = 0,
-    ids: [2]u64 = .{ 0, 0 },
-    errors: [2]?anyerror = .{ null, null },
+    ids: [3]u64 = .{ 0, 0, 0 },
+    errors: [3]?anyerror = .{ null, null, null },
 
     fn complete(context: *anyopaque, completion: Completion) void {
         const self: *@This() = @ptrCast(@alignCast(context));
@@ -986,6 +1072,66 @@ test "MQTT async subscription commands reject a full queue without leaking" {
     try std.testing.expectEqual(@as(usize, 0), completion.calls);
 }
 
+test "MQTT async disconnect rejects a full queue without leaking" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    var queue = try CommandQueue.init(
+        std.testing.allocator,
+        threaded.io(),
+        0,
+    );
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    try std.testing.expectError(
+        error.CommandQueueFull,
+        queue.disconnectAsync(
+            0x00,
+            &.{.{ .utf8 = .{
+                .id = .reason_string,
+                .value = "queue full",
+            } }},
+            completion.handler(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), completion.calls);
+}
+
+test "MQTT async disconnect owns properties" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    var reason: [8]u8 = "original".*;
+    const properties = [_]mqtt.Property{.{ .utf8 = .{
+        .id = .reason_string,
+        .value = &reason,
+    } }};
+    _ = try queue.disconnectAsync(
+        0x00,
+        &properties,
+        completion.handler(),
+    );
+    @memcpy(&reason, "modified");
+
+    const command = (try queue.take()).?;
+    switch (command.operation) {
+        .disconnect_owned => |operation| {
+            try std.testing.expectEqualStrings(
+                "original",
+                operation.properties[0].utf8.value,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    command.finishFailure(io, error.CommandQueueClosed);
+}
+
 test "MQTT async subscription commands own filters and properties" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
@@ -1107,13 +1253,13 @@ test "MQTT command queue completes buffered async publish on stop" {
     try std.testing.expectEqual(error.CommandQueueClosed, completion.err.?);
 }
 
-test "MQTT command queue fails buffered async subscription commands on stop" {
+test "MQTT command queue fails buffered async commands on stop" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var queue = try CommandQueue.init(std.testing.allocator, io, 2);
+    var queue = try CommandQueue.init(std.testing.allocator, io, 3);
     defer queue.deinit();
     var completion: TestCompletion = .{};
     const subscribe_id = try queue.subscribeAsync(
@@ -1126,25 +1272,35 @@ test "MQTT command queue fails buffered async subscription commands on stop" {
         .{},
         completion.handler(),
     );
+    const disconnect_id = try queue.disconnectAsync(
+        0x00,
+        &.{.{ .utf8 = .{
+            .id = .reason_string,
+            .value = "stopped",
+        } }},
+        completion.handler(),
+    );
 
     queue.stop(error.CommandQueueClosed);
 
-    try std.testing.expectEqual(@as(usize, 2), completion.calls);
+    try std.testing.expectEqual(@as(usize, 3), completion.calls);
     try std.testing.expectEqual(subscribe_id, completion.ids[0]);
     try std.testing.expectEqual(unsubscribe_id, completion.ids[1]);
+    try std.testing.expectEqual(disconnect_id, completion.ids[2]);
     try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[0].?);
     try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[1].?);
+    try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[2].?);
 }
 
-test "MQTT async subscription allocation failures leak nothing" {
+test "MQTT async command allocation failures leak nothing" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
-        checkAsyncSubscriptionAllocationFailure,
+        checkAsyncCommandAllocationFailure,
         .{},
     );
 }
 
-fn checkAsyncSubscriptionAllocationFailure(
+fn checkAsyncCommandAllocationFailure(
     allocator: std.mem.Allocator,
 ) !void {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
@@ -1170,6 +1326,21 @@ fn checkAsyncSubscriptionAllocationFailure(
     _ = try queue.unsubscribeAsync(
         &.{ "allocated/one", "allocated/two" },
         .{ .properties = &properties },
+        completion.handler(),
+    );
+    // Finish the two buffered commands so the third operation can exercise
+    // every allocation point without depending on queue backpressure.
+    (try queue.take()).?.finishFailure(
+        threaded.io(),
+        error.CommandQueueClosed,
+    );
+    (try queue.take()).?.finishFailure(
+        threaded.io(),
+        error.CommandQueueClosed,
+    );
+    _ = try queue.disconnectAsync(
+        0x00,
+        &properties,
         completion.handler(),
     );
 }

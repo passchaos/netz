@@ -369,6 +369,41 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn disconnect(
+        self: *QueuedRun,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) CommandQueueError!void {
+        return self.queue.disconnect(reason_code, properties);
+    }
+
+    pub fn disconnectAsync(
+        self: *QueuedRun,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.disconnectAsync(
+            reason_code,
+            properties,
+            completion,
+        );
+    }
+
+    /// Enqueue a graceful disconnect with an awaitable completion.
+    pub fn disconnectQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) CommandQueueError!u64 {
+        return self.disconnectAsync(
+            reason_code,
+            properties,
+            completions.handler(),
+        );
+    }
+
     pub fn flushPending(self: *QueuedRun) CommandQueueError!void {
         return self.queue.flushPending();
     }
@@ -724,9 +759,19 @@ pub const Client = struct {
     /// Connection. Outgoing QoS state remains available until acknowledgements
     /// complete or a future CONNACK reports that the Session no longer exists.
     pub fn disconnect(self: *Client, reason_code: u8) Error!void {
+        return self.disconnectWithProperties(reason_code, &.{});
+    }
+
+    /// Send a graceful MQTT 5 DISCONNECT with packet properties. MQTT 3.1.1
+    /// accepts only reason code zero and an empty property slice.
+    pub fn disconnectWithProperties(
+        self: *Client,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) Error!void {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
-        try active.disconnect(reason_code);
+        try active.writeDisconnectWithProperties(reason_code, properties);
         self.noteControlSent();
         self.disconnectTransport();
     }
@@ -1040,7 +1085,7 @@ pub const Client = struct {
                     error.CommandQueueClosed => return,
                     else => return err,
                 } orelse break;
-                self.executeQueuedCommand(command);
+                if (self.executeQueuedCommand(command)) return;
             }
             var poll = options.poll;
             poll.timeout = .fromNanoseconds(@min(
@@ -1347,10 +1392,12 @@ pub const Client = struct {
         };
     }
 
+    /// Returns true after a successful graceful disconnect, instructing the
+    /// queue owner to stop instead of immediately reconnecting.
     fn executeQueuedCommand(
         self: *Client,
         command: *command_queue.Command,
-    ) void {
+    ) bool {
         switch (command.operation) {
             .publish => |publish_command| {
                 const packet_id = self.publish(
@@ -1359,10 +1406,10 @@ pub const Client = struct {
                     publish_command.options,
                 ) catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
                 command.finishSuccess(self.io, packet_id);
-                return;
+                return false;
             },
             .publish_owned => |publish_command| {
                 const packet_id = self.publish(
@@ -1376,10 +1423,10 @@ pub const Client = struct {
                     },
                 ) catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
                 command.finishSuccess(self.io, packet_id);
-                return;
+                return false;
             },
             .subscribe_owned => |subscribe_command| {
                 var subscriptions = std.ArrayList(mqtt.Subscription).empty;
@@ -1389,7 +1436,7 @@ pub const Client = struct {
                     subscribe_command.subscriptions.len,
                 ) catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
                 for (subscribe_command.subscriptions) |stored| {
                     subscriptions.appendAssumeCapacity(stored.value());
@@ -1399,10 +1446,10 @@ pub const Client = struct {
                     .{ .properties = subscribe_command.properties },
                 ) catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
                 command.finishSubAck(self.io, &suback);
-                return;
+                return false;
             },
             .unsubscribe_owned => |unsubscribe_command| {
                 var unsuback = self.unsubscribe(
@@ -1410,25 +1457,69 @@ pub const Client = struct {
                     .{ .properties = unsubscribe_command.properties },
                 ) catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
                 command.finishUnsubAck(self.io, &unsuback);
-                return;
+                return false;
+            },
+            .disconnect => |disconnect_command| {
+                return self.executeDisconnectCommand(
+                    command,
+                    disconnect_command.reason_code,
+                    disconnect_command.properties,
+                );
+            },
+            .disconnect_owned => |disconnect_command| {
+                return self.executeDisconnectCommand(
+                    command,
+                    disconnect_command.reason_code,
+                    disconnect_command.properties,
+                );
             },
             .flush_pending => {
                 self.flushPending() catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
             },
             .begin_reauthentication => |properties| {
                 self.beginReauthentication(properties) catch |err| {
                     command.finishFailure(self.io, err);
-                    return;
+                    return false;
                 };
             },
         }
         command.finishSuccess(self.io, null);
+        return false;
+    }
+
+    fn executeDisconnectCommand(
+        self: *Client,
+        command: *command_queue.Command,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) bool {
+        const active = self.connection() orelse {
+            command.finishFailure(self.io, error.ConnectionUnavailable);
+            return false;
+        };
+        // Validate and encode before signaling shutdown. A protocol error must
+        // leave the active connection and reconnect loop usable.
+        active.writeDisconnectWithProperties(
+            reason_code,
+            properties,
+        ) catch |err| {
+            command.finishFailure(self.io, err);
+            return false;
+        };
+        self.noteControlSent();
+        self.disconnectTransport();
+        // Set shutdown before publishing success. A synchronous caller may
+        // return and immediately call `deinit`, which must not race the worker
+        // into a fresh reconnect iteration.
+        self.shutdown.set(self.io);
+        command.finishDisconnect(self.io);
+        return true;
     }
 
     fn applyOutgoingAck(

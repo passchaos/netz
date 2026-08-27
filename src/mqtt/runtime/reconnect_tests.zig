@@ -2169,3 +2169,268 @@ test "MQTT queued run exposes awaitable owned command completions" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT queued disconnect writes owned MQTT5 properties and stops" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(u8, 0x04),
+                disconnect.disconnect.reason_code,
+            );
+            try std.testing.expectEqualStrings(
+                "original",
+                disconnect.disconnect.properties[0].utf8.value,
+            );
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "queued-disconnect" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 1,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    var completions = try reconnect.CompletionQueue.init(allocator, io, 1);
+    defer completions.deinit();
+    var reason: [8]u8 = "original".*;
+    const command_id = try run.disconnectQueued(
+        &completions,
+        0x04,
+        &.{.{ .utf8 = .{
+            .id = .reason_string,
+            .value = &reason,
+        } }},
+    );
+    @memcpy(&reason, "modified");
+    var completion = try completions.receive();
+    defer completion.deinit();
+    try std.testing.expectEqual(command_id, completion.command_id);
+    switch (try completion.result) {
+        .disconnect => {},
+        else => return error.UnexpectedPacket,
+    }
+    if (run.deinit()) |err| return err;
+    try std.testing.expect(client.connection() == null);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT queued disconnect emits the MQTT311 minimal packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v3_1_1 });
+            defer accepted.deinit(self.server.allocator);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u8, 0), disconnect.disconnect.reason_code);
+            try std.testing.expectEqual(@as(usize, 0), disconnect.disconnect.properties.len);
+            try std.testing.expectEqual(@as(usize, 2), disconnect.packet.bytes.len);
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v3_1_1, .client_id = "queued-disconnect-v4" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 1,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    try run.disconnect(0, &.{});
+    if (run.deinit()) |err| return err;
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT queued disconnect validation failure keeps worker connected" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "still/connected",
+                publish.publish.topic,
+            );
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "invalid-disconnect" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 1,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        run.disconnect(0x01, &.{}),
+    );
+    _ = try run.publish("still/connected", "ok", .{});
+    if (run.deinit()) |err| return err;
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
