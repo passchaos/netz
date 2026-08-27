@@ -582,8 +582,11 @@ sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
 
 Netz exposes `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
-keep-alive cycles. The latter waits until a full interval of peer receive
-inactivity, supports Hyper-shaped active-stream versus `while_idle` policy, and
+keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, and WINDOW_UPDATE readers
+now provide both timeout and absolute-deadline variants, and HTTP/2 tunnels
+provide `readWithTimeout` alongside `readWithDeadline`. The keep-alive driver
+waits until a full interval of peer receive inactivity, supports Hyper-shaped
+active-stream versus `while_idle` policy, and
 then requires the matching ACK within a separate timeout. Both use awake-clock
 absolute deadlines: stale ACKs and interleaved SETTINGS, PING, WINDOW_UPDATE,
 PRIORITY, GOAWAY, and extension control traffic cannot renew the ACK budget.
@@ -592,9 +595,11 @@ response reader. `Limits.max_pending_ping_frames` bounds that queue; the frame
 that reaches the cap remains recoverable even though the probe returns
 `MessageTooLarge`. Local cleartext tests cover silent-peer timeout, stale-ACK
 and control-frame pressure, receive-activity rescheduling, idle skip/opt-in,
-active response preservation, request/response frame preservation, and queue-
-cap preservation; native TLS tests cover both direct PING and scheduled idle
-keep-alive. Unlike Hyper's continuously polled background connection driver,
+active response preservation, request/response frame preservation, queue-cap
+preservation, partial-frame timeout recovery, one-budget control-frame waits,
+and tunnel timeout recovery; native TLS tests cover both direct PING and
+scheduled idle keep-alive. Unlike Hyper's continuously polled background
+connection driver,
 the blocking netz driver deliberately runs one cycle at a time and must be the
 sole frame reader; applications repeat it from their owning event loop.
 

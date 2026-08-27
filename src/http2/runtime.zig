@@ -5955,8 +5955,33 @@ pub const Connection = struct {
     }
 
     pub fn readPing(self: *Connection) Error![8]u8 {
+        return self.readPingUntil(null);
+    }
+
+    pub fn readPingWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error![8]u8 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readPingUntil(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readPingWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error![8]u8 {
+        return self.readPingUntil(deadline);
+    }
+
+    fn readPingUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error![8]u8 {
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
@@ -6036,8 +6061,33 @@ pub const Connection = struct {
     }
 
     pub fn readGoAway(self: *Connection) Error!OwnedGoAway {
+        return self.readGoAwayUntil(null);
+    }
+
+    pub fn readGoAwayWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedGoAway {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readGoAwayUntil(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readGoAwayWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedGoAway {
+        return self.readGoAwayUntil(deadline);
+    }
+
+    fn readGoAwayUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedGoAway {
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .goaway) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
@@ -6083,8 +6133,33 @@ pub const Connection = struct {
     }
 
     pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
+        return self.readResetStreamUntil(null);
+    }
+
+    pub fn readResetStreamWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResetStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResetStreamUntil(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readResetStreamWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResetStream {
+        return self.readResetStreamUntil(deadline);
+    }
+
+    fn readResetStreamUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedResetStream {
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .rst_stream) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
@@ -6593,8 +6668,33 @@ pub const Connection = struct {
     }
 
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
+        return self.readWindowUpdateUntil(null);
+    }
+
+    pub fn readWindowUpdateWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedWindowUpdate {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readWindowUpdateUntil(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readWindowUpdateWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedWindowUpdate {
+        return self.readWindowUpdateUntil(deadline);
+    }
+
+    fn readWindowUpdateUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedWindowUpdate {
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .window_update) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
@@ -9070,6 +9170,17 @@ pub const Tunnel = struct {
 
     pub fn read(self: *Tunnel) Error!OwnedTunnelData {
         return self.readWithDeadlineInternal(null);
+    }
+
+    pub fn readWithTimeout(
+        self: *Tunnel,
+        timeout: std.Io.Duration,
+    ) Error!OwnedTunnelData {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readWithDeadlineInternal(.fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn readWithDeadline(

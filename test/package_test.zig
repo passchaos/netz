@@ -608,6 +608,46 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime.FlowWindow, "available"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "sendResetStream"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readResetStream"));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readResetStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readResetStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readPingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readPingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readGoAwayWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readGoAwayWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readWindowUpdateWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readWindowUpdateWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Tunnel,
+        "readWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Tunnel,
+        "readWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "releaseReceivedCapacity"));
     const stream_reset_error: netz.http2.runtime.Error = error.StreamReset;
     try std.testing.expect(stream_reset_error == error.StreamReset);

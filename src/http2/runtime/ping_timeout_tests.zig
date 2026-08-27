@@ -118,6 +118,273 @@ test "HTTP/2 bounded PING times out when the peer stays silent" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 bounded inbound PING preserves a partial frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const payload = [8]u8{ 2, 7, 1, 8, 2, 8, 1, 8 };
+    const Shared = struct {
+        server: *runtime.Server,
+        payload: [8]u8,
+        prefix_sent: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_sent.set(self.server.io);
+                self.timed_out.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(self.server.allocator);
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .ping,
+                    .flags = 0,
+                    .stream_id = 0,
+                },
+                .payload = &self.payload,
+            }).write(&encoded, self.server.allocator);
+            const split = http2.FrameHeader.encoded_len + 3;
+            try writeAll(
+                self.server.io,
+                connection.stream,
+                encoded.items[0..split],
+            );
+            self.prefix_sent.set(self.server.io);
+            try self.timed_out.wait(self.server.io);
+            try writeAll(
+                self.server.io,
+                connection.stream,
+                encoded.items[split..],
+            );
+
+            while (true) {
+                var ack = try runtime.testing.readOwnedFrame(&connection);
+                defer ack.deinit(self.server.allocator);
+                if (ack.frame.header.frame_type == .ping) {
+                    try std.testing.expect(
+                        (ack.frame.header.flags & flag_ack) != 0,
+                    );
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &self.payload,
+                        &(try http2.PingPayload.parse(ack.frame)).data,
+                    );
+                    break;
+                }
+                if (try runtime.testing.handleConnectionFrame(
+                    &connection,
+                    ack.frame,
+                )) continue;
+                return error.UnexpectedFrame;
+            }
+        }
+    };
+    var shared = Shared{ .server = &server, .payload = payload };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    try shared.prefix_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.readPingWithTimeout(.fromMilliseconds(20)),
+    );
+    shared.timed_out.set(io);
+    try std.testing.expectEqualSlices(
+        u8,
+        &payload,
+        &(try client.readPingWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .awake },
+        ))),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 bounded control reads keep one absolute deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(30),
+                .awake,
+            );
+            try connection.sendWindowUpdate(0, 11);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(30),
+                .awake,
+            );
+            try connection.sendWindowUpdate(0, 13);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(30),
+                .awake,
+            );
+            try connection.sendGoAway(0, .no_error, "done");
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    try std.testing.expectError(
+        error.Timeout,
+        client.readGoAwayWithTimeout(.fromMilliseconds(70)),
+    );
+    try std.testing.expectEqual(@as(i64, 65_535 + 11 + 13), client.send_connection_window.value);
+    var goaway = try client.readGoAwayWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 0), goaway.goaway.last_stream_id);
+    try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 bounded tunnel read resumes after timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        accepted: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                self.timed_out.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            var tunnel = try connection.acceptConnectTunnel(request, &.{});
+            self.accepted.set(self.server.io);
+            try self.timed_out.wait(self.server.io);
+            try tunnel.write("after-timeout", true);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    var response = try client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer response.deinit(allocator);
+    try shared.accepted.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        response.tunnel.readWithTimeout(.fromMilliseconds(20)),
+    );
+    shared.timed_out.set(io);
+    var data = try response.tunnel.readWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer data.deinit(allocator);
+    try std.testing.expectEqualStrings("after-timeout", data.data);
+    try std.testing.expect(data.end_stream);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 bounded PING uses one deadline across control frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
