@@ -2,8 +2,8 @@
 //!
 //! The pool has one mutex-protected slot table and leases exclusive Clients to
 //! callers for complete request/response exchanges. Idle connections are keyed
-//! by scheme + authority, and stale/non-reusable clients are retired rather
-//! than returned to the pool.
+//! by scheme + canonical host + effective port, and stale/non-reusable clients
+//! are retired rather than returned to the pool.
 
 const std = @import("std");
 const runtime = @import("runtime.zig");
@@ -186,6 +186,9 @@ pub const Pool = struct {
         }
         self.mutex.unlock(self.io);
 
+        // Connection setup intentionally happens outside the pool lock. Two
+        // producers targeting the same authority may connect concurrently;
+        // idle limits are enforced only when their exclusive leases return.
         var client = switch (transport) {
             .cleartext => switch (endpoint.target) {
                 .host => try runtime.Client.connectHost(
