@@ -1,14 +1,16 @@
 //! Bounded multi-producer command channel for the reconnect event loop.
 //!
 //! Synchronous requests borrow their payload until completion. Asynchronous
-//! PUBLISH requests instead deep-copy all variable data, so producers may
-//! return immediately while one loop retains exclusive transport ownership.
+//! PUBLISH, SUBSCRIBE, and UNSUBSCRIBE requests instead deep-copy all variable
+//! data, so producers may return immediately while one loop retains exclusive
+//! transport ownership.
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const session = @import("../session/mod.zig");
 const owned_properties = @import("../owned_properties.zig");
+const owned_subscription = @import("subscription.zig");
 
 pub const Error = runtime.Error || session.Error || std.Io.Cancelable || error{
     CommandQueueClosed,
@@ -98,8 +100,7 @@ pub const CommandQueue = struct {
             self.allocator,
             properties.properties,
         );
-        const command_id = self.next_command_id.fetchAdd(1, .monotonic);
-        if (command_id == 0) return error.CommandIdentifierExhausted;
+        const command_id = try self.nextCommandId();
         command.* = .{
             .operation = .{ .publish_owned = .{
                 .topic = owned_topic,
@@ -115,21 +116,89 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        _ = self.async_commands.fetchAdd(1, .monotonic);
-        errdefer _ = self.async_commands.fetchSub(1, .monotonic);
-        const count = self.queue.put(
-            self.io,
-            &.{command},
-            0,
-        ) catch |err| switch (err) {
-            error.Closed => return error.CommandQueueClosed,
-            error.Canceled => return error.Canceled,
+        try self.enqueueOwned(command);
+        return command_id;
+    }
+
+    /// Deep-copy subscriptions and MQTT 5 properties before enqueueing.
+    /// Successful SUBACK data is borrowed by the completion callback for that
+    /// invocation.
+    pub fn subscribeAsync(
+        self: *CommandQueue,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        completion: CompletionHandler,
+    ) Error!u64 {
+        self.allocator_mutex.lockUncancelable(self.io);
+        defer self.allocator_mutex.unlock(self.io);
+        const command = try self.allocator.create(Command);
+        errdefer self.allocator.destroy(command);
+        const owned_subscriptions = try cloneSubscriptions(
+            self.allocator,
+            subscriptions,
+        );
+        errdefer deinitSubscriptions(self.allocator, owned_subscriptions);
+        const properties = try owned_properties.clone(
+            self.allocator,
+            options.properties,
+            owned_properties.keepAll,
+        );
+        errdefer owned_properties.deinit(
+            self.allocator,
+            properties.properties,
+        );
+        const command_id = try self.nextCommandId();
+        command.* = .{
+            .operation = .{ .subscribe_owned = .{
+                .subscriptions = owned_subscriptions,
+                .properties = properties.properties,
+            } },
+            .async_completion = .{
+                .command_id = command_id,
+                .handler = completion,
+            },
+            .owner = self,
         };
-        // Queue ownership begins only after insertion. Before that point the
-        // errdefers above retain responsibility for all allocations.
-        if (count == 0) {
-            return error.CommandQueueFull;
-        }
+        try self.enqueueOwned(command);
+        return command_id;
+    }
+
+    /// Deep-copy filters and MQTT 5 properties before enqueueing. Successful
+    /// UNSUBACK data is borrowed by the completion callback for that invocation.
+    pub fn unsubscribeAsync(
+        self: *CommandQueue,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        completion: CompletionHandler,
+    ) Error!u64 {
+        self.allocator_mutex.lockUncancelable(self.io);
+        defer self.allocator_mutex.unlock(self.io);
+        const command = try self.allocator.create(Command);
+        errdefer self.allocator.destroy(command);
+        const owned_filters = try cloneStrings(self.allocator, filters);
+        errdefer deinitStrings(self.allocator, owned_filters);
+        const properties = try owned_properties.clone(
+            self.allocator,
+            options.properties,
+            owned_properties.keepAll,
+        );
+        errdefer owned_properties.deinit(
+            self.allocator,
+            properties.properties,
+        );
+        const command_id = try self.nextCommandId();
+        command.* = .{
+            .operation = .{ .unsubscribe_owned = .{
+                .filters = owned_filters,
+                .properties = properties.properties,
+            } },
+            .async_completion = .{
+                .command_id = command_id,
+                .handler = completion,
+            },
+            .owner = self,
+        };
+        try self.enqueueOwned(command);
         return command_id;
     }
 
@@ -157,6 +226,37 @@ pub const CommandQueue = struct {
         // stay alive. Cancellation is therefore deferred until completion.
         command.completed.waitUncancelable(self.io);
         if (command.err) |err| return err;
+    }
+
+    fn nextCommandId(self: *CommandQueue) Error!u64 {
+        // Zero is a permanent exhausted sentinel. A wrapping fetchAdd would
+        // otherwise make identifiers repeat after reporting exhaustion once.
+        var current = self.next_command_id.load(.monotonic);
+        while (current != 0) {
+            const next = if (current == std.math.maxInt(u64)) 0 else current + 1;
+            if (self.next_command_id.cmpxchgWeak(
+                current,
+                next,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                current = observed;
+            } else {
+                return current;
+            }
+        }
+        return error.CommandIdentifierExhausted;
+    }
+
+    fn enqueueOwned(self: *CommandQueue, command: *Command) Error!void {
+        _ = self.async_commands.fetchAdd(1, .monotonic);
+        errdefer _ = self.async_commands.fetchSub(1, .monotonic);
+        const count = self.queue.put(self.io, &.{command}, 0) catch |err|
+            switch (err) {
+                error.Closed => return error.CommandQueueClosed,
+                error.Canceled => return error.Canceled,
+            };
+        if (count == 0) return error.CommandQueueFull;
     }
 
     pub fn take(self: *CommandQueue) Error!?*Command {
@@ -200,6 +300,14 @@ pub const Command = struct {
             dup: bool,
             properties: []mqtt.Property,
         },
+        subscribe_owned: struct {
+            subscriptions: []OwnedSubscription,
+            properties: []mqtt.Property,
+        },
+        unsubscribe_owned: struct {
+            filters: [][]const u8,
+            properties: []mqtt.Property,
+        },
         flush_pending,
         begin_reauthentication: []const mqtt.Property,
     };
@@ -223,7 +331,7 @@ pub const Command = struct {
         if (self.async_completion) |completion| {
             completion.handler.complete(completion.handler.context, .{
                 .command_id = completion.command_id,
-                .result = packet_id,
+                .result = .{ .publish = packet_id },
             });
             self.deinitOwnedFromIo(io);
             return;
@@ -248,6 +356,42 @@ pub const Command = struct {
         self.completed.set(io);
     }
 
+    pub fn finishSubAck(
+        self: *Command,
+        io: std.Io,
+        suback: *runtime.OwnedSubAck,
+    ) void {
+        const completion = self.async_completion.?;
+        completion.handler.complete(completion.handler.context, .{
+            .command_id = completion.command_id,
+            .result = .{ .subscribe = .{
+                .packet_id = suback.suback.packet_id,
+                .reason_codes = suback.suback.reason_codes,
+                .properties = suback.suback.properties,
+            } },
+        });
+        suback.deinit(self.owner.?.allocator);
+        self.deinitOwnedFromIo(io);
+    }
+
+    pub fn finishUnsubAck(
+        self: *Command,
+        io: std.Io,
+        unsuback: *runtime.OwnedUnsubAck,
+    ) void {
+        const completion = self.async_completion.?;
+        completion.handler.complete(completion.handler.context, .{
+            .command_id = completion.command_id,
+            .result = .{ .unsubscribe = .{
+                .packet_id = unsuback.unsuback.packet_id,
+                .reason_codes = unsuback.unsuback.reason_codes,
+                .properties = unsuback.unsuback.properties,
+            } },
+        });
+        unsuback.deinit(self.owner.?.allocator);
+        self.deinitOwnedFromIo(io);
+    }
+
     fn deinitOwnedFromIo(self: *Command, _: std.Io) void {
         const owner = self.owner.?;
         self.deinitOwned(owner);
@@ -265,6 +409,23 @@ pub const Command = struct {
                 owner.allocator.free(publish.payload);
                 owner.allocator.free(publish.topic);
             },
+            .subscribe_owned => |subscribe| {
+                owned_properties.deinit(
+                    owner.allocator,
+                    subscribe.properties,
+                );
+                deinitSubscriptions(
+                    owner.allocator,
+                    subscribe.subscriptions,
+                );
+            },
+            .unsubscribe_owned => |unsubscribe| {
+                owned_properties.deinit(
+                    owner.allocator,
+                    unsubscribe.properties,
+                );
+                deinitStrings(owner.allocator, unsubscribe.filters);
+            },
             else => {},
         }
         const previous = owner.async_commands.fetchSub(1, .release);
@@ -275,15 +436,103 @@ pub const Command = struct {
 
 pub const Completion = struct {
     command_id: u64,
-    result: Error!?u16,
+    result: Error!Result,
+
+    pub const Result = union(enum) {
+        publish: ?u16,
+        subscribe: Ack,
+        unsubscribe: Ack,
+    };
+
+    pub const Ack = struct {
+        packet_id: u16,
+        /// Both slices are borrowed until the completion callback returns.
+        reason_codes: []const u8,
+        properties: []const mqtt.Property,
+    };
 };
+
+pub const OwnedSubscription = owned_subscription.Owned;
+
+fn cloneSubscriptions(
+    allocator: std.mem.Allocator,
+    subscriptions: []const mqtt.Subscription,
+) Error![]OwnedSubscription {
+    const owned = try allocator.alloc(OwnedSubscription, subscriptions.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (owned[0..initialized]) |*subscription| {
+            subscription.deinit(allocator);
+        }
+        allocator.free(owned);
+    }
+    for (subscriptions, owned) |source, *target| {
+        target.* = try OwnedSubscription.clone(allocator, source, &.{});
+        initialized += 1;
+    }
+    return owned;
+}
+
+fn deinitSubscriptions(
+    allocator: std.mem.Allocator,
+    subscriptions: []OwnedSubscription,
+) void {
+    for (subscriptions) |*value| {
+        value.deinit(allocator);
+    }
+    allocator.free(subscriptions);
+}
+
+fn cloneStrings(
+    allocator: std.mem.Allocator,
+    values: []const []const u8,
+) std.mem.Allocator.Error![][]const u8 {
+    const owned = try allocator.alloc([]const u8, values.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (owned[0..initialized]) |value| allocator.free(value);
+        allocator.free(owned);
+    }
+    for (values, owned) |source, *target| {
+        target.* = try allocator.dupe(u8, source);
+        initialized += 1;
+    }
+    return owned;
+}
+
+fn deinitStrings(allocator: std.mem.Allocator, values: [][]const u8) void {
+    for (values) |value| allocator.free(value);
+    allocator.free(values);
+}
 
 pub const CompletionHandler = struct {
     context: *anyopaque,
-    /// Invoked on the MQTT loop thread exactly once for an accepted command.
-    /// The callback must return promptly and must not synchronously wait on
-    /// another command submitted to this same queue.
+    /// Invoked exactly once for an accepted command: normally on the MQTT loop
+    /// thread, or on the thread that drains buffered commands during `stop`.
+    /// The callback must return promptly and must not synchronously wait on a
+    /// command submitted to this same queue.
     complete: *const fn (context: *anyopaque, completion: Completion) void,
+};
+
+const TestCompletion = struct {
+    calls: usize = 0,
+    ids: [2]u64 = .{ 0, 0 },
+    errors: [2]?anyerror = .{ null, null },
+
+    fn complete(context: *anyopaque, completion: Completion) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const index = self.calls;
+        self.calls += 1;
+        self.ids[index] = completion.command_id;
+        _ = completion.result catch |err| {
+            self.errors[index] = err;
+            return;
+        };
+    }
+
+    fn handler(self: *@This()) CompletionHandler {
+        return .{ .context = self, .complete = complete };
+    }
 };
 
 test "MQTT command queue supports zero-capacity rendezvous storage" {
@@ -296,6 +545,31 @@ test "MQTT command queue supports zero-capacity rendezvous storage" {
     );
     defer queue.deinit();
     try std.testing.expectEqual(@as(usize, 0), queue.queue.capacity());
+}
+
+test "MQTT asynchronous command identifiers stay exhausted after overflow" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var queue = try CommandQueue.init(
+        std.testing.allocator,
+        threaded.io(),
+        0,
+    );
+    defer queue.deinit();
+    queue.next_command_id.store(std.math.maxInt(u64), .monotonic);
+
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        try queue.nextCommandId(),
+    );
+    try std.testing.expectError(
+        error.CommandIdentifierExhausted,
+        queue.nextCommandId(),
+    );
+    try std.testing.expectError(
+        error.CommandIdentifierExhausted,
+        queue.nextCommandId(),
+    );
 }
 
 test "MQTT command queue stop wakes a pending producer" {
@@ -363,6 +637,122 @@ test "MQTT async publish rejects a full queue without leaking" {
     );
 }
 
+test "MQTT async subscription commands reject a full queue without leaking" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    var queue = try CommandQueue.init(
+        std.testing.allocator,
+        threaded.io(),
+        0,
+    );
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    const properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = "key",
+        .value = "value",
+    } }};
+    try std.testing.expectError(
+        error.CommandQueueFull,
+        queue.subscribeAsync(
+            &.{.{ .topic_filter = "full/+", .qos = .at_least_once }},
+            .{ .properties = &properties },
+            completion.handler(),
+        ),
+    );
+    try std.testing.expectError(
+        error.CommandQueueFull,
+        queue.unsubscribeAsync(
+            &.{"full/+"},
+            .{ .properties = &properties },
+            completion.handler(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), completion.calls);
+}
+
+test "MQTT async subscription commands own filters and properties" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    var filter: [11]u8 = "owned/topic".*;
+    var key: [6]u8 = "source".*;
+    var value: [8]u8 = "original".*;
+    const properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = &key,
+        .value = &value,
+    } }};
+
+    _ = try queue.subscribeAsync(
+        &.{.{ .topic_filter = &filter, .qos = .exactly_once }},
+        .{ .properties = &properties },
+        completion.handler(),
+    );
+    @memcpy(&filter, "other/topic");
+    @memcpy(&key, "target");
+    @memcpy(&value, "modified");
+    const subscribe = (try queue.take()).?;
+    switch (subscribe.operation) {
+        .subscribe_owned => |operation| {
+            try std.testing.expectEqualStrings(
+                "owned/topic",
+                operation.subscriptions[0].filter,
+            );
+            try std.testing.expectEqual(mqtt.QoS.exactly_once, operation.subscriptions[0].qos);
+            try std.testing.expectEqualStrings(
+                "source",
+                operation.properties[0].utf8_pair.key,
+            );
+            try std.testing.expectEqualStrings(
+                "original",
+                operation.properties[0].utf8_pair.value,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    subscribe.finishFailure(io, error.CommandQueueClosed);
+
+    @memcpy(&filter, "owned/topic");
+    @memcpy(&key, "source");
+    @memcpy(&value, "original");
+    _ = try queue.unsubscribeAsync(
+        &.{&filter},
+        .{ .properties = &properties },
+        completion.handler(),
+    );
+    @memcpy(&filter, "other/topic");
+    @memcpy(&key, "target");
+    @memcpy(&value, "modified");
+    const unsubscribe = (try queue.take()).?;
+    switch (unsubscribe.operation) {
+        .unsubscribe_owned => |operation| {
+            try std.testing.expectEqualStrings(
+                "owned/topic",
+                operation.filters[0],
+            );
+            try std.testing.expectEqualStrings(
+                "source",
+                operation.properties[0].utf8_pair.key,
+            );
+            try std.testing.expectEqualStrings(
+                "original",
+                operation.properties[0].utf8_pair.value,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    unsubscribe.finishFailure(io, error.CommandQueueClosed);
+    try std.testing.expectEqual(@as(usize, 2), completion.calls);
+}
+
 test "MQTT command queue completes buffered async publish on stop" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
@@ -402,4 +792,71 @@ test "MQTT command queue completes buffered async publish on stop" {
     try std.testing.expectEqual(@as(usize, 1), completion.called);
     try std.testing.expectEqual(command_id, completion.command_id);
     try std.testing.expectEqual(error.CommandQueueClosed, completion.err.?);
+}
+
+test "MQTT command queue fails buffered async subscription commands on stop" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 2);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    const subscribe_id = try queue.subscribeAsync(
+        &.{.{ .topic_filter = "stopped/+" }},
+        .{},
+        completion.handler(),
+    );
+    const unsubscribe_id = try queue.unsubscribeAsync(
+        &.{"stopped/+"},
+        .{},
+        completion.handler(),
+    );
+
+    queue.stop(error.CommandQueueClosed);
+
+    try std.testing.expectEqual(@as(usize, 2), completion.calls);
+    try std.testing.expectEqual(subscribe_id, completion.ids[0]);
+    try std.testing.expectEqual(unsubscribe_id, completion.ids[1]);
+    try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[0].?);
+    try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[1].?);
+}
+
+test "MQTT async subscription allocation failures leak nothing" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkAsyncSubscriptionAllocationFailure,
+        .{},
+    );
+}
+
+fn checkAsyncSubscriptionAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    var queue = try CommandQueue.init(allocator, threaded.io(), 2);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    const properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = "allocation",
+        .value = "failure",
+    } }};
+    _ = try queue.subscribeAsync(
+        &.{
+            .{ .topic_filter = "allocated/one" },
+            .{ .topic_filter = "allocated/two", .qos = .exactly_once },
+        },
+        .{ .properties = &properties },
+        completion.handler(),
+    );
+    _ = try queue.unsubscribeAsync(
+        &.{ "allocated/one", "allocated/two" },
+        .{ .properties = &properties },
+        completion.handler(),
+    );
 }

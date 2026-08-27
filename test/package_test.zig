@@ -845,6 +845,22 @@ test "public modules are reachable" {
         "publishAsync",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.CommandQueue,
+        "subscribeAsync",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.CommandQueue,
+        "unsubscribeAsync",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "subscribeAsync",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "unsubscribeAsync",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
         "ClientConnector",
     ));

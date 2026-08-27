@@ -1739,10 +1739,17 @@ test "MQTT queued run owns asynchronous publish until completion" {
         ) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.command_id = completion.command_id;
-            self.packet_id = completion.result catch |err| {
+            const result = completion.result catch |err| {
                 self.err = err;
                 self.event.set(self.io);
                 return;
+            };
+            self.packet_id = switch (result) {
+                .publish => |packet_id| packet_id,
+                else => blk: {
+                    self.err = error.UnexpectedPacket;
+                    break :blk null;
+                },
             };
             self.event.set(self.io);
         }
@@ -1795,5 +1802,219 @@ test "MQTT queued run owns asynchronous publish until completion" {
 
     server_thread.join();
     server_joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT queued run owns async subscription commands and results" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "async/subscription",
+                subscribe.subscribe.subscriptions[0].topic_filter,
+            );
+            try std.testing.expectEqualStrings(
+                "original",
+                subscribe.subscribe.properties[0].utf8_pair.value,
+            );
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x01},
+                &.{.{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "subscribed",
+                } }},
+            );
+            var unsubscribe = try accepted.connection.readUnsubscribe();
+            defer unsubscribe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "async/subscription",
+                unsubscribe.unsubscribe.topic_filters[0],
+            );
+            try std.testing.expectEqualStrings(
+                "unsubscribe",
+                unsubscribe.unsubscribe.properties[0].utf8_pair.key,
+            );
+            try std.testing.expectEqualStrings(
+                "original",
+                unsubscribe.unsubscribe.properties[0].utf8_pair.value,
+            );
+            try accepted.connection.writeUnsubAck(
+                unsubscribe.unsubscribe.packet_id,
+                &.{0x00},
+                &.{.{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "unsubscribed",
+                } }},
+            );
+        }
+    };
+    const Completion = struct {
+        io: std.Io,
+        shutdown: *std.Io.Event,
+        event: std.Io.Event = .unset,
+        calls: usize = 0,
+        subscribe_id: u64 = 0,
+        unsubscribe_id: u64 = 0,
+        subscribe_packet_id: u16 = 0,
+        unsubscribe_packet_id: u16 = 0,
+        err: ?anyerror = null,
+
+        fn complete(
+            context: *anyopaque,
+            completion: reconnect.CommandCompletion,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const result = completion.result catch |err| {
+                self.err = err;
+                self.event.set(self.io);
+                self.shutdown.set(self.io);
+                return;
+            };
+            switch (result) {
+                .subscribe => |ack| {
+                    if (ack.reason_codes.len != 1 or
+                        ack.reason_codes[0] != 0x01 or
+                        ack.properties.len != 1 or
+                        !std.mem.eql(
+                            u8,
+                            ack.properties[0].utf8.value,
+                            "subscribed",
+                        ))
+                    {
+                        self.err = error.UnexpectedPacket;
+                    }
+                    self.subscribe_id = completion.command_id;
+                    self.subscribe_packet_id = ack.packet_id;
+                },
+                .unsubscribe => |ack| {
+                    if (ack.reason_codes.len != 1 or
+                        ack.reason_codes[0] != 0x00 or
+                        ack.properties.len != 1 or
+                        !std.mem.eql(
+                            u8,
+                            ack.properties[0].utf8.value,
+                            "unsubscribed",
+                        ))
+                    {
+                        self.err = error.UnexpectedPacket;
+                    }
+                    self.unsubscribe_id = completion.command_id;
+                    self.unsubscribe_packet_id = ack.packet_id;
+                    self.shutdown.set(self.io);
+                },
+                else => self.err = error.UnexpectedPacket,
+            }
+            self.calls += 1;
+            self.event.set(self.io);
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "async-subscriptions" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 2,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    var completion = Completion{ .io = io, .shutdown = &shutdown };
+    var filter: [18]u8 = "async/subscription".*;
+    var property_value: [8]u8 = "original".*;
+    const subscribe_id = try run.subscribeAsync(
+        &.{.{
+            .topic_filter = &filter,
+            .qos = .at_least_once,
+        }},
+        .{ .properties = &.{.{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "source",
+            .value = &property_value,
+        } }} },
+        .{ .context = &completion, .complete = Completion.complete },
+    );
+    @memcpy(&filter, "changed/filter-now");
+    @memcpy(&property_value, "modified");
+    completion.event.waitUncancelable(io);
+    try std.testing.expect(completion.err == null);
+    try std.testing.expectEqual(subscribe_id, completion.subscribe_id);
+    completion.event.reset();
+
+    @memcpy(&property_value, "original");
+    const unsubscribe_id = try run.unsubscribeAsync(
+        &.{"async/subscription"},
+        .{ .properties = &.{.{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "unsubscribe",
+            .value = &property_value,
+        } }} },
+        .{ .context = &completion, .complete = Completion.complete },
+    );
+    @memcpy(&property_value, "modified");
+    completion.event.waitUncancelable(io);
+    try std.testing.expect(completion.err == null);
+    try std.testing.expectEqual(unsubscribe_id, completion.unsubscribe_id);
+    try std.testing.expect(completion.subscribe_packet_id != 0);
+    try std.testing.expect(completion.unsubscribe_packet_id != 0);
+    try std.testing.expect(
+        completion.subscribe_packet_id != completion.unsubscribe_packet_id,
+    );
+    try std.testing.expectEqual(@as(usize, 2), completion.calls);
+    if (run.deinit()) |err| return err;
+
+    server_thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }

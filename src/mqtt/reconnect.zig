@@ -12,6 +12,7 @@ const owned_properties = @import("owned_properties.zig");
 const runtime = @import("runtime.zig");
 const session = @import("session/mod.zig");
 const command_queue = @import("reconnect/command_queue.zig");
+const owned_subscription = @import("reconnect/subscription.zig");
 
 const net = std.Io.net;
 
@@ -295,6 +296,32 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn subscribeAsync(
+        self: *QueuedRun,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.subscribeAsync(
+            subscriptions,
+            options,
+            completion,
+        );
+    }
+
+    pub fn unsubscribeAsync(
+        self: *QueuedRun,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.unsubscribeAsync(
+            filters,
+            options,
+            completion,
+        );
+    }
+
     pub fn flushPending(self: *QueuedRun) CommandQueueError!void {
         return self.queue.flushPending();
     }
@@ -360,30 +387,7 @@ pub const SubscriptionOptions = struct {
     max_subscriptions: usize = 1024,
 };
 
-const OwnedSubscription = struct {
-    filter: []u8,
-    qos: mqtt.QoS,
-    no_local: bool,
-    retain_as_published: bool,
-    retain_handling: u2,
-    properties: []mqtt.Property,
-
-    fn deinit(self: *OwnedSubscription, allocator: std.mem.Allocator) void {
-        allocator.free(self.filter);
-        owned_properties.deinit(allocator, self.properties);
-        self.* = undefined;
-    }
-
-    fn value(self: OwnedSubscription) mqtt.Subscription {
-        return .{
-            .topic_filter = self.filter,
-            .qos = self.qos,
-            .no_local = self.no_local,
-            .retain_as_published = self.retain_as_published,
-            .retain_handling = self.retain_handling,
-        };
-    }
-};
+const OwnedSubscription = owned_subscription.Owned;
 
 /// A synchronous, cancellation-aware reconnecting MQTT client for TCP.
 ///
@@ -1330,6 +1334,40 @@ pub const Client = struct {
                 command.finishSuccess(self.io, packet_id);
                 return;
             },
+            .subscribe_owned => |subscribe_command| {
+                var subscriptions = std.ArrayList(mqtt.Subscription).empty;
+                defer subscriptions.deinit(self.allocator);
+                subscriptions.ensureTotalCapacity(
+                    self.allocator,
+                    subscribe_command.subscriptions.len,
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+                for (subscribe_command.subscriptions) |stored| {
+                    subscriptions.appendAssumeCapacity(stored.value());
+                }
+                var suback = self.subscribe(
+                    subscriptions.items,
+                    .{ .properties = subscribe_command.properties },
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+                command.finishSubAck(self.io, &suback);
+                return;
+            },
+            .unsubscribe_owned => |unsubscribe_command| {
+                var unsuback = self.unsubscribe(
+                    unsubscribe_command.filters,
+                    .{ .properties = unsubscribe_command.properties },
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+                command.finishUnsubAck(self.io, &unsuback);
+                return;
+            },
             .flush_pending => {
                 self.flushPending() catch |err| {
                     command.finishFailure(self.io, err);
@@ -1436,21 +1474,7 @@ fn cloneSubscription(
     subscription: mqtt.Subscription,
     properties: []const mqtt.Property,
 ) OptionsError!OwnedSubscription {
-    const filter = try allocator.dupe(u8, subscription.topic_filter);
-    errdefer allocator.free(filter);
-    const copied_properties = try owned_properties.clone(
-        allocator,
-        properties,
-        owned_properties.keepAll,
-    );
-    return .{
-        .filter = filter,
-        .qos = subscription.qos,
-        .no_local = subscription.no_local,
-        .retain_as_published = subscription.retain_as_published,
-        .retain_handling = subscription.retain_handling,
-        .properties = copied_properties.properties,
-    };
+    return OwnedSubscription.clone(allocator, subscription, properties);
 }
 
 fn retryableConnectError(err: anyerror) bool {
