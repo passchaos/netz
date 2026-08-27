@@ -2920,6 +2920,28 @@ pub const Connection = struct {
         }
     }
 
+    /// Continue a live re-authentication exchange with caller-provided MQTT 5
+    /// properties. This is the event-loop counterpart to the data-only helper
+    /// above and preserves User Properties or method-specific metadata emitted
+    /// by the same callback used during initial CONNECT authentication.
+    pub fn continueReauthenticationWithProperties(
+        self: *Connection,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        if (self.authentication.phase != .reauthenticating) {
+            return error.InvalidAuthenticationState;
+        }
+        if (reason_code != 0 and reason_code != 0x18) {
+            return error.InvalidAuthenticationState;
+        }
+        try self.authentication.validatePeerProperties(properties);
+        try self.writeAuth(reason_code, properties);
+        if (reason_code == 0) {
+            try self.authentication.finishReauthentication();
+        }
+    }
+
     /// Respond to an initial pre-CONNACK authentication challenge.
     pub fn continueInitialAuthentication(
         self: *Connection,

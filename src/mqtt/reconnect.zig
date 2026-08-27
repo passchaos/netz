@@ -917,7 +917,22 @@ pub const Client = struct {
                 break :blk .{ .disconnect = owned };
             },
             .auth => |owned| blk: {
-                _ = try active.applyAuthenticationEvent(owned.auth);
+                const complete = try active.applyAuthenticationEvent(
+                    owned.auth,
+                );
+                if (!complete) {
+                    const handler = self.options.value.authentication orelse
+                        return error.AuthenticationNotConfigured;
+                    const response = try handler.respond(
+                        handler.context,
+                        owned.auth,
+                    );
+                    try active.continueReauthenticationWithProperties(
+                        0x18,
+                        response,
+                    );
+                    self.noteControlSent();
+                }
                 break :blk .{ .auth = owned };
             },
         };
