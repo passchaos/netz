@@ -2844,15 +2844,31 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
+        "receiveDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
         "readStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "readStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
         "receiveSessionEventWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "receiveSessionEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "receiveDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "receiveDatagramWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
@@ -2860,7 +2876,15 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
+        "readStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
         "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "receiveSessionEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
@@ -2868,11 +2892,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
+        "receiveDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
         "readStreamWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
+        "readStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
         "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "receiveSessionEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.EndpointAcceptedSession,

@@ -469,6 +469,30 @@ test "WebTransport handshake receive helpers honor timeouts" {
         error.Timeout,
         session.receiveSessionEventWithTimeout(.fromMilliseconds(1)),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveDatagramWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(1), .clock = .awake },
+        )),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        session.readStreamWithDeadline(
+            &buffer,
+            .fromNow(
+                io,
+                .{ .raw = .fromMilliseconds(1), .clock = .awake },
+            ),
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveSessionEventWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(1), .clock = .awake },
+        )),
+    );
 }
 
 fn writeDataFrame(out: []u8, payload: []const u8) !usize {

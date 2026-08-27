@@ -112,8 +112,8 @@ WebTransport DATAGRAM round trip and transport statistics.
 | Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup; external wtransport consumes netz DRAIN before an exactly validated CLOSE | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN and reports the immediately following CLOSE |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
-Authenticated client/server sessions also expose timeout-bounded DATAGRAM,
-incremental stream, and DRAIN/CLOSE receive calls. One absolute application
+Authenticated client/server sessions also expose timeout- and absolute-deadline
+bounded DATAGRAM, incremental stream, and DRAIN/CLOSE receive calls. One absolute application
 deadline spans unrelated QUIC packets while earlier PTO, delayed-ACK,
 keep-alive, path-validation, idle and close timers continue to run; neither
 transport maintenance nor control traffic renews the caller's budget.
