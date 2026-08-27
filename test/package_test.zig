@@ -2683,6 +2683,18 @@ test "public modules are reachable" {
         "receiveSessionEventWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "receiveDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "readStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.EndpointAcceptedSession,
         "sendStream",
     ));

@@ -3800,6 +3800,14 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.readStream(out);
     }
 
+    pub fn readStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamRead {
+        return self.session.readStreamWithTimeout(out, timeout);
+    }
+
     pub fn serviceTransport(
         self: *StatefulProtectedClientSession,
     ) Error!void {
@@ -3833,6 +3841,13 @@ pub const StatefulProtectedClientSession = struct {
         self: *StatefulProtectedClientSession,
     ) Error!OwnedHandshakeDatagram {
         return self.session.receiveDatagram();
+    }
+
+    pub fn receiveDatagramWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagram {
+        return self.session.receiveDatagramWithTimeout(timeout);
     }
 
     pub fn receiveManyDatagrams(
@@ -3876,6 +3891,13 @@ pub const StatefulProtectedClientSession = struct {
         self: *StatefulProtectedClientSession,
     ) Error!SessionEvent {
         return self.session.receiveSessionEvent();
+    }
+
+    pub fn receiveSessionEventWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!SessionEvent {
+        return self.session.receiveSessionEventWithTimeout(timeout);
     }
 
     pub fn receivePeerConnectionClose(
