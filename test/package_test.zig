@@ -2991,6 +2991,10 @@ test "public modules are reachable" {
         "receivePeerConnectionCloseWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "pollPeerConnectionClose",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "receiveDatagramWithTimeout",
     ));
@@ -3041,6 +3045,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "receivePeerConnectionCloseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "pollPeerConnectionClose",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
@@ -3321,6 +3329,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "receivePeerConnectionCloseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "pollPeerConnectionClose",
     ));
     try std.testing.expect(@hasField(netz.webtransport.runtime.OwnedHandshakeDatagram, "bytes"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));

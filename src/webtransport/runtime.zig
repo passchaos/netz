@@ -2046,6 +2046,14 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Return authenticated peer CONNECTION_CLOSE metadata already observed
+    /// by this session or by its endpoint dispatcher, without reading UDP.
+    pub fn pollPeerConnectionClose(
+        self: *const AcceptedHandshakeSession,
+    ) ?quic.one_rtt.PeerCloseInfo {
+        return self.h3.established.connection.peerCloseInfo();
+    }
+
     pub fn receivePeerConnectionCloseWithDeadline(
         self: *AcceptedHandshakeSession,
         deadline: std.Io.Clock.Timestamp,
@@ -2967,6 +2975,12 @@ pub const HandshakeClientSession = struct {
         return receiveHandshakePeerConnectionClose(
             &self.h3.established.connection,
         );
+    }
+
+    pub fn pollPeerConnectionClose(
+        self: *const HandshakeClientSession,
+    ) ?quic.one_rtt.PeerCloseInfo {
+        return self.h3.established.connection.peerCloseInfo();
     }
 
     pub fn receivePeerConnectionCloseWithDeadline(
@@ -4244,6 +4258,12 @@ pub const StatefulProtectedClientSession = struct {
         self: *StatefulProtectedClientSession,
     ) Error!quic.one_rtt.PeerCloseInfo {
         return self.session.receivePeerConnectionClose();
+    }
+
+    pub fn pollPeerConnectionClose(
+        self: *const StatefulProtectedClientSession,
+    ) ?quic.one_rtt.PeerCloseInfo {
+        return self.session.pollPeerConnectionClose();
     }
 
     pub fn receivePeerConnectionCloseWithDeadline(

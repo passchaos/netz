@@ -197,7 +197,8 @@ association prefix is sent, so a bad later stream cannot expose a partial batch.
 
 Accepted stateful server sessions now expose dispatcher-oriented
 `processPacket`, `pollStream`, `pollCompleteStream`, `pollDatagram`, and
-`pollSessionEvent` methods. The poll methods never read UDP: one endpoint owner
+`pollSessionEvent` methods, plus `pollPeerConnectionClose` for connection-level
+termination metadata. The poll methods never read UDP: one endpoint owner
 routes authenticated QUIC packets, after which each WebTransport session drains
 only its own associated stream, DATAGRAM, and detached CONNECT/Capsule state.
 Whole-stream polling transfers ownership only after FIN and leaves incomplete
