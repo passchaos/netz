@@ -27,6 +27,7 @@ pub const Error = runtime.Error || one_rtt.Error ||
     DuplicateConnectionHandle,
     UnknownConnectionHandle,
     ConnectionEndpointMismatch,
+    ConnectionIdMismatch,
     StaleConnectionRoute,
     PendingHandshakeLimitReached,
 };
@@ -395,6 +396,39 @@ pub const Dispatcher = struct {
         );
         try self.syncConnectionIds(handle);
         try self.timers.armFromConnection(handle, connection);
+    }
+
+    /// Replace the storage address for an already registered connection.
+    ///
+    /// Stateful protocol wrappers often promote a pending value by moving the
+    /// embedded `Connection` into stable application storage. CID routes and
+    /// timer identity remain unchanged, so replacing the pointer atomically is
+    /// safer than an unregister/register gap in the sole receive loop.
+    pub fn replaceConnection(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+        connection: *one_rtt.Connection,
+    ) Error!void {
+        if (connection.endpoint != self.endpoint) {
+            return error.ConnectionEndpointMismatch;
+        }
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
+        const active = try connection.localConnectionIdsInto(&active_storage);
+        if (active.len != entry.connection_ids.items.len) {
+            return error.ConnectionIdMismatch;
+        }
+        for (active) |id| {
+            const key = try connection_router.ConnectionIdKey.init(
+                id.connection_id,
+            );
+            if (!containsConnectionId(entry.connection_ids.items, key)) {
+                return error.ConnectionIdMismatch;
+            }
+        }
+        try self.timers.armFromConnection(handle, connection);
+        entry.connection = connection;
     }
 
     pub fn sendNewConnectionId(

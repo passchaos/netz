@@ -1096,3 +1096,65 @@ test "QUIC endpoint dispatcher releases failed routed datagram once" {
         .bytes = conflicting,
     }));
 }
+
+test "QUIC endpoint dispatcher atomically replaces connection storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xea} ** quic.protection.secret_len,
+    );
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "replace-local",
+        .peer_connection_id = "replace-peer",
+        .enable_pacing = false,
+    });
+    var connection_owned = true;
+    defer if (connection_owned) connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &connection);
+
+    var moved = connection;
+    connection_owned = false;
+    defer moved.deinit();
+    try dispatcher.replaceConnection(1, &moved);
+
+    var peer = try one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "replace-peer",
+        .peer_connection_id = "replace-local",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    const frames = [_]quic.Frame{.{ .ping = {} }};
+    try peer.send(&frames);
+    var event = try dispatcher.receive(
+        &.{quic.Version.version_1.wireValue()},
+    );
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(@as(usize, 1), event.packet.connection_handle);
+    try std.testing.expect(event.packet.packet.frames[0] == .ping);
+}

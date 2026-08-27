@@ -215,9 +215,11 @@ That client path now starts from the public `beginEstablishedConnect` API: it
 wraps an authenticated QUIC connection on a caller-owned endpoint, exposes the
 stable connection pointer for CID registration, accepts routed packets while
 the CONNECT response is pending, and promotes through `pollConnect` without
-performing a hidden UDP read. The dispatcher is explicitly re-registered after
-the pending value is promoted because moving the owning state changes its
-connection address.
+performing a hidden UDP read. After promotion, the dispatcher pointer is
+explicitly replaced because moving the owning state changes its connection
+address. The atomic `replaceConnection` operation preserves all CID routes and
+timer identity while swapping that pointer, avoiding an unregister/register
+gap.
 The handshake server can additionally begin HTTP/3/WebTransport admission from
 the dispatcher's owned Initial event, so the first packet is not reread from the
 shared socket. At the QUIC layer, subsequent Initial/Retry/0-RTT/Handshake

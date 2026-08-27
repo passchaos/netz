@@ -404,7 +404,8 @@ test "WebTransport client polls a dispatcher-injected packet" {
     try dispatcher.registerConnection(1, pending.connection());
     try std.testing.expect((try pending.pollConnect()) == null);
     const versions = [_]u32{quic.Version.version_1.wireValue()};
-    var session = while (true) {
+    var completed: ?runtime.HandshakeConnectAttempt = null;
+    while (completed == null) {
         var event = try dispatcher.receive(&versions);
         defer event.deinit(allocator);
         switch (event) {
@@ -412,20 +413,21 @@ test "WebTransport client polls a dispatcher-injected packet" {
                 try pending.processPacket(&routed.packet);
                 try dispatcher.refreshConnectionTimer(1);
                 if (try pending.pollConnect()) |attempt_value| {
-                    var attempt = attempt_value;
                     pending_owned = false;
-                    _ = try dispatcher.unregisterConnection(1);
-                    routed.packet.deinit(allocator);
-                    event = .consumed;
-                    break try attempt.requireAccepted();
+                    completed = attempt_value;
                 }
             },
             .consumed, .timer => {},
             .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
-    };
+    }
+    var attempt = completed.?;
+    var session = try attempt.requireAccepted();
     defer session.deinit();
-    try dispatcher.registerConnection(1, &session.h3.established.connection);
+    try dispatcher.replaceConnection(
+        1,
+        &session.h3.established.connection,
+    );
     const session_id = session.session_id.value;
 
     var stream_header: std.ArrayList(u8) = .empty;

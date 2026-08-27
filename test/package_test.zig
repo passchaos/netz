@@ -2789,6 +2789,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
+        "replaceConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
         "pollPendingPacket",
     ));
     try std.testing.expect(@hasDecl(
