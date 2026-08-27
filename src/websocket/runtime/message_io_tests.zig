@@ -409,7 +409,10 @@ test "WebSocket frame timeout preserves partial wire bytes" {
             ));
             defer frame.deinit(self.server.http.allocator);
             try std.testing.expectEqual(websocket.Opcode.text, frame.header.opcode);
-            try std.testing.expectEqualStrings("partial-frame", frame.payload);
+            try std.testing.expectEqualStrings(
+                "partial-\xe2\x82\xac-frame",
+                frame.payload,
+            );
         }
     };
     var shared = Shared{ .server = &server };
@@ -429,10 +432,13 @@ test "WebSocket frame timeout preserves partial wire bytes" {
         &encoded,
         allocator,
         .text,
-        "partial-frame",
+        "partial-\xe2\x82\xac-frame",
         .{ .mask_key = .{ 1, 2, 3, 4 } },
     );
-    const split = encoded.items.len - 4;
+    const header = try websocket.FrameHeader.parse(encoded.items);
+    // Stop immediately after the first byte of a three-byte codepoint. A
+    // resumed read must retain both buffered bytes and UTF-8 DFA state.
+    const split = header.header_len + "partial-\xe2".len;
     try writeAllToStream(io, client.stream, encoded.items[0..split]);
     try shared.prefix_received.wait(io);
     try shared.timed_out.wait(io);

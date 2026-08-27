@@ -3969,7 +3969,12 @@ fn ensureIncomingFrameBuffered(
             if (connection.incoming_data_kind != .none) {
                 return error.InvalidFrame;
             }
-            connection.incoming_text_utf8.reset();
+            // A deadline may expire after validating a prefix of this same
+            // frame. Preserve the incremental UTF-8 state in that case; reset
+            // only when the frame has not been entered before.
+            if (connection.incoming_frame_validated == 0) {
+                connection.incoming_text_utf8.reset();
+            }
             break :blk if (header.rsv1) .compressed_text else .text;
         },
         .binary => blk: {
