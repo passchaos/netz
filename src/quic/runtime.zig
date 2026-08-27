@@ -103,6 +103,20 @@ pub const Server = struct {
         return self.endpoint.receive();
     }
 
+    pub fn receiveWithTimeout(
+        self: *Server,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        return self.endpoint.receiveWithTimeout(timeout);
+    }
+
+    pub fn receiveWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        return self.endpoint.receiveWithDeadline(deadline);
+    }
+
     pub fn receiveBytesHandlingVersionNegotiation(self: *Server, supported_versions: []const u32) Error!OwnedBytes {
         return self.endpoint.receiveBytesHandlingVersionNegotiation(supported_versions);
     }
@@ -146,6 +160,20 @@ pub const Client = struct {
 
     pub fn receive(self: *Client) Error!OwnedDatagram {
         return self.endpoint.receive();
+    }
+
+    pub fn receiveWithTimeout(
+        self: *Client,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        return self.endpoint.receiveWithTimeout(timeout);
+    }
+
+    pub fn receiveWithDeadline(
+        self: *Client,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        return self.endpoint.receiveWithDeadline(deadline);
     }
 };
 
@@ -555,7 +583,34 @@ pub const Endpoint = struct {
     }
 
     pub fn receive(self: *Endpoint) Error!OwnedDatagram {
-        var raw = try self.receiveBytes();
+        return self.receiveUntil(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveWithTimeout(
+        self: *Endpoint,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        return self.receiveUntil(timeout);
+    }
+
+    pub fn receiveWithDeadline(
+        self: *Endpoint,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        return self.receiveUntil(.{ .deadline = deadline });
+    }
+
+    fn receiveUntil(
+        self: *Endpoint,
+        timeout: ?std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        var raw = if (timeout) |bounded|
+            try self.receiveBytesTimeout(bounded)
+        else
+            try self.receiveBytes();
         errdefer raw.deinit(self.allocator);
         if (raw.bytes.len == 0) return error.EmptyDatagram;
 
@@ -1607,6 +1662,48 @@ pub const OwnedDatagramBatch = struct {
         return count;
     }
 };
+
+test "QUIC parsed datagram receive honors timeout and deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveWithTimeout(.{ .duration = .{
+            .raw = .fromMilliseconds(20),
+            .clock = .awake,
+        } }),
+    );
+
+    try client.sendFrames(&.{.{ .ping = {} }});
+    var datagram = try server.receiveWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer datagram.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), datagram.frames.len);
+    try std.testing.expect(datagram.frames[0] == .ping);
+}
 
 test "QUIC UDP endpoint sends and receives frame datagrams" {
     const allocator = std.testing.allocator;

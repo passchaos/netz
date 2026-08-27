@@ -2178,6 +2178,22 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 65_535), (netz.quic.runtime.Limits{}).max_datagram_size);
     try std.testing.expect(!(netz.quic.runtime.Limits{}).enable_gro_receive);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatch"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Server,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Client,
+        "receiveWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.runtime, "OwnedBytesBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "servicePacketBatch"));
