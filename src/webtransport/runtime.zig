@@ -1966,6 +1966,40 @@ pub const AcceptedHandshakeSession = struct {
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
     }
 
+    /// Receive up to `count` DATAGRAMs within one shared timeout budget. If
+    /// the deadline expires after partial progress, the returned batch retains
+    /// those DATAGRAMs and records `error.Timeout` in the next error slot.
+    pub fn receiveManyDatagramsWithTimeout(
+        self: *AcceptedHandshakeSession,
+        count: usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveManyDatagramsWithDeadline(
+            count,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveManyDatagramsWithDeadline(
+        self: *AcceptedHandshakeSession,
+        count: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return receiveManyHandshakeDatagramsUntil(
+            &self.h3.established.connection,
+            count,
+            deadline,
+        );
+    }
+
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
         try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
@@ -2847,6 +2881,40 @@ pub const HandshakeClientSession = struct {
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
+    }
+
+    /// Receive up to `count` DATAGRAMs within one shared timeout budget. If
+    /// the deadline expires after partial progress, the returned batch retains
+    /// those DATAGRAMs and records `error.Timeout` in the next error slot.
+    pub fn receiveManyDatagramsWithTimeout(
+        self: *HandshakeClientSession,
+        count: usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveManyDatagramsWithDeadline(
+            count,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveManyDatagramsWithDeadline(
+        self: *HandshakeClientSession,
+        count: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return receiveManyHandshakeDatagramsUntil(
+            &self.h3.established.connection,
+            count,
+            deadline,
+        );
     }
 
     pub fn maxDatagramPayloadSize(self: HandshakeClientSession) ?usize {
@@ -4077,6 +4145,22 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.receiveManyDatagrams(count);
     }
 
+    pub fn receiveManyDatagramsWithTimeout(
+        self: *StatefulProtectedClientSession,
+        count: usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        return self.session.receiveManyDatagramsWithTimeout(count, timeout);
+    }
+
+    pub fn receiveManyDatagramsWithDeadline(
+        self: *StatefulProtectedClientSession,
+        count: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        return self.session.receiveManyDatagramsWithDeadline(count, deadline);
+    }
+
     pub fn maxDatagramPayloadSize(
         self: StatefulProtectedClientSession,
     ) ?usize {
@@ -4874,8 +4958,30 @@ fn drainQueuedHandshakeDatagrams(connection: *quic.one_rtt.Connection, datagrams
 }
 
 fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: usize) Error!OwnedHandshakeDatagramBatch {
+    return receiveManyHandshakeDatagramsUntil(
+        connection,
+        count,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn receiveManyHandshakeDatagramsUntil(
+    connection: *quic.one_rtt.Connection,
+    count: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
     const datagrams = try connection.endpoint.allocator.alloc(?OwnedHandshakeDatagram, count);
-    errdefer connection.endpoint.allocator.free(datagrams);
+    errdefer {
+        for (datagrams) |*datagram| {
+            if (datagram.*) |*owned| {
+                owned.deinit(connection.endpoint.allocator);
+            }
+        }
+        connection.endpoint.allocator.free(datagrams);
+    }
     @memset(datagrams, null);
     const errors = try connection.endpoint.allocator.alloc(?anyerror, count);
     errdefer connection.endpoint.allocator.free(errors);
@@ -4889,9 +4995,14 @@ fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: us
     // receivePacket() calls on the same Connection would race those mutable
     // invariants.  Batch reception therefore drains one connection
     // sequentially while still returning the ergonomic batch/error shape used
-    // by the higher-level runtime.
+    // by the higher-level runtime. A bounded batch uses one absolute deadline
+    // for every slot so unrelated packets and earlier DATAGRAMs cannot renew
+    // the caller's budget. Partial results remain owned by the returned batch.
     for (datagrams[filled..], errors[filled..]) |*datagram, *err_slot| {
-        datagram.* = receiveHandshakeDatagramFromConnection(connection) catch |err| {
+        datagram.* = (if (deadline) |absolute|
+            receiveHandshakeDatagramFromConnectionUntil(connection, absolute)
+        else
+            receiveHandshakeDatagramFromConnection(connection)) catch |err| {
             err_slot.* = err;
             break;
         };
@@ -5866,6 +5977,122 @@ test "WebTransport handshake session receives datagrams with std.Io async batch"
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebTransport bounded DATAGRAM batch retains partial progress" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xeb} ** quic.protection.secret_len,
+    );
+    const client_cid = "wt-batch-client";
+    const server_cid = "wt-batch-server";
+    var transport_parameters = quic.practical_transport_parameters;
+    transport_parameters.max_datagram_frame_size = 1200;
+    const settings = webtransport.defaultSettings(.{});
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .local_transport_parameters = transport_parameters,
+            .peer_transport_parameters = transport_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    var h3_owned = true;
+    defer if (h3_owned) h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var session = AcceptedHandshakeSession{
+        .h3 = h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    h3_owned = false;
+    streams_owned = false;
+    defer {
+        session.streams.deinit();
+        session.h3.deinit();
+    }
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = client_cid,
+        .peer_connection_id = server_cid,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+
+    try sendHandshakeDatagramFromConnection(&peer, .init(0), "first");
+    var batch = try session.receiveManyDatagramsWithTimeout(
+        2,
+        .fromMilliseconds(20),
+    );
+    defer batch.deinit();
+    try std.testing.expectEqual(@as(usize, 1), batch.receivedCount());
+    try std.testing.expectEqual(error.Timeout, batch.firstError().?);
+    try std.testing.expectEqualStrings(
+        "first",
+        batch.datagrams[0].?.datagram.payload,
+    );
+    try std.testing.expect(batch.datagrams[1] == null);
+
+    try sendHandshakeDatagramFromConnection(&peer, .init(0), "second");
+    var resumed = try session.receiveManyDatagramsWithDeadline(
+        1,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer resumed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), resumed.receivedCount());
+    try std.testing.expect(resumed.firstError() == null);
+    try std.testing.expectEqualStrings(
+        "second",
+        resumed.datagrams[0].?.datagram.payload,
+    );
 }
 
 test {
