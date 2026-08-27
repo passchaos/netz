@@ -23,16 +23,25 @@ const WebSocketTransport = struct {
     input: std.ArrayList(u8) = .empty,
 };
 
+/// Partial packet state survives a bounded read timeout. TCP reads request
+/// only the bytes belonging to the current packet, preserving the previous
+/// exact-allocation behavior without losing a fragmented header or body.
+const TcpTransport = struct {
+    io: std.Io,
+    stream: net.Stream,
+    header: [5]u8 = undefined,
+    header_len: usize = 0,
+    packet: ?[]u8 = null,
+    packet_read: usize = 0,
+};
+
 /// MQTT Control Packet transport shared by every runtime session.
 ///
 /// TCP is a byte stream. MQTT-over-WebSocket has the same MQTT byte-stream
 /// semantics even though each WebSocket write becomes a binary message:
 /// packets may span messages and one message may contain multiple packets.
 pub const Transport = union(enum) {
-    tcp: struct {
-        io: std.Io,
-        stream: net.Stream,
-    },
+    tcp: TcpTransport,
     tls: *http1_runtime.TlsClientConnection,
     tls_vail: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
@@ -199,7 +208,10 @@ pub const Transport = union(enum) {
         allocator: std.mem.Allocator,
     ) void {
         switch (self.*) {
-            .tcp => |tcp| tcp.stream.close(tcp.io),
+            .tcp => |*tcp| {
+                if (tcp.packet) |packet| allocator.free(packet);
+                tcp.stream.close(tcp.io);
+            },
             .tls => |connection| connection.deinit(),
             .tls_vail => |connection| connection.deinit(),
             .tls_server => |connection| connection.deinit(),
@@ -286,10 +298,9 @@ pub const Transport = union(enum) {
         max_packet_size: usize,
     ) Error!OwnedPacket {
         return switch (self.*) {
-            .tcp => |tcp| readTcpPacket(
+            .tcp => |*tcp| readTcpPacket(
                 allocator,
-                tcp.io,
-                tcp.stream,
+                tcp,
                 max_packet_size,
             ),
             .tls => |connection| readStreamPacket(
@@ -330,10 +341,9 @@ pub const Transport = union(enum) {
         timeout: std.Io.Clock.Duration,
     ) Error!OwnedPacket {
         return switch (self.*) {
-            .tcp => |tcp| readTcpPacketWithInactivityTimeout(
+            .tcp => |*tcp| readTcpPacketWithInactivityTimeout(
                 allocator,
-                tcp.io,
-                tcp.stream,
+                tcp,
                 max_packet_size,
                 timeout,
             ),
@@ -374,10 +384,9 @@ pub const Transport = union(enum) {
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
         return switch (self.*) {
-            .tcp => |tcp| readTcpPacketWithDeadline(
+            .tcp => |*tcp| readTcpPacketWithDeadline(
                 allocator,
-                tcp.io,
-                tcp.stream,
+                tcp,
                 max_packet_size,
                 deadline,
             ),
@@ -463,39 +472,156 @@ pub const OwnedPacket = struct {
 
 fn readTcpPacket(
     allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
+    tcp: *TcpTransport,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    var reader = keep_alive_reader.Reader.init(io, stream, null);
-    return readPacketFromReader(allocator, &reader, max_packet_size);
+    return readTcpPacketWithPolicy(
+        allocator,
+        tcp,
+        max_packet_size,
+        null,
+        null,
+    );
 }
 
 fn readTcpPacketWithInactivityTimeout(
     allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
+    tcp: *TcpTransport,
     max_packet_size: usize,
     timeout: std.Io.Clock.Duration,
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
-    var reader = keep_alive_reader.Reader.init(io, stream, timeout);
-    return readPacketFromReader(allocator, &reader, max_packet_size);
+    return readTcpPacketWithPolicy(
+        allocator,
+        tcp,
+        max_packet_size,
+        timeout,
+        null,
+    );
 }
 
 fn readTcpPacketWithDeadline(
     allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
+    tcp: *TcpTransport,
     max_packet_size: usize,
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedPacket {
-    var reader = keep_alive_reader.Reader.initDeadline(
-        io,
-        stream,
+    return readTcpPacketWithPolicy(
+        allocator,
+        tcp,
+        max_packet_size,
+        null,
         deadline,
     );
-    return readPacketFromReader(allocator, &reader, max_packet_size);
+}
+
+fn readTcpPacketWithPolicy(
+    allocator: std.mem.Allocator,
+    tcp: *TcpTransport,
+    max_packet_size: usize,
+    inactivity_timeout: ?std.Io.Clock.Duration,
+    absolute_deadline: ?std.Io.Clock.Timestamp,
+) Error!OwnedPacket {
+    var deadline = if (inactivity_timeout) |timeout|
+        std.Io.Clock.Timestamp.fromNow(tcp.io, timeout)
+    else
+        absolute_deadline;
+
+    while (tcp.packet == null) {
+        if (tcp.header_len >= tcp.header.len) {
+            return error.MalformedRemainingLength;
+        }
+        try readTcpExactWithDeadline(
+            tcp,
+            tcp.header[tcp.header_len .. tcp.header_len + 1],
+            deadline,
+        );
+        tcp.header_len += 1;
+        if (tcp.header_len == 1 or
+            (tcp.header[tcp.header_len - 1] & 0x80) != 0)
+        {
+            continue;
+        }
+
+        const decoded = try mqtt.decodeRemainingLength(
+            tcp.header[1..tcp.header_len],
+        );
+        const packet_len = std.math.add(
+            usize,
+            1 + decoded.len,
+            decoded.value,
+        ) catch return error.PacketTooLarge;
+        if (packet_len > max_packet_size) return error.PacketTooLarge;
+        const packet = try allocator.alloc(u8, packet_len);
+        @memcpy(packet[0..tcp.header_len], tcp.header[0..tcp.header_len]);
+        tcp.packet = packet;
+        tcp.packet_read = tcp.header_len;
+    }
+
+    const packet = tcp.packet.?;
+    while (tcp.packet_read < packet.len) {
+        if (inactivity_timeout) |timeout| {
+            if (packet.len - tcp.packet_read >
+                keep_alive_reader.progress_threshold)
+            {
+                deadline = .fromNow(tcp.io, timeout);
+            }
+        }
+        const count = try readTcpSomeWithDeadline(
+            tcp,
+            packet[tcp.packet_read..],
+            deadline,
+        );
+        tcp.packet_read += count;
+    }
+
+    tcp.packet = null;
+    tcp.packet_read = 0;
+    tcp.header_len = 0;
+    errdefer allocator.free(packet);
+    return .{
+        .bytes = packet,
+        .fixed = try mqtt.FixedHeader.parse(packet),
+    };
+}
+
+fn readTcpExactWithDeadline(
+    tcp: *TcpTransport,
+    buffer: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        offset += try readTcpSomeWithDeadline(
+            tcp,
+            buffer[offset..],
+            deadline,
+        );
+    }
+}
+
+fn readTcpSomeWithDeadline(
+    tcp: *TcpTransport,
+    buffer: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!usize {
+    const count = if (deadline) |value|
+        try stream_io.readSomeWithDeadline(
+            tcp.io,
+            tcp.stream,
+            buffer,
+            value,
+        )
+    else blk: {
+        var bufs = [_][]u8{buffer};
+        break :blk try tcp.io.vtable.netRead(
+            tcp.io.userdata,
+            tcp.stream.socket.handle,
+            &bufs,
+        );
+    };
+    if (count == 0) return error.ConnectionClosed;
+    return count;
 }
 
 /// Assemble one owned packet from any reader that implements the shared

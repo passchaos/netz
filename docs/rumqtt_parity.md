@@ -27,7 +27,7 @@ and equal-wire broker results are kept separate.
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation, retained Will, and publication-time write authorization | Both production brokers integrate Will publication; Mosquitto rechecks its write ACL when the Will becomes due |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | CONNECT and PING liveness | Optional absolute CONNECT/CONNACK packet deadline covers TCP, native TLS, WS and WSS; partial MQTT bytes, WebSocket message boundaries and control frames cannot renew it. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on the same transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
-| Client reconnect | An owning cleartext-TCP reconnect client deep-copies CONNECT credentials/properties/Will, retries with bounded fixed, linear, or exponential delay, and makes backoff interruptible through `std.Io.Event`. It retains outgoing QoS 1/2 state across transport loss, replays PUBLISH with DUP and its original Packet Identifier when Session Present is true, resumes QoS 2 directly at PUBREL after PUBREC, clears stale QoS state when the broker reports no Session, and replays only broker-accepted subscriptions into that fresh Session. | rumqttc continuously reconnects while polled and moves inflight requests back to its pending queue; libmosquitto exposes fixed/progressive reconnect delay control |
+| Client reconnect | An owning cleartext-TCP reconnect client deep-copies CONNECT credentials/properties/Will, retries with bounded fixed, linear, or exponential delay, and makes backoff interruptible through `std.Io.Event`. Its single-owner bounded poll API continuously reconnects, negotiates Server Keep Alive, sends PINGREQ while idle, rejects a missing PINGRESP within a configurable deadline, preserves partially received TCP packets across poll timeouts, and exposes ordered connect/publish/QoS/ping/DISCONNECT/AUTH events. It automatically acknowledges inbound QoS 1/2, persists inbound QoS 2 across a resumed Session, applies outbound acknowledgements, retains outgoing QoS 1/2 across transport loss, replays PUBLISH with DUP and its original Packet Identifier when Session Present is true, resumes outgoing QoS 2 directly at PUBREL after PUBREC, clears stale QoS state when the broker reports no Session, and replays only broker-accepted subscriptions into that fresh Session. | rumqttc continuously reconnects while polled and moves inflight requests back to its pending queue; libmosquitto exposes fixed/progressive reconnect delay control |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
@@ -1056,14 +1056,18 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-The new reconnect layer is deliberately TCP-first and synchronous. Broad
+The reconnect layer remains deliberately TCP-first and synchronous. Broad
 client-loop parity still requires a multiplexed request/incoming-event queue,
-automatic keep-alive driving while idle, TLS/WS/WSS connector variants, jitter,
-and a background-loop convenience wrapper. Current tests cover real
-two-connection QoS 1 PUBLISH/DUP and QoS 2 PUBREL continuation, fresh-session
-cleanup, accepted-only subscription replay, Session Present suppression of
-redundant SUBSCRIBE, bounded delay math, and prompt cancellation during a
-thirty-second backoff.
+TLS/WS/WSS connector variants, jitter, a background-loop convenience wrapper,
+and an application callback for automatically continuing MQTT 5
+re-authentication. The single-owner bounded poll path already drives idle
+keep-alive and automatic reconnect without competing socket readers. Current
+tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
+continuation, incoming QoS 1 delivery across a keep-alive cycle, inbound QoS 2
+continuation after transport loss, silent-broker PING timeout followed by
+Session-Present replay, fresh-session cleanup, accepted-only subscription
+replay, Session Present suppression of redundant SUBSCRIBE, bounded delay math,
+and prompt cancellation during a thirty-second backoff.
 
 The public `listener_namespace.Namespace` module defines Mosquitto-compatible
 mount points. It validates literal UTF-8 prefixes, enforces MQTT's u16 wire

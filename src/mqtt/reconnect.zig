@@ -190,6 +190,48 @@ pub const ConnectEvent = struct {
     failed_attempts: usize,
 };
 
+pub const PollOptions = struct {
+    /// Maximum time this call may spend waiting for the next packet or
+    /// keep-alive transition.
+    timeout: std.Io.Duration,
+    /// Maximum interval between PINGREQ and PINGRESP. Null uses the
+    /// broker-negotiated Keep Alive interval.
+    ping_response_timeout: ?std.Io.Duration = null,
+    /// Upper bound on how long a silent socket read delays observing the
+    /// shared shutdown event. Short bounded reads preserve single ownership
+    /// while making cancellation independent of the MQTT Keep Alive value.
+    cancellation_check_interval: std.Io.Duration = .fromMilliseconds(100),
+};
+
+/// One observable transition from the reconnecting client's ordered event
+/// loop. Packet-bearing variants own their bytes until `deinit` is called.
+pub const ClientEvent = union(enum) {
+    connected: ConnectEvent,
+    publish: runtime.OwnedPublish,
+    puback: runtime.OwnedAck,
+    pubrec: runtime.OwnedAck,
+    pubrel: runtime.OwnedAck,
+    pubcomp: runtime.OwnedAck,
+    pingreq: void,
+    pingresp: void,
+    disconnect: runtime.OwnedDisconnect,
+    auth: runtime.OwnedAuth,
+
+    pub fn deinit(self: *ClientEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .publish => |*value| value.deinit(allocator),
+            .puback => |*value| value.deinit(allocator),
+            .pubrec => |*value| value.deinit(allocator),
+            .pubrel => |*value| value.deinit(allocator),
+            .pubcomp => |*value| value.deinit(allocator),
+            .disconnect => |*value| value.deinit(allocator),
+            .auth => |*value| value.deinit(allocator),
+            .connected, .pingreq, .pingresp => {},
+        }
+        self.* = undefined;
+    }
+};
+
 pub const SubscriptionOptions = struct {
     /// Maximum number of filters retained for fresh-session replay.
     max_subscriptions: usize = 1024,
@@ -240,6 +282,8 @@ pub const Client = struct {
     outgoing_open: bool = true,
     subscription_options: SubscriptionOptions,
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
+    keep_alive_deadline: ?std.Io.Timestamp = null,
+    ping_response_deadline: ?std.Io.Timestamp = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -349,6 +393,7 @@ pub const Client = struct {
             const session_present = result.connack.connack.session_present;
             result.connack.deinit(self.allocator);
             self.connection_state = result.connection;
+            self.connection_state.?.resetPacketIdentifiers();
 
             // A fresh broker Session cannot recognize Packet Identifiers from
             // the old session. Dropping that state matches rumqttc's behavior
@@ -386,6 +431,8 @@ pub const Client = struct {
                     return err;
                 };
             }
+            self.noteControlSent();
+            self.ping_response_deadline = null;
             return .{
                 .session_present = session_present,
                 .failed_attempts = failed_attempts,
@@ -399,6 +446,8 @@ pub const Client = struct {
     pub fn disconnectTransport(self: *Client) void {
         if (self.connection_state) |*active| active.close();
         self.connection_state = null;
+        self.keep_alive_deadline = null;
+        self.ping_response_deadline = null;
         if (self.outgoing_open) {
             self.outgoing.disconnect(
                 self.outgoing_handle,
@@ -416,6 +465,7 @@ pub const Client = struct {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
         try active.disconnect(reason_code);
+        self.noteControlSent();
         self.disconnectTransport();
     }
 
@@ -481,6 +531,7 @@ pub const Client = struct {
         }
         try self.subscriptions.ensureUnusedCapacity(self.allocator, additions);
         var suback = try active.subscribe(subscriptions, options);
+        self.noteControlSent();
         errdefer suback.deinit(self.allocator);
         if (suback.suback.reason_codes.len != subscriptions.len) {
             return error.UnexpectedPacket;
@@ -508,6 +559,7 @@ pub const Client = struct {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
         var unsuback = try active.unsubscribe(filters, options);
+        self.noteControlSent();
         errdefer unsuback.deinit(self.allocator);
         if (active.protocol == .v3_1_1) {
             for (filters) |filter| self.removeSubscription(filter);
@@ -537,6 +589,7 @@ pub const Client = struct {
         }
         if (options.qos == .at_most_once) {
             try active.publish(topic, payload, options);
+            self.noteControlSent();
             return null;
         }
         _ = try self.outgoing.enqueuePublish(
@@ -575,14 +628,98 @@ pub const Client = struct {
             const connected = try self.reconnect();
             if (!connected.session_present) return error.SessionLost;
         };
+        self.noteControlSent();
         return publish_value.packet_id;
+    }
+
+    /// Drive exactly one ordered client event, returning null when the caller's
+    /// bound expires first. The method is the sole reader and performs all QoS
+    /// acknowledgements, keep-alive probes, and retryable reconnects itself.
+    /// Applications must not mix it concurrently with typed reads or
+    /// `completeNextPublish`.
+    pub fn pollWithOptions(
+        self: *Client,
+        options: PollOptions,
+    ) (Error || std.Io.Cancelable)!?ClientEvent {
+        if (options.timeout.nanoseconds <= 0) return error.Timeout;
+        if (options.ping_response_timeout) |timeout| {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+        }
+        if (options.cancellation_check_interval.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        const call_deadline = std.Io.Clock.awake.now(self.io).addDuration(
+            options.timeout,
+        );
+
+        while (true) {
+            if (self.shutdown.isSet()) return error.Canceled;
+            if (self.connection_state == null) {
+                return .{ .connected = try self.connect() };
+            }
+
+            const now = std.Io.Clock.awake.now(self.io);
+            if (self.ping_response_deadline) |deadline| {
+                if (now.nanoseconds >= deadline.nanoseconds) {
+                    return .{ .connected = try self.reconnect() };
+                }
+            } else if (self.keepAliveDeadline()) |deadline| {
+                if (now.nanoseconds >= deadline.nanoseconds) {
+                    const active = self.connection().?;
+                    active.writePingReq() catch |err| {
+                        if (!retryableConnectError(err)) return err;
+                        return .{ .connected = try self.reconnect() };
+                    };
+                    const sent_at = std.Io.Clock.awake.now(self.io);
+                    self.keep_alive_deadline = sent_at.addDuration(
+                        .fromSeconds(active.keep_alive_seconds),
+                    );
+                    self.ping_response_deadline = sent_at.addDuration(
+                        self.pingResponseTimeout(options),
+                    );
+                    return .{ .pingreq = {} };
+                }
+            }
+            if (now.nanoseconds >= call_deadline.nanoseconds) {
+                return null;
+            }
+
+            const read_deadline = self.nextPollDeadline(
+                call_deadline,
+                now,
+                options.cancellation_check_interval,
+            );
+            const wait = now.durationTo(read_deadline);
+            var packet_event = self.connection().?.readClientPacketEventWithTimeout(
+                wait,
+            ) catch |err| {
+                if (err == error.Timeout) continue;
+                if (!retryableConnectError(err)) return err;
+                return .{ .connected = try self.reconnect() };
+            };
+            var packet_owned = true;
+            defer if (packet_owned) packet_event.deinit(self.allocator);
+            const client_event = try self.applyPacketEvent(&packet_event);
+            if (client_event) |event| {
+                packet_owned = false;
+                return event;
+            }
+        }
+    }
+
+    pub fn pollWithTimeout(
+        self: *Client,
+        timeout: std.Io.Duration,
+    ) (Error || std.Io.Cancelable)!?ClientEvent {
+        return self.pollWithOptions(.{ .timeout = timeout });
     }
 
     /// Retry queued QoS publications after a connection becomes available.
     /// This is useful when `publish` returned `ConnectionUnavailable` after
     /// durably queueing the request.
     pub fn flushPending(self: *Client) Error!void {
-        return self.replayPending();
+        try self.replayPending();
+        self.noteControlSent();
     }
 
     /// Read and apply one QoS acknowledgement. For PUBREC, PUBREL is emitted
@@ -698,6 +835,149 @@ pub const Client = struct {
                 return error.SubscriptionRefused;
             }
         }
+    }
+
+    fn applyPacketEvent(
+        self: *Client,
+        packet_event: *runtime.ClientPacketEvent,
+    ) Error!?ClientEvent {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        return switch (packet_event.*) {
+            .publish => |owned| blk: {
+                if (owned.publish.packet_id) |packet_id| {
+                    switch (owned.publish.qos) {
+                        .at_most_once => unreachable,
+                        .at_least_once => try active.writePubAck(packet_id, 0),
+                        .exactly_once => {
+                            const duplicate =
+                                try self.outgoing.recordIncomingQoS2(
+                                    self.outgoing_handle,
+                                    packet_id,
+                                );
+                            try active.writePubRec(packet_id, 0);
+                            self.noteControlSent();
+                            if (duplicate) {
+                                return null;
+                            }
+                        },
+                    }
+                    self.noteControlSent();
+                }
+                break :blk .{ .publish = owned };
+            },
+            .puback => |owned| blk: {
+                _ = try self.applyOutgoingAck(owned.ack);
+                break :blk .{ .puback = owned };
+            },
+            .pubrec => |owned| blk: {
+                const action = try self.applyOutgoingAck(owned.ack);
+                if (action == .send_pubrel) {
+                    try self.replayPending();
+                    self.noteControlSent();
+                }
+                break :blk .{ .pubrec = owned };
+            },
+            .pubrel => |owned| blk: {
+                const packet_id = owned.ack.packet_id;
+                const pending = try self.outgoing.containsIncomingQoS2(
+                    self.outgoing_handle,
+                    packet_id,
+                );
+                if (pending) {
+                    // Session Present can resume a transaction whose receive
+                    // bit lived on the old socket. Recreate only that local
+                    // accounting before the normal PUBCOMP writer clears it.
+                    try active.resumeIncomingQoS2(packet_id);
+                    try self.outgoing.completeIncomingQoS2(
+                        self.outgoing_handle,
+                        packet_id,
+                    );
+                }
+                // Unknown/repeated PUBREL is idempotently acknowledged: the
+                // prior PUBCOMP may have been lost after durable completion.
+                try active.writePubComp(packet_id, 0);
+                self.noteControlSent();
+                break :blk .{ .pubrel = owned };
+            },
+            .pubcomp => |owned| blk: {
+                _ = try self.applyOutgoingAck(owned.ack);
+                break :blk .{ .pubcomp = owned };
+            },
+            .pingresp => |*packet| blk: {
+                if (self.ping_response_deadline == null) {
+                    return error.UnexpectedPacket;
+                }
+                self.ping_response_deadline = null;
+                packet.deinit(self.allocator);
+                break :blk .{ .pingresp = {} };
+            },
+            .disconnect => |owned| blk: {
+                self.disconnectTransport();
+                break :blk .{ .disconnect = owned };
+            },
+            .auth => |owned| blk: {
+                _ = try active.applyAuthenticationEvent(owned.auth);
+                break :blk .{ .auth = owned };
+            },
+        };
+    }
+
+    fn applyOutgoingAck(
+        self: *Client,
+        ack: mqtt.AckPacket,
+    ) Error!session.AckAction {
+        return self.outgoing.handleAck(
+            self.outgoing_handle,
+            ack.packet_type,
+            ack.packet_id,
+            ack.reason_code,
+        );
+    }
+
+    fn noteControlSent(self: *Client) void {
+        const active = if (self.connection_state) |*current|
+            current
+        else
+            return;
+        if (active.keep_alive_seconds == 0) {
+            self.keep_alive_deadline = null;
+            return;
+        }
+        self.keep_alive_deadline = std.Io.Clock.awake.now(self.io).addDuration(
+            .fromSeconds(active.keep_alive_seconds),
+        );
+    }
+
+    fn keepAliveDeadline(self: *const Client) ?std.Io.Timestamp {
+        return self.keep_alive_deadline;
+    }
+
+    fn pingResponseTimeout(
+        self: *const Client,
+        options: PollOptions,
+    ) std.Io.Duration {
+        return options.ping_response_timeout orelse
+            .fromSeconds(self.connection_state.?.keep_alive_seconds);
+    }
+
+    fn nextPollDeadline(
+        self: *const Client,
+        call_deadline: std.Io.Timestamp,
+        now: std.Io.Timestamp,
+        cancellation_check_interval: std.Io.Duration,
+    ) std.Io.Timestamp {
+        var result = call_deadline;
+        if (self.ping_response_deadline orelse self.keepAliveDeadline()) |internal| {
+            if (internal.nanoseconds < result.nanoseconds) result = internal;
+        }
+        const cancellation_deadline = now.addDuration(
+            cancellation_check_interval,
+        );
+        if (cancellation_deadline.nanoseconds < result.nanoseconds) {
+            result = cancellation_deadline;
+        }
+        return result;
     }
 
     fn subscriptionIndex(self: *const Client, filter: []const u8) ?usize {

@@ -477,3 +477,494 @@ test "MQTT reconnect backoff is canceled promptly" {
     try std.testing.expectEqual(error.Canceled, shared.err.?);
     try std.testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
 }
+
+test "MQTT reconnect poll preserves inbound publish across keep alive" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.publish(
+                "poll/inbound",
+                "before-ping",
+                .{ .qos = .at_least_once },
+            );
+            try accepted.connection.readPingReq();
+            try accepted.connection.writePingResp();
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "poll-inbound",
+            .keep_alive_seconds = 1,
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+    try std.testing.expect(connected == .connected);
+
+    var publish = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer publish.deinit(allocator);
+    try std.testing.expect(publish == .publish);
+    try std.testing.expectEqualStrings(
+        "poll/inbound",
+        publish.publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "before-ping",
+        publish.publish.publish.payload,
+    );
+
+    try std.Io.sleep(io, .fromMilliseconds(1100), .awake);
+    var pingreq = (try client.pollWithTimeout(.fromMilliseconds(300))).?;
+    defer pingreq.deinit(allocator);
+    try std.testing.expect(pingreq == .pingreq);
+    var pingresp = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer pingresp.deinit(allocator);
+    try std.testing.expect(pingresp == .pingresp);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect poll reconnects after silent ping timeout and keeps QoS" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        first_packet_id: u16 = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            defer first.deinit(self.server.allocator);
+            var publish = try first.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            self.first_packet_id = publish.publish.packet_id.?;
+            try first.connection.readPingReq();
+            // Intentionally withhold PINGRESP. The client must retire this
+            // transport and resume the durable Session itself.
+
+            var second = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer second.deinit(self.server.allocator);
+            var retry = try second.connection.readPublish();
+            defer retry.deinit(self.server.allocator);
+            try std.testing.expect(retry.publish.dup);
+            try std.testing.expectEqual(
+                self.first_packet_id,
+                retry.publish.packet_id.?,
+            );
+            try second.connection.writePubAck(retry.publish.packet_id.?, 0);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "poll-silent",
+            .clean_start = false,
+            .keep_alive_seconds = 1,
+            .properties = &properties,
+            .connect_timeout = .fromSeconds(1),
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+    try std.testing.expect(connected == .connected);
+    _ = try client.publish(
+        "poll/durable",
+        "payload",
+        .{ .qos = .at_least_once },
+    );
+    try std.Io.sleep(io, .fromMilliseconds(1100), .awake);
+    var pingreq = (try client.pollWithOptions(.{
+        .timeout = .fromMilliseconds(300),
+        .ping_response_timeout = .fromMilliseconds(75),
+    })).?;
+    defer pingreq.deinit(allocator);
+    try std.testing.expect(pingreq == .pingreq);
+    var reconnected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer reconnected.deinit(allocator);
+    try std.testing.expect(reconnected == .connected);
+    try std.testing.expect(reconnected.connected.session_present);
+
+    var puback = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer puback.deinit(allocator);
+    try std.testing.expect(puback == .puback);
+    try std.testing.expectEqual(
+        shared.first_packet_id,
+        puback.puback.ack.packet_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try client.outgoingStats()).inflight_count,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect poll resumes inbound QoS2 at PUBREL" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            defer first.deinit(self.server.allocator);
+            const packet_id = (try first.connection.writePublish(
+                "poll/inbound-qos2",
+                "exactly-once",
+                .{ .qos = .exactly_once },
+            )).?;
+            var pubrec = try first.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+            first.connection.shutdown() catch {};
+
+            var second = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer second.deinit(self.server.allocator);
+            try second.connection.writePubRel(packet_id, 0);
+            var pubcomp = try second.connection.readPubComp();
+            defer pubcomp.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubcomp.ack.packet_id);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "poll-inbound-qos2",
+            .clean_start = false,
+            .properties = &properties,
+            .connect_timeout = .fromSeconds(1),
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+    var publish = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer publish.deinit(allocator);
+    try std.testing.expect(publish == .publish);
+    try std.testing.expectEqual(mqtt.QoS.exactly_once, publish.publish.publish.qos);
+
+    var reconnected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer reconnected.deinit(allocator);
+    try std.testing.expect(reconnected == .connected);
+    try std.testing.expect(reconnected.connected.session_present);
+    var pubrel = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer pubrel.deinit(allocator);
+    try std.testing.expect(pubrel == .pubrel);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect poll timeout preserves a fragmented TCP packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(self.server.allocator);
+            try mqtt.writePublish(
+                &encoded,
+                self.server.allocator,
+                .v5,
+                "poll/fragmented",
+                "survives-timeout",
+                .{},
+            );
+            const tcp = accepted.connection.transport.tcp;
+            _ = try tcp.io.vtable.netWrite(
+                tcp.io.userdata,
+                tcp.stream.socket.handle,
+                encoded.items[0..1],
+                &.{""},
+                0,
+            );
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(80),
+                .awake,
+            );
+            var written: usize = 1;
+            while (written < encoded.items.len) {
+                const count = try tcp.io.vtable.netWrite(
+                    tcp.io.userdata,
+                    tcp.stream.socket.handle,
+                    encoded.items[written..],
+                    &.{""},
+                    0,
+                );
+                if (count == 0) return error.SocketUnconnected;
+                written += count;
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "poll-fragmented" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+
+    try std.testing.expect((try client.pollWithTimeout(
+        .fromMilliseconds(30),
+    )) == null);
+    var publish = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer publish.deinit(allocator);
+    try std.testing.expect(publish == .publish);
+    try std.testing.expectEqualStrings(
+        "poll/fragmented",
+        publish.publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "survives-timeout",
+        publish.publish.publish.payload,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect poll observes cancellation while idle" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try std.Io.sleep(self.server.io, .fromMilliseconds(300), .awake);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "poll-cancel",
+            .keep_alive_seconds = 0,
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+
+    const Polling = struct {
+        client: *reconnect.Client,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            _ = self.client.pollWithOptions(.{
+                .timeout = .fromSeconds(30),
+                .cancellation_check_interval = .fromMilliseconds(10),
+            }) catch |err| {
+                self.err = err;
+                return;
+            };
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var polling = Polling{ .client = &client };
+    const poll_thread = try std.Thread.spawn(.{}, Polling.run, .{&polling});
+    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    const started = std.Io.Clock.awake.now(io);
+    shutdown.set(io);
+    poll_thread.join();
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    try std.testing.expectEqual(error.Canceled, polling.err.?);
+    try std.testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
+
+    server_thread.join();
+    server_joined = true;
+    if (shared.err) |err| return err;
+}

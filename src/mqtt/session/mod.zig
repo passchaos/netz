@@ -1947,6 +1947,19 @@ pub const Store = struct {
         }
     }
 
+    /// Test whether a durable inbound QoS 2 transaction is awaiting PUBREL.
+    /// Reconnecting clients use this before writing PUBCOMP because the new
+    /// transport's connection-local receive table cannot represent state that
+    /// was established on an earlier Network Connection.
+    pub fn containsIncomingQoS2(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!bool {
+        const session = try self.getSession(handle);
+        return session.incoming_qos2.contains(packet_id);
+    }
+
     fn getSession(self: *Store, handle: Handle) Error!*Session {
         if (handle.index >= self.sessions.items.len) {
             return error.SessionNotFound;

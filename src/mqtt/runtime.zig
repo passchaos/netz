@@ -1737,6 +1737,10 @@ pub const Connection = struct {
         // allocator before that move so deferred temporary cleanup never reads
         // the deliberately undefined moved-from connection.
         const allocator = self.allocator;
+        // The CONNECT value is also the client's local keep-alive schedule.
+        // A successful MQTT 5 CONNACK may replace it below with Server Keep
+        // Alive, but an omitted property must retain the requested interval.
+        self.keep_alive_seconds = options.keep_alive_seconds;
         self.write_scratch.clearRetainingCapacity();
         self.write_property_scratch.clearRetainingCapacity();
         try self.write_property_scratch.appendSlice(
@@ -2686,6 +2690,29 @@ pub const Connection = struct {
         try self.writePacket(mqtt.writePingInto(&encoded, true));
     }
 
+    /// Emit a PINGREQ without consuming the socket. Event-loop owners use
+    /// this split operation so the same receive path can continue delivering
+    /// application packets while it waits for PINGRESP.
+    pub fn writePingReq(self: *Connection) Error!void {
+        var encoded: [mqtt.ping_packet_len]u8 = undefined;
+        try self.writePacket(mqtt.writePingInto(&encoded, false));
+    }
+
+    /// Drop connection-local acknowledgement bookkeeping while preserving all
+    /// negotiated limits. Durable clients keep QoS state in their Session
+    /// store instead, so every new Network Connection starts with empty wire
+    /// inflight tables even when CONNACK reports Session Present.
+    pub fn resetPacketIdentifiers(self: *Connection) void {
+        self.next_packet_id = 1;
+        self.outgoing_inflight = 0;
+        self.incoming_inflight = 0;
+        self.incoming_qos1 = .empty;
+        self.incoming_qos2 = .empty;
+        self.outgoing_qos1 = .empty;
+        self.outgoing_qos2 = .empty;
+        self.outgoing_qos2_pubrel = .empty;
+    }
+
     pub fn disconnect(self: *Connection, reason_code: u8) Error!void {
         try self.writeDisconnectWithProperties(reason_code, &.{});
     }
@@ -2949,6 +2976,104 @@ pub const Connection = struct {
     /// connection validation and inflight state.
     pub fn readBrokerEvent(self: *Connection) Error!BrokerEvent {
         return self.readBrokerEventInternal(null);
+    }
+
+    /// Read one packet valid on an established client connection. Unlike the
+    /// synchronous typed helpers, this preserves packet ordering while a
+    /// single owner multiplexes publications, QoS acknowledgements, liveness,
+    /// server DISCONNECT, and enhanced authentication.
+    pub fn readClientPacketEvent(
+        self: *Connection,
+    ) Error!ClientPacketEvent {
+        return self.finishClientPacketEvent(try self.readPacket());
+    }
+
+    /// Bounded variant of `readClientPacketEvent`. One absolute deadline
+    /// covers the complete Control Packet, so a peer cannot defeat a caller's
+    /// poll budget by trickling the packet header or body.
+    pub fn readClientPacketEventWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!ClientPacketEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = self.transport.deadlineFromNow(timeout);
+        const packet = if (self.popPendingPingPacket()) |pending|
+            pending
+        else
+            try self.readTransportPacketWithDeadline(deadline);
+        return self.finishClientPacketEvent(packet);
+    }
+
+    fn finishClientPacketEvent(
+        self: *Connection,
+        packet_value: OwnedPacket,
+    ) Error!ClientPacketEvent {
+        var packet = packet_value;
+        errdefer packet.deinit(self.allocator);
+        return switch (packet.fixed.packet_type) {
+            .auth => blk: {
+                var value = try mqtt.Auth.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .auth = .{
+                    .packet = packet,
+                    .auth = value,
+                } };
+            },
+            .publish => blk: {
+                var value = try mqtt.Publish.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                try self.validateIncomingPublishCapabilities(value);
+                try self.applyIncomingTopicAlias(&value);
+                try self.recordIncomingPublish(value);
+                break :blk .{ .publish = .{
+                    .packet = packet,
+                    .publish = value,
+                } };
+            },
+            .puback, .pubrec, .pubrel, .pubcomp => |packet_type| blk: {
+                var value = try mqtt.AckPacket.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                const owned = OwnedAck{ .packet = packet, .ack = value };
+                break :blk switch (packet_type) {
+                    .puback => .{ .puback = owned },
+                    .pubrec => .{ .pubrec = owned },
+                    // Durable reconnect clients validate PUBREL against their
+                    // Session store, not this transport's fresh bitset.
+                    .pubrel => .{ .pubrel = owned },
+                    .pubcomp => .{ .pubcomp = owned },
+                    else => unreachable,
+                };
+            },
+            .pingresp => blk: {
+                try mqtt.validatePing(packet.bytes, true);
+                break :blk .{ .pingresp = packet };
+            },
+            .disconnect => blk: {
+                var value = try mqtt.Disconnect.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .disconnect = .{
+                    .packet = packet,
+                    .disconnect = value,
+                } };
+            },
+            else => error.UnexpectedPacket,
+        };
     }
 
     /// Read one broker event with MQTT Keep Alive inactivity enforcement.
@@ -3681,6 +3806,36 @@ pub const BrokerEvent = union(enum) {
             .pubrel => |*value| value.deinit(allocator),
             .pubcomp => |*value| value.deinit(allocator),
             .pingreq => |*value| value.deinit(allocator),
+            .disconnect => |*value| value.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+/// Packets a broker may send after CONNACK. Packet ownership is transferred to
+/// the caller, which must call `deinit` after observing the typed value.
+pub const ClientPacketEvent = union(enum) {
+    auth: OwnedAuth,
+    publish: OwnedPublish,
+    puback: OwnedAck,
+    pubrec: OwnedAck,
+    pubrel: OwnedAck,
+    pubcomp: OwnedAck,
+    pingresp: OwnedPacket,
+    disconnect: OwnedDisconnect,
+
+    pub fn deinit(
+        self: *ClientPacketEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .auth => |*value| value.deinit(allocator),
+            .publish => |*value| value.deinit(allocator),
+            .puback => |*value| value.deinit(allocator),
+            .pubrec => |*value| value.deinit(allocator),
+            .pubrel => |*value| value.deinit(allocator),
+            .pubcomp => |*value| value.deinit(allocator),
+            .pingresp => |*value| value.deinit(allocator),
             .disconnect => |*value| value.deinit(allocator),
         }
         self.* = undefined;
