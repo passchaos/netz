@@ -429,6 +429,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessageInto"));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
+        "receiveMessageIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
         "pingWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -438,6 +442,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "receiveMessageInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveMessageIntoWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,

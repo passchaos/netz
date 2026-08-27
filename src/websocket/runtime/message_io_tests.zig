@@ -42,7 +42,13 @@ test "WebSocket receiveMessageInto assembles fragments in caller storage" {
             defer connection.close();
 
             var storage: [max_message_bytes]u8 = undefined;
-            const message = try connection.receiveMessageInto(&storage);
+            const message = try connection.receiveMessageIntoWithDeadline(
+                &storage,
+                .fromNow(
+                    server_ptr.http.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            );
             try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
             try std.testing.expectEqualStrings(
                 "hello fragmented",
@@ -78,11 +84,93 @@ test "WebSocket receiveMessageInto assembles fragments in caller storage" {
     defer pong.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
     var response_storage: [max_message_bytes]u8 = undefined;
-    const response = try client.receiveMessageInto(&response_storage);
+    const response = try client.receiveMessageIntoWithDeadline(
+        &response_storage,
+        .fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .awake },
+        ),
+    );
     try std.testing.expectEqualStrings("hello fragmented", response.payload);
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket receiveMessageInto deadline spans control frames" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const max_message_bytes = 64;
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = max_message_bytes,
+            .max_message_bytes = max_message_bytes,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        timed_out: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            var storage: [max_message_bytes]u8 = undefined;
+            _ = connection.receiveMessageIntoWithDeadline(
+                &storage,
+                .fromNow(
+                    self.server.http.io,
+                    .{ .raw = .fromMilliseconds(300), .clock = .awake },
+                ),
+            ) catch |err| {
+                if (err != error.Timeout) return err;
+                self.timed_out = true;
+                return;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/message-into-deadline",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = max_message_bytes,
+            .max_message_bytes = max_message_bytes,
+        },
+    });
+    defer client.close();
+    for (0..2) |_| {
+        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+        try client.sendPing("control");
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.timed_out);
 }
 
 test "WebSocket receiveMessageInto preserves full message space across ping" {

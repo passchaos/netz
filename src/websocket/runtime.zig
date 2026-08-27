@@ -2103,6 +2103,25 @@ pub const Connection = struct {
         self: *Connection,
         out: []u8,
     ) Error!Message {
+        return self.receiveMessageIntoInternal(out, null);
+    }
+
+    /// Caller-buffer counterpart to `receiveMessageWithDeadline`. The same
+    /// absolute deadline spans every fragment, TLS read, and interleaved
+    /// control frame while preserving the allocation-avoiding receive path.
+    pub fn receiveMessageIntoWithDeadline(
+        self: *Connection,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Message {
+        return self.receiveMessageIntoInternal(out, deadline);
+    }
+
+    fn receiveMessageIntoInternal(
+        self: *Connection,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Message {
         errdefer |err| closeAfterReceiveError(self, err);
         if (out.len < self.limits.max_message_bytes) {
             return error.BufferTooShort;
@@ -2117,9 +2136,10 @@ pub const Connection = struct {
                 self.compression_receive.payload.items[written..]
             else
                 out[written..];
-            const frame = try self.receiveFrameInto(
+            const frame = try self.receiveFrameIntoInternal(
                 frame_out,
                 &control_storage,
+                deadline,
             );
             switch (frame.header.opcode) {
                 .ping => {
@@ -2190,15 +2210,16 @@ pub const Connection = struct {
         }
     }
 
-    fn receiveFrameInto(
+    fn receiveFrameIntoInternal(
         self: *Connection,
         out: []u8,
         control_out: *[125]u8,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!websocket.BorrowedFrame {
         if (self.close_sent and self.close_received) {
             return error.ConnectionClosed;
         }
-        try self.ensureBuffered(2);
+        try self.ensureBufferedWithDeadline(2, deadline);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
         const len_code = second & 0x7f;
@@ -2208,7 +2229,7 @@ pub const Connection = struct {
             header_len += 8;
         }
         if ((second & 0x80) != 0) header_len += 4;
-        try self.ensureBuffered(header_len);
+        try self.ensureBufferedWithDeadline(header_len, deadline);
 
         const header = try websocket.FrameHeader.parse(self.inbuf.items);
         const payload_len = std.math.cast(
@@ -2228,7 +2249,7 @@ pub const Connection = struct {
             header.header_len,
             payload_len,
         ) catch return error.PayloadTooLarge;
-        try ensureIncomingFrameBuffered(self, header, total_len, null);
+        try ensureIncomingFrameBuffered(self, header, total_len, deadline);
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{
                 .expect_mask = .unmasked,
@@ -3059,6 +3080,24 @@ pub const H2Connection = struct {
         self: *H2Connection,
         out: []u8,
     ) Error!Message {
+        return self.receiveMessageIntoInternal(out, null);
+    }
+
+    /// RFC 8441 caller-buffer receive under one absolute deadline. HTTP/2
+    /// connection-control and WebSocket control frames cannot renew it.
+    pub fn receiveMessageIntoWithDeadline(
+        self: *H2Connection,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Message {
+        return self.receiveMessageIntoInternal(out, deadline);
+    }
+
+    fn receiveMessageIntoInternal(
+        self: *H2Connection,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Message {
         errdefer |err| closeAfterReceiveError(self, err);
         if (out.len < self.limits.max_message_bytes) {
             return error.BufferTooShort;
@@ -3072,7 +3111,7 @@ pub const H2Connection = struct {
         var opcode: ?websocket.Opcode = null;
         var compressed = false;
         while (true) {
-            var frame = try self.receiveFrameAuto();
+            var frame = try self.receiveFrameAutoInternal(deadline);
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping, .pong => continue,
@@ -5279,8 +5318,12 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
         "\xac over h2 websocket hello over h2 websocket",
     });
     var response_storage: [4096]u8 = undefined;
-    const response = try ws_client.receiveMessageInto(
+    const response = try ws_client.receiveMessageIntoWithDeadline(
         &response_storage,
+        .fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .awake },
+        ),
     );
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
     try std.testing.expectEqualStrings(
@@ -6071,10 +6114,14 @@ test "WebSocket over HTTP/2 deadline spans control frames" {
                 } },
             );
             defer ws.close();
-            _ = ws.receiveMessageWithDeadline(.fromNow(
-                shared.server.io,
-                .{ .raw = .fromMilliseconds(300), .clock = .awake },
-            )) catch |err| {
+            var storage: [4096]u8 = undefined;
+            _ = ws.receiveMessageIntoWithDeadline(
+                &storage,
+                .fromNow(
+                    shared.server.io,
+                    .{ .raw = .fromMilliseconds(300), .clock = .awake },
+                ),
+            ) catch |err| {
                 if (err != error.Timeout) return err;
                 shared.timed_out = true;
                 return;
