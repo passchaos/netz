@@ -880,6 +880,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
+        "CompletionQueueReceiveTimeoutError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.CompletionQueue,
+        "receiveTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.CompletionQueue,
+        "ReceiveTimeoutError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
         "ClientEventQueue",
     ));
     try std.testing.expect(@hasDecl(

@@ -1060,7 +1060,7 @@ The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
 graceful DISCONNECT, pending-PUBLISH flush and re-authentication commands with
 typed, correlated completion callbacks. A bounded `CompletionQueue` adapter
-additionally provides blocking, timed and nonblocking consumption with deep-owned
+additionally provides blocking, `receiveTimeout`, and nonblocking consumption with deep-owned
 SUBACK/UNSUBACK reason codes and properties. A bounded `ClientEventQueue` also
 offers blocking, timed and nonblocking consumption and transfers complete packet
 events to consumer threads without introducing a

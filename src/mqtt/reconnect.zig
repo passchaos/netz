@@ -25,6 +25,8 @@ pub const CommandCompletionHandler = command_queue.CompletionHandler;
 pub const OwnedCommandCompletion = command_queue.OwnedCompletion;
 pub const CompletionQueue = command_queue.CompletionQueue;
 pub const CompletionQueueError = command_queue.CompletionQueueError;
+pub const CompletionQueueReceiveTimeoutError =
+    command_queue.CompletionQueueReceiveTimeoutError;
 
 pub const Error = runtime.Error || session.Error || error{
     InvalidReconnectPolicy,

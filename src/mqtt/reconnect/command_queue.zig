@@ -823,6 +823,8 @@ pub const OwnedCompletion = struct {
 
 pub const CompletionQueueError = std.mem.Allocator.Error ||
     std.Io.Cancelable || error{CompletionQueueClosed};
+pub const CompletionQueueReceiveTimeoutError = CompletionQueueError ||
+    std.Io.Timeout.Error || std.Io.ConcurrentError;
 
 /// Bounded, thread-safe sink for asynchronous command completions. It adapts
 /// the callback API while deep-owning SUBACK/UNSUBACK data, allowing another
@@ -831,6 +833,8 @@ pub const CompletionQueueError = std.mem.Allocator.Error ||
 /// is full, so consumers must drain it while commands are in flight. Its
 /// allocator must support concurrent use when shared with command producers.
 pub const CompletionQueue = struct {
+    pub const ReceiveTimeoutError = CompletionQueueReceiveTimeoutError;
+
     allocator: std.mem.Allocator,
     io: std.Io,
     storage: []OwnedCompletion,
@@ -894,8 +898,61 @@ pub const CompletionQueue = struct {
         return if (count == 0) null else values[0];
     }
 
+    /// Wait for one completion up to the supplied duration. The completion
+    /// branch owns its value as soon as the queue removes it, so cancellation
+    /// cleanup must release a concurrently completed but unselected value.
+    pub fn receiveTimeout(
+        self: *CompletionQueue,
+        timeout: std.Io.Duration,
+    ) CompletionQueueReceiveTimeoutError!OwnedCompletion {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const Wake = union(enum) {
+            completion: (std.Io.QueueClosedError ||
+                std.Io.Cancelable)!OwnedCompletion,
+            timeout: std.Io.Cancelable!void,
+        };
+        var buffer: [2]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(self.io, &buffer);
+        defer while (select.cancel()) |wake| switch (wake) {
+            .completion => |result| if (result) |owned_value| {
+                var owned = owned_value;
+                owned.deinit();
+            } else |_| {},
+            .timeout => {},
+        };
+        try select.concurrent(.completion, receiveRaw, .{self});
+        try select.concurrent(
+            .timeout,
+            waitForTimeout,
+            .{ self.io, timeout },
+        );
+        return switch (try select.await()) {
+            .completion => |result| result catch |err| switch (err) {
+                error.Closed => error.CompletionQueueClosed,
+                error.Canceled => error.Canceled,
+            },
+            .timeout => |result| {
+                try result;
+                return error.Timeout;
+            },
+        };
+    }
+
     pub fn close(self: *CompletionQueue) void {
         self.queue.close(self.io);
+    }
+
+    fn receiveRaw(
+        self: *CompletionQueue,
+    ) (std.Io.QueueClosedError || std.Io.Cancelable)!OwnedCompletion {
+        return self.queue.getOne(self.io);
+    }
+
+    fn waitForTimeout(
+        io: std.Io,
+        timeout: std.Io.Duration,
+    ) std.Io.Cancelable!void {
+        try std.Io.sleep(io, timeout, .awake);
     }
 
     fn captureCompletion(
@@ -1085,6 +1142,76 @@ test "MQTT completion queue owns acknowledgement data" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "MQTT completion queue receive timeout returns data and timeout" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CompletionQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveTimeout(.fromMilliseconds(1)),
+    );
+
+    const handler = queue.handler();
+    handler.complete(handler.context, .{
+        .command_id = 45,
+        .result = .{ .publish = 23 },
+    });
+    var completion = try queue.receiveTimeout(.fromSeconds(1));
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(u64, 45), completion.command_id);
+    const result = try completion.result;
+    switch (result) {
+        .publish => |packet_id| try std.testing.expectEqual(
+            @as(?u16, 23),
+            packet_id,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "MQTT completion queue close wakes a timed receiver" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CompletionQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+
+    const Consumer = struct {
+        io: std.Io,
+        queue: *CompletionQueue,
+        started: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.started.set(self.io);
+            var completion = self.queue.receiveTimeout(
+                .fromSeconds(30),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            completion.deinit();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var consumer = Consumer{ .io = io, .queue = &queue };
+    const thread = try std.Thread.spawn(.{}, Consumer.run, .{&consumer});
+    consumer.started.waitUncancelable(io);
+    queue.close();
+    thread.join();
+    try std.testing.expectEqual(
+        error.CompletionQueueClosed,
+        consumer.err.?,
+    );
 }
 
 test "MQTT completion queue preserves failures and close semantics" {
