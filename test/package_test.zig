@@ -440,6 +440,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
+        "receiveCloseFrameWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "receiveCloseFrameWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
         "receiveFrameAutoWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -474,6 +482,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "receiveFrameWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveCloseFrameWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveCloseFrameWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,

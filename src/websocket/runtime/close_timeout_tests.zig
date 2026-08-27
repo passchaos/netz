@@ -184,6 +184,98 @@ fn writeAll(
     }
 }
 
+test "WebSocket typed close receive resumes a partial frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        prefix_received: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_received.set(self.server.http.io);
+                self.timed_out.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            self.prefix_received.set(self.server.http.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.receiveCloseFrameWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.timed_out.set(self.server.http.io);
+            var close = (try connection.receiveCloseFrameWithDeadline(
+                .fromNow(
+                    self.server.http.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            )).?;
+            defer close.deinit(self.server.http.allocator);
+            try std.testing.expectEqual(
+                websocket.CloseCode.going_away,
+                close.code,
+            );
+            try std.testing.expectEqualStrings("restart", close.reason);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .host = "localhost" },
+    );
+    defer client.close();
+    var payload_storage: [125]u8 = undefined;
+    const payload = try websocket.writeClosePayloadInto(
+        &payload_storage,
+        .{ .code = .going_away, .reason = "restart" },
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try websocket.writeFrame(
+        &encoded,
+        allocator,
+        .close,
+        payload,
+        .{ .mask_key = .{ 1, 2, 3, 4 } },
+    );
+    const header = try websocket.FrameHeader.parse(encoded.items);
+    const split = header.header_len + 1;
+    try writeAll(io, client.stream, encoded.items[0..split]);
+    try shared.prefix_received.wait(io);
+    try shared.timed_out.wait(io);
+    try writeAll(io, client.stream, encoded.items[split..]);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket close handshake returns in-flight data before peer close" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

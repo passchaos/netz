@@ -1861,6 +1861,30 @@ pub const Connection = struct {
         return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
     }
 
+    pub fn receiveCloseFrameWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!?websocket.OwnedCloseFrame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveCloseFrameWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Receive and parse one peer Close frame under an absolute deadline.
+    /// Partial frame bytes remain buffered for a later receive. This strict
+    /// typed helper rejects an intervening application or control frame.
+    pub fn receiveCloseFrameWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!?websocket.OwnedCloseFrame {
+        var frame = try self.receiveFrameWithDeadline(deadline);
+        defer frame.deinit(self.allocator);
+        if (frame.header.opcode != .close) return error.InvalidFrame;
+        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+    }
+
     /// Relative-budget counterpart to `receiveFrameWithDeadline`. Partial
     /// frame bytes remain buffered so a later receive can resume exactly.
     pub fn receiveFrameWithTimeout(
@@ -2797,6 +2821,29 @@ pub const H2Connection = struct {
 
     pub fn receiveCloseFrame(self: *H2Connection) Error!?websocket.OwnedCloseFrame {
         var frame = try self.receiveFrame();
+        defer frame.deinit(self.allocator);
+        if (frame.header.opcode != .close) return error.InvalidFrame;
+        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+    }
+
+    pub fn receiveCloseFrameWithTimeout(
+        self: *H2Connection,
+        timeout: std.Io.Duration,
+    ) Error!?websocket.OwnedCloseFrame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveCloseFrameWithDeadline(.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// RFC 8441 counterpart to
+    /// `Connection.receiveCloseFrameWithDeadline`.
+    pub fn receiveCloseFrameWithDeadline(
+        self: *H2Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!?websocket.OwnedCloseFrame {
+        var frame = try self.receiveFrameWithDeadline(deadline);
         defer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
         return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
