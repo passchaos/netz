@@ -2018,3 +2018,154 @@ test "MQTT queued run owns async subscription commands and results" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT queued run exposes awaitable owned command completions" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "awaitable/publish",
+                publish.publish.topic,
+            );
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x00},
+                &.{.{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "owned ack",
+                } }},
+            );
+            var unsubscribe = try accepted.connection.readUnsubscribe();
+            defer unsubscribe.deinit(self.server.allocator);
+            try accepted.connection.writeUnsubAck(
+                unsubscribe.unsubscribe.packet_id,
+                &.{0x00},
+                &.{},
+            );
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "completion-queue" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 1,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    var completions = try reconnect.CompletionQueue.init(allocator, io, 3);
+    defer completions.deinit();
+    const publish_id = try run.publishQueued(
+        &completions,
+        "awaitable/publish",
+        "payload",
+        .{},
+    );
+    var publish_completion = try completions.receive();
+    defer publish_completion.deinit();
+    try std.testing.expectEqual(publish_id, publish_completion.command_id);
+    switch (try publish_completion.result) {
+        .publish => |packet_id| try std.testing.expect(packet_id == null),
+        else => return error.UnexpectedPacket,
+    }
+
+    const command_id = try run.subscribeQueued(
+        &completions,
+        &.{.{ .topic_filter = "awaitable/+" }},
+        .{},
+    );
+    var completion = try completions.receive();
+    defer completion.deinit();
+    const unsubscribe_id = try run.unsubscribeQueued(
+        &completions,
+        &.{"awaitable/+"},
+        .{},
+    );
+    var unsubscribe_completion = try completions.receive();
+    defer unsubscribe_completion.deinit();
+    // Stop the network worker before inspecting the result to prove the queue
+    // owns the ACK bytes beyond the callback and connection lifetime.
+    if (run.deinit()) |err| return err;
+
+    try std.testing.expectEqual(command_id, completion.command_id);
+    switch (try completion.result) {
+        .subscribe => |ack| {
+            try std.testing.expectEqual(@as(u8, 0x00), ack.reason_codes[0]);
+            try std.testing.expectEqualStrings(
+                "owned ack",
+                ack.properties[0].utf8.value,
+            );
+        },
+        else => return error.UnexpectedPacket,
+    }
+    try std.testing.expectEqual(
+        unsubscribe_id,
+        unsubscribe_completion.command_id,
+    );
+    switch (try unsubscribe_completion.result) {
+        .unsubscribe => |ack| {
+            try std.testing.expectEqual(@as(u8, 0x00), ack.reason_codes[0]);
+        },
+        else => return error.UnexpectedPacket,
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}

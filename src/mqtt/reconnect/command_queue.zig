@@ -452,6 +452,197 @@ pub const Completion = struct {
     };
 };
 
+/// An owned command result removed from a `CompletionQueue`. Unlike the
+/// callback-only `Completion`, acknowledgement slices remain valid until
+/// `deinit` is called. The originating queue must outlive this value because
+/// it serializes allocator access for producers and consumers.
+pub const OwnedCompletion = struct {
+    command_id: u64,
+    result: Error!Result,
+    owner: *CompletionQueue,
+
+    pub const Result = union(enum) {
+        publish: ?u16,
+        subscribe: Ack,
+        unsubscribe: Ack,
+    };
+
+    pub const Ack = struct {
+        packet_id: u16,
+        reason_codes: []u8,
+        properties: []mqtt.Property,
+    };
+
+    fn capture(
+        owner: *CompletionQueue,
+        completion: Completion,
+    ) OwnedCompletion {
+        const borrowed = completion.result catch |err| {
+            return .{
+                .command_id = completion.command_id,
+                .result = err,
+                .owner = owner,
+            };
+        };
+        const result = cloneResult(owner.allocator, borrowed) catch |err| {
+            return .{
+                .command_id = completion.command_id,
+                .result = err,
+                .owner = owner,
+            };
+        };
+        return .{
+            .command_id = completion.command_id,
+            .result = result,
+            .owner = owner,
+        };
+    }
+
+    fn cloneResult(
+        allocator: std.mem.Allocator,
+        result: Completion.Result,
+    ) Error!Result {
+        return switch (result) {
+            .publish => |packet_id| .{ .publish = packet_id },
+            .subscribe => |ack| .{ .subscribe = try cloneAck(allocator, ack) },
+            .unsubscribe => |ack| .{
+                .unsubscribe = try cloneAck(allocator, ack),
+            },
+        };
+    }
+
+    fn cloneAck(
+        allocator: std.mem.Allocator,
+        ack: Completion.Ack,
+    ) Error!Ack {
+        const reason_codes = try allocator.dupe(u8, ack.reason_codes);
+        errdefer allocator.free(reason_codes);
+        const properties = try owned_properties.clone(
+            allocator,
+            ack.properties,
+            owned_properties.keepAll,
+        );
+        return .{
+            .packet_id = ack.packet_id,
+            .reason_codes = reason_codes,
+            .properties = properties.properties,
+        };
+    }
+
+    pub fn deinit(self: *OwnedCompletion) void {
+        const owner = self.owner;
+        owner.allocator_mutex.lockUncancelable(owner.io);
+        defer owner.allocator_mutex.unlock(owner.io);
+        if (self.result) |result| switch (result) {
+            .publish => {},
+            .subscribe => |ack| deinitAck(owner.allocator, ack),
+            .unsubscribe => |ack| deinitAck(owner.allocator, ack),
+        } else |_| {}
+        const previous = owner.outstanding.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+        self.* = undefined;
+    }
+
+    fn deinitAck(allocator: std.mem.Allocator, ack: Ack) void {
+        owned_properties.deinit(allocator, ack.properties);
+        allocator.free(ack.reason_codes);
+    }
+};
+
+pub const CompletionQueueError = std.mem.Allocator.Error ||
+    std.Io.Cancelable || error{CompletionQueueClosed};
+
+/// Bounded, thread-safe sink for asynchronous command completions. It adapts
+/// the callback API while deep-owning SUBACK/UNSUBACK data, allowing another
+/// thread to await and inspect results after the loop callback has returned.
+/// Capacity is intentional backpressure: the MQTT loop waits when this queue
+/// is full, so consumers must drain it while commands are in flight.
+pub const CompletionQueue = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    storage: []OwnedCompletion,
+    queue: std.Io.Queue(OwnedCompletion),
+    allocator_mutex: std.Io.Mutex = .init,
+    outstanding: std.atomic.Value(usize) = .init(0),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        capacity: usize,
+    ) std.mem.Allocator.Error!CompletionQueue {
+        const storage = try allocator.alloc(OwnedCompletion, capacity);
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .storage = storage,
+            .queue = .init(storage),
+        };
+    }
+
+    /// Call only after all command producers have stopped and after releasing
+    /// every completion previously returned by `receive` or `tryReceive`.
+    pub fn deinit(self: *CompletionQueue) void {
+        self.close();
+        while (true) {
+            var values: [1]OwnedCompletion = undefined;
+            const count = self.queue.getUncancelable(
+                self.io,
+                &values,
+                0,
+            ) catch break;
+            if (count == 0) break;
+            values[0].deinit();
+        }
+        std.debug.assert(self.outstanding.load(.acquire) == 0);
+        self.allocator.free(self.storage);
+        self.* = undefined;
+    }
+
+    pub fn handler(self: *CompletionQueue) CompletionHandler {
+        return .{ .context = self, .complete = captureCompletion };
+    }
+
+    pub fn receive(self: *CompletionQueue) CompletionQueueError!OwnedCompletion {
+        return self.queue.getOne(self.io) catch |err| switch (err) {
+            error.Closed => error.CompletionQueueClosed,
+            error.Canceled => error.Canceled,
+        };
+    }
+
+    pub fn tryReceive(
+        self: *CompletionQueue,
+    ) CompletionQueueError!?OwnedCompletion {
+        var values: [1]OwnedCompletion = undefined;
+        const count = self.queue.get(self.io, &values, 0) catch |err|
+            switch (err) {
+                error.Closed => return error.CompletionQueueClosed,
+                error.Canceled => return error.Canceled,
+            };
+        return if (count == 0) null else values[0];
+    }
+
+    pub fn close(self: *CompletionQueue) void {
+        self.queue.close(self.io);
+    }
+
+    fn captureCompletion(
+        context: *anyopaque,
+        completion: Completion,
+    ) void {
+        const self: *CompletionQueue = @ptrCast(@alignCast(context));
+        self.allocator_mutex.lockUncancelable(self.io);
+        var owned = OwnedCompletion.capture(self, completion);
+        _ = self.outstanding.fetchAdd(1, .monotonic);
+        self.allocator_mutex.unlock(self.io);
+
+        self.queue.putOneUncancelable(self.io, owned) catch {
+            // Closing the sink explicitly discards future completions, but any
+            // owned ACK data still has to be released on the producer thread.
+            owned.deinit();
+        };
+    }
+};
+
 pub const OwnedSubscription = owned_subscription.Owned;
 
 fn cloneSubscriptions(
@@ -570,6 +761,128 @@ test "MQTT asynchronous command identifiers stay exhausted after overflow" {
         error.CommandIdentifierExhausted,
         queue.nextCommandId(),
     );
+}
+
+test "MQTT completion queue owns acknowledgement data" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CompletionQueue.init(std.testing.allocator, io, 2);
+    defer queue.deinit();
+    try std.testing.expect((try queue.tryReceive()) == null);
+
+    var reason_codes: [2]u8 = .{ 0x00, 0x01 };
+    var reason: [8]u8 = "accepted".*;
+    var properties = [_]mqtt.Property{.{ .utf8 = .{
+        .id = .reason_string,
+        .value = &reason,
+    } }};
+    const handler = queue.handler();
+    handler.complete(handler.context, .{
+        .command_id = 41,
+        .result = .{ .subscribe = .{
+            .packet_id = 7,
+            .reason_codes = &reason_codes,
+            .properties = &properties,
+        } },
+    });
+    @memset(&reason_codes, 0xff);
+    @memcpy(&reason, "modified");
+    properties[0] = .{ .byte = .{
+        .id = .maximum_qos,
+        .value = 0,
+    } };
+
+    var completion = try queue.receive();
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(u64, 41), completion.command_id);
+    const result = try completion.result;
+    switch (result) {
+        .subscribe => |ack| {
+            try std.testing.expectEqual(@as(u16, 7), ack.packet_id);
+            try std.testing.expectEqualSlices(
+                u8,
+                &.{ 0x00, 0x01 },
+                ack.reason_codes,
+            );
+            try std.testing.expectEqualStrings(
+                "accepted",
+                ack.properties[0].utf8.value,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "MQTT completion queue preserves failures and close semantics" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var queue = try CompletionQueue.init(
+        std.testing.allocator,
+        threaded.io(),
+        1,
+    );
+    defer queue.deinit();
+    const handler = queue.handler();
+    handler.complete(handler.context, .{
+        .command_id = 42,
+        .result = error.ConnectionUnavailable,
+    });
+
+    var completion = try queue.receive();
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(u64, 42), completion.command_id);
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        completion.result,
+    );
+    queue.close();
+    handler.complete(handler.context, .{
+        .command_id = 44,
+        .result = .{ .subscribe = .{
+            .packet_id = 10,
+            .reason_codes = &.{0x00},
+            .properties = &.{.{ .utf8 = .{
+                .id = .reason_string,
+                .value = "discarded",
+            } }},
+        } },
+    });
+    try std.testing.expectError(
+        error.CompletionQueueClosed,
+        queue.tryReceive(),
+    );
+}
+
+test "MQTT completion queue allocation failures are owned results" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkCompletionQueueAllocationFailure,
+        .{},
+    );
+}
+
+fn checkCompletionQueueAllocationFailure(allocator: std.mem.Allocator) !void {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var queue = try CompletionQueue.init(allocator, threaded.io(), 1);
+    defer queue.deinit();
+    const handler = queue.handler();
+    handler.complete(handler.context, .{
+        .command_id = 43,
+        .result = .{ .unsubscribe = .{
+            .packet_id = 9,
+            .reason_codes = &.{0x00},
+            .properties = &.{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "allocation",
+                .value = "failure",
+            } }},
+        } },
+    });
+    var completion = try queue.receive();
+    defer completion.deinit();
+    _ = completion.result catch |err| return err;
 }
 
 test "MQTT command queue stop wakes a pending producer" {

@@ -20,6 +20,9 @@ pub const CommandQueue = command_queue.CommandQueue;
 pub const CommandQueueError = command_queue.Error;
 pub const CommandCompletion = command_queue.Completion;
 pub const CommandCompletionHandler = command_queue.CompletionHandler;
+pub const OwnedCommandCompletion = command_queue.OwnedCompletion;
+pub const CompletionQueue = command_queue.CompletionQueue;
+pub const CompletionQueueError = command_queue.CompletionQueueError;
 
 pub const Error = runtime.Error || session.Error || error{
     InvalidReconnectPolicy,
@@ -296,6 +299,22 @@ pub const QueuedRun = struct {
         );
     }
 
+    /// Enqueue an owned PUBLISH and route its result into `completions`.
+    pub fn publishQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+    ) CommandQueueError!u64 {
+        return self.publishAsync(
+            topic,
+            payload,
+            options,
+            completions.handler(),
+        );
+    }
+
     pub fn subscribeAsync(
         self: *QueuedRun,
         subscriptions: []const mqtt.Subscription,
@@ -309,6 +328,20 @@ pub const QueuedRun = struct {
         );
     }
 
+    /// Enqueue an owned SUBSCRIBE with an awaitable, owned completion.
+    pub fn subscribeQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+    ) CommandQueueError!u64 {
+        return self.subscribeAsync(
+            subscriptions,
+            options,
+            completions.handler(),
+        );
+    }
+
     pub fn unsubscribeAsync(
         self: *QueuedRun,
         filters: []const []const u8,
@@ -319,6 +352,20 @@ pub const QueuedRun = struct {
             filters,
             options,
             completion,
+        );
+    }
+
+    /// Enqueue an owned UNSUBSCRIBE with an awaitable, owned completion.
+    pub fn unsubscribeQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+    ) CommandQueueError!u64 {
+        return self.unsubscribeAsync(
+            filters,
+            options,
+            completions.handler(),
         );
     }
 
