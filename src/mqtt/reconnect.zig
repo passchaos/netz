@@ -20,6 +20,7 @@ const net = std.Io.net;
 
 pub const CommandQueue = command_queue.CommandQueue;
 pub const CommandQueueError = command_queue.Error;
+pub const CommandEnqueueTimeoutError = command_queue.EnqueueTimeoutError;
 pub const CommandCompletion = command_queue.Completion;
 pub const CommandCompletionHandler = command_queue.CompletionHandler;
 pub const OwnedCommandCompletion = command_queue.OwnedCompletion;
@@ -304,6 +305,24 @@ pub const QueuedRun = struct {
         );
     }
 
+    /// Wait for bounded queue capacity without waiting for MQTT delivery.
+    pub fn publishAsyncTimeout(
+        self: *QueuedRun,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        completion: command_queue.CompletionHandler,
+        timeout: std.Io.Duration,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.publishAsyncTimeout(
+            topic,
+            payload,
+            options,
+            completion,
+            timeout,
+        );
+    }
+
     /// Enqueue an owned PUBLISH and route its result into `completions`.
     pub fn publishQueued(
         self: *QueuedRun,
@@ -317,6 +336,23 @@ pub const QueuedRun = struct {
             payload,
             options,
             completions.handler(),
+        );
+    }
+
+    pub fn publishQueuedTimeout(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        timeout: std.Io.Duration,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.publishAsyncTimeout(
+            topic,
+            payload,
+            options,
+            completions.handler(),
+            timeout,
         );
     }
 

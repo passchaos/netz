@@ -24,6 +24,8 @@ pub const Error = runtime.Error || session.Error || std.Io.Cancelable || error{
     OwnedPropertyLimitExceeded,
     ManualAcknowledgementsDisabled,
 };
+pub const EnqueueTimeoutError = Error || std.Io.Timeout.Error ||
+    std.Io.ConcurrentError;
 
 pub const CommandQueue = struct {
     allocator: std.mem.Allocator,
@@ -85,6 +87,47 @@ pub const CommandQueue = struct {
         options: runtime.PublishOptions,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.publishAsyncInternal(
+            topic,
+            payload,
+            options,
+            completion,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Deep-copy a publication and wait up to `timeout` for bounded queue
+    /// capacity. Success transfers ownership to the reconnect loop but does
+    /// not wait for socket delivery; `completion` still reports that result.
+    pub fn publishAsyncTimeout(
+        self: *CommandQueue,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.publishAsyncInternal(
+            topic,
+            payload,
+            options,
+            completion,
+            timeout,
+        );
+    }
+
+    fn publishAsyncInternal(
+        self: *CommandQueue,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -118,7 +161,11 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        if (enqueue_timeout) |timeout| {
+            try self.enqueueOwnedTimeout(command, timeout);
+        } else {
+            try self.enqueueOwned(command);
+        }
         return command_id;
     }
 
@@ -426,6 +473,93 @@ pub const CommandQueue = struct {
                 error.Canceled => return error.Canceled,
             };
         if (count == 0) return error.CommandQueueFull;
+    }
+
+    fn enqueueOwnedTimeout(
+        self: *CommandQueue,
+        command: *Command,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!void {
+        _ = self.async_commands.fetchAdd(1, .monotonic);
+        var transferred = false;
+        errdefer if (!transferred) {
+            _ = self.async_commands.fetchSub(1, .monotonic);
+        };
+
+        const PutResult = (std.Io.QueueClosedError ||
+            std.Io.Cancelable)!void;
+        const Wake = union(enum) {
+            put: PutResult,
+            timeout: std.Io.Cancelable!void,
+        };
+        var wake_buffer: [2]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(self.io, &wake_buffer);
+        try select.concurrent(.put, putOwned, .{ self, command });
+        select.concurrent(
+            .timeout,
+            waitForEnqueueTimeout,
+            .{ self.io, timeout },
+        ) catch |err| {
+            while (select.cancel()) |wake| switch (wake) {
+                .put => |result| {
+                    result catch continue;
+                    transferred = true;
+                },
+                .timeout => {},
+            };
+            if (transferred) return;
+            return err;
+        };
+
+        const first = select.await() catch |err| {
+            while (select.cancel()) |wake| switch (wake) {
+                .put => |result| {
+                    result catch continue;
+                    transferred = true;
+                },
+                .timeout => {},
+            };
+            if (transferred) return;
+            return err;
+        };
+        switch (first) {
+            .put => |result| {
+                defer select.cancelDiscard();
+                result catch |err| switch (err) {
+                    error.Closed => return error.CommandQueueClosed,
+                    error.Canceled => return error.Canceled,
+                };
+                transferred = true;
+            },
+            .timeout => |result| {
+                try result;
+                while (select.cancel()) |wake| switch (wake) {
+                    .put => |put_result| {
+                        put_result catch continue;
+                        transferred = true;
+                    },
+                    .timeout => {},
+                };
+                // If queue capacity became available exactly as the timeout
+                // fired, accepting the command wins: returning Timeout after
+                // ownership transferred would hide a live completion ID.
+                if (!transferred) return error.Timeout;
+            },
+        }
+    }
+
+    fn putOwned(
+        self: *CommandQueue,
+        command: *Command,
+    ) (std.Io.QueueClosedError || std.Io.Cancelable)!void {
+        return self.queue.putOne(self.io, command);
+    }
+
+    fn waitForEnqueueTimeout(
+        io: std.Io,
+        timeout: std.Io.Duration,
+    ) std.Io.Cancelable!void {
+        try std.Io.sleep(io, timeout, .awake);
     }
 
     pub fn take(self: *CommandQueue) Error!?*Command {
@@ -1206,7 +1340,7 @@ test "MQTT completion queue close wakes a timed receiver" {
     var consumer = Consumer{ .io = io, .queue = &queue };
     const thread = try std.Thread.spawn(.{}, Consumer.run, .{&consumer});
     consumer.started.waitUncancelable(io);
-    queue.close();
+    queue.queue.close(io);
     thread.join();
     try std.testing.expectEqual(
         error.CompletionQueueClosed,
@@ -1348,6 +1482,166 @@ test "MQTT async publish rejects a full queue without leaking" {
             },
         ),
     );
+}
+
+test "MQTT async publish timeout releases an unqueued command" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    const first_id = try queue.publishAsync(
+        "queued/first",
+        "first",
+        .{},
+        completion.handler(),
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        queue.publishAsyncTimeout(
+            "queued/timeout",
+            "not accepted",
+            .{ .properties = &.{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "owned",
+                .value = "until timeout",
+            } }} },
+            completion.handler(),
+            .fromMilliseconds(1),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), queue.async_commands.load(
+        .acquire,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), completion.calls);
+
+    const first = (try queue.take()).?;
+    first.finishFailure(io, error.CommandQueueClosed);
+    try std.testing.expectEqual(@as(usize, 1), completion.calls);
+    try std.testing.expectEqual(first_id, completion.ids[0]);
+}
+
+test "MQTT async publish waits for bounded queue capacity" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    _ = try queue.publishAsync(
+        "queued/first",
+        "first",
+        .{},
+        completion.handler(),
+    );
+
+    const Producer = struct {
+        io: std.Io,
+        queue: *CommandQueue,
+        completion: *TestCompletion,
+        started: std.Io.Event = .unset,
+        result: ?EnqueueTimeoutError!u64 = null,
+
+        fn run(self: *@This()) void {
+            self.started.set(self.io);
+            self.result = self.queue.publishAsyncTimeout(
+                "queued/second",
+                "second",
+                .{},
+                self.completion.handler(),
+                .fromSeconds(1),
+            );
+        }
+    };
+    var producer = Producer{
+        .io = io,
+        .queue = &queue,
+        .completion = &completion,
+    };
+    const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
+    producer.started.waitUncancelable(io);
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+
+    const first = (try queue.take()).?;
+    thread.join();
+    const second_id = try producer.result.?;
+    const second = (try queue.take()).?;
+    switch (second.operation) {
+        .publish_owned => |publish| {
+            try std.testing.expectEqualStrings(
+                "queued/second",
+                publish.topic,
+            );
+            try std.testing.expectEqualStrings("second", publish.payload);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    first.finishFailure(io, error.CommandQueueClosed);
+    second.finishFailure(io, error.CommandQueueClosed);
+    try std.testing.expectEqual(@as(usize, 2), completion.calls);
+    try std.testing.expectEqual(second_id, completion.ids[1]);
+}
+
+test "MQTT async publish timed wait observes queue close" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    _ = try queue.publishAsync(
+        "queued/first",
+        "first",
+        .{},
+        completion.handler(),
+    );
+
+    const Producer = struct {
+        io: std.Io,
+        queue: *CommandQueue,
+        completion: *TestCompletion,
+        started: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.started.set(self.io);
+            _ = self.queue.publishAsyncTimeout(
+                "queued/closed",
+                "not accepted",
+                .{},
+                self.completion.handler(),
+                .fromSeconds(30),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var producer = Producer{
+        .io = io,
+        .queue = &queue,
+        .completion = &completion,
+    };
+    const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
+    producer.started.waitUncancelable(io);
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    queue.queue.close(io);
+    thread.join();
+    try std.testing.expectEqual(error.CommandQueueClosed, producer.err.?);
+    try std.testing.expectEqual(@as(usize, 1), queue.async_commands.load(
+        .acquire,
+    ));
+    queue.stop(error.CommandQueueClosed);
+    try std.testing.expectEqual(@as(usize, 1), completion.calls);
 }
 
 test "MQTT async subscription commands reject a full queue without leaking" {
