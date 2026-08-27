@@ -112,6 +112,118 @@ test "MQTT reconnect client retries TCP and resumes QoS1 with DUP" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect reports QoS0 and acknowledged publish delivery" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var qos0 = try accepted.connection.readPublish();
+            defer qos0.deinit(self.server.allocator);
+            try std.testing.expectEqual(mqtt.QoS.at_most_once, qos0.publish.qos);
+            var qos1 = try accepted.connection.readPublish();
+            defer qos1.deinit(self.server.allocator);
+            try accepted.connection.writePubAckWithProperties(
+                qos1.publish.packet_id.?,
+                0x10,
+                &.{.{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "delivered",
+                } }},
+            );
+        }
+    };
+    const Delivery = struct {
+        calls: usize = 0,
+        packet_ids: [2]?u16 = .{ null, null },
+        qos: [2]mqtt.QoS = .{ .at_most_once, .at_most_once },
+        reasons: [2]u8 = .{ 0, 0 },
+        property_seen: bool = false,
+        fn complete(context: *anyopaque, delivery: reconnect.PublishDelivery) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const index = self.calls;
+            self.calls += 1;
+            self.packet_ids[index] = delivery.packet_id;
+            self.qos[index] = delivery.qos;
+            self.reasons[index] = delivery.reason_code;
+            if (delivery.properties.len != 0) {
+                self.property_seen = std.mem.eql(
+                    u8,
+                    delivery.properties[0].utf8.value,
+                    "delivered",
+                );
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var delivery: Delivery = .{};
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "delivery-callback" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+        .{ .publish_delivery = .{
+            .context = &delivery,
+            .complete = Delivery.complete,
+        } },
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    try std.testing.expect((try client.publish(
+        "delivery/qos0",
+        "zero",
+        .{},
+    )) == null);
+    const packet_id = (try client.publish(
+        "delivery/qos1",
+        "one",
+        .{ .qos = .at_least_once },
+    )).?;
+    try std.testing.expectEqual(packet_id, try client.completeNextPublish());
+
+    try std.testing.expectEqual(@as(usize, 2), delivery.calls);
+    try std.testing.expect(delivery.packet_ids[0] == null);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, delivery.qos[0]);
+    try std.testing.expectEqual(packet_id, delivery.packet_ids[1].?);
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, delivery.qos[1]);
+    try std.testing.expectEqual(@as(u8, 0x10), delivery.reasons[1]);
+    try std.testing.expect(delivery.property_seen);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect client resumes QoS2 directly at PUBREL" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -202,6 +314,204 @@ test "MQTT reconnect client resumes QoS2 directly at PUBREL" {
         @as(usize, 0),
         (try client.outgoingStats()).inflight_count,
     );
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect reports QoS2 delivery only at its terminal ack" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            const packet_id = publish.publish.packet_id.?;
+            try accepted.connection.writePubRec(packet_id, 0);
+            var pubrel = try accepted.connection.readPubRel();
+            defer pubrel.deinit(self.server.allocator);
+            try accepted.connection.writePubCompWithProperties(
+                packet_id,
+                0,
+                &.{.{ .utf8_pair = .{
+                    .id = .user_property,
+                    .key = "delivery",
+                    .value = "complete",
+                } }},
+            );
+        }
+    };
+    const Delivery = struct {
+        calls: usize = 0,
+        packet_id: u16 = 0,
+        property_seen: bool = false,
+        fn complete(context: *anyopaque, delivery: reconnect.PublishDelivery) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.packet_id = delivery.packet_id.?;
+            self.property_seen = delivery.qos == .exactly_once and
+                delivery.properties.len == 1 and
+                std.mem.eql(
+                    u8,
+                    delivery.properties[0].utf8_pair.value,
+                    "complete",
+                );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var delivery: Delivery = .{};
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "delivery-qos2" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+        .{ .publish_delivery = .{
+            .context = &delivery,
+            .complete = Delivery.complete,
+        } },
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    const packet_id = (try client.publish(
+        "delivery/qos2",
+        "two",
+        .{ .qos = .exactly_once },
+    )).?;
+    try std.testing.expectEqual(packet_id, try client.completeNextPublish());
+    try std.testing.expectEqual(@as(usize, 0), delivery.calls);
+    try std.testing.expectEqual(packet_id, try client.completeNextPublish());
+    try std.testing.expectEqual(@as(usize, 1), delivery.calls);
+    try std.testing.expectEqual(packet_id, delivery.packet_id);
+    try std.testing.expect(delivery.property_seen);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect reports rejected QoS2 delivery at PUBREC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try accepted.connection.writePubRecWithProperties(
+                publish.publish.packet_id.?,
+                0x80,
+                &.{.{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "rejected",
+                } }},
+            );
+        }
+    };
+    const Delivery = struct {
+        calls: usize = 0,
+        reason_code: u8 = 0,
+        reason_seen: bool = false,
+        fn complete(context: *anyopaque, delivery: reconnect.PublishDelivery) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.reason_code = delivery.reason_code;
+            self.reason_seen = delivery.qos == .exactly_once and
+                delivery.properties.len == 1 and
+                std.mem.eql(
+                    u8,
+                    delivery.properties[0].utf8.value,
+                    "rejected",
+                );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var delivery: Delivery = .{};
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "delivery-rejected" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+        .{ .publish_delivery = .{
+            .context = &delivery,
+            .complete = Delivery.complete,
+        } },
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    _ = try client.publish(
+        "delivery/rejected",
+        "two",
+        .{ .qos = .exactly_once },
+    );
+    try std.testing.expectError(
+        error.PublishRefused,
+        client.completeNextPublish(),
+    );
+    try std.testing.expectEqual(@as(usize, 1), delivery.calls);
+    try std.testing.expectEqual(@as(u8, 0x80), delivery.reason_code);
+    try std.testing.expect(delivery.reason_seen);
 
     server_thread.join();
     joined = true;

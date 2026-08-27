@@ -572,9 +572,29 @@ pub const ClientOptions = struct {
     /// application must acknowledge them through this Client or its queued
     /// handle so the single socket-owner invariant is preserved.
     manual_acknowledgements: bool = false,
+    /// Optional notification emitted when an outbound PUBLISH reaches its
+    /// protocol delivery boundary: socket completion for QoS 0, PUBACK for
+    /// QoS 1, and PUBCOMP (or a negative PUBREC) for QoS 2. This observes all
+    /// sends, including retransmissions restored from durable Session state.
+    publish_delivery: ?PublishDeliveryHandler = null,
 };
 
 pub const SubscriptionOptions = ClientOptions;
+
+pub const PublishDelivery = struct {
+    packet_id: ?u16,
+    qos: mqtt.QoS,
+    reason_code: u8,
+    /// Borrowed from the incoming acknowledgement for this callback only.
+    properties: []const mqtt.Property,
+};
+
+pub const PublishDeliveryHandler = struct {
+    context: *anyopaque,
+    /// Runs synchronously on the connection owner. The callback must not wait
+    /// for another operation that requires that same owner to make progress.
+    complete: *const fn (context: *anyopaque, delivery: PublishDelivery) void,
+};
 
 const OwnedSubscription = owned_subscription.Owned;
 
@@ -1067,6 +1087,12 @@ pub const Client = struct {
         if (options.qos == .at_most_once) {
             try active.publish(topic, payload, options);
             self.noteControlSent();
+            self.finishPublishDelivery(.{
+                .packet_id = null,
+                .qos = .at_most_once,
+                .reason_code = 0,
+                .properties = &.{},
+            });
             return null;
         }
         _ = try self.outgoing.enqueuePublish(
@@ -1410,6 +1436,17 @@ pub const Client = struct {
                 ack.reason_code,
             );
             if (action == .send_pubrel) try self.replayPending();
+            if (action == .completed) {
+                self.finishPublishDelivery(.{
+                    .packet_id = ack.packet_id,
+                    .qos = if (ack.packet_type == .puback)
+                        .at_least_once
+                    else
+                        .exactly_once,
+                    .reason_code = ack.reason_code,
+                    .properties = ack.properties,
+                });
+            }
             if (!ack.accepted()) return error.PublishRefused;
             return ack.packet_id;
         }
@@ -1549,6 +1586,12 @@ pub const Client = struct {
             },
             .puback => |owned| blk: {
                 _ = try self.applyOutgoingAck(owned.ack);
+                self.finishPublishDelivery(.{
+                    .packet_id = owned.ack.packet_id,
+                    .qos = .at_least_once,
+                    .reason_code = owned.ack.reason_code,
+                    .properties = owned.ack.properties,
+                });
                 break :blk .{ .puback = owned };
             },
             .pubrec => |owned| blk: {
@@ -1556,6 +1599,15 @@ pub const Client = struct {
                 if (action == .send_pubrel) {
                     try self.replayPending();
                     self.noteControlSent();
+                } else {
+                    // A negative PUBREC terminates the QoS 2 transaction and
+                    // is its protocol-level delivery result.
+                    self.finishPublishDelivery(.{
+                        .packet_id = owned.ack.packet_id,
+                        .qos = .exactly_once,
+                        .reason_code = owned.ack.reason_code,
+                        .properties = owned.ack.properties,
+                    });
                 }
                 break :blk .{ .pubrec = owned };
             },
@@ -1583,6 +1635,12 @@ pub const Client = struct {
             },
             .pubcomp => |owned| blk: {
                 _ = try self.applyOutgoingAck(owned.ack);
+                self.finishPublishDelivery(.{
+                    .packet_id = owned.ack.packet_id,
+                    .qos = .exactly_once,
+                    .reason_code = owned.ack.reason_code,
+                    .properties = owned.ack.properties,
+                });
                 break :blk .{ .pubcomp = owned };
             },
             .pingresp => |*packet| blk: {
@@ -1617,6 +1675,15 @@ pub const Client = struct {
                 break :blk .{ .auth = owned };
             },
         };
+    }
+
+    fn finishPublishDelivery(
+        self: *Client,
+        delivery: PublishDelivery,
+    ) void {
+        if (self.client_options.publish_delivery) |handler| {
+            handler.complete(handler.context, delivery);
+        }
     }
 
     /// Returns true after a successful graceful disconnect, instructing the
