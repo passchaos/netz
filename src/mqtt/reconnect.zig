@@ -31,6 +31,7 @@ pub const Error = runtime.Error || session.Error || error{
     SubscriptionLimitExceeded,
     SubscriptionRefused,
     OwnedPropertyLimitExceeded,
+    ManualAcknowledgementsDisabled,
 };
 
 const OptionsError = mqtt.Error || std.mem.Allocator.Error ||
@@ -404,6 +405,46 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn acknowledge(
+        self: *QueuedRun,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+    ) CommandQueueError!void {
+        return self.queue.acknowledge(packet_id, qos, options);
+    }
+
+    pub fn acknowledgeAsync(
+        self: *QueuedRun,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.acknowledgeAsync(
+            packet_id,
+            qos,
+            options,
+            completion,
+        );
+    }
+
+    /// Enqueue an inbound PUBLISH acknowledgement with an awaitable result.
+    pub fn acknowledgeQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+    ) CommandQueueError!u64 {
+        return self.acknowledgeAsync(
+            packet_id,
+            qos,
+            options,
+            completions.handler(),
+        );
+    }
+
     pub fn flushPending(self: *QueuedRun) CommandQueueError!void {
         return self.queue.flushPending();
     }
@@ -464,10 +505,16 @@ pub const ClientEvent = union(enum) {
     }
 };
 
-pub const SubscriptionOptions = struct {
+pub const ClientOptions = struct {
     /// Maximum number of filters retained for fresh-session replay.
     max_subscriptions: usize = 1024,
+    /// Leave inbound QoS 1/2 PUBLISH acknowledgements to the application. The
+    /// application must acknowledge them through this Client or its queued
+    /// handle so the single socket-owner invariant is preserved.
+    manual_acknowledgements: bool = false,
 };
+
+pub const SubscriptionOptions = ClientOptions;
 
 const OwnedSubscription = owned_subscription.Owned;
 
@@ -494,7 +541,7 @@ pub const Client = struct {
     outgoing: session.Store,
     outgoing_handle: session.Handle,
     outgoing_open: bool = true,
-    subscription_options: SubscriptionOptions,
+    client_options: ClientOptions,
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
@@ -525,7 +572,7 @@ pub const Client = struct {
         options: runtime.ConnectOptions,
         policy: ReconnectPolicy,
         shutdown: *std.Io.Event,
-        subscription_options: SubscriptionOptions,
+        client_options: ClientOptions,
     ) Error!Client {
         return initTarget(
             allocator,
@@ -534,7 +581,7 @@ pub const Client = struct {
             options,
             policy,
             shutdown,
-            subscription_options,
+            client_options,
         );
     }
 
@@ -567,7 +614,7 @@ pub const Client = struct {
         options: runtime.ConnectOptions,
         policy: ReconnectPolicy,
         shutdown: *std.Io.Event,
-        subscription_options: SubscriptionOptions,
+        client_options: ClientOptions,
     ) Error!Client {
         return initTarget(
             allocator,
@@ -576,7 +623,7 @@ pub const Client = struct {
             options,
             policy,
             shutdown,
-            subscription_options,
+            client_options,
         );
     }
 
@@ -587,7 +634,7 @@ pub const Client = struct {
         options: runtime.ConnectOptions,
         policy: ReconnectPolicy,
         shutdown: *std.Io.Event,
-        subscription_options: SubscriptionOptions,
+        client_options: ClientOptions,
     ) Error!Client {
         try policy.validate();
         if (options.client_id.len == 0) return error.InvalidClientId;
@@ -612,7 +659,7 @@ pub const Client = struct {
             .options = owned_options,
             .policy = policy,
             .shutdown = shutdown,
-            .subscription_options = subscription_options,
+            .client_options = client_options,
             .outgoing = outgoing,
             .outgoing_handle = opened.handle,
         };
@@ -794,6 +841,69 @@ pub const Client = struct {
         return self.subscriptions.items.len;
     }
 
+    /// Acknowledge one inbound PUBLISH when manual acknowledgements are
+    /// enabled. QoS 0 requires no wire response. QoS 1 emits PUBACK and QoS 2
+    /// durably records the transaction before emitting PUBREC.
+    pub fn acknowledge(
+        self: *Client,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+    ) Error!void {
+        if (qos == .at_most_once) return;
+        if (!self.client_options.manual_acknowledgements) {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        switch (qos) {
+            .at_most_once => unreachable,
+            .at_least_once => {
+                if (!active.hasPendingIncomingPublish(packet_id, qos)) {
+                    return error.UnexpectedPacket;
+                }
+                try active.writePubAckWithProperties(
+                    packet_id,
+                    options.reason_code,
+                    options.properties,
+                );
+            },
+            .exactly_once => {
+                if (!active.hasPendingIncomingPublish(packet_id, qos)) {
+                    return error.UnexpectedPacket;
+                }
+                var recorded = false;
+                if (options.reason_code < 0x80) {
+                    const duplicate = try self.outgoing.recordIncomingQoS2(
+                        self.outgoing_handle,
+                        packet_id,
+                    );
+                    if (duplicate) return error.UnexpectedPacket;
+                    recorded = true;
+                }
+                active.writePubRecWithProperties(
+                    packet_id,
+                    options.reason_code,
+                    options.properties,
+                ) catch |err| {
+                    // Local validation/allocation can fail before bytes are
+                    // emitted; a transport error can also happen after a
+                    // partial write. Rolling back is safe in both cases: the
+                    // peer either retries PUBLISH or resumes with PUBREL,
+                    // which this client acknowledges idempotently.
+                    if (recorded) {
+                        self.outgoing.completeIncomingQoS2(
+                            self.outgoing_handle,
+                            packet_id,
+                        ) catch unreachable;
+                    }
+                    return err;
+                };
+            },
+        }
+        self.noteControlSent();
+    }
+
     /// Subscribe and remember only filters accepted by the broker. A future
     /// reconnect replays them when CONNACK reports that no Session survived.
     /// Existing entries are updated transactionally after SUBACK.
@@ -813,7 +923,7 @@ pub const Client = struct {
                 additions += 1;
             }
         }
-        if (additions > self.subscription_options.max_subscriptions -|
+        if (additions > self.client_options.max_subscriptions -|
             self.subscriptions.items.len)
         {
             return error.SubscriptionLimitExceeded;
@@ -1302,21 +1412,40 @@ pub const Client = struct {
                 if (owned.publish.packet_id) |packet_id| {
                     switch (owned.publish.qos) {
                         .at_most_once => unreachable,
-                        .at_least_once => try active.writePubAck(packet_id, 0),
+                        .at_least_once => if (!self.client_options.manual_acknowledgements) {
+                            try active.writePubAck(packet_id, 0);
+                        },
                         .exactly_once => {
-                            const duplicate =
-                                try self.outgoing.recordIncomingQoS2(
+                            if (self.client_options.manual_acknowledgements) {
+                                // Once the application has accepted a QoS 2
+                                // message, retransmitted PUBLISH packets belong
+                                // to the existing handshake. Re-emit PUBREC and
+                                // suppress a second application delivery.
+                                if (try self.outgoing.containsIncomingQoS2(
                                     self.outgoing_handle,
                                     packet_id,
-                                );
-                            try active.writePubRec(packet_id, 0);
-                            self.noteControlSent();
-                            if (duplicate) {
-                                return null;
+                                )) {
+                                    try active.writePubRec(packet_id, 0);
+                                    self.noteControlSent();
+                                    return null;
+                                }
+                            } else {
+                                const duplicate =
+                                    try self.outgoing.recordIncomingQoS2(
+                                        self.outgoing_handle,
+                                        packet_id,
+                                    );
+                                try active.writePubRec(packet_id, 0);
+                                self.noteControlSent();
+                                if (duplicate) {
+                                    return null;
+                                }
                             }
                         },
                     }
-                    self.noteControlSent();
+                    if (!self.client_options.manual_acknowledgements) {
+                        self.noteControlSent();
+                    }
                 }
                 break :blk .{ .publish = owned };
             },
@@ -1475,6 +1604,33 @@ pub const Client = struct {
                     disconnect_command.reason_code,
                     disconnect_command.properties,
                 );
+            },
+            .acknowledge => |acknowledge_command| {
+                self.acknowledge(
+                    acknowledge_command.packet_id,
+                    acknowledge_command.qos,
+                    acknowledge_command.options,
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return false;
+                };
+                command.finishAcknowledge(self.io);
+                return false;
+            },
+            .acknowledge_owned => |acknowledge_command| {
+                self.acknowledge(
+                    acknowledge_command.packet_id,
+                    acknowledge_command.qos,
+                    .{
+                        .reason_code = acknowledge_command.reason_code,
+                        .properties = acknowledge_command.properties,
+                    },
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return false;
+                };
+                command.finishAcknowledge(self.io);
+                return false;
             },
             .flush_pending => {
                 self.flushPending() catch |err| {

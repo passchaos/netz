@@ -1,9 +1,9 @@
 //! Bounded multi-producer command channel for the reconnect event loop.
 //!
 //! Synchronous requests borrow their payload until completion. Asynchronous
-//! PUBLISH, SUBSCRIBE, UNSUBSCRIBE, and DISCONNECT requests instead deep-copy
-//! all variable data, so producers may return immediately while one loop
-//! retains exclusive transport ownership.
+//! PUBLISH, SUBSCRIBE, UNSUBSCRIBE, DISCONNECT, and manual acknowledgement
+//! requests instead deep-copy all variable data, so producers may return
+//! immediately while one loop retains exclusive transport ownership.
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
@@ -21,6 +21,7 @@ pub const Error = runtime.Error || session.Error || std.Io.Cancelable || error{
     SessionLost,
     SubscriptionLimitExceeded,
     OwnedPropertyLimitExceeded,
+    ManualAcknowledgementsDisabled,
 };
 
 pub const CommandQueue = struct {
@@ -254,6 +255,62 @@ pub const CommandQueue = struct {
         return command_id;
     }
 
+    /// Acknowledge an inbound PUBLISH through the event-loop socket owner.
+    /// MQTT 5 properties are borrowed until this synchronous call completes.
+    pub fn acknowledge(
+        self: *CommandQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+    ) Error!void {
+        var command = Command{ .operation = .{ .acknowledge = .{
+            .packet_id = packet_id,
+            .qos = qos,
+            .options = options,
+        } } };
+        try self.submit(&command);
+    }
+
+    /// Deep-copy MQTT 5 acknowledgement properties and enqueue without
+    /// waiting for the socket write.
+    pub fn acknowledgeAsync(
+        self: *CommandQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        completion: CompletionHandler,
+    ) Error!u64 {
+        self.allocator_mutex.lockUncancelable(self.io);
+        defer self.allocator_mutex.unlock(self.io);
+        const command = try self.allocator.create(Command);
+        errdefer self.allocator.destroy(command);
+        const copied_properties = try owned_properties.clone(
+            self.allocator,
+            options.properties,
+            owned_properties.keepAll,
+        );
+        errdefer owned_properties.deinit(
+            self.allocator,
+            copied_properties.properties,
+        );
+        const command_id = try self.nextCommandId();
+        command.* = .{
+            .operation = .{ .acknowledge_owned = .{
+                .packet_id = packet_id,
+                .qos = qos,
+                .reason_code = options.reason_code,
+                .properties = copied_properties.properties,
+            } },
+            .async_completion = .{
+                .command_id = command_id,
+                .handler = completion,
+            },
+            .owner = self,
+        };
+        try self.enqueueOwned(command);
+        return command_id;
+    }
+
     pub fn flushPending(self: *CommandQueue) Error!void {
         var command = Command{ .operation = .flush_pending };
         try self.submit(&command);
@@ -348,6 +405,19 @@ pub const Command = struct {
         properties: []mqtt.Property,
     };
 
+    pub const Acknowledge = struct {
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+    };
+
+    pub const OwnedAcknowledge = struct {
+        packet_id: u16,
+        qos: mqtt.QoS,
+        reason_code: u8,
+        properties: []mqtt.Property,
+    };
+
     pub const Operation = union(enum) {
         publish: struct {
             topic: []const u8,
@@ -372,6 +442,8 @@ pub const Command = struct {
         },
         disconnect: Disconnect,
         disconnect_owned: OwnedDisconnect,
+        acknowledge: Acknowledge,
+        acknowledge_owned: OwnedAcknowledge,
         flush_pending,
         begin_reauthentication: []const mqtt.Property,
     };
@@ -468,6 +540,18 @@ pub const Command = struct {
         self.completed.set(io);
     }
 
+    pub fn finishAcknowledge(self: *Command, io: std.Io) void {
+        if (self.async_completion) |completion| {
+            completion.handler.complete(completion.handler.context, .{
+                .command_id = completion.command_id,
+                .result = .{ .acknowledge = {} },
+            });
+            self.deinitOwnedFromIo(io);
+            return;
+        }
+        self.completed.set(io);
+    }
+
     fn deinitOwnedFromIo(self: *Command, _: std.Io) void {
         const owner = self.owner.?;
         self.deinitOwned(owner);
@@ -508,6 +592,12 @@ pub const Command = struct {
                     disconnect_command.properties,
                 );
             },
+            .acknowledge_owned => |acknowledge_command| {
+                owned_properties.deinit(
+                    owner.allocator,
+                    acknowledge_command.properties,
+                );
+            },
             else => {},
         }
         const previous = owner.async_commands.fetchSub(1, .release);
@@ -525,6 +615,7 @@ pub const Completion = struct {
         subscribe: Ack,
         unsubscribe: Ack,
         disconnect: void,
+        acknowledge: void,
     };
 
     pub const Ack = struct {
@@ -549,6 +640,7 @@ pub const OwnedCompletion = struct {
         subscribe: Ack,
         unsubscribe: Ack,
         disconnect: void,
+        acknowledge: void,
     };
 
     pub const Ack = struct {
@@ -593,6 +685,7 @@ pub const OwnedCompletion = struct {
                 .unsubscribe = try cloneAck(allocator, ack),
             },
             .disconnect => .{ .disconnect = {} },
+            .acknowledge => .{ .acknowledge = {} },
         };
     }
 
@@ -623,6 +716,7 @@ pub const OwnedCompletion = struct {
             .subscribe => |ack| deinitAck(owner.allocator, ack),
             .unsubscribe => |ack| deinitAck(owner.allocator, ack),
             .disconnect => {},
+            .acknowledge => {},
         } else |_| {}
         const previous = owner.outstanding.fetchSub(1, .release);
         std.debug.assert(previous != 0);
@@ -642,7 +736,8 @@ pub const CompletionQueueError = std.mem.Allocator.Error ||
 /// the callback API while deep-owning SUBACK/UNSUBACK data, allowing another
 /// thread to await and inspect results after the loop callback has returned.
 /// Capacity is intentional backpressure: the MQTT loop waits when this queue
-/// is full, so consumers must drain it while commands are in flight.
+/// is full, so consumers must drain it while commands are in flight. Its
+/// allocator must support concurrent use when shared with command producers.
 pub const CompletionQueue = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -793,8 +888,8 @@ pub const CompletionHandler = struct {
 
 const TestCompletion = struct {
     calls: usize = 0,
-    ids: [3]u64 = .{ 0, 0, 0 },
-    errors: [3]?anyerror = .{ null, null, null },
+    ids: [4]u64 = .{ 0, 0, 0, 0 },
+    errors: [4]?anyerror = .{ null, null, null, null },
 
     fn complete(context: *anyopaque, completion: Completion) void {
         const self: *@This() = @ptrCast(@alignCast(context));
@@ -1098,6 +1193,71 @@ test "MQTT async disconnect rejects a full queue without leaking" {
     try std.testing.expectEqual(@as(usize, 0), completion.calls);
 }
 
+test "MQTT async acknowledgement rejects a full queue without leaking" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    var queue = try CommandQueue.init(
+        std.testing.allocator,
+        threaded.io(),
+        0,
+    );
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    try std.testing.expectError(
+        error.CommandQueueFull,
+        queue.acknowledgeAsync(
+            7,
+            .at_least_once,
+            .{ .properties = &.{.{ .utf8 = .{
+                .id = .reason_string,
+                .value = "queue full",
+            } }} },
+            completion.handler(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), completion.calls);
+}
+
+test "MQTT async acknowledgement owns properties" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    var reason: [8]u8 = "original".*;
+    const properties = [_]mqtt.Property{.{ .utf8 = .{
+        .id = .reason_string,
+        .value = &reason,
+    } }};
+    _ = try queue.acknowledgeAsync(
+        7,
+        .at_least_once,
+        .{ .reason_code = 0x10, .properties = &properties },
+        completion.handler(),
+    );
+    @memcpy(&reason, "modified");
+
+    const command = (try queue.take()).?;
+    switch (command.operation) {
+        .acknowledge_owned => |operation| {
+            try std.testing.expectEqual(@as(u16, 7), operation.packet_id);
+            try std.testing.expectEqual(mqtt.QoS.at_least_once, operation.qos);
+            try std.testing.expectEqual(@as(u8, 0x10), operation.reason_code);
+            try std.testing.expectEqualStrings(
+                "original",
+                operation.properties[0].utf8.value,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    command.finishFailure(io, error.CommandQueueClosed);
+}
+
 test "MQTT async disconnect owns properties" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
@@ -1259,7 +1419,7 @@ test "MQTT command queue fails buffered async commands on stop" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var queue = try CommandQueue.init(std.testing.allocator, io, 3);
+    var queue = try CommandQueue.init(std.testing.allocator, io, 4);
     defer queue.deinit();
     var completion: TestCompletion = .{};
     const subscribe_id = try queue.subscribeAsync(
@@ -1280,16 +1440,24 @@ test "MQTT command queue fails buffered async commands on stop" {
         } }},
         completion.handler(),
     );
+    const acknowledge_id = try queue.acknowledgeAsync(
+        7,
+        .at_least_once,
+        .{},
+        completion.handler(),
+    );
 
     queue.stop(error.CommandQueueClosed);
 
-    try std.testing.expectEqual(@as(usize, 3), completion.calls);
+    try std.testing.expectEqual(@as(usize, 4), completion.calls);
     try std.testing.expectEqual(subscribe_id, completion.ids[0]);
     try std.testing.expectEqual(unsubscribe_id, completion.ids[1]);
     try std.testing.expectEqual(disconnect_id, completion.ids[2]);
+    try std.testing.expectEqual(acknowledge_id, completion.ids[3]);
     try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[0].?);
     try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[1].?);
     try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[2].?);
+    try std.testing.expectEqual(error.CommandQueueClosed, completion.errors[3].?);
 }
 
 test "MQTT async command allocation failures leak nothing" {
@@ -1341,6 +1509,16 @@ fn checkAsyncCommandAllocationFailure(
     _ = try queue.disconnectAsync(
         0x00,
         &properties,
+        completion.handler(),
+    );
+    (try queue.take()).?.finishFailure(
+        threaded.io(),
+        error.CommandQueueClosed,
+    );
+    _ = try queue.acknowledgeAsync(
+        7,
+        .at_least_once,
+        .{ .properties = &properties },
         completion.handler(),
     );
 }

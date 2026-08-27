@@ -2322,6 +2322,22 @@ pub const Connection = struct {
         self.completeIncomingPublish(.puback, packet_id);
     }
 
+    /// Whether an inbound QoS PUBLISH with this Packet Identifier is awaiting
+    /// its first acknowledgement on this Network Connection. Reconnect clients
+    /// use this to reject stale manual-ACK requests without exposing bitsets.
+    pub fn hasPendingIncomingPublish(
+        self: *const Connection,
+        packet_id: u16,
+        qos: mqtt.QoS,
+    ) bool {
+        if (packet_id == 0) return false;
+        return switch (qos) {
+            .at_most_once => false,
+            .at_least_once => self.incoming_qos1.isSet(packet_id),
+            .exactly_once => self.incoming_qos2.isSet(packet_id),
+        };
+    }
+
     pub fn readPubAck(self: *Connection) Error!OwnedAck {
         return self.readAck(.puback);
     }
@@ -3722,6 +3738,11 @@ pub const SubscribeOptions = struct {
 };
 
 pub const UnsubscribeOptions = struct {
+    properties: []const mqtt.Property = &.{},
+};
+
+pub const AcknowledgeOptions = struct {
+    reason_code: u8 = 0,
     properties: []const mqtt.Property = &.{},
 };
 

@@ -828,6 +828,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "PollOptions"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "CommandQueue"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "QueuedRun"));
+    try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ClientOptions"));
+    try std.testing.expect(@hasField(
+        netz.mqtt.reconnect.ClientOptions,
+        "manual_acknowledgements",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
         "CommandCompletion",
@@ -869,6 +874,14 @@ test "public modules are reachable" {
         "disconnectAsync",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.CommandQueue,
+        "acknowledge",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.CommandQueue,
+        "acknowledgeAsync",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.QueuedRun,
         "subscribeAsync",
     ));
@@ -901,8 +914,28 @@ test "public modules are reachable" {
         "disconnectQueued",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "acknowledge",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "acknowledgeAsync",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "acknowledgeQueued",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "disconnectWithProperties",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "acknowledge",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "AcknowledgeOptions",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
