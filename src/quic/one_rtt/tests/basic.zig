@@ -362,26 +362,38 @@ test "QUIC timer-servicing receive honors caller timeout" {
         .{ .max_datagram_size = 4096 },
     );
     defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
     const keys = quic.protection.deriveAes128Keys(
         [_]u8{0x91} ** quic.protection.secret_len,
     );
     var connection = try one_rtt.Connection.init(&endpoint, .{
-        .peer = endpoint.address(),
+        .peer = peer_endpoint.address(),
         .receive_keys = keys,
         .send_keys = keys,
         .local_connection_id = "timed-local",
         .peer_connection_id = "timed-peer",
+        .local_endpoint = .server,
+        .tls_handshake_complete = true,
+        .keep_alive_period_ms = 1,
         .enable_pacing = false,
     });
     defer connection.deinit();
+    connection.markPeerActivity(0);
 
     try std.testing.expectError(
         error.Timeout,
         connection.servicePacketServicingTimersTimeout(.{ .duration = .{
             .clock = .awake,
-            .raw = .fromMilliseconds(1),
+            .raw = .fromMilliseconds(400),
         } }),
     );
+    try std.testing.expect(connection.keepAlivePingOutstanding());
 }
 
 test "QUIC 1-RTT batch send preflights storage and all packets" {

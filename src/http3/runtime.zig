@@ -576,6 +576,97 @@ const ConnectionPacketCursor = struct {
         self.batch = batch;
         return visitor(context, packetView(packet));
     }
+
+    fn visitWithDeadline(
+        self: *ConnectionPacketCursor,
+        connection: *quic.one_rtt.Connection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: *const fn (
+            @TypeOf(context),
+            quic.one_rtt.ReceivedPacketView,
+        ) Error!void,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (self.ack_pending) {
+            try connection.sendAck(0);
+            self.ack_pending = false;
+        }
+        if (self.batch) |*batch| {
+            if (batch.takeNext()) |packet_value| {
+                var packet = packet_value;
+                defer packet.deinit(connection.endpoint.allocator);
+                return visitor(context, packetView(packet));
+            }
+            batch.deinit();
+            self.batch = null;
+        }
+        if (deadline.durationFromNow(connection.endpoint.io)
+            .raw.nanoseconds <= 0) return error.Timeout;
+        if (connection.endpoint.groReceiveEnabled()) {
+            return self.visitBatchWithDeadline(
+                connection,
+                deadline,
+                context,
+                visitor,
+            );
+        }
+
+        const Context = @TypeOf(context);
+        const AdapterContext = struct {
+            cursor: *ConnectionPacketCursor,
+            connection: *quic.one_rtt.Connection,
+            context: Context,
+        };
+        const Adapter = struct {
+            fn visit(
+                adapter: *AdapterContext,
+                packet: quic.one_rtt.ReceivedPacketView,
+            ) Error!void {
+                _ = adapter.connection.sendAckForPacketIfNeeded(
+                    packet.packet_number,
+                    packet.frames,
+                ) catch {
+                    adapter.cursor.ack_pending = true;
+                };
+                try visitor(adapter.context, packet);
+            }
+        };
+        var adapter: AdapterContext = .{
+            .cursor = self,
+            .connection = connection,
+            .context = context,
+        };
+        return connection.visitPacketServicingTimersDeadline(
+            deadline,
+            &adapter,
+            Adapter.visit,
+        );
+    }
+
+    fn visitBatchWithDeadline(
+        self: *ConnectionPacketCursor,
+        connection: *quic.one_rtt.Connection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: *const fn (
+            @TypeOf(context),
+            quic.one_rtt.ReceivedPacketView,
+        ) Error!void,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        var batch = try connection.receivePacketBatchServicingTimersDeadline(
+            deadline,
+        );
+        errdefer batch.deinit();
+        _ = connection.sendAckForPacketsIfNeeded(
+            batch.packets[batch.next_index..],
+        ) catch {
+            self.ack_pending = true;
+        };
+        var packet = batch.takeNext() orelse return error.MissingStreamFrame;
+        defer packet.deinit(connection.endpoint.allocator);
+        self.batch = batch;
+        return visitor(context, packetView(packet));
+    }
 };
 
 fn packetView(packet: quic.one_rtt.ReceivedPacket) quic.one_rtt.ReceivedPacketView {
@@ -4338,6 +4429,22 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    pub fn receiveDetachedRequestProgressWithDeadline(
+        self: *HandshakeServerSession,
+        detached_stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        try self.receive_packets.visitWithDeadline(
+            &self.established.connection,
+            deadline,
+            .{ self, detached_stream_id },
+            visitDetachedServerRequestPacket,
+        );
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback();
+        }
+    }
+
     /// Apply a dispatcher-owned packet while preserving bytes on one detached
     /// Extended CONNECT stream for its protocol adapter.
     pub fn processDetachedRequestPacket(
@@ -6298,6 +6405,33 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             detached_stream_id,
+        );
+    }
+
+    pub fn receiveDetachedResponseProgressWithDeadline(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        var context: ConnectionResponseReceiveContext = .{
+            .connection = &self.established.connection,
+            .control = &self.control,
+            .qpack_decode = &self.qpack_decode,
+            .qpack_encode = &self.qpack_encode,
+            .response_streams = &self.response_streams,
+            .streaming_responses = &self.streaming_responses,
+            .push_streams = &self.push_streams,
+            .request_lifecycle = &self.request_lifecycle,
+            .detached_stream_id = detached_stream_id,
+        };
+        try self.receive_packets.visitWithDeadline(
+            &self.established.connection,
+            deadline,
+            &context,
+            visitConnectionResponsePacket,
         );
     }
 

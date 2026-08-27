@@ -4439,12 +4439,24 @@ pub const Connection = struct {
         self: *Connection,
         timeout: std.Io.Timeout,
     ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacket {
-        const caller_deadline = timeout.toTimestamp(self.endpoint.io);
-        if (caller_deadline) |deadline| {
-            if (deadline.clock != .awake) return error.ConcurrencyUnavailable;
-        }
+        const caller_deadline = callerDeadlineFromTimeout(
+            self.endpoint.io,
+            timeout,
+        );
         return self.receivePacketServicingTimersUntil(
             caller_deadline,
+        );
+    }
+
+    pub fn receivePacketServicingTimersDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacket {
+        return self.receivePacketServicingTimersUntil(
+            try callerDeadlineFromTimeout(
+                self.endpoint.io,
+                .{ .deadline = deadline },
+            ),
         );
     }
 
@@ -4453,11 +4465,11 @@ pub const Connection = struct {
         caller_deadline: ?std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacket {
         const now_ns = self.monotonicNowNs();
+        if (try self.receivePendingPacketAt(now_ns)) |packet|
+            return packet;
         if (callerDeadlineExpired(caller_deadline, now_ns)) {
             return error.Timeout;
         }
-        if (try self.receivePendingPacketAt(now_ns)) |packet|
-            return packet;
         while (true) {
             var datagram = try self.receiveBytesServicingTimersUntil(
                 caller_deadline,
@@ -4832,39 +4844,80 @@ pub const Connection = struct {
     pub fn receivePacketBatchServicingTimers(
         self: *Connection,
     ) Error!ReceivedPacketBatch {
-        if (try self.receivePendingPacketBatchAt(self.monotonicNowNs())) |batch|
-            return batch;
-        while (true) {
-            const timer = self.nextTimerDeadline() orelse {
-                return self.receivePacketBatchServicingAckDrivenRecovery();
+        return self.receivePacketBatchServicingTimersUntil(null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
             };
+    }
+
+    pub fn receivePacketBatchServicingTimersTimeout(
+        self: *Connection,
+        timeout: std.Io.Timeout,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacketBatch {
+        return self.receivePacketBatchServicingTimersUntil(
+            callerDeadlineFromTimeout(self.endpoint.io, timeout),
+        );
+    }
+
+    pub fn receivePacketBatchServicingTimersDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacketBatch {
+        return self.receivePacketBatchServicingTimersUntil(
+            callerDeadlineFromTimeout(
+                self.endpoint.io,
+                .{ .deadline = deadline },
+            ),
+        );
+    }
+
+    fn receivePacketBatchServicingTimersUntil(
+        self: *Connection,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacketBatch {
+        const first_now_ns = self.monotonicNowNs();
+        if (try self.receivePendingPacketBatchAt(first_now_ns)) |batch|
+            return batch;
+        if (callerDeadlineExpired(caller_deadline, first_now_ns)) {
+            return error.Timeout;
+        }
+        while (true) {
+            const timer = self.nextTimerDeadline();
+            if (timer == null and caller_deadline == null) {
+                return self.receivePacketBatchServicingAckDrivenRecovery();
+            }
             const now_ns = self.monotonicNowNs();
-            if (now_ns >= timer.deadline_ns) {
+            if (callerDeadlineExpired(caller_deadline, now_ns)) {
+                return error.Timeout;
+            }
+            if (timer) |scheduled| if (now_ns >= scheduled.deadline_ns) {
                 if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
                     continue;
                 }
-                if (try self.receivePacketBatchAfterBlockedTimer(now_ns)) |batch| {
+                if (try self.receivePacketBatchAfterBlockedTimer(
+                    now_ns,
+                    caller_deadline,
+                )) |batch| {
                     return batch;
                 }
                 continue;
-            }
-            const deadline_ns_i96 = std.math.cast(
-                i96,
-                timer.deadline_ns,
-            ) orelse std.math.maxInt(i96);
+            };
             var datagrams = self.endpoint.receiveBytesBatchTimeout(
-                .{ .deadline = .{
-                    .clock = .awake,
-                    .raw = .fromNanoseconds(deadline_ns_i96),
-                } },
+                earliestConnectionReceiveTimeout(timer, caller_deadline),
             ) catch |err| switch (err) {
                 error.Timeout => {
                     const timeout_ns = self.monotonicNowNs();
+                    if (callerDeadlineExpired(
+                        caller_deadline,
+                        timeout_ns,
+                    )) return error.Timeout;
                     if (!try self.serviceNextTimerForBlockingReceive(
                         timeout_ns,
                     )) {
                         if (try self.receivePacketBatchAfterBlockedTimer(
                             timeout_ns,
+                            caller_deadline,
                         )) |batch| {
                             return batch;
                         }
@@ -4872,6 +4925,9 @@ pub const Connection = struct {
                     continue;
                 },
                 error.ConcurrencyUnavailable => {
+                    if (caller_deadline != null) {
+                        return error.ConcurrencyUnavailable;
+                    }
                     return self.receivePacketBatchServicingAckDrivenRecovery();
                 },
                 else => |other| return @errorCast(other),
@@ -4899,24 +4955,31 @@ pub const Connection = struct {
     fn receivePacketBatchAfterBlockedTimer(
         self: *Connection,
         now_ns: u64,
-    ) Error!?ReceivedPacketBatch {
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!?ReceivedPacketBatch {
         const deadline_ns = std.math.add(
             u64,
             now_ns,
             timer_blocked_receive_backoff_ns,
         ) catch std.math.maxInt(u64);
-        const deadline_ns_i96 = std.math.cast(
-            i96,
-            deadline_ns,
-        ) orelse std.math.maxInt(i96);
+        const timeout = earliestConnectionReceiveTimeout(
+            .{ .kind = .loss_time, .deadline_ns = deadline_ns },
+            caller_deadline,
+        );
         var datagrams = self.endpoint.receiveBytesBatchTimeout(
-            .{ .deadline = .{
-                .clock = .awake,
-                .raw = .fromNanoseconds(deadline_ns_i96),
-            } },
+            timeout,
         ) catch |err| switch (err) {
-            error.Timeout => return null,
+            error.Timeout => {
+                if (callerDeadlineExpired(
+                    caller_deadline,
+                    self.monotonicNowNs(),
+                )) return error.Timeout;
+                return null;
+            },
             error.ConcurrencyUnavailable => {
+                if (caller_deadline != null) {
+                    return error.ConcurrencyUnavailable;
+                }
                 return try self.receivePacketBatchServicingAckDrivenRecovery();
             },
             else => |other| return @errorCast(other),
@@ -5038,12 +5101,29 @@ pub const Connection = struct {
         comptime visitor: anytype,
     ) (Error || quic.runtime.ReceiveTimeoutError ||
         callbackErrorSet(visitor))!void {
-        const caller_deadline = timeout.toTimestamp(self.endpoint.io);
-        if (caller_deadline) |deadline| {
-            if (deadline.clock != .awake) return error.ConcurrencyUnavailable;
-        }
+        const caller_deadline = callerDeadlineFromTimeout(
+            self.endpoint.io,
+            timeout,
+        );
         return self.visitPacketServicingTimersUntil(
             caller_deadline,
+            context,
+            visitor,
+        );
+    }
+
+    pub fn visitPacketServicingTimersDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || quic.runtime.ReceiveTimeoutError ||
+        callbackErrorSet(visitor))!void {
+        return self.visitPacketServicingTimersUntil(
+            callerDeadlineFromTimeout(
+                self.endpoint.io,
+                .{ .deadline = deadline },
+            ),
             context,
             visitor,
         );
@@ -5057,9 +5137,6 @@ pub const Connection = struct {
     ) (Error || quic.runtime.ReceiveTimeoutError ||
         callbackErrorSet(visitor))!void {
         const now_ns = self.monotonicNowNs();
-        if (callerDeadlineExpired(caller_deadline, now_ns)) {
-            return error.Timeout;
-        }
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
@@ -5071,6 +5148,9 @@ pub const Connection = struct {
                 context,
                 visitor,
             );
+        }
+        if (callerDeadlineExpired(caller_deadline, now_ns)) {
+            return error.Timeout;
         }
         const datagram = try self.receiveBytesIntoServicingTimersUntil(
             caller_deadline,
@@ -5119,6 +5199,17 @@ pub const Connection = struct {
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
         return self.visitPacketServicingTimersTimeout(
             timeout,
+            self,
+            acknowledgePacketView,
+        );
+    }
+
+    pub fn servicePacketServicingTimersDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        return self.visitPacketServicingTimersDeadline(
+            deadline,
             self,
             acknowledgePacketView,
         );
@@ -7127,6 +7218,24 @@ fn earliestConnectionReceiveTimeout(
         return .{ .deadline = timer };
     }
     return if (caller) |deadline| .{ .deadline = deadline } else .none;
+}
+
+fn callerDeadlineFromTimeout(
+    io: std.Io,
+    timeout: std.Io.Timeout,
+) ?std.Io.Clock.Timestamp {
+    const deadline = timeout.toTimestamp(io);
+    if (deadline) |value| {
+        if (value.clock == .awake) return value;
+        // Compare all receive deadlines in the monotonic awake domain. This
+        // samples both clocks once rather than relying on Clock.Timestamp's
+        // cross-clock conversion, which is not available on every backend.
+        return .fromNow(io, .{
+            .clock = .awake,
+            .raw = value.durationFromNow(io).raw,
+        });
+    }
+    return null;
 }
 
 fn callerDeadlineExpired(

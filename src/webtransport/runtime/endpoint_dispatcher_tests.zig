@@ -383,6 +383,94 @@ test "WebTransport handshake admission polls routed CONNECT state" {
     try std.testing.expectEqualStrings("/routed", pending.path());
 }
 
+test "WebTransport handshake receive helpers honor timeouts" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    var transport_parameters = quic.practical_transport_parameters;
+    transport_parameters.max_datagram_frame_size = 1200;
+    const settings = webtransport.defaultSettings(.{});
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-timeout-server",
+            .peer_connection_id = "wt-timeout-client",
+            .local_transport_parameters = transport_parameters,
+            .peer_transport_parameters = transport_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    var h3_owned = true;
+    defer if (h3_owned) h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var session = runtime.AcceptedHandshakeSession{
+        .h3 = h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    h3_owned = false;
+    streams_owned = false;
+    defer {
+        session.streams.deinit();
+        session.h3.deinit();
+    }
+
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveDatagramWithTimeout(.fromMilliseconds(1)),
+    );
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        session.readStreamWithTimeout(&buffer, .fromMilliseconds(1)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveSessionEventWithTimeout(.fromMilliseconds(1)),
+    );
+}
+
 fn writeDataFrame(out: []u8, payload: []const u8) !usize {
     const frame_type = try quic.varint.encodeInto(
         out,

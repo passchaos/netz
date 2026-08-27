@@ -1,5 +1,6 @@
 //! Incremental caller-buffer WebTransport stream reads and cancellation.
 
+const std = @import("std");
 const webtransport = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const association = @import("stream_association.zig");
@@ -51,6 +52,24 @@ pub fn read(
         // `poll` reads assembled QUIC stream state, so packet plaintext and
         // frame arrays do not need ownership beyond transport processing.
         try connection.servicePacketServicingTimers();
+    }
+}
+
+/// Deadline-bounded counterpart to `read`. One absolute deadline spans all
+/// unrelated/control packets and any earlier QUIC transport timers.
+pub fn readWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    out: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!Read {
+    if (out.len == 0) return error.BufferTooShort;
+    while (true) {
+        if (try poll(connection, registry, session_id, out)) |event| {
+            return event;
+        }
+        try connection.servicePacketServicingTimersDeadline(deadline);
     }
 }
 

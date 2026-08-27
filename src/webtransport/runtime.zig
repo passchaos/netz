@@ -21,6 +21,7 @@ pub const Error = webtransport.Error || http3.runtime.Error || error{
     MissingDatagram,
     InvalidSessionState,
 } || protected_control.Error;
+pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 pub const EndpointServerError = Error ||
     http3.runtime.HandshakeAdmissionError;
@@ -1928,6 +1929,24 @@ pub const AcceptedHandshakeSession = struct {
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
     }
 
+    pub fn receiveDatagramWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return receiveHandshakeDatagramFromConnectionUntil(
+            &self.h3.established.connection,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
@@ -2114,6 +2133,24 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn readStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return incremental_stream.readWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            out,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
     /// control/QPACK and unrelated requests progress while the detached
     /// WebTransport CONNECT stream and associated streams remain available to
@@ -2248,6 +2285,22 @@ pub const AcceptedHandshakeSession = struct {
         return event;
     }
 
+    pub fn receiveSessionEventWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!SessionEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        const event = while (true) {
+            if (try self.pollSessionEvent()) |ready| break ready;
+            try self.receiveControlProgressWithDeadline(deadline);
+        };
+        return event;
+    }
+
     fn finishPolledSessionEvent(
         self: *AcceptedHandshakeSession,
         event: SessionEvent,
@@ -2273,6 +2326,16 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!void {
         try self.h3.receiveDetachedRequestProgress(
             self.session_id.value,
+        );
+    }
+
+    fn receiveControlProgressWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.h3.receiveDetachedRequestProgressWithDeadline(
+            self.session_id.value,
+            deadline,
         );
     }
 };
@@ -2666,6 +2729,24 @@ pub const HandshakeClientSession = struct {
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
     }
 
+    pub fn receiveDatagramWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return receiveHandshakeDatagramFromConnectionUntil(
+            &self.h3.established.connection,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
@@ -2844,6 +2925,24 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    pub fn readStreamWithTimeout(
+        self: *HandshakeClientSession,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return incremental_stream.readWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            out,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     /// Drive one timer-aware QUIC receive without consuming WebTransport data.
     ///
     /// Event loops waiting on a peer-side terminal condition still need to
@@ -2953,11 +3052,64 @@ pub const HandshakeClientSession = struct {
         return event;
     }
 
+    pub fn receiveSessionEventWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!SessionEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        const event = self.control.receive(
+            &self.h3.established.connection,
+            .{ self, deadline },
+            receiveControlProgressWithDeadline,
+        ) catch |err| switch (err) {
+            error.InvalidCapsule => {
+                try self.h3.established.connection.resetStream(
+                    self.session_id.value,
+                    http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            },
+            else => return err,
+        };
+        if (event == .closed or event == .reset) {
+            if (event == .closed and !self.control.local_close_sent) {
+                try self.h3.sendRequestBodyPaced(
+                    self.session_id.value,
+                    &.{},
+                    true,
+                );
+                self.control.local_close_sent = true;
+            }
+            try session_control.terminateStreams(
+                &self.h3.established.connection,
+                &self.streams,
+            );
+        }
+        return event;
+    }
+
     fn receiveControlProgress(
         self: *HandshakeClientSession,
     ) Error!void {
         try self.h3.receiveDetachedResponseProgress(
             self.session_id.value,
+        );
+    }
+
+    fn receiveControlProgressWithDeadline(
+        context: struct {
+            *HandshakeClientSession,
+            std.Io.Clock.Timestamp,
+        },
+    ) ReceiveTimeoutError!void {
+        const self, const deadline = context;
+        try self.h3.receiveDetachedResponseProgressWithDeadline(
+            self.session_id.value,
+            deadline,
         );
     }
 };
@@ -4255,6 +4407,18 @@ fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) 
         // call is awaiting. A plain blocking receive would sleep past that
         // recovery deadline and deadlock both endpoints.
         try connection.servicePacketServicingTimers();
+    }
+}
+
+fn receiveHandshakeDatagramFromConnectionUntil(
+    connection: *quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!OwnedHandshakeDatagram {
+    while (true) {
+        if (try popHandshakeDatagramFromConnection(connection)) |datagram| {
+            return datagram;
+        }
+        try connection.servicePacketServicingTimersDeadline(deadline);
     }
 }
 
