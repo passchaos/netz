@@ -843,6 +843,19 @@ pub const Client = struct {
         return self.pollWithOptions(.{ .timeout = timeout });
     }
 
+    /// Initiate MQTT 5 re-authentication. Subsequent AUTH challenges and the
+    /// final success packet are processed by the same single-owner poll path.
+    /// The supplied properties are borrowed only for this synchronous write.
+    pub fn beginReauthentication(
+        self: *Client,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        try active.beginReauthenticationWithProperties(properties);
+        self.noteControlSent();
+    }
+
     /// Retry queued QoS publications after a connection becomes available.
     /// This is useful when `publish` returned `ConnectionUnavailable` after
     /// durably queueing the request.

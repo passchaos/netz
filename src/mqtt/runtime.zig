@@ -2871,6 +2871,21 @@ pub const Connection = struct {
         };
     }
 
+    /// Start client-initiated MQTT 5 re-authentication with a complete AUTH
+    /// property set. The negotiated Authentication Method is mandatory and is
+    /// validated before the connection enters its traffic gate.
+    pub fn beginReauthenticationWithProperties(
+        self: *Connection,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        const previous_phase = self.authentication.phase;
+        try self.authentication.beginReauthentication(properties);
+        self.writeAuth(0x19, properties) catch |err| {
+            self.authentication.phase = previous_phase;
+            return err;
+        };
+    }
+
     /// Receive one re-authentication continuation/completion packet.
     pub fn receiveReauthentication(
         self: *Connection,

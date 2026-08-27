@@ -1057,10 +1057,10 @@ rumqttd.
 ## Remaining work before broad superiority
 
 The reconnect layer remains synchronous. Broad client-loop parity still
-requires a multiplexed request/incoming-event queue, a background-loop
-convenience wrapper, and explicit client-initiated re-authentication
-orchestration. The single-owner
-bounded poll path already drives server-initiated MQTT 5 re-authentication, idle
+requires a multiplexed request/incoming-event queue and a background-loop
+convenience wrapper. The single-owner bounded poll path already supports
+explicit client-initiated re-authentication and drives both directions of
+multi-step MQTT 5 re-authentication, idle
 keep-alive and automatic reconnect without competing socket readers. Current
 tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
 continuation, incoming QoS 1 delivery across a keep-alive cycle, inbound QoS 2

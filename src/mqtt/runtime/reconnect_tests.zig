@@ -1181,3 +1181,157 @@ test "MQTT reconnect poll requires a reauthentication handler" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT reconnect poll completes client initiated reauthentication" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const method = "mirror";
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.acceptPending(.{ .protocol = .v5 });
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit(self.server.allocator);
+            try pending.authorizeAuthentication();
+            var accepted = try pending.finish(.{ .protocol = .v5 });
+            pending_owned = false;
+            defer accepted.deinit(self.server.allocator);
+
+            var initial = try accepted.connection.acceptReauthentication();
+            defer initial.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "client-first",
+                mqtt.authenticationData(initial.auth.properties).?,
+            );
+            try std.testing.expectEqualStrings(
+                "kept",
+                initial.auth.properties[2].utf8_pair.value,
+            );
+            try accepted.connection.continueReauthentication(
+                0x18,
+                "server-step",
+            );
+            var response =
+                try accepted.connection.receiveReauthentication();
+            defer response.auth.deinit(self.server.allocator);
+            try std.testing.expect(!response.complete);
+            try std.testing.expectEqualStrings(
+                "client-final",
+                mqtt.authenticationData(
+                    response.auth.auth.properties,
+                ).?,
+            );
+            try accepted.connection.continueReauthentication(
+                0,
+                "server-final",
+            );
+        }
+    };
+    const Handler = struct {
+        calls: usize = 0,
+
+        fn respond(
+            context: *anyopaque,
+            challenge: mqtt.Auth,
+        ) runtime.Error![]const mqtt.Property {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (!std.mem.eql(
+                u8,
+                "server-step",
+                mqtt.authenticationData(challenge.properties) orelse
+                    return error.InvalidAuthenticationState,
+            )) return error.InvalidAuthenticationState;
+            return &.{
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = method,
+                } },
+                .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = "client-final",
+                } },
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var handler: Handler = .{};
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "poll-client-reauth",
+            .properties = &.{.{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } }},
+            .authentication = .{
+                .context = &handler,
+                .respond = Handler.respond,
+            },
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+
+    try client.beginReauthentication(&.{
+        .{ .utf8 = .{
+            .id = .authentication_method,
+            .value = method,
+        } },
+        .{ .binary = .{
+            .id = .authentication_data,
+            .value = "client-first",
+        } },
+        .{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "trace",
+            .value = "kept",
+        } },
+    });
+    var challenge = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer challenge.deinit(allocator);
+    try std.testing.expect(challenge == .auth);
+    try std.testing.expectEqual(@as(usize, 1), handler.calls);
+    var complete = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer complete.deinit(allocator);
+    try std.testing.expect(complete == .auth);
+    try std.testing.expectEqual(@as(u8, 0), complete.auth.auth.reason_code);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}

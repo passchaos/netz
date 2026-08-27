@@ -846,6 +846,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
+        "beginReauthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
         "subscribe",
     ));
     try std.testing.expect(@hasDecl(
