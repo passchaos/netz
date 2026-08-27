@@ -23038,15 +23038,40 @@ test "HTTP/3 handshake client response deadline preserves progress" {
     );
     try std.testing.expect(client.request_lifecycle.contains(stream_id));
 
-    var response = try client.receiveResponseWithTimeout(
-        stream_id,
-        .fromSeconds(1),
+    var saw_head = false;
+    var saw_finished = false;
+    var body: [32]u8 = undefined;
+    var body_len: usize = 0;
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
     );
-    defer response.deinit(allocator);
-    try std.testing.expectEqualStrings(
-        "after-timeout",
-        response.response.body,
-    );
+    while (!saw_finished) {
+        var event = (try client.receiveResponseEventWithDeadline(
+            stream_id,
+            deadline,
+        )) orelse continue;
+        defer event.deinit(allocator);
+        switch (event) {
+            .head => |head| {
+                try std.testing.expect(head == .response);
+                try std.testing.expectEqual(@as(u16, 200), head.response.status);
+                saw_head = true;
+            },
+            .data_available => {
+                const count = try client.readResponseData(
+                    stream_id,
+                    body[body_len..],
+                );
+                body_len += count;
+            },
+            .finished => saw_finished = true,
+            .trailers, .push_promise => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expect(saw_head);
+    try std.testing.expectEqualStrings("after-timeout", body[0..body_len]);
+    try std.testing.expect(!client.request_lifecycle.contains(stream_id));
 
     thread.join();
     joined = true;
