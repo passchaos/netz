@@ -1336,6 +1336,156 @@ test "MQTT reconnect poll completes client initiated reauthentication" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT queued flush and reauthentication expose owned completions" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const method = "queued-mirror";
+    const Shared = struct {
+        server: *runtime.Server,
+        observed: *std.Io.Event,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.observed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.acceptPending(.{ .protocol = .v5 });
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit(self.server.allocator);
+            try pending.authorizeAuthentication();
+            var accepted = try pending.finish(.{ .protocol = .v5 });
+            pending_owned = false;
+            defer accepted.deinit(self.server.allocator);
+
+            var auth = try accepted.connection.acceptReauthentication();
+            defer auth.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "initial",
+                mqtt.authenticationData(auth.auth.properties).?,
+            );
+            try std.testing.expectEqualStrings(
+                "original",
+                auth.auth.properties[2].utf8_pair.value,
+            );
+            self.observed.set(self.server.io);
+            self.release.waitUncancelable(self.server.io);
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var observed: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var shared = Shared{
+        .server = &server,
+        .observed = &observed,
+        .release = &release,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "queued-reauth",
+            .properties = &.{.{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } }},
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 2,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    var completions = try reconnect.CompletionQueue.init(allocator, io, 2);
+    defer completions.deinit();
+
+    const flush_id = try run.flushPendingQueued(&completions);
+    var flush_completion = try completions.receive();
+    defer flush_completion.deinit();
+    try std.testing.expectEqual(flush_id, flush_completion.command_id);
+    try std.testing.expect(try flush_completion.result == .flush_pending);
+
+    var authentication_data: [7]u8 = "initial".*;
+    var property_value: [8]u8 = "original".*;
+    const reauth_id = try run.beginReauthenticationQueued(
+        &completions,
+        &.{
+            .{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } },
+            .{ .binary = .{
+                .id = .authentication_data,
+                .value = &authentication_data,
+            } },
+            .{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "trace",
+                .value = &property_value,
+            } },
+        },
+    );
+    @memcpy(&authentication_data, "changed");
+    @memcpy(&property_value, "modified");
+    var reauth_completion = try completions.receive();
+    defer reauth_completion.deinit();
+    try std.testing.expectEqual(reauth_id, reauth_completion.command_id);
+    try std.testing.expect(
+        try reauth_completion.result == .begin_reauthentication,
+    );
+    observed.waitUncancelable(io);
+    if (shared.err) |err| return err;
+    run.stop();
+    release.set(io);
+    if (run.deinit()) |err| return err;
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect serveUntil dispatches owned events and shuts down" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

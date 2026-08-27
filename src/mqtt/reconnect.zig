@@ -449,11 +449,47 @@ pub const QueuedRun = struct {
         return self.queue.flushPending();
     }
 
+    pub fn flushPendingAsync(
+        self: *QueuedRun,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.flushPendingAsync(completion);
+    }
+
+    pub fn flushPendingQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+    ) CommandQueueError!u64 {
+        return self.flushPendingAsync(completions.handler());
+    }
+
     pub fn beginReauthentication(
         self: *QueuedRun,
         properties: []const mqtt.Property,
     ) CommandQueueError!void {
         return self.queue.beginReauthentication(properties);
+    }
+
+    pub fn beginReauthenticationAsync(
+        self: *QueuedRun,
+        properties: []const mqtt.Property,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.beginReauthenticationAsync(
+            properties,
+            completion,
+        );
+    }
+
+    pub fn beginReauthenticationQueued(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        properties: []const mqtt.Property,
+    ) CommandQueueError!u64 {
+        return self.beginReauthenticationAsync(
+            properties,
+            completions.handler(),
+        );
     }
 
     pub fn stop(self: *QueuedRun) void {
@@ -1637,16 +1673,26 @@ pub const Client = struct {
                     command.finishFailure(self.io, err);
                     return false;
                 };
+                command.finishFlushPending(self.io);
+                return false;
             },
             .begin_reauthentication => |properties| {
                 self.beginReauthentication(properties) catch |err| {
                     command.finishFailure(self.io, err);
                     return false;
                 };
+                command.finishReauthentication(self.io);
+                return false;
+            },
+            .begin_reauthentication_owned => |properties| {
+                self.beginReauthentication(properties) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return false;
+                };
+                command.finishReauthentication(self.io);
+                return false;
             },
         }
-        command.finishSuccess(self.io, null);
-        return false;
     }
 
     fn executeDisconnectCommand(

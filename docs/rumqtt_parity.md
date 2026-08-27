@@ -1057,13 +1057,14 @@ rumqttd.
 ## Remaining work before broad superiority
 
 The reconnect layer's network owner remains synchronous internally. The public
-managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE and graceful
-DISCONNECT commands with
+managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
+graceful DISCONNECT, pending-PUBLISH flush and re-authentication commands with
 typed, correlated completion callbacks. A bounded `CompletionQueue` adapter
 additionally provides blocking and nonblocking consumption with deep-owned
 SUBACK/UNSUBACK reason codes and properties. Further parity work is ergonomic
 integration with application-specific async executors rather than missing
-operations or completion storage. The single-owner bounded poll path, callback
+operations or completion storage. Re-authentication properties are deep-owned
+until the initiating AUTH write completes. The single-owner bounded poll path, callback
 driver, managed background-thread wrapper, optional application-controlled QoS
 1/2 acknowledgements, and bounded command queue already support explicit
 client-initiated re-authentication and drive both directions of
