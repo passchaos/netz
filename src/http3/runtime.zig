@@ -4176,10 +4176,41 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
+        return self.receiveRequestInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Aggregate the next request within one relative application budget. A
+    /// timeout preserves all received STREAM and QPACK state for a later call.
+    pub fn receiveRequestWithTimeout(
+        self: *HandshakeServerSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestInternal(
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Aggregate the next request before `deadline` without resetting or
+    /// completing a partially received request when the deadline expires.
+    pub fn receiveRequestWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeRequest {
+        return self.receiveRequestInternal(deadline);
+    }
+
+    fn receiveRequestInternal(
+        self: *HandshakeServerSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeRequest {
         if (self.streaming_requests.retainedCount() != 0) {
             return error.UnexpectedStream;
         }
-        const assembled = receiveConnectionRequestStreamBytes(
+        const assembled = receiveConnectionRequestStreamBytesUntil(
             &self.established.connection,
             &self.receive_packets,
             self.options,
@@ -4188,6 +4219,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encode,
             &self.request_streams,
             self.peer_promised_push_ids.items,
+            deadline,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
@@ -4284,9 +4316,39 @@ pub const HandshakeServerSession = struct {
     pub fn receiveRequestEvent(
         self: *HandshakeServerSession,
     ) Error!StreamingRequestEvent {
+        return self.receiveRequestEventInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Wait for one multiplexed request event within a relative application
+    /// budget. Active incremental readers remain resumable after timeout.
+    pub fn receiveRequestEventWithTimeout(
+        self: *HandshakeServerSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestEventInternal(
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Wait for one multiplexed request event until an absolute deadline.
+    pub fn receiveRequestEventWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        return self.receiveRequestEventInternal(deadline);
+    }
+
+    fn receiveRequestEventInternal(
+        self: *HandshakeServerSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
         while (true) {
             if (try self.pollRequestEvent()) |event| return event;
-            try self.receiveRequestPacket();
+            try self.receiveRequestPacketUntil(deadline);
         }
     }
 
@@ -5241,11 +5303,30 @@ pub const HandshakeServerSession = struct {
     }
 
     fn receiveRequestPacket(self: *HandshakeServerSession) Error!void {
-        try self.receive_packets.visit(
-            &self.established.connection,
-            self,
-            visitStreamingServerRequestPacket,
-        );
+        return self.receiveRequestPacketUntil(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn receiveRequestPacketUntil(
+        self: *HandshakeServerSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            try self.receive_packets.visitWithDeadline(
+                &self.established.connection,
+                absolute,
+                self,
+                visitStreamingServerRequestPacket,
+            );
+        } else {
+            try self.receive_packets.visit(
+                &self.established.connection,
+                self,
+                visitStreamingServerRequestPacket,
+            );
+        }
         // Encoder-stream inserts and reset cancellations both queue decoder
         // instructions. Flush them at the packet boundary so a peer does not
         // remain artificially blocked until another HEADERS event appears.
@@ -5307,6 +5388,10 @@ pub const HandshakeServerSession = struct {
                 &entry.reader,
             );
         }
+    }
+
+    fn connectionIo(self: *const HandshakeServerSession) std.Io {
+        return self.established.connection.endpoint.io;
     }
 
     fn sendQpackFeedback(self: *HandshakeServerSession) Error!void {
@@ -12836,6 +12921,33 @@ fn receiveConnectionRequestStreamBytes(
     request_streams: *RequestStreamSet,
     peer_promised_push_ids: []const u64,
 ) Error!AssembledStream {
+    return receiveConnectionRequestStreamBytesUntil(
+        connection,
+        receive_packets,
+        options,
+        control,
+        qpack_decode,
+        qpack_encode,
+        request_streams,
+        peer_promised_push_ids,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn receiveConnectionRequestStreamBytesUntil(
+    connection: *quic.one_rtt.Connection,
+    receive_packets: *ConnectionPacketCursor,
+    options: HandshakeSessionOptions,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    request_streams: *RequestStreamSet,
+    peer_promised_push_ids: []const u64,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!AssembledStream {
     if (try request_streams.takeReady(
         qpack_decode.table,
         options.local_settings.qpack_blocked_streams,
@@ -12850,11 +12962,20 @@ fn receiveConnectionRequestStreamBytes(
             .request_streams = request_streams,
             .peer_promised_push_ids = peer_promised_push_ids,
         };
-        try receive_packets.visit(
-            connection,
-            &context,
-            visitConnectionRequestPacket,
-        );
+        if (deadline) |absolute| {
+            try receive_packets.visitWithDeadline(
+                connection,
+                absolute,
+                &context,
+                visitConnectionRequestPacket,
+            );
+        } else {
+            try receive_packets.visit(
+                connection,
+                &context,
+                visitConnectionRequestPacket,
+            );
+        }
         if (context.reset) |reset| {
             return requestResetError(reset.application_error_code);
         }

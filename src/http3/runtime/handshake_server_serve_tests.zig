@@ -158,6 +158,216 @@ fn responseHeader(
     return null;
 }
 
+test "HTTP/3 handshake server request deadlines preserve progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 };
+    const client_cid = [_]u8{ 0xa9, 0xaa, 0xab, 0xac };
+    const server_cid = [_]u8{ 0xad, 0xae, 0xaf, 0xb0 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xb1} ** 32,
+            .x25519_secret_key = [_]u8{0xb2} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const aggregate_body = "aggregate-after-timeout";
+    const streaming_body = "stream-after-timeout";
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        io: std.Io,
+        aggregate_timed_out: std.Io.Event = .unset,
+        streaming_timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                // Release the client on failure so the test reports the server
+                // error rather than hanging behind a coordination event.
+                self.aggregate_timed_out.set(self.io);
+                self.streaming_timed_out.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+
+            try std.testing.expectError(
+                error.Timeout,
+                session.receiveRequestWithTimeout(.fromMilliseconds(30)),
+            );
+            // The request head arrived before the caller deadline, but the FIN
+            // did not. Timeout must leave the aggregate reassembler intact.
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_streams.entries.items.len,
+            );
+            self.aggregate_timed_out.set(self.io);
+
+            var request = try session.receiveRequestWithDeadline(
+                .fromNow(
+                    self.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            );
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings(
+                "/aggregate-deadline",
+                request.request.path,
+            );
+            try std.testing.expectEqualStrings(
+                aggregate_body,
+                request.request.body,
+            );
+            try session.sendResponse(request.stream_id, .{ .status = 204 });
+
+            var head = try session.receiveRequestEventWithDeadline(
+                .fromNow(
+                    self.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            );
+            defer head.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expect(head == .message);
+            try std.testing.expect(head.message.value == .head);
+            try std.testing.expectEqualStrings(
+                "/streaming-deadline",
+                head.message.value.head.request.path,
+            );
+            const stream_id = head.message.stream_id;
+
+            try std.testing.expectError(
+                error.Timeout,
+                session.receiveRequestEventWithTimeout(.fromMilliseconds(30)),
+            );
+            // Streaming mode has already moved the parser out of the aggregate
+            // set. Its active reader and lifecycle entry must survive timeout.
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.streaming_requests.entries.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_lifecycle.active_streams.items.len,
+            );
+            self.streaming_timed_out.set(self.io);
+
+            var body: [64]u8 = undefined;
+            var body_len: usize = 0;
+            var finished = false;
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                self.io,
+                .{ .raw = .fromSeconds(1), .clock = .awake },
+            );
+            while (!finished) {
+                var event = try session.receiveRequestEventWithDeadline(
+                    deadline,
+                );
+                defer event.deinit(
+                    session.established.connection.endpoint.allocator,
+                );
+                try std.testing.expect(event == .message);
+                try std.testing.expectEqual(stream_id, event.message.stream_id);
+                switch (event.message.value) {
+                    .data_available => {
+                        body_len += try session.readRequestData(
+                            stream_id,
+                            body[body_len..],
+                        );
+                    },
+                    .finished => finished = true,
+                    .head, .trailers, .push_promise => return error.TestUnexpectedResult,
+                }
+            }
+            try std.testing.expectEqualStrings(
+                streaming_body,
+                body[0..body_len],
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                session.streaming_requests.entries.items.len,
+            );
+            try session.sendResponse(stream_id, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xb3} ** 32,
+            .x25519_secret_key = [_]u8{0xb4} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    const aggregate_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/aggregate-deadline",
+        .authority = "localhost",
+    }, aggregate_body.len);
+    try shared.aggregate_timed_out.wait(io);
+    try client.sendRequestBody(aggregate_id, aggregate_body, true);
+    var aggregate_response = try client.receiveResponse(aggregate_id);
+    defer aggregate_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u16, 204),
+        aggregate_response.response.status,
+    );
+
+    const streaming_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/streaming-deadline",
+        .authority = "localhost",
+    }, streaming_body.len);
+    try shared.streaming_timed_out.wait(io);
+    try client.sendRequestBody(streaming_id, streaming_body, true);
+    var streaming_response = try client.receiveResponse(streaming_id);
+    defer streaming_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u16, 204),
+        streaming_response.response.status,
+    );
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/3 handshake client rejects DATA on a HEAD response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

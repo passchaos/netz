@@ -789,6 +789,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequestEvent"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
+        "receiveRequestEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receiveRequestEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
         "pollRequestEvent",
     ));
     try std.testing.expect(@hasDecl(
@@ -2074,6 +2082,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseWithPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receiveRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receiveRequestWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseWithPush"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
