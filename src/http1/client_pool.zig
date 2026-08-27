@@ -28,15 +28,14 @@ const Transport = enum { cleartext, tls };
 const Slot = struct {
     client: runtime.Client,
     transport: Transport,
-    authority: []u8,
     tls_host: []u8,
+    port: u16,
     last_used: u64,
     idle_since_ns: i96,
 
     fn deinit(self: *Slot, allocator: std.mem.Allocator) void {
         self.client.close();
         allocator.free(self.tls_host);
-        allocator.free(self.authority);
         self.* = undefined;
     }
 };
@@ -148,6 +147,30 @@ pub const Pool = struct {
         return self.idle.items.len;
     }
 
+    pub fn idleCountForUri(
+        self: *Pool,
+        uri_text: []const u8,
+    ) Error!usize {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const transport = try transportForScheme(uri.scheme);
+        var endpoint = try runtime.uriEndpoint(
+            self.allocator,
+            uri,
+            if (transport == .tls) 443 else 80,
+        );
+        defer endpoint.deinit();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        var count: usize = 0;
+        for (self.idle.items) |slot| {
+            count += @intFromBool(slot.transport == transport and
+                slot.port == endpoint.port and
+                hostEqual(slot.tls_host, endpoint.tls_host));
+        }
+        return count;
+    }
+
     pub fn pruneExpired(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -172,7 +195,7 @@ pub const Pool = struct {
             index -= 1;
             const slot = self.idle.items[index];
             if (slot.transport == transport and
-                authorityEqual(slot.authority, endpoint.authority) and
+                slot.port == endpoint.port and
                 hostEqual(slot.tls_host, endpoint.tls_host))
             {
                 const owned = self.idle.swapRemove(index);
@@ -233,14 +256,12 @@ pub const Pool = struct {
             },
         };
         errdefer client.close();
-        const authority = try self.allocator.dupe(u8, endpoint.authority);
-        errdefer self.allocator.free(authority);
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
         return .{ .pool = self, .slot = .{
             .client = client,
             .transport = transport,
-            .authority = authority,
             .tls_host = tls_host,
+            .port = endpoint.port,
             .last_used = 0,
             .idle_since_ns = 0,
         } };
@@ -263,7 +284,7 @@ pub const Pool = struct {
         var same_authority: usize = 0;
         for (self.idle.items) |idle| {
             same_authority += @intFromBool(idle.transport == slot.transport and
-                authorityEqual(idle.authority, slot.authority) and
+                idle.port == slot.port and
                 hostEqual(idle.tls_host, slot.tls_host));
         }
         if (same_authority >= self.options.max_idle_per_authority) {
@@ -335,35 +356,6 @@ fn hostEqual(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
 
-fn authorityEqual(a: []const u8, b: []const u8) bool {
-    const a_parts = authorityParts(a);
-    const b_parts = authorityParts(b);
-    return std.mem.eql(u8, a_parts.port, b_parts.port) and hostEqual(
-        a_parts.host,
-        b_parts.host,
-    );
-}
-
-fn authorityParts(authority: []const u8) struct {
-    host: []const u8,
-    port: []const u8,
-} {
-    if (authority.len != 0 and authority[0] == '[') {
-        const end = std.mem.findScalar(u8, authority, ']') orelse
-            return .{ .host = authority, .port = "" };
-        return .{
-            .host = authority[0 .. end + 1],
-            .port = if (end + 1 < authority.len and authority[end + 1] == ':')
-                authority[end + 2 ..]
-            else
-                "",
-        };
-    }
-    const colon = std.mem.findScalarLast(u8, authority, ':') orelse
-        return .{ .host = authority, .port = "" };
-    return .{ .host = authority[0..colon], .port = authority[colon + 1 ..] };
-}
-
 fn uriTargetAlloc(
     allocator: std.mem.Allocator,
     uri: std.Uri,
@@ -411,17 +403,7 @@ test "HTTP/1 client pool validates idle limits" {
     ));
 }
 
-test "HTTP/1 pool authority keys normalize DNS case only" {
-    try std.testing.expect(authorityEqual(
-        "Example.COM:443",
-        "example.com:443",
-    ));
-    try std.testing.expect(!authorityEqual(
-        "example.com:443",
-        "example.com:444",
-    ));
-    try std.testing.expect(authorityEqual(
-        "[2001:DB8::1]:443",
-        "[2001:db8::1]:443",
-    ));
+test "HTTP/1 pool host keys normalize DNS case" {
+    try std.testing.expect(hostEqual("Example.COM", "example.com"));
+    try std.testing.expect(hostEqual("2001:DB8::1", "2001:db8::1"));
 }
