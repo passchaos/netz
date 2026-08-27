@@ -2012,6 +2012,16 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn receivePeerConnectionCloseWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        return receiveHandshakePeerConnectionCloseUntil(
+            &self.h3.established.connection,
+            deadline,
+        );
+    }
+
     pub fn openBidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
@@ -2841,6 +2851,16 @@ pub const HandshakeClientSession = struct {
     ) Error!quic.one_rtt.PeerCloseInfo {
         return receiveHandshakePeerConnectionClose(
             &self.h3.established.connection,
+        );
+    }
+
+    pub fn receivePeerConnectionCloseWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        return receiveHandshakePeerConnectionCloseUntil(
+            &self.h3.established.connection,
+            deadline,
         );
     }
 
@@ -4029,6 +4049,13 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.receivePeerConnectionClose();
     }
 
+    pub fn receivePeerConnectionCloseWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        return self.session.receivePeerConnectionCloseWithDeadline(deadline);
+    }
+
     pub fn stats(
         self: StatefulProtectedClientSession,
     ) quic.one_rtt.ConnectionStats {
@@ -4708,6 +4735,22 @@ fn receiveHandshakePeerConnectionClose(
             },
             else => return err,
         };
+    }
+}
+
+fn receiveHandshakePeerConnectionCloseUntil(
+    connection: *quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+    while (true) {
+        if (connection.peerCloseInfo()) |close| return close;
+        connection.servicePacketServicingTimersDeadline(deadline) catch |err|
+            switch (err) {
+                error.ConnectionClosed => {
+                    return connection.peerCloseInfo() orelse return err;
+                },
+                else => return err,
+            };
     }
 }
 

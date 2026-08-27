@@ -113,7 +113,8 @@ WebTransport DATAGRAM round trip and transport statistics.
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
 Authenticated client/server sessions also expose timeout- and absolute-deadline
-bounded DATAGRAM, incremental stream, and DRAIN/CLOSE receive calls. One absolute application
+bounded DATAGRAM, incremental stream, DRAIN/CLOSE, and peer connection-close
+receive calls. One absolute application
 deadline spans unrelated QUIC packets while earlier PTO, delayed-ACK,
 keep-alive, path-validation, idle and close timers continue to run; neither
 transport maintenance nor control traffic renews the caller's budget.

@@ -493,6 +493,13 @@ test "WebTransport handshake receive helpers honor timeouts" {
             .{ .raw = .fromMilliseconds(1), .clock = .awake },
         )),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receivePeerConnectionCloseWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(1), .clock = .awake },
+        )),
+    );
 }
 
 fn writeDataFrame(out: []u8, payload: []const u8) !usize {
