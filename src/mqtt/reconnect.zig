@@ -843,6 +843,27 @@ pub const Client = struct {
         return self.pollWithOptions(.{ .timeout = timeout });
     }
 
+    /// Run the single-owner reconnect/keep-alive loop until `shutdown` is set.
+    /// Events are borrowed only for the synchronous callback and are released
+    /// immediately afterward, including when the handler returns an error.
+    pub fn serveUntil(
+        self: *Client,
+        comptime Context: type,
+        context: *Context,
+        comptime handler: *const fn (
+            *Context,
+            *Client,
+            *ClientEvent,
+        ) anyerror!void,
+        options: PollOptions,
+    ) anyerror!void {
+        while (!self.shutdown.isSet()) {
+            var event = (try self.pollWithOptions(options)) orelse continue;
+            defer event.deinit(self.allocator);
+            try handler(context, self, &event);
+        }
+    }
+
     /// Initiate MQTT 5 re-authentication. Subsequent AUTH challenges and the
     /// final success packet are processed by the same single-owner poll path.
     /// The supplied properties are borrowed only for this synchronous write.

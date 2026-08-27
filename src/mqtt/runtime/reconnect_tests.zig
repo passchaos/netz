@@ -1335,3 +1335,97 @@ test "MQTT reconnect poll completes client initiated reauthentication" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT reconnect serveUntil dispatches owned events and shuts down" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.publish(
+                "serve/event",
+                "payload",
+                .{ .qos = .at_least_once },
+            );
+        }
+    };
+    const Handler = struct {
+        io: std.Io,
+        shutdown: *std.Io.Event,
+        connected: usize = 0,
+        publishes: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            _: *reconnect.Client,
+            event: *reconnect.ClientEvent,
+        ) !void {
+            switch (event.*) {
+                .connected => self.connected += 1,
+                .publish => |owned| {
+                    try std.testing.expectEqualStrings(
+                        "serve/event",
+                        owned.publish.topic,
+                    );
+                    try std.testing.expectEqualStrings(
+                        "payload",
+                        owned.publish.payload,
+                    );
+                    self.publishes += 1;
+                    self.shutdown.set(self.io);
+                },
+                else => return error.UnexpectedPacket,
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "serve-until" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler = Handler{ .io = io, .shutdown = &shutdown };
+    try client.serveUntil(Handler, &handler, Handler.handle, .{
+        .timeout = .fromSeconds(1),
+    });
+    try std.testing.expectEqual(@as(usize, 1), handler.connected);
+    try std.testing.expectEqual(@as(usize, 1), handler.publishes);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
