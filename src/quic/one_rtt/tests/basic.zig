@@ -1162,6 +1162,102 @@ test "QUIC 1-RTT connection delivers FIN-only stream packet" {
     );
 }
 
+test "QUIC 1-RTT pollStream reports data FIN and reset once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x94} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "poll-client",
+        .peer_connection_id = "poll-server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "poll-server",
+        .peer_connection_id = "poll-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    var empty: [0]u8 = .{};
+    try std.testing.expectError(error.BufferTooShort, server.pollStream(&empty));
+    var out: [4]u8 = undefined;
+    try std.testing.expect((try server.pollStream(&out)) == null);
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "abcdef",
+        .fin = true,
+    } }});
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    const first = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try std.testing.expectEqual(@as(u62, 0), first.data.stream_id);
+    try std.testing.expectEqual(@as(usize, 4), first.data.bytes);
+    try std.testing.expect(!first.data.fin);
+    try std.testing.expectEqualStrings("abcd", out[0..first.data.bytes]);
+    const final = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(final == .data);
+    try std.testing.expectEqual(@as(usize, 2), final.data.bytes);
+    try std.testing.expect(final.data.fin);
+    try std.testing.expectEqualStrings("ef", out[0..final.data.bytes]);
+    try std.testing.expect((try server.pollStream(&out)) == null);
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 4,
+        .data = &.{},
+        .fin = true,
+    } }});
+    var fin_packet = try server.receivePacket();
+    defer fin_packet.deinit(allocator);
+    const fin = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(fin == .data);
+    try std.testing.expectEqual(@as(u62, 4), fin.data.stream_id);
+    try std.testing.expectEqual(@as(usize, 0), fin.data.bytes);
+    try std.testing.expect(fin.data.fin);
+    try std.testing.expect((try server.pollStream(&out)) == null);
+
+    try client.resetStream(8, 77);
+    var reset_packet = try server.receivePacket();
+    defer reset_packet.deinit(allocator);
+    const reset = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(@as(u62, 8), reset.reset.stream_id);
+    try std.testing.expectEqual(@as(u64, 77), reset.reset.application_error_code);
+    try std.testing.expectEqual(@as(u64, 0), reset.reset.final_size);
+    try std.testing.expect((try server.pollStream(&out)) == null);
+}
+
 test "QUIC 1-RTT stats include datagram queue drops" {
     const allocator = std.testing.allocator;
 

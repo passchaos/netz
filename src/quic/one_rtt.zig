@@ -273,6 +273,8 @@ const StreamRecvFlowEntry = struct {
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
     reset: ?StreamResetInfo = null,
+    reset_reported: bool = false,
+    fin_reported: bool = false,
     stop_sending_sent: ?StopSendingInfo = null,
     stream_count_credit_released: bool = false,
 
@@ -452,6 +454,21 @@ pub const RecvStreamStats = struct {
     final_size: ?u64,
     reset: ?StreamResetInfo,
     stop_sending_sent: ?StopSendingInfo,
+};
+
+/// One nonblocking receive-side stream event. DATA is copied into the caller's
+/// buffer; terminal reset state is returned once per stream.
+pub const StreamRead = union(enum) {
+    data: struct {
+        stream_id: u62,
+        bytes: usize,
+        fin: bool,
+    },
+    reset: struct {
+        stream_id: u62,
+        application_error_code: u64,
+        final_size: u64,
+    },
 };
 
 fn sendStreamStatsFromEntry(entry: *const StreamFlowEntry) SendStreamStats {
@@ -3622,6 +3639,56 @@ pub const Connection = struct {
             stream_id.* = @intCast(entry.stream_id);
         }
         return out[0..count];
+    }
+
+    /// Poll one receive stream selected by connection insertion order.
+    ///
+    /// This method never reads the endpoint socket. It copies at most
+    /// `out.len` contiguous bytes, returns their flow-control credit before
+    /// success, reports FIN with the final data prefix (or one zero-byte
+    /// event), and reports RESET_STREAM exactly once. Endpoint dispatchers can
+    /// therefore process a packet and drain stream events without introducing
+    /// a second UDP owner.
+    pub fn pollStream(self: *Connection, out: []u8) Error!?StreamRead {
+        if (out.len == 0) return error.BufferTooShort;
+        for (self.stream_recv_flows.items) |*entry| {
+            if (entry.reset) |reset| {
+                if (!entry.reset_reported) {
+                    entry.reset_reported = true;
+                    return .{ .reset = .{
+                        .stream_id = @intCast(entry.stream_id),
+                        .application_error_code = reset.application_error_code,
+                        .final_size = reset.final_size,
+                    } };
+                }
+                continue;
+            }
+            if (entry.fin_reported) continue;
+            const available = entry.recv_state.available();
+            if (available.len != 0) {
+                const count = @min(out.len, available.len);
+                @memcpy(out[0..count], available[0..count]);
+                const fin = entry.recv_state.final_size != null and
+                    entry.recv_state.read_offset + count ==
+                        entry.recv_state.final_size.?;
+                try self.releaseReceivedCapacity(entry.stream_id, count);
+                if (fin) entry.fin_reported = true;
+                return .{ .data = .{
+                    .stream_id = @intCast(entry.stream_id),
+                    .bytes = count,
+                    .fin = fin,
+                } };
+            }
+            if (entry.recv_state.complete() and !entry.fin_reported) {
+                entry.fin_reported = true;
+                return .{ .data = .{
+                    .stream_id = @intCast(entry.stream_id),
+                    .bytes = 0,
+                    .fin = true,
+                } };
+            }
+        }
+        return null;
     }
 
     /// Copy the currently assembled receive bytes for diagnostics and
