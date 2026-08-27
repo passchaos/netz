@@ -17,6 +17,8 @@ const net = std.Io.net;
 
 pub const CommandQueue = command_queue.CommandQueue;
 pub const CommandQueueError = command_queue.Error;
+pub const CommandCompletion = command_queue.Completion;
+pub const CommandCompletionHandler = command_queue.CompletionHandler;
 
 pub const Error = runtime.Error || session.Error || error{
     InvalidReconnectPolicy,
@@ -276,6 +278,21 @@ pub const QueuedRun = struct {
         options: runtime.PublishOptions,
     ) CommandQueueError!?u16 {
         return self.queue.publish(topic, payload, options);
+    }
+
+    pub fn publishAsync(
+        self: *QueuedRun,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        completion: command_queue.CompletionHandler,
+    ) CommandQueueError!u64 {
+        return self.queue.publishAsync(
+            topic,
+            payload,
+            options,
+            completion,
+        );
     }
 
     pub fn flushPending(self: *QueuedRun) CommandQueueError!void {
@@ -1289,6 +1306,23 @@ pub const Client = struct {
                     publish_command.topic,
                     publish_command.payload,
                     publish_command.options,
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+                command.finishSuccess(self.io, packet_id);
+                return;
+            },
+            .publish_owned => |publish_command| {
+                const packet_id = self.publish(
+                    publish_command.topic,
+                    publish_command.payload,
+                    .{
+                        .qos = publish_command.qos,
+                        .retain = publish_command.retain,
+                        .dup = publish_command.dup,
+                        .properties = publish_command.properties,
+                    },
                 ) catch |err| {
                     command.finishFailure(self.io, err);
                     return;

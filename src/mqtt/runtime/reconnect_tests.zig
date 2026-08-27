@@ -1672,3 +1672,128 @@ test "MQTT managed queued run owns worker lifecycle" {
     server_joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT queued run owns asynchronous publish until completion" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "async/original",
+                publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "owned-payload",
+                publish.publish.payload,
+            );
+            try accepted.connection.writePubAck(
+                publish.publish.packet_id.?,
+                0,
+            );
+        }
+    };
+    const Handler = struct {
+        io: std.Io,
+        shutdown: *std.Io.Event,
+        fn handle(
+            self: *@This(),
+            _: *reconnect.Client,
+            event: *reconnect.ClientEvent,
+        ) !void {
+            if (event.* == .puback) self.shutdown.set(self.io);
+        }
+    };
+    const Completion = struct {
+        event: std.Io.Event = .unset,
+        io: std.Io,
+        command_id: u64 = 0,
+        packet_id: ?u16 = null,
+        err: ?anyerror = null,
+
+        fn complete(
+            context: *anyopaque,
+            completion: reconnect.CommandCompletion,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.command_id = completion.command_id;
+            self.packet_id = completion.result catch |err| {
+                self.err = err;
+                self.event.set(self.io);
+                return;
+            };
+            self.event.set(self.io);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "async-queue" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler = Handler{ .io = io, .shutdown = &shutdown };
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 2,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    var completion = Completion{ .io = io };
+    var topic: [14]u8 = "async/original".*;
+    var payload: [13]u8 = "owned-payload".*;
+    const command_id = try run.publishAsync(
+        &topic,
+        &payload,
+        .{ .qos = .at_least_once },
+        .{ .context = &completion, .complete = Completion.complete },
+    );
+    @memcpy(&topic, "async/modified");
+    @memcpy(&payload, "changed-value");
+    completion.event.waitUncancelable(io);
+    try std.testing.expect(completion.err == null);
+    try std.testing.expectEqual(command_id, completion.command_id);
+    try std.testing.expect(completion.packet_id != null);
+    if (run.deinit()) |err| return err;
+
+    server_thread.join();
+    server_joined = true;
+    if (shared.err) |err| return err;
+}

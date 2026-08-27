@@ -1057,7 +1057,8 @@ rumqttd.
 ## Remaining work before broad superiority
 
 The reconnect layer remains synchronous. Broad client-loop parity still
-requires a fully asynchronous fire-and-forget request/completion API. The
+requires asynchronous subscribe/unsubscribe and a general completion queue.
+Owned fire-and-forget PUBLISH is available with exact callback completion. The
 single-owner bounded poll path, callback driver, managed background-thread
 wrapper, and bounded synchronous-completion command queue already support
 explicit client-initiated re-authentication and drive both directions of
