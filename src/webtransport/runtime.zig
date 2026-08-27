@@ -2757,6 +2757,38 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Begin WebTransport CONNECT on an authenticated QUIC connection whose
+    /// endpoint remains caller-owned. The caller's dispatcher routes packets
+    /// to the returned pending object, then calls `pollConnect` until the final
+    /// response is available.
+    pub fn beginEstablishedConnect(
+        endpoint: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        established: quic.handshake.EstablishedConnection,
+        options: EstablishedConnectOptions,
+    ) Error!PendingHandshakeConnect {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        var h3_client = try http3.runtime.HandshakeClient.initEstablished(
+            endpoint,
+            server,
+            established,
+            webTransportHandshakeSessionOptions(options.h3),
+        );
+        errdefer h3_client.deinit();
+        const session_id = try startStatefulConnect(
+            &h3_client,
+            options.authority,
+            options.path,
+            options.origin,
+            options.headers,
+        );
+        return .{
+            .h3 = h3_client,
+            .session_id = session_id,
+            .limits = options.limits,
+        };
+    }
+
     pub fn deinit(self: *HandshakeClientSession) void {
         self.response.deinit(self.h3.allocator);
         self.streams.deinit();
@@ -3418,6 +3450,60 @@ pub const HandshakeClientSession = struct {
     }
 };
 
+/// A dispatcher-driven WebTransport CONNECT whose final response has not yet
+/// arrived. Moving this value changes the address of its QUIC connection; an
+/// endpoint router must unregister it before moving or promoting the value and
+/// then register the resulting session at its new stable address.
+pub const PendingHandshakeConnect = struct {
+    h3: ?http3.runtime.HandshakeClient,
+    session_id: webtransport.SessionId,
+    limits: Limits,
+
+    pub fn deinit(self: *PendingHandshakeConnect) void {
+        if (self.h3) |*h3| h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn connection(
+        self: *PendingHandshakeConnect,
+    ) *quic.one_rtt.Connection {
+        return &self.h3.?.established.connection;
+    }
+
+    pub fn sessionId(self: PendingHandshakeConnect) webtransport.SessionId {
+        return self.session_id;
+    }
+
+    pub fn processPacket(
+        self: *PendingHandshakeConnect,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        try self.h3.?.processDetachedResponsePacket(
+            self.session_id.value,
+            packet,
+        );
+    }
+
+    /// Poll the already-buffered CONNECT response without reading UDP.
+    pub fn pollConnect(
+        self: *PendingHandshakeConnect,
+    ) Error!?HandshakeConnectAttempt {
+        var response = (try pollHandshakeConnectAttemptResponse(
+            &self.h3.?,
+            self.session_id.value,
+        )) orelse return null;
+        errdefer response.deinit(self.h3.?.allocator);
+        const h3 = self.h3.?;
+        self.h3 = null;
+        return .{
+            .h3 = h3,
+            .session_id = self.session_id,
+            .response = response,
+            .limits = self.limits,
+        };
+    }
+};
+
 pub const HandshakeConnectAttempt = struct {
     h3: ?http3.runtime.HandshakeClient,
     session_id: webtransport.SessionId,
@@ -3839,6 +3925,15 @@ pub const HandshakeUriConnectOptions = struct {
     headers: []const http3.Qpack.HeaderField = &.{},
     limits: Limits = .{},
     h3: http3.runtime.HandshakeClientOptions,
+};
+
+pub const EstablishedConnectOptions = struct {
+    authority: []const u8,
+    path: []const u8 = "/",
+    origin: []const u8 = "/",
+    headers: []const http3.Qpack.HeaderField = &.{},
+    limits: Limits = .{},
+    h3: http3.runtime.HandshakeSessionOptions = .{},
 };
 
 test "WebTransport URI connect rejects non-HTTPS and userinfo before I/O" {
@@ -4391,32 +4486,50 @@ fn connectStatefulAttempt(
     additional_headers: []const http3.Qpack.HeaderField,
     limits: Limits,
 ) Error!HandshakeConnectAttempt {
+    const session_id = try startStatefulConnect(
+        h3_client,
+        authority,
+        path,
+        origin,
+        additional_headers,
+    );
     const allocator = h3_client.allocator;
+    var response_head = try receiveHandshakeConnectAttemptResponse(
+        h3_client,
+        session_id.value,
+    );
+    errdefer response_head.deinit(allocator);
+    const owned_h3 = h3_client.*;
+    h3_client.* = undefined;
+    return .{
+        .h3 = owned_h3,
+        .session_id = session_id,
+        .response = response_head,
+        .limits = limits,
+    };
+}
+
+fn startStatefulConnect(
+    h3_client: *http3.runtime.HandshakeClient,
+    authority: []const u8,
+    path: []const u8,
+    origin: []const u8,
+    additional_headers: []const http3.Qpack.HeaderField,
+) Error!webtransport.SessionId {
     var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
     const headers = try connectRequestHeadersWithAdditional(
         origin,
         additional_headers,
         &header_buf,
     );
-    const session_id = try h3_client.startRequest(.{
+    const stream_id = try h3_client.startRequest(.{
         .method = "CONNECT",
         .path = path,
         .scheme = "https",
         .authority = authority,
         .headers = headers,
     }, null);
-    var response_head =
-        try receiveHandshakeConnectAttemptResponse(h3_client, session_id);
-    errdefer response_head.deinit(allocator);
-    const webtransport_session_id = webtransport.SessionId.init(session_id);
-    const owned_h3 = h3_client.*;
-    h3_client.* = undefined;
-    return .{
-        .h3 = owned_h3,
-        .session_id = webtransport_session_id,
-        .response = response_head,
-        .limits = limits,
-    };
+    return webtransport.SessionId.init(stream_id);
 }
 
 fn receiveStatefulSessionRequest(
@@ -4534,6 +4647,19 @@ fn receiveHandshakeConnectAttemptResponse(
             else => return error.InvalidConnect,
         }
     }
+}
+
+fn pollHandshakeConnectAttemptResponse(
+    client: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+) Error!?http3.DecodedResponseHead {
+    var head = (try client.pollDetachedResponseHead(stream_id)) orelse
+        return null;
+    errdefer head.deinit(client.allocator);
+    if (head.status >= 200 and head.status < 300) {
+        try validateOptionalCapsuleProtocol(head.headers);
+    }
+    return head;
 }
 
 fn receiveProtectedConnectAttemptResponse(

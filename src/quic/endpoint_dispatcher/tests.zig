@@ -1034,3 +1034,65 @@ test "QUIC endpoint dispatcher caller timeout coexists with transport timers" {
         } },
     ));
 }
+
+test "QUIC endpoint dispatcher releases failed routed datagram once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe9} ** quic.protection.secret_len,
+    );
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = .{ .ip4 = .loopback(443) },
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "dispatcher-local",
+        .peer_connection_id = "dispatcher-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &connection);
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 1,
+        .data = "first",
+    } }).write(&payload, allocator);
+    const first = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "dispatcher-local",
+        .packet_number = 0,
+        .payload = payload.items,
+    });
+    defer allocator.free(first);
+    var event = try dispatcher.dispatch(.{
+        .from = connection.peerAddress(),
+        .bytes = try allocator.dupe(u8, first),
+    });
+    defer event.deinit(allocator);
+
+    payload.clearRetainingCapacity();
+    try (quic.Frame{ .stream = .{
+        .stream_id = 1,
+        .data = "other",
+    } }).write(&payload, allocator);
+    const conflicting = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "dispatcher-local",
+        .packet_number = 1,
+        .payload = payload.items,
+    });
+    try std.testing.expectError(error.ConflictingStreamData, dispatcher.dispatch(.{
+        .from = connection.peerAddress(),
+        .bytes = conflicting,
+    }));
+}

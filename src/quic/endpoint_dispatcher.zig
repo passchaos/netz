@@ -726,7 +726,6 @@ pub const Dispatcher = struct {
                         return error.ConcurrencyUnavailable,
                     else => |other| return other,
                 };
-            errdefer datagram.deinit(self.allocator);
             if (try self.endpoint.sendVersionNegotiationIfUnsupported(
                 datagram.from,
                 datagram.bytes,
@@ -735,6 +734,8 @@ pub const Dispatcher = struct {
                 datagram.deinit(self.allocator);
                 continue;
             }
+            // Ownership transfers unconditionally: `dispatch` either returns
+            // it through an event, queues it, or releases it before erroring.
             const event = try self.dispatch(datagram);
             if (event == .discarded_long_header) continue;
             return event;

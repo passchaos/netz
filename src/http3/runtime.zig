@@ -6820,6 +6820,60 @@ pub const HandshakeClient = struct {
         try self.flushResponsePacketFeedback();
     }
 
+    /// Decode the final response head already buffered on a detached Extended
+    /// CONNECT stream without reading UDP or claiming later tunnel bytes.
+    pub fn pollDetachedResponseHead(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+    ) Error!?http3.DecodedResponseHead {
+        if (!self.request_lifecycle.contains(detached_stream_id)) {
+            return error.UnexpectedStream;
+        }
+        const bytes = self.established.connection.availableReceivedStream(
+            detached_stream_id,
+        ) orelse return null;
+        if (bytes.len == 0) return null;
+        var head = http3.decodeResponseHeadWithDynamicTableAndOptions(
+            self.allocator,
+            bytes,
+            self.options.local_settings,
+            self.qpack_decode.table,
+            blk: {
+                var options = self.request_lifecycle.responseDecodeOptions(
+                    detached_stream_id,
+                );
+                options.max_informational_responses =
+                    self.options.max_informational_responses;
+                break :blk options;
+            },
+        ) catch |err| switch (err) {
+            error.BufferTooShort, error.QpackBlocked => return null,
+            else => return err,
+        };
+        errdefer head.deinit(self.allocator);
+        try self.established.connection.releaseReceivedCapacity(
+            detached_stream_id,
+            head.consumed,
+        );
+        try self.qpack_decode.acknowledgeSections(
+            detached_stream_id,
+            head.qpack_section_acknowledgments,
+        );
+        var entry = try self.streaming_responses.activateResponse(
+            &self.response_streams,
+            detached_stream_id,
+        );
+        entry.reader.phase = .body;
+        entry.reader.content_length = if (head.body_allowed)
+            head.content_length
+        else
+            null;
+        entry.reader.body_allowed = head.body_allowed;
+        entry.reader.credited_offset = entry.reader.receive.read_offset;
+        try self.flushResponsePacketFeedback();
+        return head;
+    }
+
     /// Apply a dispatcher-owned packet while preserving bytes on one detached
     /// Extended CONNECT stream for its WebTransport owner. The packet remains
     /// caller-owned and this method never reads the UDP socket.

@@ -2920,6 +2920,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
+        "EstablishedConnectOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "PendingHandshakeConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "beginEstablishedConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeConnect,
+        "processPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeConnect,
+        "pollConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
         "StatefulProtectedServer",
     ));
     try std.testing.expect(@hasDecl(
