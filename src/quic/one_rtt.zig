@@ -684,6 +684,7 @@ pub const Connection = struct {
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
     stream_recv_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     last_recv_stream_index: ?usize = null,
+    stream_poll_cursor: usize = 0,
     close_info: ?CloseInfo = null,
     peer_close_frame_received: bool = false,
     send_key_phase: quic.protection.Aes128KeyPhaseState,
@@ -3641,7 +3642,7 @@ pub const Connection = struct {
         return out[0..count];
     }
 
-    /// Poll one receive stream selected by connection insertion order.
+    /// Poll one receive stream with round-robin fairness.
     ///
     /// This method never reads the endpoint socket. It copies at most
     /// `out.len` contiguous bytes, returns their flow-control credit before
@@ -3651,42 +3652,70 @@ pub const Connection = struct {
     /// a second UDP owner.
     pub fn pollStream(self: *Connection, out: []u8) Error!?StreamRead {
         if (out.len == 0) return error.BufferTooShort;
-        for (self.stream_recv_flows.items) |*entry| {
-            if (entry.reset) |reset| {
-                if (!entry.reset_reported) {
-                    entry.reset_reported = true;
-                    return .{ .reset = .{
-                        .stream_id = @intCast(entry.stream_id),
-                        .application_error_code = reset.application_error_code,
-                        .final_size = reset.final_size,
-                    } };
-                }
-                continue;
+        const stream_count = self.stream_recv_flows.items.len;
+        if (stream_count == 0) return null;
+        const start = self.stream_poll_cursor % stream_count;
+        for (0..stream_count) |step| {
+            const index = (start + step) % stream_count;
+            const entry = &self.stream_recv_flows.items[index];
+            if (try self.pollStreamEntry(entry, out)) |event| {
+                self.stream_poll_cursor = (index + 1) % stream_count;
+                return event;
             }
-            if (entry.fin_reported) continue;
-            const available = entry.recv_state.available();
-            if (available.len != 0) {
-                const count = @min(out.len, available.len);
-                @memcpy(out[0..count], available[0..count]);
-                const fin = entry.recv_state.final_size != null and
-                    entry.recv_state.read_offset + count ==
-                        entry.recv_state.final_size.?;
-                try self.releaseReceivedCapacity(entry.stream_id, count);
-                if (fin) entry.fin_reported = true;
-                return .{ .data = .{
-                    .stream_id = @intCast(entry.stream_id),
-                    .bytes = count,
-                    .fin = fin,
-                } };
-            }
-            if (entry.recv_state.complete() and !entry.fin_reported) {
-                entry.fin_reported = true;
-                return .{ .data = .{
-                    .stream_id = @intCast(entry.stream_id),
-                    .bytes = 0,
-                    .fin = true,
-                } };
-            }
+        }
+        return null;
+    }
+
+    /// Poll one known stream without allowing a busy sibling to consume the
+    /// caller's scheduling turn. Unknown streams and streams with no newly
+    /// reportable data or terminal state return null.
+    pub fn pollStreamId(
+        self: *Connection,
+        stream_id: u62,
+        out: []u8,
+    ) Error!?StreamRead {
+        if (out.len == 0) return error.BufferTooShort;
+        const entry = self.findRecvStreamEntry(stream_id) orelse return null;
+        return self.pollStreamEntry(entry, out);
+    }
+
+    fn pollStreamEntry(
+        self: *Connection,
+        entry: *StreamRecvFlowEntry,
+        out: []u8,
+    ) Error!?StreamRead {
+        if (entry.reset) |reset| {
+            if (entry.reset_reported) return null;
+            entry.reset_reported = true;
+            return .{ .reset = .{
+                .stream_id = @intCast(entry.stream_id),
+                .application_error_code = reset.application_error_code,
+                .final_size = reset.final_size,
+            } };
+        }
+        if (entry.fin_reported) return null;
+        const available = entry.recv_state.available();
+        if (available.len != 0) {
+            const count = @min(out.len, available.len);
+            @memcpy(out[0..count], available[0..count]);
+            const fin = entry.recv_state.final_size != null and
+                entry.recv_state.read_offset + count ==
+                    entry.recv_state.final_size.?;
+            try self.releaseReceivedCapacity(entry.stream_id, count);
+            if (fin) entry.fin_reported = true;
+            return .{ .data = .{
+                .stream_id = @intCast(entry.stream_id),
+                .bytes = count,
+                .fin = fin,
+            } };
+        }
+        if (entry.recv_state.complete()) {
+            entry.fin_reported = true;
+            return .{ .data = .{
+                .stream_id = @intCast(entry.stream_id),
+                .bytes = 0,
+                .fin = true,
+            } };
         }
         return null;
     }

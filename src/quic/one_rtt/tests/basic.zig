@@ -1256,6 +1256,28 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     try std.testing.expectEqual(@as(u64, 77), reset.reset.application_error_code);
     try std.testing.expectEqual(@as(u64, 0), reset.reset.final_size);
     try std.testing.expect((try server.pollStream(&out)) == null);
+
+    try client.send(&.{
+        .{ .stream = .{ .stream_id = 12, .data = "aaaaaa" } },
+        .{ .stream = .{ .stream_id = 16, .data = "bbbbbb" } },
+    });
+    var fair_packet = try server.receivePacket();
+    defer fair_packet.deinit(allocator);
+    const fair_first = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    const fair_second = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(fair_first == .data);
+    try std.testing.expect(fair_second == .data);
+    try std.testing.expect(fair_first.data.stream_id !=
+        fair_second.data.stream_id);
+
+    const targeted = (try server.pollStreamId(12, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(targeted == .data);
+    try std.testing.expectEqual(@as(u62, 12), targeted.data.stream_id);
+    try std.testing.expectEqualStrings("aa", out[0..targeted.data.bytes]);
+    try std.testing.expect((try server.pollStreamId(999, &out)) == null);
 }
 
 test "QUIC 1-RTT stats include datagram queue drops" {
