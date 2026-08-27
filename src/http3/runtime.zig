@@ -5491,6 +5491,7 @@ pub const HandshakeServerSession = struct {
 
 pub const HandshakeClient = struct {
     endpoint: *quic.runtime.Endpoint,
+    owns_endpoint: bool,
     peer: net.IpAddress,
     allocator: std.mem.Allocator,
     established: quic.handshake.EstablishedConnection,
@@ -5552,6 +5553,34 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Build an HTTP/3 client around an established connection on a
+    /// caller-owned endpoint. This is the client-side composition point for
+    /// endpoint-wide dispatchers that multiplex several connections over one
+    /// UDP socket. Ownership of `established` transfers on success; `endpoint`
+    /// remains caller-owned and must outlive this client.
+    pub fn initEstablished(
+        endpoint: *quic.runtime.Endpoint,
+        peer: net.IpAddress,
+        established: quic.handshake.EstablishedConnection,
+        options: HandshakeSessionOptions,
+    ) Error!HandshakeClient {
+        try validateBlockedStreamLimit(
+            options.local_settings,
+            options.max_concurrent_request_streams,
+        );
+        if (established.connection.endpoint != endpoint) {
+            return error.InvalidTransportParameter;
+        }
+        return initEstablishedWithEndpointOwnership(
+            endpoint.allocator,
+            endpoint,
+            false,
+            peer,
+            established,
+            options,
+        );
+    }
+
     /// Build the HTTP/3 client state around a successfully initialized QUIC
     /// connection. Ownership of both `endpoint` and `established` transfers
     /// only on success. Keeping this common path prevents the TLS and external
@@ -5563,6 +5592,24 @@ pub const HandshakeClient = struct {
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
     ) Error!HandshakeClient {
+        return initEstablishedWithEndpointOwnership(
+            allocator,
+            endpoint,
+            true,
+            peer,
+            established,
+            options,
+        );
+    }
+
+    fn initEstablishedWithEndpointOwnership(
+        allocator: std.mem.Allocator,
+        endpoint: *quic.runtime.Endpoint,
+        owns_endpoint: bool,
+        peer: net.IpAddress,
+        established: quic.handshake.EstablishedConnection,
+        options: HandshakeSessionOptions,
+    ) Error!HandshakeClient {
         if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
         const max_capacity = std.math.cast(
             usize,
@@ -5570,6 +5617,7 @@ pub const HandshakeClient = struct {
         ) orelse return error.InvalidSetting;
         return .{
             .endpoint = endpoint,
+            .owns_endpoint = owns_endpoint,
             .peer = peer,
             .allocator = allocator,
             .established = established,
@@ -5882,8 +5930,10 @@ pub const HandshakeClient = struct {
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
         self.established.deinit();
-        self.endpoint.deinit();
-        self.allocator.destroy(self.endpoint);
+        if (self.owns_endpoint) {
+            self.endpoint.deinit();
+            self.allocator.destroy(self.endpoint);
+        }
         self.* = undefined;
     }
 
@@ -6521,6 +6571,18 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
         );
+        try self.flushResponsePacketFeedback();
+    }
+
+    /// Apply one already-authenticated packet selected by an endpoint-wide
+    /// dispatcher. The packet remains caller-owned and no UDP read occurs.
+    /// Responses, pushes, control frames, and QPACK state remain available to
+    /// the normal aggregate or incremental receive APIs.
+    pub fn processResponsePacket(
+        self: *HandshakeClient,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        try self.processResponsePacketPreserving(null, packet);
     }
 
     /// Advance one response stream without assembling its DATA payload.
@@ -6538,6 +6600,48 @@ pub const HandshakeClient = struct {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
             };
+    }
+
+    /// Return one event already buffered for `stream_id` without reading UDP.
+    /// Once a response enters streaming mode, its remaining events must be
+    /// consumed through the streaming APIs rather than aggregate receive.
+    pub fn pollResponseEvent(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        if (self.streaming_responses.find(stream_id)) |active| {
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &active.reader,
+            );
+        }
+        if (self.response_streams.takeReset(stream_id)) |code| {
+            try self.flushResponsePacketFeedback();
+            try self.finishStreamingResponse(stream_id);
+            return if (code == http3.ApplicationErrorCode.request_rejected)
+                error.RequestRejected
+            else
+                error.RequestCancelled;
+        }
+        const entry = try self.streaming_responses.activateResponse(
+            &self.response_streams,
+            stream_id,
+        );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &entry.reader,
+        );
+        const event = (try entry.reader.next(self.qpack_decode.table)) orelse
+            return null;
+        var owned_event = event;
+        errdefer owned_event.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        try self.applyStreamingResponseEvent(stream_id, owned_event);
+        return owned_event;
     }
 
     pub fn receiveResponseEventWithDeadline(
@@ -6565,39 +6669,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?StreamingEvent {
-        if (!self.request_lifecycle.contains(stream_id)) {
-            return error.UnexpectedStream;
-        }
-        if (self.streaming_responses.find(stream_id)) |active| {
-            try releaseStreamingReaderCapacity(
-                &self.established.connection,
-                &active.reader,
-            );
-        }
-        if (self.response_streams.takeReset(stream_id)) |code| {
-            try self.sendQpackFeedback();
-            try self.finishStreamingResponse(stream_id);
-            return if (code == http3.ApplicationErrorCode.request_rejected)
-                error.RequestRejected
-            else
-                error.RequestCancelled;
-        }
-        const entry = try self.streaming_responses.activateResponse(
-            &self.response_streams,
-            stream_id,
-        );
-        self.request_lifecycle.applyResponseReaderSemantics(
-            stream_id,
-            &entry.reader,
-        );
-        if (try entry.reader.next(self.qpack_decode.table)) |event| {
-            var owned_event = event;
-            errdefer owned_event.deinit(
-                self.established.connection.endpoint.allocator,
-            );
-            try self.applyStreamingResponseEvent(stream_id, owned_event);
-            return owned_event;
-        }
+        if (try self.pollResponseEvent(stream_id)) |event| return event;
         try receiveConnectionResponsePacketUntil(
             &self.established.connection,
             &self.receive_packets,
@@ -6611,29 +6683,8 @@ pub const HandshakeClient = struct {
             null,
             deadline,
         );
-        if (self.response_streams.takeReset(stream_id)) |code| {
-            try self.sendQpackFeedback();
-            try self.finishStreamingResponse(stream_id);
-            return if (code == http3.ApplicationErrorCode.request_rejected)
-                error.RequestRejected
-            else
-                error.RequestCancelled;
-        }
-        const active = self.streaming_responses.find(stream_id) orelse
-            return error.UnexpectedStream;
-        self.request_lifecycle.applyResponseReaderSemantics(
-            stream_id,
-            &active.reader,
-        );
-        if (try active.reader.next(self.qpack_decode.table)) |event| {
-            var owned_event = event;
-            errdefer owned_event.deinit(
-                self.established.connection.endpoint.allocator,
-            );
-            try self.applyStreamingResponseEvent(stream_id, owned_event);
-            return owned_event;
-        }
-        return null;
+        try self.flushResponsePacketFeedback();
+        return self.pollResponseEvent(stream_id);
     }
 
     fn connectionIo(self: *const HandshakeClient) std.Io {
@@ -6777,6 +6828,17 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        try self.processResponsePacketPreserving(
+            detached_stream_id,
+            packet,
+        );
+    }
+
+    fn processResponsePacketPreserving(
+        self: *HandshakeClient,
+        detached_stream_id: ?u62,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -6831,6 +6893,15 @@ pub const HandshakeClient = struct {
         };
     }
 
+    /// Return one promised-response event already buffered by packet
+    /// injection without reading UDP.
+    pub fn pollPushEvent(
+        self: *HandshakeClient,
+    ) Error!?StreamingPushEvent {
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.pollPushEventMatching(null);
+    }
+
     /// Wait for an event from any promised push within one relative budget.
     pub fn receivePushEventWithTimeout(
         self: *HandshakeClient,
@@ -6858,37 +6929,7 @@ pub const HandshakeClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
         while (true) {
-            for (self.push_streams.entries.items) |*entry| {
-                if (entry.reader) |*reader| {
-                    try releaseStreamingReaderCapacity(
-                        &self.established.connection,
-                        reader,
-                    );
-                }
-            }
-            try self.applyPendingPushCancellations();
-            if (try self.push_streams.next(
-                self.qpack_decode.table,
-                self.options.local_settings.qpack_blocked_streams,
-                target_push_id,
-            )) |ready| {
-                var event = ready.event;
-                errdefer event.deinit(self.allocator);
-                if (event.value == .push_promise) {
-                    return error.UnexpectedFrame;
-                }
-                if (try streamingResponseSectionAcknowledgments(
-                    event.value,
-                )) |count| {
-                    try self.qpack_decode.acknowledgeSections(
-                        event.stream_id,
-                        count,
-                    );
-                    try self.sendQpackFeedback();
-                }
-                if (event.value == .finished) {
-                    self.push_streams.removeFinished(ready.index);
-                }
+            if (try self.pollPushEventMatching(target_push_id)) |event| {
                 return event;
             }
             try receiveConnectionResponsePacketUntil(
@@ -6904,7 +6945,44 @@ pub const HandshakeClient = struct {
                 null,
                 deadline,
             );
+            try self.flushResponsePacketFeedback();
         }
+    }
+
+    fn pollPushEventMatching(
+        self: *HandshakeClient,
+        target_push_id: ?u64,
+    ) Error!?StreamingPushEvent {
+        for (self.push_streams.entries.items) |*entry| {
+            if (entry.reader) |*reader| {
+                try releaseStreamingReaderCapacity(
+                    &self.established.connection,
+                    reader,
+                );
+            }
+        }
+        try self.applyPendingPushCancellations();
+        const ready = try self.push_streams.next(
+            self.qpack_decode.table,
+            self.options.local_settings.qpack_blocked_streams,
+            target_push_id,
+        ) orelse return null;
+        var event = ready.event;
+        errdefer event.deinit(self.allocator);
+        if (event.value == .push_promise) return error.UnexpectedFrame;
+        if (try streamingResponseSectionAcknowledgments(
+            event.value,
+        )) |count| {
+            try self.qpack_decode.acknowledgeSections(
+                event.stream_id,
+                count,
+            );
+            try self.flushResponsePacketFeedback();
+        }
+        if (event.value == .finished) {
+            self.push_streams.removeFinished(ready.index);
+        }
+        return event;
     }
 
     fn applyPendingPushCancellations(
@@ -7099,11 +7177,74 @@ pub const HandshakeClient = struct {
     pub fn receiveNextResponseEvent(
         self: *HandshakeClient,
     ) Error!StreamingResponseEvent {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
         return self.receiveNextResponseEventInternal(null) catch |err|
             switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
             };
+    }
+
+    /// Return the next response event already buffered on any outstanding
+    /// request without reading UDP. The selected stream ID is included in the
+    /// result so one dispatcher loop can fairly service many requests.
+    pub fn pollNextResponseEvent(
+        self: *HandshakeClient,
+    ) Error!?StreamingResponseEvent {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return null;
+        }
+        try self.releaseStreamingResponseCapacity();
+        if (self.response_streams.firstReset()) |reset| {
+            if (!self.request_lifecycle.contains(reset.stream_id)) {
+                return error.UnexpectedStream;
+            }
+            _ = self.response_streams.takeReset(reset.stream_id);
+            try self.flushResponsePacketFeedback();
+            try self.finishStreamingResponse(reset.stream_id);
+            return .{ .reset = .{
+                .stream_id = reset.stream_id,
+                .application_error_code = reset.application_error_code,
+            } };
+        }
+        const ready_value = try self.streaming_responses.nextResponse(
+            &self.response_streams,
+            self.qpack_decode.table,
+            self.options.local_settings.qpack_blocked_streams,
+        ) orelse return null;
+        var ready = ready_value;
+        const stream_id: u62 = @intCast(
+            ready.entry.reader.receive.stream_id,
+        );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &ready.entry.reader,
+        );
+        // `nextResponse` decoded this head before the request context was
+        // applied. Revalidate it before exposing request-sensitive semantics.
+        if (ready.event == .head and ready.event.head == .response) {
+            try http3.applyResponseHeadRequestSemantics(
+                &ready.event.head.response,
+                ready.entry.reader.response_request_method,
+                ready.entry.reader.response_extended_connect,
+            );
+            ready.entry.reader.body_allowed =
+                ready.event.head.response.body_allowed;
+            if (!ready.entry.reader.body_allowed) {
+                ready.entry.reader.content_length = null;
+            }
+        }
+        var owned_event = ready.event;
+        errdefer owned_event.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        try self.applyStreamingResponseEvent(stream_id, owned_event);
+        return .{ .message = .{
+            .stream_id = stream_id,
+            .value = owned_event,
+        } };
     }
 
     /// Wait for the next event from any outstanding response within one
@@ -7113,6 +7254,9 @@ pub const HandshakeClient = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingResponseEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
         return self.receiveNextResponseEventInternal(
             .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
         );
@@ -7122,6 +7266,9 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
         return self.receiveNextResponseEventInternal(deadline);
     }
 
@@ -7129,66 +7276,8 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
-        if (self.request_lifecycle.outstanding.items.len == 0) {
-            return error.UnexpectedStream;
-        }
         while (true) {
-            try self.releaseStreamingResponseCapacity();
-            if (self.response_streams.firstReset()) |reset| {
-                if (!self.request_lifecycle.contains(reset.stream_id)) {
-                    return error.UnexpectedStream;
-                }
-                _ = self.response_streams.takeReset(reset.stream_id);
-                try self.sendQpackFeedback();
-                try self.finishStreamingResponse(reset.stream_id);
-                return .{ .reset = .{
-                    .stream_id = reset.stream_id,
-                    .application_error_code = reset.application_error_code,
-                } };
-            }
-            if (try self.streaming_responses.nextResponse(
-                &self.response_streams,
-                self.qpack_decode.table,
-                self.options.local_settings.qpack_blocked_streams,
-            )) |ready_value| {
-                var ready = ready_value;
-                const stream_id: u62 = @intCast(
-                    ready.entry.reader.receive.stream_id,
-                );
-                self.request_lifecycle.applyResponseReaderSemantics(
-                    stream_id,
-                    &ready.entry.reader,
-                );
-                // `nextResponse` decoded this head before the request context
-                // was applied. Revalidate the owned event immediately so the
-                // caller never observes HEAD/CONNECT DATA semantics.
-                if (ready.event == .head and
-                    ready.event.head == .response)
-                {
-                    try http3.applyResponseHeadRequestSemantics(
-                        &ready.event.head.response,
-                        ready.entry.reader.response_request_method,
-                        ready.entry.reader.response_extended_connect,
-                    );
-                    ready.entry.reader.body_allowed =
-                        ready.event.head.response.body_allowed;
-                    if (!ready.entry.reader.body_allowed) {
-                        ready.entry.reader.content_length = null;
-                    }
-                }
-                var owned_event = ready.event;
-                errdefer owned_event.deinit(
-                    self.established.connection.endpoint.allocator,
-                );
-                try self.applyStreamingResponseEvent(
-                    stream_id,
-                    owned_event,
-                );
-                return .{ .message = .{
-                    .stream_id = stream_id,
-                    .value = owned_event,
-                } };
-            }
+            if (try self.pollNextResponseEvent()) |event| return event;
             try self.releaseStreamingResponseCapacity();
             try receiveConnectionResponsePacketUntil(
                 &self.established.connection,
@@ -7203,6 +7292,7 @@ pub const HandshakeClient = struct {
                 null,
                 deadline,
             );
+            try self.flushResponsePacketFeedback();
         }
     }
 
@@ -15122,6 +15212,7 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
 
     const retry_client = HandshakeClient{
         .endpoint = undefined,
+        .owns_endpoint = false,
         .peer = .{ .ip4 = .loopback(443) },
         .allocator = std.testing.allocator,
         .established = undefined,

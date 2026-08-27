@@ -889,6 +889,26 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClient,
         "processDetachedResponsePacket",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "initEstablished",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "processResponsePacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "pollResponseEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "pollNextResponseEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "pollPushEvent",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
