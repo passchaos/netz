@@ -3072,6 +3072,19 @@ pub const Connection = struct {
         return self.readBrokerEventInternal(null);
     }
 
+    /// Read one broker-facing event within a relative application budget.
+    /// The resulting absolute deadline covers the complete MQTT packet and is
+    /// not renewed when the peer trickles a fixed header or payload.
+    pub fn readBrokerEventWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!BrokerEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readBrokerEventWithDeadline(
+            self.transport.deadlineFromNow(timeout),
+        );
+    }
+
     /// Read one broker-facing event under an absolute application deadline.
     /// Unlike Keep Alive enforcement, progress on a large packet does not
     /// renew this caller-owned budget.

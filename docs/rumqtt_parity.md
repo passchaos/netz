@@ -1075,8 +1075,10 @@ command queue already support explicit
 client-initiated re-authentication and drive both directions of
 multi-step MQTT 5 re-authentication, idle
 keep-alive and automatic reconnect without competing socket readers. Current
-connection APIs also accept caller-owned absolute deadlines for CONNECT,
-PINGRESP, and ordered client packet events. The reconnect poller accepts an
+connection APIs also accept relative timeouts and caller-owned absolute
+deadlines for CONNECT, PINGRESP, and ordered client or broker packet events.
+These budgets span the complete MQTT Control Packet and preserve partial TCP,
+TLS, or WebSocket framing for a later call. The reconnect poller accepts an
 awake-clock absolute deadline while still shortening individual waits for
 Keep Alive and shutdown checks; neither mechanism renews the application
 budget. Partial TCP/TLS/WebSocket packets and packets queued during PING remain

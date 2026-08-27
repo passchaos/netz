@@ -160,7 +160,7 @@ test "MQTT client PING absolute deadline preserves queued publish" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT broker event absolute deadline resumes partial publish" {
+test "MQTT broker event timeout and deadline resume partial publish" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -195,10 +195,9 @@ test "MQTT broker event absolute deadline resumes partial publish" {
             self.prefix_received.set(self.server.io);
             try std.testing.expectError(
                 error.Timeout,
-                accepted.connection.readBrokerEventWithDeadline(.fromNow(
-                    self.server.io,
-                    .{ .raw = .fromMilliseconds(20), .clock = .awake },
-                )),
+                accepted.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
             );
             self.timed_out.set(self.server.io);
             var event = try accepted.connection.readBrokerEventWithDeadline(

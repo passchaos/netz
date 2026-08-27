@@ -1700,6 +1700,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
+        "readBrokerEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
         "readBrokerEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
