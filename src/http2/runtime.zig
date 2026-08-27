@@ -3711,8 +3711,36 @@ pub const Connection = struct {
     pub fn readPriorityUpdate(
         self: *Connection,
     ) Error!http2.PriorityUpdatePayload {
+        return self.readPriorityUpdateUntil(null);
+    }
+
+    pub fn readPriorityUpdateWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!http2.PriorityUpdatePayload {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readPriorityUpdateUntil(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Wait for one RFC 9218 PRIORITY_UPDATE under an absolute deadline.
+    /// Connection-control frames may be processed along the way, but none of
+    /// them renews the caller's budget and partial frame bytes remain buffered.
+    pub fn readPriorityUpdateWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!http2.PriorityUpdatePayload {
+        return self.readPriorityUpdateUntil(deadline);
+    }
+
+    fn readPriorityUpdateUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!http2.PriorityUpdatePayload {
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type == .priority_update) {
                 const update =

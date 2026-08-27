@@ -674,6 +674,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readResetStream"));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
+        "readPriorityUpdateWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readPriorityUpdateWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
         "readResetStreamWithTimeout",
     ));
     try std.testing.expect(@hasDecl(

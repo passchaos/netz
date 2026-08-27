@@ -6,6 +6,25 @@ const Client = runtime.Client;
 const Connection = runtime.Connection;
 const Server = runtime.Server;
 
+fn writeAll(
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    bytes: []const u8,
+) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const count = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[written..],
+            &.{""},
+            0,
+        );
+        if (count == 0) return error.SocketUnconnected;
+        written += count;
+    }
+}
+
 test "HTTP/2 PRIORITY_UPDATE before request is retained and replaced" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -186,6 +205,97 @@ test "HTTP/2 PRIORITY_UPDATE reprioritizes a promised push" {
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(u31, 2), shared.pushed_stream.?);
     try std.testing.expectEqual(@as(u3, 0), shared.priority.?.urgency);
+}
+
+test "HTTP/2 bounded PRIORITY_UPDATE resumes a partial frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .no_rfc7540_priorities = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        prefix_sent: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_sent.set(self.server.io);
+                self.timed_out.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(self.server.allocator);
+            try http2.PriorityUpdatePayload.write(
+                &encoded,
+                self.server.allocator,
+                1,
+                "u=2, i",
+            );
+            const split = http2.FrameHeader.encoded_len - 2;
+            try writeAll(
+                self.server.io,
+                connection.stream,
+                encoded.items[0..split],
+            );
+            self.prefix_sent.set(self.server.io);
+            try self.timed_out.wait(self.server.io);
+            try writeAll(
+                self.server.io,
+                connection.stream,
+                encoded.items[split..],
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    client.role = .server;
+    client.limits.no_rfc7540_priorities = true;
+    defer client.close();
+    try shared.prefix_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.readPriorityUpdateWithTimeout(.fromMilliseconds(20)),
+    );
+    shared.timed_out.set(io);
+    const update = try client.readPriorityUpdateWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    try std.testing.expectEqual(@as(u31, 1), update.prioritized_stream_id);
+    try std.testing.expectEqualStrings("u=2, i", update.field_value);
+    try std.testing.expectEqual(
+        http2.ExtensiblePriority{ .urgency = 2, .incremental = true },
+        client.peerPriority(1).?,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 PRIORITY_UPDATE enforces negotiation and target direction" {

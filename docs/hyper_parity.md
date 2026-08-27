@@ -589,8 +589,9 @@ silent-peer timeout, and successful reuse of the same tunnel afterward.
 
 Netz exposes `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
-keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, and WINDOW_UPDATE readers
-now provide both timeout and absolute-deadline variants, and HTTP/2 tunnels
+keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, WINDOW_UPDATE, and RFC
+9218 PRIORITY_UPDATE readers now provide both timeout and absolute-deadline
+variants, and HTTP/2 tunnels
 provide `readWithTimeout` alongside `readWithDeadline`. The keep-alive driver
 waits until a full interval of peer receive inactivity, supports Hyper-shaped
 active-stream versus `while_idle` policy, and
