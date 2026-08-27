@@ -1,8 +1,8 @@
 //! Bounded multi-producer command channel for the reconnect event loop.
 //!
-//! Requests borrow their payload until completion, so producer-side methods
-//! synchronously wait after enqueueing. This avoids a second deep copy while
-//! ensuring the MQTT connection and its allocator remain owned by one loop.
+//! Synchronous requests borrow their payload until completion. Asynchronous
+//! PUBLISH requests instead deep-copy all variable data, so producers may
+//! return immediately while one loop retains exclusive transport ownership.
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
@@ -28,6 +28,7 @@ pub const CommandQueue = struct {
     queue: std.Io.Queue(*Command),
     allocator_mutex: std.Io.Mutex = .init,
     next_command_id: std.atomic.Value(u64) = .init(1),
+    async_commands: std.atomic.Value(usize) = .init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -47,6 +48,7 @@ pub const CommandQueue = struct {
     /// buffer. Call only after the loop owner has stopped accessing the queue.
     pub fn deinit(self: *CommandQueue) void {
         self.stop(error.CommandQueueClosed);
+        std.debug.assert(self.async_commands.load(.acquire) == 0);
         self.allocator.free(self.storage);
         self.* = undefined;
     }
@@ -113,6 +115,8 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
+        _ = self.async_commands.fetchAdd(1, .monotonic);
+        errdefer _ = self.async_commands.fetchSub(1, .monotonic);
         const count = self.queue.put(
             self.io,
             &.{command},
@@ -263,6 +267,8 @@ pub const Command = struct {
             },
             else => {},
         }
+        const previous = owner.async_commands.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
         owner.allocator.destroy(self);
     }
 };
