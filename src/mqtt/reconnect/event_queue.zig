@@ -7,6 +7,8 @@ pub fn Queue(comptime Event: type) type {
         const Self = @This();
 
         pub const Error = std.Io.Cancelable || error{EventQueueClosed};
+        pub const ReceiveTimeoutError = Error || std.Io.Timeout.Error ||
+            std.Io.ConcurrentError;
 
         pub const OwnedEvent = struct {
             value: Event,
@@ -80,6 +82,41 @@ pub fn Queue(comptime Event: type) type {
             return if (count == 0) null else events[0];
         }
 
+        /// Wait for one event until `timeout` elapses. If the event and timer
+        /// complete concurrently, any unselected owned event is reclaimed.
+        pub fn receiveTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) ReceiveTimeoutError!OwnedEvent {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            const Wake = union(enum) {
+                event: (std.Io.QueueClosedError ||
+                    std.Io.Cancelable)!OwnedEvent,
+                timeout: std.Io.Cancelable!void,
+            };
+            var buffer: [2]Wake = undefined;
+            var select: std.Io.Select(Wake) = .init(self.io, &buffer);
+            defer while (select.cancel()) |wake| switch (wake) {
+                .event => |result| if (result) |owned_value| {
+                    var owned = owned_value;
+                    owned.deinit();
+                } else |_| {},
+                .timeout => {},
+            };
+            try select.concurrent(.event, receiveRaw, .{self});
+            try select.concurrent(.timeout, waitForTimeout, .{ self.io, timeout });
+            return switch (try select.await()) {
+                .event => |result| result catch |err| switch (err) {
+                    error.Closed => error.EventQueueClosed,
+                    error.Canceled => error.Canceled,
+                },
+                .timeout => |result| {
+                    try result;
+                    return error.Timeout;
+                },
+            };
+        }
+
         pub fn close(self: *Self) void {
             self.queue.close(self.io);
         }
@@ -106,6 +143,19 @@ pub fn Queue(comptime Event: type) type {
                 error.Closed => return error.EventQueueClosed,
                 error.Canceled => return error.Canceled,
             };
+        }
+
+        fn receiveRaw(
+            self: *Self,
+        ) (std.Io.QueueClosedError || std.Io.Cancelable)!OwnedEvent {
+            return self.queue.getOne(self.io);
+        }
+
+        fn waitForTimeout(
+            io: std.Io,
+            timeout: std.Io.Duration,
+        ) std.Io.Cancelable!void {
+            try std.Io.sleep(io, timeout, .awake);
         }
     };
 }
@@ -138,6 +188,36 @@ test "MQTT event queue transfers ownership and drains on deinit" {
     try std.testing.expectEqualStrings("first", first.value.bytes);
     first.deinit();
     queue.deinit();
+}
+
+test "MQTT event queue receive timeout returns data and timeout" {
+    const TestEvent = struct {
+        bytes: []u8,
+
+        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            allocator.free(self.bytes);
+            self.* = undefined;
+        }
+    };
+    const TestQueue = Queue(TestEvent);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try TestQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveTimeout(.fromMilliseconds(1)),
+    );
+    try queue.send(
+        .{ .bytes = try std.testing.allocator.dupe(u8, "ready") },
+        std.testing.allocator,
+    );
+    var event = try queue.receiveTimeout(.fromSeconds(1));
+    defer event.deinit();
+    try std.testing.expectEqualStrings("ready", event.value.bytes);
 }
 
 test "MQTT event queue close wakes a blocked producer" {

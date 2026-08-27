@@ -1593,7 +1593,20 @@ pub const Client = struct {
                 break :blk .{ .publish = owned };
             },
             .puback => |owned| blk: {
-                _ = try self.applyOutgoingAck(owned.ack);
+                _ = self.applyOutgoingAck(owned.ack) catch |err| {
+                    // The Session store removes a terminal ACK before
+                    // surfacing its rejection. Notify observers while the ACK
+                    // properties are still alive, then preserve the error.
+                    if (err == error.PublishRefused) {
+                        self.finishPublishDelivery(.{
+                            .packet_id = owned.ack.packet_id,
+                            .qos = .at_least_once,
+                            .reason_code = owned.ack.reason_code,
+                            .properties = owned.ack.properties,
+                        });
+                    }
+                    return err;
+                };
                 self.finishPublishDelivery(.{
                     .packet_id = owned.ack.packet_id,
                     .qos = .at_least_once,
@@ -1642,7 +1655,17 @@ pub const Client = struct {
                 break :blk .{ .pubrel = owned };
             },
             .pubcomp => |owned| blk: {
-                _ = try self.applyOutgoingAck(owned.ack);
+                _ = self.applyOutgoingAck(owned.ack) catch |err| {
+                    if (err == error.PublishRefused) {
+                        self.finishPublishDelivery(.{
+                            .packet_id = owned.ack.packet_id,
+                            .qos = .exactly_once,
+                            .reason_code = owned.ack.reason_code,
+                            .properties = owned.ack.properties,
+                        });
+                    }
+                    return err;
+                };
                 self.finishPublishDelivery(.{
                     .packet_id = owned.ack.packet_id,
                     .qos = .exactly_once,

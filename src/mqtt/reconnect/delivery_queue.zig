@@ -9,6 +9,8 @@ pub fn Queue(comptime Delivery: type, comptime Handler: type) type {
         const Self = @This();
 
         pub const Error = std.Io.Cancelable || error{DeliveryQueueClosed};
+        pub const ReceiveTimeoutError = Error || std.Io.Timeout.Error ||
+            std.Io.ConcurrentError;
 
         pub const OwnedDelivery = struct {
             packet_id: ?u16,
@@ -87,6 +89,40 @@ pub fn Queue(comptime Delivery: type, comptime Handler: type) type {
             return if (count == 0) null else values[0];
         }
 
+        /// Wait for a delivery notification up to the supplied duration.
+        pub fn receiveTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) ReceiveTimeoutError!OwnedDelivery {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            const Wake = union(enum) {
+                delivery: (std.Io.QueueClosedError ||
+                    std.Io.Cancelable)!OwnedDelivery,
+                timeout: std.Io.Cancelable!void,
+            };
+            var buffer: [2]Wake = undefined;
+            var select: std.Io.Select(Wake) = .init(self.io, &buffer);
+            defer while (select.cancel()) |wake| switch (wake) {
+                .delivery => |result| if (result) |owned_value| {
+                    var owned = owned_value;
+                    owned.deinit();
+                } else |_| {},
+                .timeout => {},
+            };
+            try select.concurrent(.delivery, receiveRaw, .{self});
+            try select.concurrent(.timeout, waitForTimeout, .{ self.io, timeout });
+            return switch (try select.await()) {
+                .delivery => |result| result catch |err| switch (err) {
+                    error.Closed => error.DeliveryQueueClosed,
+                    error.Canceled => error.Canceled,
+                },
+                .timeout => |result| {
+                    try result;
+                    return error.Timeout;
+                },
+            };
+        }
+
         pub fn close(self: *Self) void {
             self.queue.close(self.io);
         }
@@ -114,6 +150,19 @@ pub fn Queue(comptime Delivery: type, comptime Handler: type) type {
             self.queue.putOneUncancelable(self.io, owned) catch {
                 owned.deinit();
             };
+        }
+
+        fn receiveRaw(
+            self: *Self,
+        ) (std.Io.QueueClosedError || std.Io.Cancelable)!OwnedDelivery {
+            return self.queue.getOne(self.io);
+        }
+
+        fn waitForTimeout(
+            io: std.Io,
+            timeout: std.Io.Duration,
+        ) std.Io.Cancelable!void {
+            try std.Io.sleep(io, timeout, .awake);
         }
     };
 }
@@ -162,6 +211,30 @@ test "MQTT delivery queue owns properties and supports polling" {
         "accepted",
         delivery.properties[0].utf8.value,
     );
+}
+
+test "MQTT delivery queue receive timeout returns data and timeout" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try TestQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveTimeout(.fromMilliseconds(1)),
+    );
+    const handler = queue.handler();
+    handler.complete(handler.context, .{
+        .packet_id = null,
+        .qos = .at_most_once,
+        .reason_code = 0,
+        .properties = &.{},
+    });
+    var delivery = try queue.receiveTimeout(.fromSeconds(1));
+    defer delivery.deinit();
+    try std.testing.expect(delivery.packet_id == null);
 }
 
 test "MQTT delivery queue drops notifications after close" {
