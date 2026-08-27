@@ -3072,6 +3072,18 @@ pub const Connection = struct {
         return self.readBrokerEventInternal(null);
     }
 
+    /// Read one broker-facing event under an absolute application deadline.
+    /// Unlike Keep Alive enforcement, progress on a large packet does not
+    /// renew this caller-owned budget.
+    pub fn readBrokerEventWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!BrokerEvent {
+        var packet = try self.readPacketWithDeadline(deadline);
+        errdefer packet.deinit(self.allocator);
+        return self.finishBrokerEvent(packet);
+    }
+
     /// Read one packet valid on an established client connection. Unlike the
     /// synchronous typed helpers, this preserves packet ordering while a
     /// single owner multiplexes publications, QoS acknowledgements, liveness,
@@ -3207,6 +3219,13 @@ pub const Connection = struct {
         else
             try self.readPacket();
         errdefer packet.deinit(self.allocator);
+        return self.finishBrokerEvent(packet);
+    }
+
+    fn finishBrokerEvent(
+        self: *Connection,
+        packet: OwnedPacket,
+    ) Error!BrokerEvent {
         return switch (packet.fixed.packet_type) {
             .auth => blk: {
                 var value = try mqtt.Auth.parse(

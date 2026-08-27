@@ -8,6 +8,21 @@ const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 
 const net = std.Io.net;
 
+fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const count = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[written..],
+            &.{""},
+            0,
+        );
+        if (count == 0) return error.SocketUnconnected;
+        written += count;
+    }
+}
+
 fn acceptTcpClient(
     server: *runtime.Server,
     sleep_for: std.Io.Duration,
@@ -139,6 +154,98 @@ test "MQTT client PING absolute deadline preserves queued publish" {
         "preserved",
         publish.publish.publish.payload,
     );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT broker event absolute deadline resumes partial publish" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        prefix_received: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_received.set(self.server.io);
+                self.timed_out.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            self.prefix_received.set(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.connection.readBrokerEventWithDeadline(.fromNow(
+                    self.server.io,
+                    .{ .raw = .fromMilliseconds(20), .clock = .awake },
+                )),
+            );
+            self.timed_out.set(self.server.io);
+            var event = try accepted.connection.readBrokerEventWithDeadline(
+                .fromNow(
+                    self.server.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            );
+            defer event.deinit(self.server.allocator);
+            try std.testing.expect(event == .publish);
+            try std.testing.expectEqualStrings(
+                "deadline/broker",
+                event.publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "payload",
+                event.publish.publish.payload,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .client_id = "broker-event-deadline" },
+    );
+    defer client.close();
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try mqtt.writePublish(
+        &encoded,
+        allocator,
+        .v5,
+        "deadline/broker",
+        "payload",
+        .{},
+    );
+    const tcp = client.transport.tcp;
+    try writeAll(io, tcp.stream, encoded.items[0..2]);
+    try shared.prefix_received.wait(io);
+    try shared.timed_out.wait(io);
+    try writeAll(io, tcp.stream, encoded.items[2..]);
 
     thread.join();
     joined = true;

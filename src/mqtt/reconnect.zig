@@ -260,6 +260,14 @@ pub const PollOptions = struct {
     cancellation_check_interval: std.Io.Duration = .fromMilliseconds(100),
 };
 
+/// Internal scheduling options for an already-absolute poll budget. Timestamps
+/// in reconnect state are raw awake-clock values, so this avoids pretending
+/// they can be compared with an arbitrary `std.Io.Clock.Timestamp`.
+pub const DeadlinePollOptions = struct {
+    ping_response_timeout: ?std.Io.Duration = null,
+    cancellation_check_interval: std.Io.Duration = .fromMilliseconds(100),
+};
+
 pub const QueuedServeOptions = struct {
     poll: PollOptions,
     /// Maximum socket wait before newly queued commands are observed.
@@ -1373,13 +1381,12 @@ pub const Client = struct {
     pub fn pollWithDeadline(
         self: *Client,
         deadline: std.Io.Timestamp,
-        ping_response_timeout: ?std.Io.Duration,
-        cancellation_check_interval: std.Io.Duration,
+        options: DeadlinePollOptions,
     ) (Error || std.Io.Cancelable)!?ClientEvent {
         return self.pollUntil(
             deadline,
-            ping_response_timeout,
-            cancellation_check_interval,
+            options.ping_response_timeout,
+            options.cancellation_check_interval,
         );
     }
 

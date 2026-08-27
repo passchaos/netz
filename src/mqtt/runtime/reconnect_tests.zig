@@ -1331,8 +1331,7 @@ test "MQTT reconnect poll accepts one caller-owned deadline" {
     );
     try std.testing.expect((try client.pollWithDeadline(
         deadline,
-        null,
-        .fromMilliseconds(5),
+        .{ .cancellation_check_interval = .fromMilliseconds(5) },
     )) == null);
 
     thread.join();

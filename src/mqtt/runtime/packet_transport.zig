@@ -35,6 +35,32 @@ const TcpTransport = struct {
     packet_read: usize = 0,
 };
 
+/// Resumable packet state for stream transports whose own read API does not
+/// retain MQTT framing progress. This mirrors `TcpTransport` so timeout and
+/// cancellation can never discard a partial Remaining Length or payload.
+const StreamPacketState = struct {
+    header: [5]u8 = undefined,
+    header_len: usize = 0,
+    packet: ?[]u8 = null,
+    packet_read: usize = 0,
+
+    fn deinit(self: *StreamPacketState, allocator: std.mem.Allocator) void {
+        if (self.packet) |packet| allocator.free(packet);
+        self.* = .{};
+    }
+};
+
+fn StreamTransport(comptime Connection: type) type {
+    return struct {
+        connection: *Connection,
+        packet_state: StreamPacketState = .{},
+    };
+}
+
+const TlsTransport = StreamTransport(http1_runtime.TlsClientConnection);
+const VailTlsTransport = StreamTransport(tls_stream.ClientConnection);
+const TlsServerTransport = StreamTransport(tls_stream.ServerConnection);
+
 /// MQTT Control Packet transport shared by every runtime session.
 ///
 /// TCP is a byte stream. MQTT-over-WebSocket has the same MQTT byte-stream
@@ -42,9 +68,9 @@ const TcpTransport = struct {
 /// packets may span messages and one message may contain multiple packets.
 pub const Transport = union(enum) {
     tcp: TcpTransport,
-    tls: *http1_runtime.TlsClientConnection,
-    tls_vail: *tls_stream.ClientConnection,
-    tls_server: *tls_stream.ServerConnection,
+    tls: TlsTransport,
+    tls_vail: VailTlsTransport,
+    tls_server: TlsServerTransport,
     websocket: WebSocketTransport,
 
     pub fn initTcp(io: std.Io, stream: net.Stream) Transport {
@@ -60,27 +86,27 @@ pub const Transport = union(enum) {
     pub fn initTls(
         connection: *http1_runtime.TlsClientConnection,
     ) Transport {
-        return .{ .tls = connection };
+        return .{ .tls = .{ .connection = connection } };
     }
 
     pub fn initTlsServer(
         connection: *tls_stream.ServerConnection,
     ) Transport {
-        return .{ .tls_server = connection };
+        return .{ .tls_server = .{ .connection = connection } };
     }
 
     pub fn initVailTls(
         connection: *tls_stream.ClientConnection,
     ) Transport {
-        return .{ .tls_vail = connection };
+        return .{ .tls_vail = .{ .connection = connection } };
     }
 
     pub fn peerCertificates(
         self: *const Transport,
     ) ?[]const []const u8 {
         return switch (self.*) {
-            .tls_server => |connection| connection.peerCertificates(),
-            .tls_vail => |connection| connection.peerCertificates(),
+            .tls_server => |transport| transport.connection.peerCertificates(),
+            .tls_vail => |transport| transport.connection.peerCertificates(),
             .websocket => |*ws| ws.connection.peerCertificates(),
             // Zig's standard TLS client does not expose its authenticated
             // chain, and cleartext TCP has no certificate identity.
@@ -90,8 +116,8 @@ pub const Transport = union(enum) {
 
     pub fn negotiatedAlpn(self: *const Transport) ?[]const u8 {
         return switch (self.*) {
-            .tls_vail => |connection| connection.negotiatedAlpn(),
-            .tls_server => |connection| connection.negotiatedAlpn(),
+            .tls_vail => |transport| transport.connection.negotiatedAlpn(),
+            .tls_server => |transport| transport.connection.negotiatedAlpn(),
             // Zig's standard TLS client does not currently expose ALPN, and
             // MQTT-over-WebSocket negotiates its application protocol through
             // Sec-WebSocket-Protocol rather than the underlying TLS session.
@@ -103,8 +129,8 @@ pub const Transport = union(enum) {
         self: *const Transport,
     ) ?tls_stream.CipherSuite {
         return switch (self.*) {
-            .tls_vail => |connection| connection.negotiatedCipherSuite(),
-            .tls_server => |connection| connection.negotiatedCipherSuite(),
+            .tls_vail => |transport| transport.connection.negotiatedCipherSuite(),
+            .tls_server => |transport| transport.connection.negotiatedCipherSuite(),
             .websocket => |*ws| ws.connection.negotiatedCipherSuite(),
             .tcp, .tls => null,
         };
@@ -114,8 +140,8 @@ pub const Transport = union(enum) {
         self: *const Transport,
     ) ?tls_stream.TranscriptHash {
         return switch (self.*) {
-            .tls_vail => |connection| connection.negotiatedTranscriptHash(),
-            .tls_server => |connection| connection.negotiatedTranscriptHash(),
+            .tls_vail => |transport| transport.connection.negotiatedTranscriptHash(),
+            .tls_server => |transport| transport.connection.negotiatedTranscriptHash(),
             .websocket => |*ws| ws.connection.negotiatedTranscriptHash(),
             .tcp, .tls => null,
         };
@@ -126,10 +152,10 @@ pub const Transport = union(enum) {
         request_peer_update: bool,
     ) Error!void {
         return switch (self.*) {
-            .tls_vail => |connection| connection.updateTrafficKeys(
+            .tls_vail => |transport| transport.connection.updateTrafficKeys(
                 request_peer_update,
             ),
-            .tls_server => |connection| connection.updateTrafficKeys(
+            .tls_server => |transport| transport.connection.updateTrafficKeys(
                 request_peer_update,
             ),
             .websocket => |*ws| ws.connection.updateTrafficKeys(
@@ -143,8 +169,8 @@ pub const Transport = union(enum) {
         self: *const Transport,
     ) ?tls_stream.KeyUpdateCounts {
         return switch (self.*) {
-            .tls_vail => |connection| connection.keyUpdateCounts(),
-            .tls_server => |connection| connection.keyUpdateCounts(),
+            .tls_vail => |transport| transport.connection.keyUpdateCounts(),
+            .tls_server => |transport| transport.connection.keyUpdateCounts(),
             .websocket => |*ws| ws.connection.keyUpdateCounts(),
             .tcp, .tls => null,
         };
@@ -157,12 +183,12 @@ pub const Transport = union(enum) {
         out: []u8,
     ) Error!void {
         return switch (self.*) {
-            .tls_vail => |connection| connection.exportKeyingMaterial(
+            .tls_vail => |transport| transport.connection.exportKeyingMaterial(
                 label,
                 context,
                 out,
             ),
-            .tls_server => |connection| connection.exportKeyingMaterial(
+            .tls_server => |transport| transport.connection.exportKeyingMaterial(
                 label,
                 context,
                 out,
@@ -179,9 +205,9 @@ pub const Transport = union(enum) {
     pub fn remoteAddress(self: *const Transport) net.IpAddress {
         return switch (self.*) {
             .tcp => |tcp| tcp.stream.socket.address,
-            .tls => |connection| connection.stream.socket.address,
-            .tls_vail => |connection| connection.stream.socket.address,
-            .tls_server => |connection| connection.stream.socket.address,
+            .tls => |transport| transport.connection.stream.socket.address,
+            .tls_vail => |transport| transport.connection.stream.socket.address,
+            .tls_server => |transport| transport.connection.stream.socket.address,
             .websocket => |*ws| ws.connection.stream.socket.address,
         };
     }
@@ -192,9 +218,9 @@ pub const Transport = union(enum) {
     ) std.Io.Clock.Timestamp {
         const io = switch (self) {
             .tcp => |tcp| tcp.io,
-            .tls => |connection| connection.io,
-            .tls_vail => |connection| connection.io,
-            .tls_server => |connection| connection.io,
+            .tls => |transport| transport.connection.io,
+            .tls_vail => |transport| transport.connection.io,
+            .tls_server => |transport| transport.connection.io,
             .websocket => |ws| ws.connection.io,
         };
         return .fromNow(
@@ -212,9 +238,18 @@ pub const Transport = union(enum) {
                 if (tcp.packet) |packet| allocator.free(packet);
                 tcp.stream.close(tcp.io);
             },
-            .tls => |connection| connection.deinit(),
-            .tls_vail => |connection| connection.deinit(),
-            .tls_server => |connection| connection.deinit(),
+            .tls => |*transport| {
+                transport.packet_state.deinit(allocator);
+                transport.connection.deinit();
+            },
+            .tls_vail => |*transport| {
+                transport.packet_state.deinit(allocator);
+                transport.connection.deinit();
+            },
+            .tls_server => |*transport| {
+                transport.packet_state.deinit(allocator);
+                transport.connection.deinit();
+            },
             .websocket => |*ws| {
                 ws.input.deinit(allocator);
                 ws.connection.close();
@@ -243,9 +278,9 @@ pub const Transport = union(enum) {
     ) Error!void {
         switch (self.*) {
             .tcp => |tcp| try writeAll(tcp.io, tcp.stream, bytes),
-            .tls => |connection| try connection.writeAll(bytes),
-            .tls_vail => |connection| try connection.writeAll(bytes),
-            .tls_server => |connection| try connection.writeAll(bytes),
+            .tls => |transport| try transport.connection.writeAll(bytes),
+            .tls_vail => |transport| try transport.connection.writeAll(bytes),
+            .tls_server => |transport| try transport.connection.writeAll(bytes),
             // One packet per write matches rumqtt's WsStream behavior. The
             // reader intentionally does not depend on that optimization.
             // Client MQTT encoders relinquish their temporary bytes after the
@@ -273,15 +308,15 @@ pub const Transport = union(enum) {
                 prefix,
                 payload,
             ),
-            .tls => |connection| try connection.writeAllParts(
+            .tls => |transport| try transport.connection.writeAllParts(
                 prefix,
                 payload,
             ),
-            .tls_vail => |connection| try connection.writeAllParts(
+            .tls_vail => |transport| try transport.connection.writeAllParts(
                 prefix,
                 payload,
             ),
-            .tls_server => |connection| try connection.writeAllParts(
+            .tls_server => |transport| try transport.connection.writeAllParts(
                 prefix,
                 payload,
             ),
@@ -303,19 +338,19 @@ pub const Transport = union(enum) {
                 tcp,
                 max_packet_size,
             ),
-            .tls => |connection| readStreamPacket(
+            .tls => |*transport| readStreamPacket(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
             ),
-            .tls_vail => |connection| readStreamPacket(
+            .tls_vail => |*transport| readStreamPacket(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
             ),
-            .tls_server => |connection| readStreamPacket(
+            .tls_server => |*transport| readStreamPacket(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
             ),
             .websocket => |*ws| readWebSocketPacket(
@@ -347,21 +382,21 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
             ),
-            .tls => |connection| readStreamPacketWithInactivityTimeout(
+            .tls => |*transport| readStreamPacketWithInactivityTimeout(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
                 timeout,
             ),
-            .tls_vail => |connection| readStreamPacketWithInactivityTimeout(
+            .tls_vail => |*transport| readStreamPacketWithInactivityTimeout(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
                 timeout,
             ),
-            .tls_server => |connection| readStreamPacketWithInactivityTimeout(
+            .tls_server => |*transport| readStreamPacketWithInactivityTimeout(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
                 timeout,
             ),
@@ -390,21 +425,21 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 deadline,
             ),
-            .tls => |connection| readStreamPacketWithDeadline(
+            .tls => |*transport| readStreamPacketWithDeadline(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
                 deadline,
             ),
-            .tls_vail => |connection| readStreamPacketWithDeadline(
+            .tls_vail => |*transport| readStreamPacketWithDeadline(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
                 deadline,
             ),
-            .tls_server => |connection| readStreamPacketWithDeadline(
+            .tls_server => |*transport| readStreamPacketWithDeadline(
                 allocator,
-                connection,
+                transport,
                 max_packet_size,
                 deadline,
             ),
@@ -420,41 +455,138 @@ pub const Transport = union(enum) {
 
 fn readStreamPacket(
     allocator: std.mem.Allocator,
-    connection: anytype,
+    transport: anytype,
     max_packet_size: usize,
 ) Error!OwnedPacket {
-    var reader = TlsPacketReader(@TypeOf(connection)).init(
-        connection,
-        .none,
+    return readStreamPacketWithPolicy(
+        allocator,
+        transport,
+        max_packet_size,
+        null,
+        null,
     );
-    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readStreamPacketWithInactivityTimeout(
     allocator: std.mem.Allocator,
-    connection: anytype,
+    transport: anytype,
     max_packet_size: usize,
     timeout: std.Io.Clock.Duration,
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
-    var reader = TlsPacketReader(@TypeOf(connection)).init(
-        connection,
-        .{ .inactivity_timeout = timeout },
+    return readStreamPacketWithPolicy(
+        allocator,
+        transport,
+        max_packet_size,
+        timeout,
+        null,
     );
-    return readPacketFromReader(allocator, &reader, max_packet_size);
 }
 
 fn readStreamPacketWithDeadline(
     allocator: std.mem.Allocator,
-    connection: anytype,
+    transport: anytype,
     max_packet_size: usize,
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedPacket {
-    var reader = TlsPacketReader(@TypeOf(connection)).init(
-        connection,
-        .{ .absolute_deadline = deadline },
+    return readStreamPacketWithPolicy(
+        allocator,
+        transport,
+        max_packet_size,
+        null,
+        deadline,
     );
-    return readPacketFromReader(allocator, &reader, max_packet_size);
+}
+
+fn readStreamPacketWithPolicy(
+    allocator: std.mem.Allocator,
+    transport: anytype,
+    max_packet_size: usize,
+    inactivity_timeout: ?std.Io.Clock.Duration,
+    absolute_deadline: ?std.Io.Clock.Timestamp,
+) Error!OwnedPacket {
+    const connection = transport.connection;
+    var deadline = if (inactivity_timeout) |timeout|
+        std.Io.Clock.Timestamp.fromNow(connection.io, timeout)
+    else
+        absolute_deadline;
+    const state = &transport.packet_state;
+
+    while (state.packet == null) {
+        if (state.header_len >= state.header.len) {
+            return error.MalformedRemainingLength;
+        }
+        state.header_len += readStreamExactWithDeadline(
+            connection,
+            state.header[state.header_len .. state.header_len + 1],
+            deadline,
+        ) catch |err| return err;
+        if (state.header_len == 1 or
+            (state.header[state.header_len - 1] & 0x80) != 0)
+        {
+            continue;
+        }
+
+        const decoded = try mqtt.decodeRemainingLength(
+            state.header[1..state.header_len],
+        );
+        const packet_len = std.math.add(
+            usize,
+            1 + decoded.len,
+            decoded.value,
+        ) catch return error.PacketTooLarge;
+        if (packet_len > max_packet_size) return error.PacketTooLarge;
+        const packet = try allocator.alloc(u8, packet_len);
+        @memcpy(packet[0..state.header_len], state.header[0..state.header_len]);
+        state.packet = packet;
+        state.packet_read = state.header_len;
+    }
+
+    const packet = state.packet.?;
+    while (state.packet_read < packet.len) {
+        if (inactivity_timeout) |timeout| {
+            if (packet.len - state.packet_read >
+                keep_alive_reader.progress_threshold)
+            {
+                deadline = .fromNow(connection.io, timeout);
+            }
+        }
+        state.packet_read += readStreamExactWithDeadline(
+            connection,
+            packet[state.packet_read..],
+            deadline,
+        ) catch |err| return err;
+    }
+
+    state.packet = null;
+    state.packet_read = 0;
+    state.header_len = 0;
+    errdefer allocator.free(packet);
+    return .{
+        .bytes = packet,
+        .fixed = try mqtt.FixedHeader.parse(packet),
+    };
+}
+
+fn readStreamExactWithDeadline(
+    connection: anytype,
+    buffer: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!usize {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const count = if (deadline) |absolute|
+            connection.readWithDeadline(buffer[offset..], absolute)
+        else
+            connection.read(buffer[offset..]);
+        const received = count catch |err| {
+            if (err == error.Timeout and offset != 0) return offset;
+            return err;
+        };
+        if (received == 0) return error.ConnectionClosed;
+        offset += received;
+    }
+    return offset;
 }
 
 pub const OwnedPacket = struct {
@@ -869,7 +1001,7 @@ fn TlsPacketReader(comptime ConnectionType: type) type {
             self: *Self,
             buffer: []u8,
             renew_large_progress: bool,
-        ) Error!void {
+        ) Error!usize {
             if (self.policy == .inactivity_timeout and
                 renew_large_progress and
                 buffer.len > keep_alive_reader.progress_threshold)
@@ -894,6 +1026,7 @@ fn TlsPacketReader(comptime ConnectionType: type) type {
                     self.renewInactivityDeadline();
                 }
             }
+            return offset;
         }
 
         fn renewInactivityDeadline(self: *Self) void {

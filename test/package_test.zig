@@ -1263,6 +1263,10 @@ test "public modules are reachable" {
         "pollWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "DeadlinePollOptions",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "pollWithOptions",
     ));
@@ -1685,6 +1689,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "readBrokerEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "readBrokerEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
