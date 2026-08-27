@@ -791,7 +791,27 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "skipResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePush"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receivePushWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receivePushWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receivePushWithInformationalUntil",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePushEvent"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receivePushEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receivePushEventWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readPushData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));

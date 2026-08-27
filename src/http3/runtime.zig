@@ -958,6 +958,74 @@ pub const PushedResponse = struct {
     }
 };
 
+/// Resumable ownership for an aggregate push receive. Unlike ordinary
+/// responses, push bodies are intentionally consumed through the incremental
+/// reader, so decoded heads and copied DATA must outlive a caller timeout.
+const HandshakePushAggregateState = struct {
+    head: ?http3.DecodedResponseHead = null,
+    trailers: ?http3.DecodedTrailers = null,
+    body: std.ArrayList(u8) = .empty,
+    push_id: ?u64 = null,
+    request_stream_id: u62 = 0,
+    stream_id: u62 = 0,
+    finished: bool = false,
+
+    fn active(self: HandshakePushAggregateState) bool {
+        return self.push_id != null;
+    }
+
+    fn deinit(
+        self: *HandshakePushAggregateState,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.head) |*head| head.deinit(allocator);
+        if (self.trailers) |*trailers| trailers.deinit(allocator);
+        self.body.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn takeResponse(
+        self: *HandshakePushAggregateState,
+        allocator: std.mem.Allocator,
+    ) Error!PushedResponse {
+        if (!self.finished) return error.UnexpectedStream;
+        const head = self.head orelse return error.ExpectedHeadersFrame;
+        const body_storage: ?[]u8 = if (self.body.items.len == 0) storage: {
+            self.body.deinit(allocator);
+            break :storage null;
+        } else try self.body.toOwnedSlice(allocator);
+        const trailer_fields: []http3.Qpack.HeaderField =
+            if (self.trailers) |trailers|
+                trailers.fields
+            else
+                @constCast(&.{});
+        const acknowledgments =
+            head.qpack_section_acknowledgments +
+            if (self.trailers) |trailers|
+                trailers.qpack_section_acknowledgments
+            else
+                0;
+        const result: PushedResponse = .{
+            .push_id = self.push_id.?,
+            .request_stream_id = self.request_stream_id,
+            .stream_id = self.stream_id,
+            .response = .{
+                .status = head.status,
+                .headers = head.headers,
+                .trailers = trailer_fields,
+                .body = if (body_storage) |storage| storage else &.{},
+                .body_storage = body_storage,
+                .consumed = 0,
+                .qpack_section_acknowledgments = acknowledgments,
+            },
+        };
+        // All allocations have moved into `result`; do not run their normal
+        // deinitializers while returning the completed aggregate.
+        self.* = .{};
+        return result;
+    }
+};
+
 pub const ServerPush = struct {
     push_id: u64,
     request: http3.Request,
@@ -5423,6 +5491,7 @@ pub const HandshakeClient = struct {
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
     push_streams: PushStreamSet,
+    push_aggregate: HandshakePushAggregateState = .{},
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
@@ -5789,6 +5858,7 @@ pub const HandshakeClient = struct {
         self.stream_send_scratch.deinit(self.allocator);
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
+        self.push_aggregate.deinit(self.allocator);
         self.push_streams.deinit();
         self.streaming_responses.deinit();
         self.request_lifecycle.deinit();
@@ -6680,13 +6750,39 @@ pub const HandshakeClient = struct {
     pub fn receivePushEvent(
         self: *HandshakeClient,
     ) Error!StreamingPushEvent {
-        return self.receivePushEventMatching(null);
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.receivePushEventMatching(null, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Wait for an event from any promised push within one relative budget.
+    pub fn receivePushEventWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingPushEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.receivePushEventMatching(
+            null,
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receivePushEventWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.receivePushEventMatching(null, deadline);
     }
 
     fn receivePushEventMatching(
         self: *HandshakeClient,
         target_push_id: ?u64,
-    ) Error!StreamingPushEvent {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingPushEvent {
         while (true) {
             for (self.push_streams.entries.items) |*entry| {
                 if (entry.reader) |*reader| {
@@ -6721,7 +6817,7 @@ pub const HandshakeClient = struct {
                 }
                 return event;
             }
-            try receiveConnectionResponsePacket(
+            try receiveConnectionResponsePacketUntil(
                 &self.established.connection,
                 &self.receive_packets,
                 &self.control,
@@ -6732,6 +6828,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                deadline,
             );
         }
     }
@@ -6767,29 +6864,91 @@ pub const HandshakeClient = struct {
         return self.receivePushWithInformational(null);
     }
 
+    /// Aggregate one promised response within a relative budget. The partial
+    /// head, body, trailers, and reader remain owned by the client on timeout.
+    pub fn receivePushWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PushedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePushWithInformationalAttempt(
+            null,
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receivePushWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        return self.receivePushWithInformationalAttempt(null, deadline);
+    }
+
     /// Aggregate one promised response while reporting its ordered 1xx heads.
     pub fn receivePushWithInformational(
         self: *HandshakeClient,
         informational: ?PushInformationalObserver,
     ) Error!PushedResponse {
-        var head: ?http3.DecodedResponseHead = null;
-        errdefer if (head) |*value| value.deinit(self.allocator);
-        var trailers: ?http3.DecodedTrailers = null;
-        errdefer if (trailers) |*value| value.deinit(self.allocator);
-        var body: std.ArrayList(u8) = .empty;
-        errdefer body.deinit(self.allocator);
-        var push_id: ?u64 = null;
-        var request_stream_id: u62 = 0;
-        var push_stream_id: u62 = 0;
+        return self.receivePushWithInformationalAttempt(
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receivePushWithInformationalUntil(
+        self: *HandshakeClient,
+        informational: ?PushInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        return self.receivePushWithInformationalAttempt(
+            informational,
+            deadline,
+        );
+    }
+
+    fn receivePushWithInformationalAttempt(
+        self: *HandshakeClient,
+        informational: ?PushInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        return self.receivePushWithInformationalInternal(
+            informational,
+            deadline,
+        ) catch |err| switch (err) {
+            // These are retryable transport outcomes. Retain aggregation state
+            // so a later aggregate call can continue the same push exactly.
+            error.Timeout, error.ConcurrencyUnavailable => return err,
+            else => {
+                self.push_aggregate.deinit(self.allocator);
+                return err;
+            },
+        };
+    }
+
+    fn receivePushWithInformationalInternal(
+        self: *HandshakeClient,
+        informational: ?PushInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        if (self.push_aggregate.finished) {
+            return self.push_aggregate.takeResponse(self.allocator);
+        }
         while (true) {
-            var event = try self.receivePushEventMatching(push_id);
+            var event = try self.receivePushEventMatching(
+                self.push_aggregate.push_id,
+                deadline,
+            );
             defer event.deinit(self.allocator);
-            if (push_id) |expected| {
+            if (self.push_aggregate.push_id) |expected| {
                 if (event.push_id != expected) return error.UnexpectedStream;
             } else {
-                push_id = event.push_id;
-                request_stream_id = event.request_stream_id;
-                push_stream_id = event.stream_id;
+                self.push_aggregate.push_id = event.push_id;
+                self.push_aggregate.request_stream_id =
+                    event.request_stream_id;
+                self.push_aggregate.stream_id = event.stream_id;
             }
             switch (event.value) {
                 .head => |value| {
@@ -6814,8 +6973,10 @@ pub const HandshakeClient = struct {
                         // callback while aggregation awaits the final head.
                         continue;
                     }
-                    if (head != null) return error.UnexpectedFrame;
-                    head = value.response;
+                    if (self.push_aggregate.head != null) {
+                        return error.UnexpectedFrame;
+                    }
+                    self.push_aggregate.head = value.response;
                     event.value = .finished;
                 },
                 .data_available => {
@@ -6830,12 +6991,17 @@ pub const HandshakeClient = struct {
                             &chunk,
                         );
                         if (count == 0) break;
-                        try body.appendSlice(self.allocator, chunk[0..count]);
+                        try self.push_aggregate.body.appendSlice(
+                            self.allocator,
+                            chunk[0..count],
+                        );
                     }
                 },
                 .trailers => |value| {
-                    if (trailers != null) return error.UnexpectedFrame;
-                    trailers = value;
+                    if (self.push_aggregate.trailers != null) {
+                        return error.UnexpectedFrame;
+                    }
+                    self.push_aggregate.trailers = value;
                     event.value = .finished;
                 },
                 .finished => {},
@@ -6846,35 +7012,8 @@ pub const HandshakeClient = struct {
             {
                 continue;
             }
-            const decoded_head = head orelse return error.ExpectedHeadersFrame;
-            const body_storage: ?[]u8 = if (body.items.len == 0) storage: {
-                body.deinit(self.allocator);
-                break :storage null;
-            } else try body.toOwnedSlice(self.allocator);
-            const trailer_fields: []http3.Qpack.HeaderField = if (trailers) |value|
-                value.fields
-            else
-                @constCast(&.{});
-            const acknowledgments =
-                decoded_head.qpack_section_acknowledgments +
-                if (trailers) |value|
-                    value.qpack_section_acknowledgments
-                else
-                    0;
-            return .{
-                .push_id = push_id.?,
-                .request_stream_id = request_stream_id,
-                .stream_id = push_stream_id,
-                .response = .{
-                    .status = decoded_head.status,
-                    .headers = decoded_head.headers,
-                    .trailers = trailer_fields,
-                    .body = if (body_storage) |storage| storage else &.{},
-                    .body_storage = body_storage,
-                    .consumed = 0,
-                    .qpack_section_acknowledgments = acknowledgments,
-                },
-            };
+            self.push_aggregate.finished = true;
+            return self.push_aggregate.takeResponse(self.allocator);
         }
     }
 
@@ -7110,6 +7249,9 @@ pub const HandshakeClient = struct {
         );
         try self.push_streams.observePeerCancellation(push_id);
         try self.applyPendingPushCancellations();
+        if (self.push_aggregate.push_id == push_id) {
+            self.push_aggregate.deinit(self.allocator);
+        }
     }
 
     pub fn cancelRequest(
@@ -23471,6 +23613,276 @@ test "HTTP/3 handshake client next-response deadlines preserve progress" {
     }
     try std.testing.expectEqualStrings(streaming_body, body[0..body_len]);
     try std.testing.expect(!client.request_lifecycle.contains(streaming_id));
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 handshake client push deadlines preserve progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78 };
+    const client_cid = [_]u8{ 0x79, 0x7a, 0x7b, 0x7c };
+    const server_cid = [_]u8{ 0x7d, 0x7e, 0x7f, 0x80 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x83} ** 32,
+            .x25519_secret_key = [_]u8{0x84} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const aggregate_body = "aggregate-push-after-timeout";
+    const streaming_body = "streaming-push-after-timeout";
+    const Shared = struct {
+        server: *HandshakeServer,
+        io: std.Io,
+        aggregate_prefix_sent: std.Io.Event = .unset,
+        aggregate_timed_out: std.Io.Event = .unset,
+        streaming_prefix_sent: std.Io.Event = .unset,
+        streaming_timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.aggregate_prefix_sent.set(self.io);
+                self.aggregate_timed_out.set(self.io);
+                self.streaming_prefix_sent.set(self.io);
+                self.streaming_timed_out.set(self.io);
+            };
+        }
+
+        fn sendSplitPush(
+            self: *@This(),
+            session: *HandshakeServerSession,
+            request_stream_id: u62,
+            push_id: u64,
+            push_stream_id: u62,
+            path: []const u8,
+            body: []const u8,
+            body_prefix_len: usize,
+            prefix_sent: *std.Io.Event,
+            timed_out: *std.Io.Event,
+        ) !void {
+            var parent: std.ArrayList(u8) = .empty;
+            defer parent.deinit(allocator);
+            var pushed: std.ArrayList(u8) = .empty;
+            defer pushed.deinit(allocator);
+            try encodePushMessages(
+                allocator,
+                session.control.settings.peer,
+                request_stream_id,
+                .{ .status = 204 },
+                push_stream_id,
+                .{
+                    .push_id = push_id,
+                    .request = .{
+                        .method = "GET",
+                        .path = path,
+                        .authority = "localhost",
+                    },
+                    .response = .{
+                        .status = 200,
+                        .body = body,
+                    },
+                },
+                &session.qpack_encode,
+                &parent,
+                &pushed,
+            );
+            try sendConnectionQpackEncoderInstructions(
+                &session.established.connection,
+                &session.critical_stream_send_scratch,
+                &session.qpack_encode,
+                &session.qpack_encoder_send,
+                &session.qpack_encoder_prefix_sent,
+                session.options,
+            );
+            const split = pushed.items.len - body.len + body_prefix_len;
+            const prefix_frames = [_]quic.Frame{
+                .{ .stream = .{
+                    .stream_id = request_stream_id,
+                    .data = parent.items,
+                    .fin = true,
+                } },
+                .{ .stream = .{
+                    .stream_id = push_stream_id,
+                    .data = pushed.items[0..split],
+                    .fin = false,
+                } },
+            };
+            try sendConnectionFrames(
+                &session.established.connection,
+                &prefix_frames,
+                session.options.max_frames_per_packet,
+            );
+            prefix_sent.set(self.io);
+            try timed_out.wait(self.io);
+            try sendConnectionFrames(
+                &session.established.connection,
+                &.{.{ .stream = .{
+                    .stream_id = push_stream_id,
+                    .offset = split,
+                    .data = pushed.items[split..],
+                    .fin = true,
+                } }},
+                session.options.max_frames_per_packet,
+            );
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var first = try session.receiveRequest();
+            defer first.deinit(allocator);
+            while (session.control.peer_max_push_id != 2) {
+                try session.receiveRequestPacket();
+            }
+            try self.sendSplitPush(
+                &session,
+                first.stream_id,
+                1,
+                first_server_push_stream_id,
+                "/aggregate-push",
+                aggregate_body,
+                aggregate_body.len / 2,
+                &self.aggregate_prefix_sent,
+                &self.aggregate_timed_out,
+            );
+
+            var second = try session.receiveRequest();
+            defer second.deinit(allocator);
+            try self.sendSplitPush(
+                &session,
+                second.stream_id,
+                2,
+                first_server_push_stream_id + 4,
+                "/streaming-push",
+                streaming_body,
+                0,
+                &self.streaming_prefix_sent,
+                &self.streaming_timed_out,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x81} ** 32,
+            .x25519_secret_key = [_]u8{0x82} ** 32,
+        } },
+    );
+    defer client.deinit();
+    try client.sendMaxPushId(2);
+
+    const first_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/first-push",
+        .authority = "localhost",
+    });
+    try shared.aggregate_prefix_sent.wait(io);
+    while (true) {
+        const event = try client.receiveResponseEvent(first_id);
+        if (event) |value| {
+            var owned = value;
+            defer owned.deinit(allocator);
+            if (owned == .push_promise) break;
+        }
+    }
+    try std.testing.expectError(
+        error.Timeout,
+        client.receivePushWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectEqual(@as(?u64, 1), client.push_aggregate.push_id);
+    try std.testing.expect(client.push_aggregate.head != null);
+    try std.testing.expectEqualStrings(
+        aggregate_body[0 .. aggregate_body.len / 2],
+        client.push_aggregate.body.items,
+    );
+    shared.aggregate_timed_out.set(io);
+    var aggregate = try client.receivePushWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer aggregate.deinit(allocator);
+    try std.testing.expectEqualStrings(aggregate_body, aggregate.response.body);
+
+    const second_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/second-push",
+        .authority = "localhost",
+    });
+    try shared.streaming_prefix_sent.wait(io);
+    while (true) {
+        const event = try client.receiveResponseEvent(second_id);
+        if (event) |value| {
+            var owned = value;
+            defer owned.deinit(allocator);
+            if (owned == .push_promise) break;
+        }
+    }
+    var push_head = try client.receivePushEventWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer push_head.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), push_head.push_id);
+    try std.testing.expect(push_head.value == .head);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receivePushEventWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.push_streams.findByPushId(2) != null);
+    shared.streaming_timed_out.set(io);
+
+    var body: [40]u8 = undefined;
+    var body_len: usize = 0;
+    var finished = false;
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    );
+    while (!finished) {
+        var event = try client.receivePushEventWithDeadline(deadline);
+        defer event.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, 2), event.push_id);
+        switch (event.value) {
+            .data_available => {
+                body_len += try client.readPushData(2, body[body_len..]);
+            },
+            .finished => finished = true,
+            .head, .trailers, .push_promise => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqualStrings(streaming_body, body[0..body_len]);
 
     thread.join();
     joined = true;
