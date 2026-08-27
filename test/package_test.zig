@@ -230,6 +230,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime.Connection, "acceptConnectTunnel"));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Connection,
+        "readRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "readRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
         "negotiatedCipherSuite",
     ));
     try std.testing.expect(@hasDecl(

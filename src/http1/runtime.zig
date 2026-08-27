@@ -2834,6 +2834,41 @@ pub const Connection = struct {
         };
     }
 
+    /// Read one request with a relative deadline for the request head. The
+    /// body remains governed by the ordinary body-size and transport policy.
+    /// Unlike the configured Slowloris protection, a caller-owned timeout is
+    /// resumable: partial head bytes remain in `inbuf` for a later call.
+    pub fn readRequestWithTimeout(
+        self: *Connection,
+        options: http1.ParseOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readRequestWithDeadline(
+            options,
+            try self.transport().deadlineFromNow(timeout),
+        );
+    }
+
+    /// Read one request using a caller-owned absolute request-head deadline.
+    /// A timeout does not poison the persistent connection, allowing the same
+    /// owner to resume the partially buffered head with a later deadline.
+    pub fn readRequestWithDeadline(
+        self: *Connection,
+        options: http1.ParseOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedRequest {
+        try self.writer_state.ensureReadable();
+        return readRequestFromTransportBuffered(
+            self.allocator,
+            self.transport(),
+            self.limits,
+            options,
+            &self.inbuf,
+            deadline,
+        );
+    }
+
     /// Read a request while delivering body bytes without aggregation.
     pub fn readRequestStreaming(
         self: *Connection,

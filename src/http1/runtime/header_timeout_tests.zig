@@ -126,6 +126,84 @@ test "HTTP/1 request head timeout is absolute across trickled bytes" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "HTTP/1 explicit request deadline resumes a partial head" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        prefix_received: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_received.set(self.server.io);
+                self.timed_out.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            self.prefix_received.set(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readRequestWithTimeout(
+                    .{},
+                    .fromMilliseconds(20),
+                ),
+            );
+            try std.testing.expect(connection.writer_state.phase == .idle);
+            self.timed_out.set(self.server.io);
+
+            var request = try connection.readRequestWithDeadline(
+                .{},
+                .fromNow(
+                    self.server.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            );
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/resumed",
+                request.request.target,
+            );
+            try std.testing.expectEqualStrings(
+                "localhost",
+                request.request.header("host").?,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAll(io, client, "GET /resumed HTTP/1.1\r\nHost:");
+    try shared.prefix_received.wait(io);
+    try shared.timed_out.wait(io);
+    try writeAll(io, client, " localhost\r\n\r\n");
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 request head timeout resets for each persistent request" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
