@@ -2213,6 +2213,18 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Poll a FIN-complete associated stream without reading UDP.
+    pub fn pollCompleteStream(
+        self: *AcceptedHandshakeSession,
+    ) Error!?OwnedHandshakeStream {
+        return handshake_stream.poll(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            self.h3.options.max_stream_buffer,
+        );
+    }
+
     /// Read the next stream data/control event without waiting for FIN.
     pub fn readStream(
         self: *AcceptedHandshakeSession,
@@ -3119,6 +3131,17 @@ pub const HandshakeClientSession = struct {
             self.session_id,
             self.h3.options.max_stream_buffer,
             deadline,
+        );
+    }
+
+    pub fn pollCompleteStream(
+        self: *HandshakeClientSession,
+    ) Error!?OwnedHandshakeStream {
+        return handshake_stream.poll(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            self.h3.options.max_stream_buffer,
         );
     }
 
@@ -4064,6 +4087,12 @@ pub const StatefulProtectedClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         return self.session.receiveStreamWithDeadline(deadline);
+    }
+
+    pub fn pollCompleteStream(
+        self: *StatefulProtectedClientSession,
+    ) Error!?OwnedHandshakeStream {
+        return self.session.pollCompleteStream();
     }
 
     pub fn readStream(

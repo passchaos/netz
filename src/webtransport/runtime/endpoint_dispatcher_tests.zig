@@ -229,7 +229,6 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
     var saw_datagram_a = false;
     var saw_datagram_b = false;
     var saw_drain_a = false;
-    var buffer: [32]u8 = undefined;
     const versions = [_]u32{quic.Version.version_1.wireValue()};
     while (!saw_stream_a or !saw_stream_b or
         !saw_datagram_a or !saw_datagram_b or !saw_drain_a)
@@ -247,21 +246,21 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
                 try dispatcher.refreshConnectionTimer(
                     routed.connection_handle,
                 );
-                if (try session.pollStream(&buffer)) |stream| {
-                    if (stream == .data and stream.data.bytes != 0) {
-                        const expected = if (routed.connection_handle == 1)
-                            "stream-a"
-                        else
-                            "stream-b";
-                        try std.testing.expectEqualStrings(
-                            expected,
-                            buffer[0..stream.data.bytes],
-                        );
-                        if (routed.connection_handle == 1)
-                            saw_stream_a = true
-                        else
-                            saw_stream_b = true;
-                    }
+                if (try session.pollCompleteStream()) |stream_value| {
+                    var stream = stream_value;
+                    defer stream.deinit();
+                    const expected = if (routed.connection_handle == 1)
+                        "stream-a"
+                    else
+                        "stream-b";
+                    try std.testing.expectEqualStrings(
+                        expected,
+                        stream.payload,
+                    );
+                    if (routed.connection_handle == 1)
+                        saw_stream_a = true
+                    else
+                        saw_stream_b = true;
                 }
                 if (try session.pollDatagram()) |datagram_value| {
                     var datagram = datagram_value;

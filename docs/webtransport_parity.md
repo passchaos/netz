@@ -196,13 +196,14 @@ credit/4-KiB-datagram configuration. Batch validation occurs before any
 association prefix is sent, so a bad later stream cannot expose a partial batch.
 
 Accepted stateful server sessions now expose dispatcher-oriented
-`processPacket`, `pollStream`, `pollDatagram`, and `pollSessionEvent` methods.
-The poll methods never read UDP: one endpoint owner routes authenticated QUIC
-packets, after which each WebTransport session drains only its own associated
-stream, DATAGRAM, and detached CONNECT/Capsule state. A two-client shared-
-endpoint test interleaves same-numbered associated streams, DATAGRAMs, and a
-DRAIN capsule and verifies that payloads and control events remain isolated by
-QUIC connection.
+`processPacket`, `pollStream`, `pollCompleteStream`, `pollDatagram`, and
+`pollSessionEvent` methods. The poll methods never read UDP: one endpoint owner
+routes authenticated QUIC packets, after which each WebTransport session drains
+only its own associated stream, DATAGRAM, and detached CONNECT/Capsule state.
+Whole-stream polling transfers ownership only after FIN and leaves incomplete
+streams in QUIC reassembly. A two-client shared-endpoint test interleaves
+same-numbered complete associated streams, DATAGRAMs, and a DRAIN capsule and
+verifies that payloads and control events remain isolated by QUIC connection.
 The handshake server can additionally begin HTTP/3/WebTransport admission from
 the dispatcher's owned Initial event, so the first packet is not reread from the
 shared socket. At the QUIC layer, subsequent Initial/Retry/0-RTT/Handshake

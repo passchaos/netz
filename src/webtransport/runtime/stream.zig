@@ -350,37 +350,54 @@ fn receiveUntil(
     deadline: ?std.Io.Clock.Timestamp,
 ) (Error || quic.runtime.ReceiveTimeoutError)!OwnedHandshakeStream {
     while (true) {
-        var stream_ids: [256]u62 = undefined;
-        var start: usize = 0;
-        while (true) {
-            const ids = connection.receivedStreamIdsFromInto(
-                start,
-                &stream_ids,
-            );
-            for (ids) |stream_id| {
-                // Critical/push streams are not prefiltered by numeric ID. The
-                // HTTP/3 layer has already consumed them into connection stream
-                // state, and association parsing rejects every prefix except
-                // the WebTransport 0x41/0x54 forms. This also permits a valid
-                // WebTransport stream to use an ID once guessed to be reserved.
-                if (stream_id == session_id.value) continue;
-                if (try takeHandshakeSessionStream(
-                    connection,
-                    registry,
-                    session_id,
-                    stream_id,
-                    max_stream_bytes,
-                )) |stream| return stream;
-            }
-            start += ids.len;
-            if (ids.len < stream_ids.len) break;
-        }
+        if (try poll(
+            connection,
+            registry,
+            session_id,
+            max_stream_bytes,
+        )) |stream| return stream;
 
         if (deadline) |absolute| {
             try connection.servicePacketServicingTimersDeadline(absolute);
         } else {
             try connection.servicePacketServicingTimers();
         }
+    }
+}
+
+/// Take the next FIN-complete associated stream already present in QUIC
+/// receive state without reading the endpoint socket. This is the whole-stream
+/// counterpart to the incremental poller used by shared-endpoint dispatchers.
+pub fn poll(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    max_stream_bytes: usize,
+) Error!?OwnedHandshakeStream {
+    var stream_ids: [256]u62 = undefined;
+    var start: usize = 0;
+    while (true) {
+        const ids = connection.receivedStreamIdsFromInto(
+            start,
+            &stream_ids,
+        );
+        for (ids) |stream_id| {
+            // Critical/push streams are not prefiltered by numeric ID. The
+            // HTTP/3 layer has already consumed them into connection stream
+            // state, and association parsing rejects every prefix except the
+            // WebTransport 0x41/0x54 forms. This also permits a valid
+            // WebTransport stream to use an ID once guessed to be reserved.
+            if (stream_id == session_id.value) continue;
+            if (try takeHandshakeSessionStream(
+                connection,
+                registry,
+                session_id,
+                stream_id,
+                max_stream_bytes,
+            )) |stream| return stream;
+        }
+        start += ids.len;
+        if (ids.len < stream_ids.len) return null;
     }
 }
 
