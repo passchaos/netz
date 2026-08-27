@@ -12,6 +12,7 @@ const owned_properties = @import("owned_properties.zig");
 const runtime = @import("runtime.zig");
 const session = @import("session/mod.zig");
 const command_queue = @import("reconnect/command_queue.zig");
+const event_queue = @import("reconnect/event_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
 
 const net = std.Io.net;
@@ -538,6 +539,29 @@ pub const ClientEvent = union(enum) {
             .connected, .pingreq, .pingresp => {},
         }
         self.* = undefined;
+    }
+};
+
+pub const ClientEventQueue = event_queue.Queue(ClientEvent);
+pub const OwnedClientEvent = ClientEventQueue.OwnedEvent;
+pub const ClientEventQueueError = ClientEventQueue.Error;
+
+/// Managed reconnect worker paired with its event sink. Closing the sink
+/// before joining ensures bounded-queue backpressure cannot deadlock shutdown.
+pub const QueuedEventRun = struct {
+    commands: QueuedRun,
+    events: *ClientEventQueue,
+
+    pub fn stop(self: *QueuedEventRun) void {
+        self.commands.stop();
+        self.events.close();
+    }
+
+    pub fn deinit(self: *QueuedEventRun) ?anyerror {
+        self.stop();
+        const result = self.commands.deinit();
+        self.* = undefined;
+        return result;
     }
 };
 
@@ -1298,6 +1322,44 @@ pub const Client = struct {
             .queue = queue,
             .worker = worker,
             .result = result,
+        };
+    }
+
+    /// Spawn the managed reconnect worker and transfer every event into a
+    /// bounded owned queue. This gives applications a rumqtt-style event
+    /// stream without introducing a second socket reader. Close `events` to
+    /// unblock a full queue before joining the worker during early shutdown.
+    pub fn runQueuedEvents(
+        self: *Client,
+        events: *ClientEventQueue,
+        options: RunQueuedOptions,
+    ) (std.mem.Allocator.Error || std.Thread.SpawnError)!QueuedEventRun {
+        const Adapter = struct {
+            fn handle(
+                queue: *ClientEventQueue,
+                client: *Client,
+                event: *ClientEvent,
+            ) !void {
+                queue.send(event.*, client.allocator) catch |err| switch (err) {
+                    error.EventQueueClosed => if (client.shutdown.isSet())
+                        return
+                    else
+                        return err,
+                    error.Canceled => return error.Canceled,
+                };
+                // `serveQueuedUntil` releases its local event after callback
+                // return. Replace it with a non-owning variant after transfer.
+                event.* = .{ .pingresp = {} };
+            }
+        };
+        return .{
+            .commands = try self.runQueued(
+                ClientEventQueue,
+                events,
+                Adapter.handle,
+                options,
+            ),
+            .events = events,
         };
     }
 

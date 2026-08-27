@@ -846,12 +846,28 @@ test "public modules are reachable" {
         "CompletionQueue",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "ClientEventQueue",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "OwnedClientEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "QueuedEventRun",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "serveQueuedUntil",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "runQueued",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "runQueuedEvents",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.CommandQueue,

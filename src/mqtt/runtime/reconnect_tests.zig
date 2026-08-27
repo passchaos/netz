@@ -2320,6 +2320,93 @@ test "MQTT queued run exposes awaitable owned command completions" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT queued event stream owns inbound packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.publish(
+                "events/owned",
+                "event payload",
+                .{},
+            );
+            try std.Io.sleep(self.server.io, .fromMilliseconds(50), .awake);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "event-queue" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var events = try reconnect.ClientEventQueue.init(allocator, io, 2);
+    defer events.deinit();
+    try std.testing.expect((try events.tryReceive()) == null);
+    var run = try client.runQueuedEvents(&events, .{
+        .queue_capacity = 1,
+        .serve = .{
+            .poll = .{ .timeout = .fromMilliseconds(50) },
+        },
+    });
+
+    var connected = try events.receive();
+    defer connected.deinit();
+    try std.testing.expect(connected.value == .connected);
+    var publish = try events.receive();
+    defer publish.deinit();
+    if (run.deinit()) |err| return err;
+    switch (publish.value) {
+        .publish => |value| {
+            try std.testing.expectEqualStrings(
+                "events/owned",
+                value.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "event payload",
+                value.publish.payload,
+            );
+        },
+        else => return error.UnexpectedPacket,
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT queued disconnect writes owned MQTT5 properties and stops" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
