@@ -314,6 +314,41 @@ pub fn receive(
     session_id: webtransport.SessionId,
     max_stream_bytes: usize,
 ) Error!OwnedHandshakeStream {
+    return receiveUntil(
+        connection,
+        registry,
+        session_id,
+        max_stream_bytes,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn receiveWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    max_stream_bytes: usize,
+    deadline: std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!OwnedHandshakeStream {
+    return receiveUntil(
+        connection,
+        registry,
+        session_id,
+        max_stream_bytes,
+        deadline,
+    );
+}
+
+fn receiveUntil(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    max_stream_bytes: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!OwnedHandshakeStream {
     while (true) {
         var stream_ids: [256]u62 = undefined;
         var start: usize = 0;
@@ -341,7 +376,11 @@ pub fn receive(
             if (ids.len < stream_ids.len) break;
         }
 
-        try connection.servicePacketServicingTimers();
+        if (deadline) |absolute| {
+            try connection.servicePacketServicingTimersDeadline(absolute);
+        } else {
+            try connection.servicePacketServicingTimers();
+        }
     }
 }
 

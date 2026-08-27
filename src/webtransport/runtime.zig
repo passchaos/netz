@@ -2022,6 +2022,17 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn receivePeerConnectionCloseWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePeerConnectionCloseWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     pub fn openBidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
@@ -2141,6 +2152,30 @@ pub const AcceptedHandshakeSession = struct {
             &self.streams,
             self.session_id,
             self.h3.options.max_stream_buffer,
+        );
+    }
+
+    pub fn receiveStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeStream {
+        return receiveHandshakeSessionStreamWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            self.h3.options.max_stream_buffer,
+            deadline,
         );
     }
 
@@ -2864,6 +2899,17 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    pub fn receivePeerConnectionCloseWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePeerConnectionCloseWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     pub fn openBidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
@@ -2981,6 +3027,30 @@ pub const HandshakeClientSession = struct {
             &self.streams,
             self.session_id,
             self.h3.options.max_stream_buffer,
+        );
+    }
+
+    pub fn receiveStreamWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveStreamWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeStream {
+        return receiveHandshakeSessionStreamWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            self.h3.options.max_stream_buffer,
+            deadline,
         );
     }
 
@@ -3914,6 +3984,20 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.receiveStream();
     }
 
+    pub fn receiveStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeStream {
+        return self.session.receiveStreamWithTimeout(timeout);
+    }
+
+    pub fn receiveStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeStream {
+        return self.session.receiveStreamWithDeadline(deadline);
+    }
+
     pub fn readStream(
         self: *StatefulProtectedClientSession,
         out: []u8,
@@ -4054,6 +4138,13 @@ pub const StatefulProtectedClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
         return self.session.receivePeerConnectionCloseWithDeadline(deadline);
+    }
+
+    pub fn receivePeerConnectionCloseWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        return self.session.receivePeerConnectionCloseWithTimeout(timeout);
     }
 
     pub fn stats(
@@ -4503,6 +4594,8 @@ pub const SessionEvent = session_control.Event;
 const initHandshakeStreamRegistry = handshake_stream.initRegistry;
 const sendHandshakeSessionStream = handshake_stream.send;
 const receiveHandshakeSessionStream = handshake_stream.receive;
+const receiveHandshakeSessionStreamWithDeadline =
+    handshake_stream.receiveWithDeadline;
 const readHandshakeSessionStream = incremental_stream.read;
 const resetHandshakeSessionStream = incremental_stream.reset;
 const stopHandshakeSessionStream = incremental_stream.stop;

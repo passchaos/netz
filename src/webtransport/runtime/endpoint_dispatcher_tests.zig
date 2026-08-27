@@ -455,6 +455,17 @@ test "WebTransport handshake receive helpers honor timeouts" {
         session.streams.deinit();
         session.h3.deinit();
     }
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-timeout-client",
+        .peer_connection_id = "wt-timeout-server",
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
 
     try std.testing.expectError(
         error.Timeout,
@@ -499,6 +510,73 @@ test "WebTransport handshake receive helpers honor timeouts" {
             io,
             .{ .raw = .fromMilliseconds(1), .clock = .awake },
         )),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveStreamWithTimeout(.fromMilliseconds(1)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveStreamWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(1), .clock = .awake },
+        )),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        session.receivePeerConnectionCloseWithTimeout(
+            .fromMilliseconds(1),
+        ),
+    );
+
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &prefix_storage,
+        .init(0),
+    );
+    const first_payload = "partial-";
+    const partial_frames = [_]quic.Frame{ .{ .stream = .{
+        .stream_id = 4,
+        .data = prefix,
+    } }, .{ .stream = .{
+        .stream_id = 4,
+        .offset = prefix.len,
+        .data = first_payload,
+    } } };
+    try peer.send(&partial_frames);
+    var partial_packet =
+        try session.h3.established.connection.receivePacket();
+    defer partial_packet.deinit(allocator);
+    try session.processPacket(&partial_packet);
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveStreamWithTimeout(.fromMilliseconds(1)),
+    );
+
+    // A bounded whole-stream receive must leave QUIC reassembly and the
+    // WebTransport association intact when FIN has not arrived yet.
+    const final_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .offset = prefix.len + first_payload.len,
+        .data = "complete",
+        .fin = true,
+    } }};
+    try peer.send(&final_frames);
+    var received = try session.receiveStreamWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer received.deinit();
+    try std.testing.expectEqual(@as(u62, 4), received.stream_id);
+    try std.testing.expectEqual(
+        webtransport.StreamDirection.bidirectional,
+        received.direction,
+    );
+    try std.testing.expect(!received.locally_initiated);
+    try std.testing.expect(received.fin);
+    try std.testing.expectEqualStrings(
+        "partial-complete",
+        received.payload,
     );
 }
 
