@@ -1984,6 +1984,39 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectTlsAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+    ) Error!Client {
+        const stream = try address.connect(io, .{ .mode = .stream });
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const tls_conn = try TlsClientConnection.init(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            tls_options,
+        );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        const owned_authority = try allocator.dupe(u8, authority);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_authority,
+            .tls_conn = tls_conn,
+        };
+    }
+
     pub fn connectVailTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2139,6 +2172,11 @@ pub const Client = struct {
     ) ?tls_stream.KeyUpdateCounts {
         const connection = self.tls_vail_conn orelse return null;
         return connection.keyUpdateCounts();
+    }
+
+    pub fn isReusable(self: *const Client) bool {
+        return self.writer_state.phase == .idle and
+            !self.writer_state.reading;
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {

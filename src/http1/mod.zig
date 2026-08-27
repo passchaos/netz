@@ -2,7 +2,12 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const client_pool = @import("client_pool.zig");
 pub const Header = wire.Header;
+
+test {
+    _ = @import("runtime/client_pool_tests.zig");
+}
 
 pub const Error = wire.Error || error{
     BufferTooShort,
