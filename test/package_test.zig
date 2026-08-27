@@ -837,6 +837,14 @@ test "public modules are reachable" {
         netz.mqtt.reconnect,
         "PublishDeliveryHandler",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "PublishDeliveryQueue",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "OwnedPublishDelivery",
+    ));
     try std.testing.expect(@hasField(
         netz.mqtt.reconnect.ClientOptions,
         "manual_acknowledgements",

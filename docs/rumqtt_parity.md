@@ -1069,7 +1069,8 @@ delivery, or completion storage. Re-authentication properties are deep-owned
 until the initiating AUTH write completes. The single-owner bounded poll path,
 callback
 driver, managed background-thread wrapper, optional application-controlled QoS
-1/2 acknowledgements, and bounded command queue already support explicit
+1/2 acknowledgements, an owned bounded terminal-delivery queue, and the bounded
+command queue already support explicit
 client-initiated re-authentication and drive both directions of
 multi-step MQTT 5 re-authentication, idle
 keep-alive and automatic reconnect without competing socket readers. Current

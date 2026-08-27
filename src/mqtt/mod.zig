@@ -4263,6 +4263,7 @@ test {
     _ = @import("runtime/reconnect_tests.zig");
     _ = @import("reconnect/command_queue.zig");
     _ = @import("reconnect/event_queue.zig");
+    _ = @import("reconnect/delivery_queue.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/information_preferences_tests.zig");
     _ = @import("tls_runtime_tests.zig");

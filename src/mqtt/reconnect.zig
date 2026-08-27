@@ -13,6 +13,7 @@ const runtime = @import("runtime.zig");
 const session = @import("session/mod.zig");
 const command_queue = @import("reconnect/command_queue.zig");
 const event_queue = @import("reconnect/event_queue.zig");
+const delivery_queue = @import("reconnect/delivery_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
 
 const net = std.Io.net;
@@ -595,6 +596,13 @@ pub const PublishDeliveryHandler = struct {
     /// for another operation that requires that same owner to make progress.
     complete: *const fn (context: *anyopaque, delivery: PublishDelivery) void,
 };
+
+pub const PublishDeliveryQueue = delivery_queue.Queue(
+    PublishDelivery,
+    PublishDeliveryHandler,
+);
+pub const OwnedPublishDelivery = PublishDeliveryQueue.OwnedDelivery;
+pub const PublishDeliveryQueueError = PublishDeliveryQueue.Error;
 
 const OwnedSubscription = owned_subscription.Owned;
 

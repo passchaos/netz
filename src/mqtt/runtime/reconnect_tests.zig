@@ -224,6 +224,85 @@ test "MQTT reconnect reports QoS0 and acknowledged publish delivery" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT publish delivery queue owns acknowledgement properties" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try accepted.connection.writePubAckWithProperties(
+                publish.publish.packet_id.?,
+                0,
+                &.{.{ .utf8 = .{
+                    .id = .reason_string,
+                    .value = "queue owned",
+                } }},
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var deliveries = try reconnect.PublishDeliveryQueue.init(allocator, io, 1);
+    defer deliveries.deinit();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "delivery-queue" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+        .{ .publish_delivery = deliveries.handler() },
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    const packet_id = (try client.publish(
+        "delivery/queue",
+        "payload",
+        .{ .qos = .at_least_once },
+    )).?;
+    try std.testing.expectEqual(packet_id, try client.completeNextPublish());
+    var delivery = try deliveries.receive();
+    defer delivery.deinit();
+    try std.testing.expectEqual(packet_id, delivery.packet_id.?);
+    try std.testing.expectEqualStrings(
+        "queue owned",
+        delivery.properties[0].utf8.value,
+    );
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect client resumes QoS2 directly at PUBREL" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
