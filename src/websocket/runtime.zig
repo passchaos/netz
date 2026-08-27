@@ -39,6 +39,7 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     InvalidUri,
     UnsupportedScheme,
     MessageTooLarge,
+    UnexpectedPong,
     InvalidServeOptions,
     TimedReadUnsupported,
     ExporterUnavailable,
@@ -1429,6 +1430,29 @@ pub const CloseHandshakeEvent = union(enum) {
     }
 };
 
+/// One observable step while awaiting the Pong for a locally sent Ping.
+/// Application and Close frames are returned rather than consumed invisibly.
+pub const PingEvent = union(enum) {
+    pong: void,
+    closed: ?websocket.OwnedCloseFrame,
+    application: websocket.Frame,
+
+    pub fn deinit(self: *PingEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .pong => {},
+            .closed => |maybe_close| if (maybe_close) |value| {
+                var close_frame = value;
+                close_frame.deinit(allocator);
+            },
+            .application => |value| {
+                var frame = value;
+                frame.deinit(allocator);
+            },
+        }
+        self.* = undefined;
+    }
+};
+
 pub const Message = struct {
     opcode: websocket.Opcode,
     payload: []u8,
@@ -1696,6 +1720,76 @@ pub const Connection = struct {
 
     pub fn sendPong(self: *Connection, payload: []const u8) Error!void {
         try self.sendFrame(.pong, payload);
+    }
+
+    /// Send Ping once and wait for the matching Pong under one deadline.
+    /// Interleaved application frames are returned with ownership so callers
+    /// can process them and resume through `continuePingWithDeadline`.
+    pub fn pingWithTimeout(
+        self: *Connection,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) Error!PingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        return self.pingWithDeadline(payload, deadline);
+    }
+
+    pub fn pingWithDeadline(
+        self: *Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PingEvent {
+        try self.sendPing(payload);
+        return self.readPingEvent(payload, deadline);
+    }
+
+    pub fn continuePingWithDeadline(
+        self: *Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PingEvent {
+        return self.readPingEvent(payload, deadline);
+    }
+
+    fn readPingEvent(
+        self: *Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PingEvent {
+        while (true) {
+            var frame = try self.receiveFrameAutoInternal(deadline);
+            switch (frame.header.opcode) {
+                .ping => {
+                    frame.deinit(self.allocator);
+                    continue;
+                },
+                .pong => {
+                    defer frame.deinit(self.allocator);
+                    if (!std.mem.eql(u8, frame.payload, payload)) {
+                        return error.UnexpectedPong;
+                    }
+                    return .{ .pong = {} };
+                },
+                .close => {
+                    defer frame.deinit(self.allocator);
+                    return .{ .closed = try websocket.parseClosePayloadOwned(
+                        self.allocator,
+                        frame.payload,
+                    ) };
+                },
+                .text, .binary, .continuation => {
+                    return .{ .application = frame };
+                },
+                else => {
+                    frame.deinit(self.allocator);
+                    return error.InvalidFrame;
+                },
+            }
+        }
     }
 
     pub fn sendClose(self: *Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
@@ -2614,6 +2708,74 @@ pub const H2Connection = struct {
 
     pub fn sendPong(self: *H2Connection, payload: []const u8) Error!void {
         try self.sendFrame(.pong, payload);
+    }
+
+    /// RFC 8441 counterpart to `Connection.pingWithTimeout`.
+    pub fn pingWithTimeout(
+        self: *H2Connection,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) Error!PingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        return self.pingWithDeadline(payload, deadline);
+    }
+
+    pub fn pingWithDeadline(
+        self: *H2Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PingEvent {
+        try self.sendPing(payload);
+        return self.readPingEvent(payload, deadline);
+    }
+
+    pub fn continuePingWithDeadline(
+        self: *H2Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PingEvent {
+        return self.readPingEvent(payload, deadline);
+    }
+
+    fn readPingEvent(
+        self: *H2Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PingEvent {
+        while (true) {
+            var frame = try self.receiveFrameAutoInternal(deadline);
+            switch (frame.header.opcode) {
+                .ping => {
+                    frame.deinit(self.allocator);
+                    continue;
+                },
+                .pong => {
+                    defer frame.deinit(self.allocator);
+                    if (!std.mem.eql(u8, frame.payload, payload)) {
+                        return error.UnexpectedPong;
+                    }
+                    return .{ .pong = {} };
+                },
+                .close => {
+                    defer frame.deinit(self.allocator);
+                    return .{ .closed = try websocket.parseClosePayloadOwned(
+                        self.allocator,
+                        frame.payload,
+                    ) };
+                },
+                .text, .binary, .continuation => {
+                    return .{ .application = frame };
+                },
+                else => {
+                    frame.deinit(self.allocator);
+                    return error.InvalidFrame;
+                },
+            }
+        }
     }
 
     pub fn sendClose(self: *H2Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
@@ -6009,6 +6171,288 @@ test "WebSocket receiveFrameAuto replies to ping" {
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
 
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket pingWithDeadline preserves an interleaved message" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            var ping = try connection.receiveFrame();
+            defer ping.deinit(self.server.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
+            try connection.sendText("in flight");
+            try connection.sendPong(ping.payload);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/ping-deadline",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    );
+    var application = try client.pingWithDeadline("probe", deadline);
+    defer application.deinit(allocator);
+    switch (application) {
+        .application => |frame| {
+            try std.testing.expectEqual(websocket.Opcode.text, frame.header.opcode);
+            try std.testing.expectEqualStrings("in flight", frame.payload);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    var pong = try client.continuePingWithDeadline("probe", deadline);
+    defer pong.deinit(allocator);
+    try std.testing.expect(pong == .pong);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket pingWithTimeout rejects mismatched Pong" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            var ping = try connection.receiveFrame();
+            defer ping.deinit(self.server.http.allocator);
+            try connection.sendPong("wrong");
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/wrong-pong",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    try std.testing.expectError(
+        error.UnexpectedPong,
+        client.pingWithTimeout("probe", .fromSeconds(1)),
+    );
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket pingWithTimeout reports peer Close" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            var ping = try connection.receiveFrame();
+            defer ping.deinit(self.server.http.allocator);
+            try connection.sendClose(.going_away, "maintenance");
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/ping-close",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    var event = try client.pingWithTimeout("probe", .fromSeconds(1));
+    defer event.deinit(allocator);
+    switch (event) {
+        .closed => |maybe_close| {
+            const close = maybe_close orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(websocket.CloseCode.going_away, close.code);
+            try std.testing.expectEqualStrings("maintenance", close.reason);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket pingWithTimeout enforces one deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            var ping = try connection.receiveFrame();
+            defer ping.deinit(self.server.http.allocator);
+            try std.Io.sleep(self.server.http.io, .fromMilliseconds(80), .awake);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/ping-timeout",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    try std.testing.expectError(
+        error.Timeout,
+        client.pingWithTimeout("probe", .fromMilliseconds(20)),
+    );
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP2 pingWithTimeout validates Pong" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(
+                self.server.allocator,
+                &h2,
+                .{ .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = 4096,
+                    .max_message_bytes = 4096,
+                } },
+            );
+            defer ws.close();
+            var ping = try ws.receiveFrame();
+            defer ping.deinit(self.server.allocator);
+            try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
+            try ws.sendPong(ping.payload);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer h2_client.close();
+    var client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/h2-ping-timeout",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    });
+    defer client.close();
+    var event = try client.pingWithTimeout("h2-probe", .fromSeconds(1));
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .pong);
     thread.join();
     if (shared.err) |err| return err;
 }

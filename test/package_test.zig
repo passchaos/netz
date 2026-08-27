@@ -422,10 +422,19 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "Message"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "PingEvent"));
     try std.testing.expect(@hasDecl(netz.websocket, "BorrowedFrame"));
     try std.testing.expect(@hasDecl(netz.websocket, "parseFrameInto"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessageInto"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "pingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "continuePingWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "receiveMessageInto",
@@ -505,6 +514,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Server, "accept"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Connection, "receiveMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Connection, "sendClose"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "pingWithTimeout",
+    ));
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
     try std.testing.expect(std.meta.stringToEnum(netz.http1.BodyFraming, "close_delimited") != null);
