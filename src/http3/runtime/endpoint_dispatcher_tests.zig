@@ -419,4 +419,42 @@ test "HTTP/3 clients poll dispatcher-routed responses without socket races" {
             .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
     }
+
+    // Control traffic remains meaningful after the last response stream has
+    // finished. A dispatcher must be able to inject GOAWAY without inventing
+    // a dummy outstanding request or falling back to a competing socket read.
+    var goaway_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    var server_control = http3.ControlState{};
+    const goaway = try server_control.writeGoAwayInto(&goaway_storage, 4);
+    var control_bytes: std.ArrayList(u8) = .empty;
+    defer control_bytes.deinit(allocator);
+    try quic.varint.encode(
+        &control_bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.control),
+    );
+    try http3.writeSettingsFrame(&control_bytes, allocator, .{});
+    try control_bytes.appendSlice(allocator, goaway);
+    const goaway_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 3,
+        .data = control_bytes.items,
+    } }};
+    try server_a.send(&goaway_frames);
+    while (client_a.peerGoAwayId() == null) {
+        var event = try dispatcher.receive(&versions);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*routed| {
+                try std.testing.expectEqual(
+                    @as(usize, 1),
+                    routed.connection_handle,
+                );
+                try client_a.processResponsePacket(&routed.packet);
+                try dispatcher.refreshConnectionTimer(1);
+            },
+            .consumed, .timer => {},
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqual(@as(?u64, 4), client_a.peerGoAwayId());
 }

@@ -6828,6 +6828,9 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (!self.request_lifecycle.contains(detached_stream_id)) {
+            return error.UnexpectedStream;
+        }
         try self.processResponsePacketPreserving(
             detached_stream_id,
             packet,
@@ -6839,9 +6842,6 @@ pub const HandshakeClient = struct {
         detached_stream_id: ?u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
-        if (self.request_lifecycle.outstanding.items.len == 0) {
-            return error.UnexpectedStream;
-        }
         if (self.receive_packets.ack_pending) {
             try self.established.connection.sendAck(0);
             self.receive_packets.ack_pending = false;
