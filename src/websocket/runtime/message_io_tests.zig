@@ -174,6 +174,275 @@ test "WebSocket receiveMessageInto deadline spans control frames" {
     try std.testing.expect(shared.timed_out);
 }
 
+test "WebSocket receive timeout resumes a fragmented message" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const max_message_bytes = 64;
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = max_message_bytes,
+            .max_message_bytes = max_message_bytes,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        first_sent: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_sent.set(self.server.http.io);
+                self.timed_out.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            try runtime.testing.writeFrame(
+                &connection,
+                .text,
+                "resumable ",
+                false,
+            );
+            self.first_sent.set(self.server.http.io);
+            try self.timed_out.wait(self.server.http.io);
+            try runtime.testing.writeFrame(
+                &connection,
+                .continuation,
+                "message",
+                true,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/message-timeout-resume",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = max_message_bytes,
+            .max_message_bytes = max_message_bytes,
+        },
+    });
+    defer client.close();
+    try shared.first_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveMessageWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.message_assembler != null);
+    shared.timed_out.set(io);
+    var message = try client.receiveMessageWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer message.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+    try std.testing.expectEqualStrings("resumable message", message.payload);
+    try std.testing.expect(client.message_assembler == null);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket caller-buffer timeout resumes with identical storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const max_message_bytes = 64;
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = max_message_bytes,
+            .max_message_bytes = max_message_bytes,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        first_sent: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_sent.set(self.server.http.io);
+                self.timed_out.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            try runtime.testing.writeFrame(
+                &connection,
+                .binary,
+                "caller ",
+                false,
+            );
+            self.first_sent.set(self.server.http.io);
+            try self.timed_out.wait(self.server.http.io);
+            try runtime.testing.writeFrame(
+                &connection,
+                .continuation,
+                "storage",
+                true,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/message-into-timeout-resume",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = max_message_bytes,
+            .max_message_bytes = max_message_bytes,
+        },
+    });
+    defer client.close();
+    var storage: [max_message_bytes]u8 = undefined;
+    try shared.first_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveMessageIntoWithTimeout(
+            &storage,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 7), client.message_into.written);
+    var other_storage: [max_message_bytes]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        client.receiveMessageIntoWithTimeout(
+            &other_storage,
+            .fromMilliseconds(20),
+        ),
+    );
+    shared.timed_out.set(io);
+    const message = try client.receiveMessageIntoWithDeadline(
+        &storage,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);
+    try std.testing.expectEqualStrings("caller storage", message.payload);
+    try std.testing.expect(client.message_into.opcode == null);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket frame timeout preserves partial wire bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 64 },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        prefix_received: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_received.set(self.server.http.io);
+                self.timed_out.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            self.prefix_received.set(self.server.http.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.receiveFrameWithTimeout(.fromMilliseconds(20)),
+            );
+            self.timed_out.set(self.server.http.io);
+            var frame = try connection.receiveFrameWithDeadline(.fromNow(
+                self.server.http.io,
+                .{ .raw = .fromSeconds(1), .clock = .awake },
+            ));
+            defer frame.deinit(self.server.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.text, frame.header.opcode);
+            try std.testing.expectEqualStrings("partial-frame", frame.payload);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/frame-timeout-resume",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 64 },
+    });
+    defer client.close();
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try websocket.writeFrame(
+        &encoded,
+        allocator,
+        .text,
+        "partial-frame",
+        .{ .mask_key = .{ 1, 2, 3, 4 } },
+    );
+    const split = encoded.items.len - 4;
+    try writeAllToStream(io, client.stream, encoded.items[0..split]);
+    try shared.prefix_received.wait(io);
+    try shared.timed_out.wait(io);
+    try writeAllToStream(io, client.stream, encoded.items[split..]);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket receiveMessageInto preserves full message space across ping" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

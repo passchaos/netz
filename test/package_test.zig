@@ -426,7 +426,27 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket, "BorrowedFrame"));
     try std.testing.expect(@hasDecl(netz.websocket, "parseFrameInto"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessage"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "receiveFrameWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "receiveFrameAutoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "receiveFrameAutoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "receiveMessageWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessageInto"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "receiveMessageIntoWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
         "receiveMessageIntoWithDeadline",
@@ -442,6 +462,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "receiveMessageInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveFrameWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveFrameAutoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveFrameAutoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveMessageWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "receiveMessageIntoWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,

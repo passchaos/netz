@@ -462,6 +462,14 @@ CPU-0-pinned 4-KiB echo run after this change measured 33.075 us/roundtrip and
 236.20 logical MiB/s; this is a regression sample rather than a new
 cross-library comparison.
 
+Both HTTP/1 Upgrade/WSS and RFC 8441 connections now expose relative-timeout
+counterparts for frame, owned-message, and caller-buffer message receives. One
+absolute deadline continues through fragmented messages and interleaved control
+frames. Partial wire frames, the owning message assembler, caller-buffer offsets,
+compression mode, and incremental UTF-8 validation remain resumable after a
+timeout; caller-buffer retries must present the same storage so already written
+bytes cannot be silently lost.
+
 ## Remaining evidence before a broad completion claim
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark

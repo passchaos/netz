@@ -1458,6 +1458,51 @@ pub const Message = struct {
     payload: []u8,
 };
 
+/// Resumable state for the caller-buffer receive path. The caller owns the
+/// bytes already written, so retries after a timeout must present the same
+/// storage until the fragmented message completes.
+const MessageIntoReceiveState = struct {
+    opcode: ?websocket.Opcode = null,
+    compressed: bool = false,
+    written: usize = 0,
+    output_address: usize = 0,
+    output_len: usize = 0,
+
+    fn active(self: MessageIntoReceiveState) bool {
+        return self.opcode != null;
+    }
+
+    fn begin(
+        self: *MessageIntoReceiveState,
+        out: []u8,
+        opcode: websocket.Opcode,
+        compressed: bool,
+    ) void {
+        self.* = .{
+            .opcode = opcode,
+            .compressed = compressed,
+            .output_address = @intFromPtr(out.ptr),
+            .output_len = out.len,
+        };
+    }
+
+    fn validateOutput(
+        self: MessageIntoReceiveState,
+        out: []u8,
+    ) Error!void {
+        if (!self.active()) return;
+        if (self.output_address != @intFromPtr(out.ptr) or
+            self.output_len != out.len)
+        {
+            return error.BufferTooShort;
+        }
+    }
+
+    fn reset(self: *MessageIntoReceiveState) void {
+        self.* = .{};
+    }
+};
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1474,6 +1519,9 @@ pub const Connection = struct {
     close_received: bool = false,
     incoming_data_kind: IncomingDataKind = .none,
     incoming_text_utf8: websocket.Utf8Validator = .{},
+    incoming_frame_validated: usize = 0,
+    message_assembler: ?websocket.MessageAssembler = null,
+    message_into: MessageIntoReceiveState = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     compression_threshold: usize = default_compression_threshold,
@@ -1585,6 +1633,7 @@ pub const Connection = struct {
 
     pub fn close(self: *Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
+        if (self.message_assembler) |*assembler| assembler.deinit();
         self.inbuf.deinit(self.allocator);
         self.compression_send.deinit(self.allocator);
         self.compression_receive.deinit(self.allocator);
@@ -1812,12 +1861,31 @@ pub const Connection = struct {
         return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
     }
 
+    /// Relative-budget counterpart to `receiveFrameWithDeadline`. Partial
+    /// frame bytes remain buffered so a later receive can resume exactly.
+    pub fn receiveFrameWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!websocket.Frame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
+        return self.receiveFrameInternal(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// Receive one frame under a caller-owned absolute deadline. The same
     /// deadline covers partial headers, payload bytes, and TLS records.
     pub fn receiveFrameWithDeadline(
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
         return self.receiveFrameInternal(deadline);
     }
 
@@ -1985,6 +2053,9 @@ pub const Connection = struct {
     }
 
     pub fn receiveFrame(self: *Connection) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
         return self.receiveFrameInternal(null);
     }
 
@@ -2021,7 +2092,34 @@ pub const Connection = struct {
     }
 
     pub fn receiveFrameAuto(self: *Connection) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
         return self.receiveFrameAutoInternal(null);
+    }
+
+    pub fn receiveFrameAutoWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!websocket.Frame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
+        return self.receiveFrameAutoInternal(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveFrameAutoWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
+        return self.receiveFrameAutoInternal(deadline);
     }
 
     fn receiveFrameAutoInternal(
@@ -2055,6 +2153,18 @@ pub const Connection = struct {
         return self.receiveMessageInternal(null);
     }
 
+    /// Receive one complete message within one relative application budget.
+    pub fn receiveMessageWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedMessage {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveMessageInternal(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// Receive one complete message under a caller-owned absolute deadline.
     ///
     /// The deadline is deliberately unchanged across continuation and control
@@ -2072,8 +2182,13 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedMessage {
         errdefer |err| closeAfterReceiveError(self, err);
-        var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
-        defer assembler.deinit();
+        if (self.message_into.active()) return error.InvalidFrame;
+        if (self.message_assembler == null) {
+            self.message_assembler = websocket.MessageAssembler.initLimited(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        }
 
         while (true) {
             var frame = try self.receiveFrameAutoInternal(deadline);
@@ -2082,9 +2197,19 @@ pub const Connection = struct {
                 .ping, .pong => continue,
                 .close => return error.ConnectionClosed,
                 else => {
-                    const maybe_message = try assembler.feed(frame);
+                    const maybe_message = self.message_assembler.?.feed(frame) catch |err| {
+                        self.message_assembler.?.deinit();
+                        self.message_assembler = null;
+                        return @errorCast(err);
+                    };
                     if (maybe_message) |message| {
-                        return finishIncomingMessage(self.allocator, message, self.limits.max_message_bytes);
+                        self.message_assembler.?.deinit();
+                        self.message_assembler = null;
+                        return finishIncomingMessage(
+                            self.allocator,
+                            message,
+                            self.limits.max_message_bytes,
+                        );
                     }
                 },
             }
@@ -2104,6 +2229,19 @@ pub const Connection = struct {
         out: []u8,
     ) Error!Message {
         return receiveMessageIntoConnection(self, out, null);
+    }
+
+    pub fn receiveMessageIntoWithTimeout(
+        self: *Connection,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) Error!Message {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveMessageIntoConnection(
+            self,
+            out,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     /// Caller-buffer counterpart to `receiveMessageWithDeadline`. The same
@@ -2391,6 +2529,9 @@ pub const H2Connection = struct {
     close_received: bool = false,
     incoming_data_kind: IncomingDataKind = .none,
     incoming_text_utf8: websocket.Utf8Validator = .{},
+    incoming_frame_validated: usize = 0,
+    message_assembler: ?websocket.MessageAssembler = null,
+    message_into: MessageIntoReceiveState = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     compression_threshold: usize = default_compression_threshold,
@@ -2424,6 +2565,7 @@ pub const H2Connection = struct {
 
     pub fn close(self: *H2Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
+        if (self.message_assembler) |*assembler| assembler.deinit();
         self.inbuf.deinit(self.allocator);
         self.compression_send.deinit(self.allocator);
         self.compression_receive.deinit(self.allocator);
@@ -2660,11 +2802,30 @@ pub const H2Connection = struct {
         return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
     }
 
+    /// RFC 8441 relative-budget counterpart to
+    /// `receiveFrameWithDeadline`.
+    pub fn receiveFrameWithTimeout(
+        self: *H2Connection,
+        timeout: std.Io.Duration,
+    ) Error!websocket.Frame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
+        return self.receiveFrameInternal(.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// RFC 8441 counterpart to `Connection.receiveFrameWithDeadline`.
     pub fn receiveFrameWithDeadline(
         self: *H2Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
         return self.receiveFrameInternal(deadline);
     }
 
@@ -2812,6 +2973,9 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveFrame(self: *H2Connection) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
         return self.receiveFrameInternal(null);
     }
 
@@ -2848,7 +3012,34 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveFrameAuto(self: *H2Connection) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
         return self.receiveFrameAutoInternal(null);
+    }
+
+    pub fn receiveFrameAutoWithTimeout(
+        self: *H2Connection,
+        timeout: std.Io.Duration,
+    ) Error!websocket.Frame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
+        return self.receiveFrameAutoInternal(.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveFrameAutoWithDeadline(
+        self: *H2Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!websocket.Frame {
+        if (self.message_assembler != null or self.message_into.active()) {
+            return error.InvalidFrame;
+        }
+        return self.receiveFrameAutoInternal(deadline);
     }
 
     fn receiveFrameAutoInternal(
@@ -2877,6 +3068,17 @@ pub const H2Connection = struct {
         return self.receiveMessageInternal(null);
     }
 
+    pub fn receiveMessageWithTimeout(
+        self: *H2Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedMessage {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveMessageInternal(.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// Receive one RFC 8441 message under a caller-owned absolute deadline.
     /// HTTP/2 connection-control frames and WebSocket control frames share the
     /// same deadline rather than extending upper-layer inactivity budgets.
@@ -2892,8 +3094,13 @@ pub const H2Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedMessage {
         errdefer |err| closeAfterReceiveError(self, err);
-        var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
-        defer assembler.deinit();
+        if (self.message_into.active()) return error.InvalidFrame;
+        if (self.message_assembler == null) {
+            self.message_assembler = websocket.MessageAssembler.initLimited(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        }
 
         while (true) {
             var frame = try self.receiveFrameAutoInternal(deadline);
@@ -2902,9 +3109,19 @@ pub const H2Connection = struct {
                 .ping, .pong => continue,
                 .close => return error.ConnectionClosed,
                 else => {
-                    const maybe_message = try assembler.feed(frame);
+                    const maybe_message = self.message_assembler.?.feed(frame) catch |err| {
+                        self.message_assembler.?.deinit();
+                        self.message_assembler = null;
+                        return @errorCast(err);
+                    };
                     if (maybe_message) |message| {
-                        return finishIncomingMessage(self.allocator, message, self.limits.max_message_bytes);
+                        self.message_assembler.?.deinit();
+                        self.message_assembler = null;
+                        return finishIncomingMessage(
+                            self.allocator,
+                            message,
+                            self.limits.max_message_bytes,
+                        );
                     }
                 },
             }
@@ -2921,6 +3138,22 @@ pub const H2Connection = struct {
         out: []u8,
     ) Error!Message {
         return receiveMessageIntoConnection(self, out, null);
+    }
+
+    pub fn receiveMessageIntoWithTimeout(
+        self: *H2Connection,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) Error!Message {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveMessageIntoConnection(
+            self,
+            out,
+            .fromNow(
+                self.tunnel.connection.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
     }
 
     /// RFC 8441 caller-buffer receive under one absolute deadline. HTTP/2
@@ -3435,6 +3668,19 @@ pub const H2Server = struct {
     }
 };
 
+/// Narrow test hook for constructing deliberately split WebSocket frames.
+/// Production callers should use the validated public message APIs.
+pub const testing = struct {
+    pub fn writeFrame(
+        connection: anytype,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        return connection.writeFrameLocked(opcode, payload, fin);
+    }
+};
+
 pub const H2ConnectOptions = struct {
     authority: ?[]const u8 = null,
     path: []const u8 = "/",
@@ -3499,19 +3745,18 @@ fn receiveMessageIntoConnection(
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!Message {
     errdefer |err| closeAfterReceiveError(connection, err);
+    if (connection.message_assembler != null) return error.InvalidFrame;
     if (out.len < connection.limits.max_message_bytes) {
         return error.BufferTooShort;
     }
+    try connection.message_into.validateOutput(out);
 
-    var opcode: ?websocket.Opcode = null;
-    var compressed: ?bool = null;
-    var written: usize = 0;
     var control_storage: [125]u8 = undefined;
     while (true) {
-        const frame_out = if (compressed == true)
-            connection.compression_receive.payload.items[written..]
+        const frame_out = if (connection.message_into.compressed)
+            connection.compression_receive.payload.items[connection.message_into.written..]
         else
-            out[written..];
+            out[connection.message_into.written..];
         const frame = try receiveFrameIntoConnection(
             connection,
             frame_out,
@@ -3534,19 +3779,28 @@ fn receiveMessageIntoConnection(
                 return error.ConnectionClosed;
             },
             .text, .binary => {
-                if (opcode != null) return error.InvalidFrame;
-                opcode = frame.header.opcode;
-                compressed = frame.header.rsv1;
-                if (compressed.? and !connection.permessage_deflate) {
+                if (connection.message_into.active()) {
+                    return error.InvalidFrame;
+                }
+                connection.message_into.begin(
+                    out,
+                    frame.header.opcode,
+                    frame.header.rsv1,
+                );
+                if (connection.message_into.compressed and
+                    !connection.permessage_deflate)
+                {
                     return error.UnexpectedRsv;
                 }
-                if (compressed.?) {
+                if (connection.message_into.compressed) {
                     try connection.ensureCompressionReceiveScratch();
                 }
                 // The first frame is decoded before its RSV1 bit selects
                 // compressed scratch, so copy it exactly once. Continuations
                 // then decode directly into retained compressed storage.
-                if (compressed.? and frame.payload.len != 0) {
+                if (connection.message_into.compressed and
+                    frame.payload.len != 0)
+                {
                     @memcpy(
                         connection.compression_receive
                             .payload.items[0..frame.payload.len],
@@ -3555,36 +3809,42 @@ fn receiveMessageIntoConnection(
                 }
             },
             .continuation => {
-                if (opcode == null) return error.InvalidFrame;
+                if (!connection.message_into.active()) {
+                    return error.InvalidFrame;
+                }
                 if (frame.header.rsv1) return error.UnexpectedRsv;
             },
             else => return error.InvalidFrame,
         }
-        written = std.math.add(
+        connection.message_into.written = std.math.add(
             usize,
-            written,
+            connection.message_into.written,
             frame.payload.len,
         ) catch return error.PayloadTooLarge;
-        if (written > connection.limits.max_message_bytes) {
+        if (connection.message_into.written >
+            connection.limits.max_message_bytes)
+        {
             return error.PayloadTooLarge;
         }
         if (!frame.header.fin) continue;
 
-        const message_opcode = opcode orelse return error.InvalidFrame;
-        const payload = if (compressed == true)
+        const message_opcode = connection.message_into.opcode orelse
+            return error.InvalidFrame;
+        const payload = if (connection.message_into.compressed)
             try websocket.decompressMessageInto(
                 out[0..connection.limits.max_message_bytes],
-                connection.compression_receive.payload.items[0..written],
+                connection.compression_receive.payload.items[0..connection.message_into.written],
                 connection.compression_receive.payload.allocatedSlice(),
                 connection.compression_receive.flate_window.?,
             )
         else
-            out[0..written];
+            out[0..connection.message_into.written];
         if (message_opcode == .text and
             !std.unicode.utf8ValidateSlice(payload))
         {
             return error.InvalidUtf8;
         }
+        connection.message_into.reset();
         return .{ .opcode = message_opcode, .payload = payload };
     }
 }
@@ -3727,7 +3987,11 @@ fn ensureIncomingFrameBuffered(
         else => .none,
     };
     const validate_text = message_kind == .text;
-    var validated = header.header_len;
+    var validated = @max(
+        header.header_len,
+        connection.incoming_frame_validated,
+    );
+    errdefer preserveIncomingFrameValidation(connection, validated);
     while (connection.inbuf.items.len < total_len) {
         if (validate_text) {
             try validateBufferedTextRange(
@@ -3756,6 +4020,14 @@ fn ensureIncomingFrameBuffered(
         connection.incoming_data_kind =
             if (header.fin) .none else message_kind;
     }
+    connection.incoming_frame_validated = 0;
+}
+
+fn preserveIncomingFrameValidation(
+    connection: anytype,
+    validated: usize,
+) void {
+    connection.incoming_frame_validated = validated;
 }
 
 fn validateBufferedTextRange(
