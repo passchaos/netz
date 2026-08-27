@@ -806,6 +806,37 @@ pub const ConnectOptions = struct {
     tls_handshake_timeout: ?std.Io.Duration = null,
 };
 
+/// Borrowed WS/WSS target for `mqtt.reconnect.Client`. URI/TLS/WebSocket
+/// configuration must remain valid for the reconnect client lifetime.
+pub const ReconnectConnector = struct {
+    uri: []const u8,
+    options: ConnectOptions,
+
+    pub fn connector(self: *ReconnectConnector) runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *ReconnectConnector = @ptrCast(@alignCast(context));
+        var options = self.options;
+        options.mqtt = mqtt_options;
+        return Client.connectUriAttempt(
+            allocator,
+            io,
+            self.uri,
+            options,
+        );
+    }
+};
+
 fn websocketLimits(
     limits: runtime.Limits,
     max_head_bytes: usize,

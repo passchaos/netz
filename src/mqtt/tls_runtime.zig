@@ -499,6 +499,40 @@ pub const ConnectOptions = struct {
     tcp_nodelay: bool = true,
 };
 
+/// Borrowed native-TLS target for `mqtt.reconnect.Client`. The host and all
+/// TLS option slices must remain valid for the reconnect client lifetime; MQTT
+/// CONNECT data is supplied separately and deeply owned by that client.
+pub const ReconnectConnector = struct {
+    address: net.IpAddress,
+    tls_host: []const u8,
+    options: ConnectOptions,
+
+    pub fn connector(self: *ReconnectConnector) mqtt_runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt_runtime.ConnectOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const self: *ReconnectConnector = @ptrCast(@alignCast(context));
+        var options = self.options;
+        options.mqtt = mqtt_options;
+        return Client.connectAddressAttempt(
+            allocator,
+            io,
+            self.address,
+            self.tls_host,
+            options,
+        );
+    }
+};
+
 fn connectStreamAttempt(
     allocator: std.mem.Allocator,
     io: std.Io,

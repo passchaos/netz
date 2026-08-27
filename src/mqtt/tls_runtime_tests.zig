@@ -2,6 +2,7 @@ const std = @import("std");
 const mqtt = @import("mod.zig");
 const runtime = @import("runtime.zig");
 const mqtt_tls = @import("tls_runtime.zig");
+const reconnect = @import("reconnect.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const tls_stream = @import("../tls/mod.zig").stream;
 const tls_test = @import("testing/tls13_server.zig");
@@ -319,6 +320,99 @@ test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     );
     try expectLargePayload(server_publish.publish.payload);
     try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect client reuses native TLS connector" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            first.deinit(self.server.allocator);
+            var second = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer second.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var connector = mqtt_tls.ReconnectConnector{
+        .address = server.address(),
+        .tls_host = "localhost",
+        .options = .{
+            .mqtt = undefined,
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+        },
+    };
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector.connector(),
+        .{
+            .protocol = .v5,
+            .client_id = "reconnect-tls",
+            .clean_start = false,
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var first = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    defer first.deinit(allocator);
+    try std.testing.expect(first == .connected);
+    var second = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    defer second.deinit(allocator);
+    try std.testing.expect(second == .connected);
+    try std.testing.expect(second.connected.session_present);
 
     thread.join();
     joined = true;

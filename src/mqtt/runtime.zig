@@ -1243,6 +1243,34 @@ pub const ClientAuthHandler = struct {
     ) Error![]const mqtt.Property,
 };
 
+/// Type-erased transport opener for reconnecting MQTT clients. The connector
+/// owns only transport policy; the caller supplies the reconnect client's
+/// deeply-owned MQTT CONNECT options on every attempt. Its context must
+/// outlive every Client that borrows this value.
+pub const ClientConnector = struct {
+    context: *anyopaque,
+    connect_attempt: *const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt,
+
+    pub fn connectAttempt(
+        self: ClientConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        return self.connect_attempt(
+            self.context,
+            allocator,
+            io,
+            options,
+        );
+    }
+};
+
 fn applyConnAckNegotiation(
     connection: *Connection,
     connack: mqtt.ConnAck,
