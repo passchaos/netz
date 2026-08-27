@@ -6292,12 +6292,60 @@ pub const HandshakeClient = struct {
         return self.receiveNextResponseWithInformational(null);
     }
 
+    /// Aggregate whichever outstanding response becomes ready within one
+    /// relative budget. A timeout leaves every request eligible for later
+    /// aggregate or incremental consumption.
+    pub fn receiveNextResponseWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveNextResponseWithInformationalUntil(
+            null,
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receiveNextResponseWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        return self.receiveNextResponseWithInformationalUntil(null, deadline);
+    }
+
     /// Aggregate whichever outstanding response becomes ready first and
     /// correlate every callback-scoped 1xx head with its request stream.
     pub fn receiveNextResponseWithInformational(
         self: *HandshakeClient,
         informational: ?MultiplexedInformationalObserver,
     ) Error!OwnedHandshakeResponseEvent {
+        return self.receiveNextResponseWithInformationalInternal(
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Deadline-bounded variant that preserves callback ordering across all
+    /// packets consumed before the timeout.
+    pub fn receiveNextResponseWithInformationalUntil(
+        self: *HandshakeClient,
+        informational: ?MultiplexedInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        return self.receiveNextResponseWithInformationalInternal(
+            informational,
+            deadline,
+        );
+    }
+
+    fn receiveNextResponseWithInformationalInternal(
+        self: *HandshakeClient,
+        informational: ?MultiplexedInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -6331,21 +6379,26 @@ pub const HandshakeClient = struct {
                     };
                     return .{ .response = .{
                         .stream_id = stream_id,
-                        .value = try self.receiveResponseWithInformational(
+                        .value = try self.receiveResponseWithInformationalInternal(
                             stream_id,
                             .{
                                 .context = &adapter,
                                 .on_response = MultiplexedInformationalContext.notify,
                             },
+                            deadline,
                         ),
                     } };
                 }
                 return .{ .response = .{
                     .stream_id = stream_id,
-                    .value = try self.receiveResponse(stream_id),
+                    .value = try self.receiveResponseWithInformationalInternal(
+                        stream_id,
+                        null,
+                        deadline,
+                    ),
                 } };
             }
-            try receiveConnectionResponsePacket(
+            try receiveConnectionResponsePacketUntil(
                 &self.established.connection,
                 &self.receive_packets,
                 &self.control,
@@ -6356,6 +6409,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                deadline,
             );
         }
     }
@@ -6832,6 +6886,36 @@ pub const HandshakeClient = struct {
     pub fn receiveNextResponseEvent(
         self: *HandshakeClient,
     ) Error!StreamingResponseEvent {
+        return self.receiveNextResponseEventInternal(null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    /// Wait for the next event from any outstanding response within one
+    /// relative budget without retiring active response readers on timeout.
+    pub fn receiveNextResponseEventWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveNextResponseEventInternal(
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receiveNextResponseEventWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingResponseEvent {
+        return self.receiveNextResponseEventInternal(deadline);
+    }
+
+    fn receiveNextResponseEventInternal(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingResponseEvent {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -6893,7 +6977,7 @@ pub const HandshakeClient = struct {
                 } };
             }
             try self.releaseStreamingResponseCapacity();
-            try receiveConnectionResponsePacket(
+            try receiveConnectionResponsePacketUntil(
                 &self.established.connection,
                 &self.receive_packets,
                 &self.control,
@@ -6904,6 +6988,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                deadline,
             );
         }
     }
@@ -23193,6 +23278,199 @@ test "HTTP/3 handshake client response deadline preserves progress" {
     try std.testing.expect(saw_head);
     try std.testing.expectEqualStrings("after-timeout", body[0..body_len]);
     try std.testing.expect(!client.request_lifecycle.contains(stream_id));
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 handshake client next-response deadlines preserve progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
+    const client_cid = [_]u8{ 0x59, 0x5a, 0x5b, 0x5c };
+    const server_cid = [_]u8{ 0x5d, 0x5e, 0x5f, 0x60 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x63} ** 32,
+            .x25519_secret_key = [_]u8{0x64} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const aggregate_body = "aggregate-next";
+    const streaming_body = "streaming-next";
+    const Shared = struct {
+        server: *HandshakeServer,
+        io: std.Io,
+        aggregate_head_sent: std.Io.Event = .unset,
+        aggregate_timed_out: std.Io.Event = .unset,
+        streaming_head_sent: std.Io.Event = .unset,
+        streaming_timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.aggregate_head_sent.set(self.io);
+                self.aggregate_timed_out.set(self.io);
+                self.streaming_head_sent.set(self.io);
+                self.streaming_timed_out.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+
+            var aggregate = try session.receiveRequest();
+            defer aggregate.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try session.startResponse(
+                aggregate.stream_id,
+                .{ .status = 200 },
+                aggregate_body.len,
+            );
+            self.aggregate_head_sent.set(self.io);
+            try self.aggregate_timed_out.wait(self.io);
+            try session.sendResponseBody(
+                aggregate.stream_id,
+                aggregate_body,
+                true,
+            );
+
+            var streaming = try session.receiveRequest();
+            defer streaming.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try session.startResponse(
+                streaming.stream_id,
+                .{ .status = 200 },
+                streaming_body.len,
+            );
+            self.streaming_head_sent.set(self.io);
+            try self.streaming_timed_out.wait(self.io);
+            try session.sendResponseBody(
+                streaming.stream_id,
+                streaming_body,
+                true,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x61} ** 32,
+            .x25519_secret_key = [_]u8{0x62} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    const aggregate_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/aggregate-next-deadline",
+        .authority = "localhost",
+    });
+    try shared.aggregate_head_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveNextResponseWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(aggregate_id));
+    try std.testing.expect(client.response_streams.entries.items.len != 0);
+    shared.aggregate_timed_out.set(io);
+
+    var aggregate_event = try client.receiveNextResponseWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer aggregate_event.deinit(allocator);
+    try std.testing.expect(aggregate_event == .response);
+    try std.testing.expectEqual(
+        aggregate_id,
+        aggregate_event.response.stream_id,
+    );
+    try std.testing.expectEqualStrings(
+        aggregate_body,
+        aggregate_event.response.value.response.body,
+    );
+    try std.testing.expect(!client.request_lifecycle.contains(aggregate_id));
+
+    const streaming_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/streaming-next-deadline",
+        .authority = "localhost",
+    });
+    try shared.streaming_head_sent.wait(io);
+    var head = try client.receiveNextResponseEventWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .message);
+    try std.testing.expectEqual(streaming_id, head.message.stream_id);
+    try std.testing.expect(head.message.value == .head);
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveNextResponseEventWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(streaming_id));
+    try std.testing.expect(client.streaming_responses.find(streaming_id) != null);
+    shared.streaming_timed_out.set(io);
+
+    var body: [32]u8 = undefined;
+    var body_len: usize = 0;
+    var finished = false;
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    );
+    while (!finished) {
+        var event = try client.receiveNextResponseEventWithDeadline(deadline);
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .message);
+        try std.testing.expectEqual(streaming_id, event.message.stream_id);
+        switch (event.message.value) {
+            .data_available => {
+                body_len += try client.readResponseData(
+                    streaming_id,
+                    body[body_len..],
+                );
+            },
+            .finished => finished = true,
+            .head, .trailers, .push_promise => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqualStrings(streaming_body, body[0..body_len]);
+    try std.testing.expect(!client.request_lifecycle.contains(streaming_id));
 
     thread.join();
     joined = true;

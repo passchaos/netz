@@ -758,6 +758,18 @@ test "public modules are reachable" {
         "receiveResponseWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponse"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveNextResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveNextResponseWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveNextResponseWithInformationalUntil",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponseEvent"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
@@ -768,6 +780,14 @@ test "public modules are reachable" {
         "receiveResponseEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponseEvent"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveNextResponseEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveNextResponseEventWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "skipResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePush"));
