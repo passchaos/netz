@@ -222,10 +222,20 @@ paths remove the RFC 7692 suffix and set RSV1 only when the wire payload is
 strictly smaller; incompressible/small input is sent unchanged rather than
 paying expansion, and payloads below 32 bytes skip compressor setup entirely.
 No-context-takeover resets codec state for every message
-while retaining wire buffers. Vort's current hash parser allocates temporary
+while retaining wire buffers. RFC 8441 caller-buffer receive now writes each
+uncompressed frame directly into application storage and each compressed
+continuation directly into codec scratch; it no longer allocates every frame
+or retains a second whole-message buffer. Vort's current hash parser allocates temporary
 match state per compressed send; receive-side codec storage is allocation-free
-after first-use warmup. The H2 adapter still owns tunnel-frame/message scratch
-but avoids separate compression-output/decompressed-message allocations.
+after first-use warmup. The H2 adapter retains tunnel/frame and codec scratch
+but avoids separate application-message and decompressed-message allocations.
+Buffered regressions prove both an uncompressed fragmented message with an
+interleaved control frame and a warmed compressed fragmented message complete
+without another caller-allocator allocation. A CPU-0 ReleaseFast regression
+run measured 31.566 us/roundtrip for one 4-KiB frame and 37.087 us for sixteen
+fragments, with checksum 51,000 in both cases; these overlap the prior ranges
+and document that removing the duplicate receive buffer did not trade memory
+for a visible throughput regression.
 Fragmented compressed sends no longer concatenate plaintext first: each caller
 slice feeds the same bit-packed DEFLATE stream directly, UTF-8 is validated
 across slice boundaries with four bytes of state, and only compressed wire

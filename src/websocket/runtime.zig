@@ -2103,7 +2103,7 @@ pub const Connection = struct {
         self: *Connection,
         out: []u8,
     ) Error!Message {
-        return self.receiveMessageIntoInternal(out, null);
+        return receiveMessageIntoConnection(self, out, null);
     }
 
     /// Caller-buffer counterpart to `receiveMessageWithDeadline`. The same
@@ -2114,164 +2114,7 @@ pub const Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Message {
-        return self.receiveMessageIntoInternal(out, deadline);
-    }
-
-    fn receiveMessageIntoInternal(
-        self: *Connection,
-        out: []u8,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Message {
-        errdefer |err| closeAfterReceiveError(self, err);
-        if (out.len < self.limits.max_message_bytes) {
-            return error.BufferTooShort;
-        }
-
-        var opcode: ?websocket.Opcode = null;
-        var compressed: ?bool = null;
-        var written: usize = 0;
-        var control_storage: [125]u8 = undefined;
-        while (true) {
-            const frame_out = if (compressed == true)
-                self.compression_receive.payload.items[written..]
-            else
-                out[written..];
-            const frame = try self.receiveFrameIntoInternal(
-                frame_out,
-                &control_storage,
-                deadline,
-            );
-            switch (frame.header.opcode) {
-                .ping => {
-                    if (!self.close_sent) try self.sendPong(frame.payload);
-                    continue;
-                },
-                .pong => continue,
-                .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) {
-                        try self.sendFrame(.close, frame.payload);
-                    }
-                    return error.ConnectionClosed;
-                },
-                .text, .binary => {
-                    if (opcode != null) return error.InvalidFrame;
-                    opcode = frame.header.opcode;
-                    compressed = frame.header.rsv1;
-                    if (compressed.? and !self.permessage_deflate) {
-                        return error.UnexpectedRsv;
-                    }
-                    if (compressed.?) {
-                        try self.ensureCompressionReceiveScratch();
-                    }
-                    // `receiveFrameInto` selected output before seeing this
-                    // first frame's RSV1. Move its payload into reusable
-                    // compressed storage exactly once; continuations decode
-                    // there directly.
-                    if (compressed.? and frame.payload.len != 0) {
-                        @memcpy(
-                            self.compression_receive
-                                .payload.items[0..frame.payload.len],
-                            frame.payload,
-                        );
-                    }
-                },
-                .continuation => {
-                    if (opcode == null) return error.InvalidFrame;
-                    if (frame.header.rsv1) return error.UnexpectedRsv;
-                },
-                _ => return error.InvalidFrame,
-            }
-            written = std.math.add(
-                usize,
-                written,
-                frame.payload.len,
-            ) catch return error.PayloadTooLarge;
-            if (written > self.limits.max_message_bytes) {
-                return error.PayloadTooLarge;
-            }
-            if (!frame.header.fin) continue;
-            const message_opcode = opcode orelse return error.InvalidFrame;
-            const payload = if (compressed == true)
-                try websocket.decompressMessageInto(
-                    out[0..self.limits.max_message_bytes],
-                    self.compression_receive.payload.items[0..written],
-                    self.compression_receive.payload.allocatedSlice(),
-                    self.compression_receive.flate_window.?,
-                )
-            else
-                out[0..written];
-            if (message_opcode == .text and
-                !std.unicode.utf8ValidateSlice(payload))
-            {
-                return error.InvalidUtf8;
-            }
-            return .{ .opcode = message_opcode, .payload = payload };
-        }
-    }
-
-    fn receiveFrameIntoInternal(
-        self: *Connection,
-        out: []u8,
-        control_out: *[125]u8,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!websocket.BorrowedFrame {
-        if (self.close_sent and self.close_received) {
-            return error.ConnectionClosed;
-        }
-        try self.ensureBufferedWithDeadline(2, deadline);
-        const second = self.inbuf.items[1];
-        var header_len: usize = 2;
-        const len_code = second & 0x7f;
-        if (len_code == 126) {
-            header_len += 2;
-        } else if (len_code == 127) {
-            header_len += 8;
-        }
-        if ((second & 0x80) != 0) header_len += 4;
-        try self.ensureBufferedWithDeadline(header_len, deadline);
-
-        const header = try websocket.FrameHeader.parse(self.inbuf.items);
-        const payload_len = std.math.cast(
-            usize,
-            header.payload_len,
-        ) orelse return error.PayloadTooLarge;
-        if (payload_len > self.limits.max_frame_bytes) {
-            return error.MessageTooLarge;
-        }
-        const payload_out = if (header.opcode.isControl())
-            control_out[0..]
-        else
-            out;
-        if (payload_len > payload_out.len) return error.PayloadTooLarge;
-        const total_len = std.math.add(
-            usize,
-            header.header_len,
-            payload_len,
-        ) catch return error.PayloadTooLarge;
-        try ensureIncomingFrameBuffered(self, header, total_len, deadline);
-        const parse_options: websocket.ParseFrameOptions = switch (self.role) {
-            .client => .{
-                .expect_mask = .unmasked,
-                .allow_rsv1 = self.permessage_deflate,
-                .validate_utf8 = false,
-            },
-            .server => .{
-                .expect_mask = .masked,
-                .allow_rsv1 = self.permessage_deflate,
-                .validate_utf8 = false,
-            },
-        };
-        const frame = try websocket.parseFrameInto(
-            payload_out,
-            self.inbuf.items[0..total_len],
-            parse_options,
-        );
-        self.discardBuffered(frame.consumed);
-        if (self.close_received and frame.header.opcode != .close) {
-            return error.ConnectionClosed;
-        }
-        return frame;
+        return receiveMessageIntoConnection(self, out, deadline);
     }
 
     fn ensureCompressionReceiveScratch(self: *Connection) Error!void {
@@ -2552,7 +2395,6 @@ pub const H2Connection = struct {
     permessage_deflate: bool = false,
     compression_threshold: usize = default_compression_threshold,
     compression_send_max_window_bits: u8 = 15,
-    message_buffer: std.ArrayList(u8) = .empty,
     compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
 
@@ -2583,7 +2425,6 @@ pub const H2Connection = struct {
     pub fn close(self: *H2Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
-        self.message_buffer.deinit(self.allocator);
         self.compression_send.deinit(self.allocator);
         self.compression_receive.deinit(self.allocator);
         self.* = undefined;
@@ -3073,14 +2914,13 @@ pub const H2Connection = struct {
     /// Receive one complete message into caller-owned storage.
     ///
     /// HTTP/2 tunnel chunks may split WebSocket frame headers or payloads. This
-    /// adapter reuses connection-owned frame/message scratch and avoids a
-    /// separate owned final message; compressed output lands directly in
-    /// `out`.
+    /// adapter decodes uncompressed fragments directly into `out`; compressed
+    /// input uses only the reusable codec scratch before inflating into `out`.
     pub fn receiveMessageInto(
         self: *H2Connection,
         out: []u8,
     ) Error!Message {
-        return self.receiveMessageIntoInternal(out, null);
+        return receiveMessageIntoConnection(self, out, null);
     }
 
     /// RFC 8441 caller-buffer receive under one absolute deadline. HTTP/2
@@ -3090,86 +2930,7 @@ pub const H2Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Message {
-        return self.receiveMessageIntoInternal(out, deadline);
-    }
-
-    fn receiveMessageIntoInternal(
-        self: *H2Connection,
-        out: []u8,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Message {
-        errdefer |err| closeAfterReceiveError(self, err);
-        if (out.len < self.limits.max_message_bytes) {
-            return error.BufferTooShort;
-        }
-        try self.message_buffer.ensureTotalCapacityPrecise(
-            self.allocator,
-            self.limits.max_message_bytes,
-        );
-        self.message_buffer.clearRetainingCapacity();
-
-        var opcode: ?websocket.Opcode = null;
-        var compressed = false;
-        while (true) {
-            var frame = try self.receiveFrameAutoInternal(deadline);
-            defer frame.deinit(self.allocator);
-            switch (frame.header.opcode) {
-                .ping, .pong => continue,
-                .close => return error.ConnectionClosed,
-                .text, .binary => {
-                    if (opcode != null) return error.InvalidFrame;
-                    opcode = frame.header.opcode;
-                    compressed = frame.header.rsv1;
-                },
-                .continuation => {
-                    if (opcode == null) return error.InvalidFrame;
-                },
-                _ => return error.InvalidFrame,
-            }
-            const next_len = std.math.add(
-                usize,
-                self.message_buffer.items.len,
-                frame.payload.len,
-            ) catch return error.PayloadTooLarge;
-            if (next_len > self.limits.max_message_bytes) {
-                return error.PayloadTooLarge;
-            }
-            try self.message_buffer.appendSlice(
-                self.allocator,
-                frame.payload,
-            );
-            if (!frame.header.fin) continue;
-
-            const message_opcode = opcode orelse return error.InvalidFrame;
-            const payload = if (compressed) blk: {
-                try self.ensureCompressionReceiveScratch();
-                const compressed_len = self.message_buffer.items.len;
-                @memcpy(
-                    self.compression_receive
-                        .payload.items[0..compressed_len],
-                    self.message_buffer.items,
-                );
-                break :blk try websocket.decompressMessageInto(
-                    out[0..self.limits.max_message_bytes],
-                    self.compression_receive
-                        .payload.items[0..compressed_len],
-                    self.compression_receive.payload.allocatedSlice(),
-                    self.compression_receive.flate_window.?,
-                );
-            } else blk: {
-                @memcpy(
-                    out[0..self.message_buffer.items.len],
-                    self.message_buffer.items,
-                );
-                break :blk out[0..self.message_buffer.items.len];
-            };
-            if (message_opcode == .text and
-                !std.unicode.utf8ValidateSlice(payload))
-            {
-                return error.InvalidUtf8;
-            }
-            return .{ .opcode = message_opcode, .payload = payload };
-        }
+        return receiveMessageIntoConnection(self, out, deadline);
     }
 
     fn ensureCompressionReceiveScratch(self: *H2Connection) Error!void {
@@ -3725,6 +3486,171 @@ fn canSendOpcode(opcode: websocket.Opcode, close_sent: bool, close_received: boo
     if (close_sent) return false;
     if (close_received and opcode != .close) return false;
     return true;
+}
+
+/// Assemble a message directly into caller storage for either stream-backed
+/// WebSocket transport. Both connection types expose the same buffering and
+/// frame-writing contract; keeping the state machine here prevents the HTTP/2
+/// adapter from regressing to per-frame ownership and a second whole-message
+/// buffer.
+fn receiveMessageIntoConnection(
+    connection: anytype,
+    out: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!Message {
+    errdefer |err| closeAfterReceiveError(connection, err);
+    if (out.len < connection.limits.max_message_bytes) {
+        return error.BufferTooShort;
+    }
+
+    var opcode: ?websocket.Opcode = null;
+    var compressed: ?bool = null;
+    var written: usize = 0;
+    var control_storage: [125]u8 = undefined;
+    while (true) {
+        const frame_out = if (compressed == true)
+            connection.compression_receive.payload.items[written..]
+        else
+            out[written..];
+        const frame = try receiveFrameIntoConnection(
+            connection,
+            frame_out,
+            &control_storage,
+            deadline,
+        );
+        switch (frame.header.opcode) {
+            .ping => {
+                if (!connection.close_sent) {
+                    try connection.sendPong(frame.payload);
+                }
+                continue;
+            },
+            .pong => continue,
+            .close => {
+                connection.close_received = true;
+                if (!connection.close_sent) {
+                    try connection.sendFrame(.close, frame.payload);
+                }
+                return error.ConnectionClosed;
+            },
+            .text, .binary => {
+                if (opcode != null) return error.InvalidFrame;
+                opcode = frame.header.opcode;
+                compressed = frame.header.rsv1;
+                if (compressed.? and !connection.permessage_deflate) {
+                    return error.UnexpectedRsv;
+                }
+                if (compressed.?) {
+                    try connection.ensureCompressionReceiveScratch();
+                }
+                // The first frame is decoded before its RSV1 bit selects
+                // compressed scratch, so copy it exactly once. Continuations
+                // then decode directly into retained compressed storage.
+                if (compressed.? and frame.payload.len != 0) {
+                    @memcpy(
+                        connection.compression_receive
+                            .payload.items[0..frame.payload.len],
+                        frame.payload,
+                    );
+                }
+            },
+            .continuation => {
+                if (opcode == null) return error.InvalidFrame;
+                if (frame.header.rsv1) return error.UnexpectedRsv;
+            },
+            else => return error.InvalidFrame,
+        }
+        written = std.math.add(
+            usize,
+            written,
+            frame.payload.len,
+        ) catch return error.PayloadTooLarge;
+        if (written > connection.limits.max_message_bytes) {
+            return error.PayloadTooLarge;
+        }
+        if (!frame.header.fin) continue;
+
+        const message_opcode = opcode orelse return error.InvalidFrame;
+        const payload = if (compressed == true)
+            try websocket.decompressMessageInto(
+                out[0..connection.limits.max_message_bytes],
+                connection.compression_receive.payload.items[0..written],
+                connection.compression_receive.payload.allocatedSlice(),
+                connection.compression_receive.flate_window.?,
+            )
+        else
+            out[0..written];
+        if (message_opcode == .text and
+            !std.unicode.utf8ValidateSlice(payload))
+        {
+            return error.InvalidUtf8;
+        }
+        return .{ .opcode = message_opcode, .payload = payload };
+    }
+}
+
+fn receiveFrameIntoConnection(
+    connection: anytype,
+    out: []u8,
+    control_out: *[125]u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!websocket.BorrowedFrame {
+    if (connection.close_sent and connection.close_received) {
+        return error.ConnectionClosed;
+    }
+    try connection.ensureBufferedWithDeadline(2, deadline);
+    const second = connection.inbuf.items[1];
+    var header_len: usize = 2;
+    const len_code = second & 0x7f;
+    if (len_code == 126) {
+        header_len += 2;
+    } else if (len_code == 127) {
+        header_len += 8;
+    }
+    if ((second & 0x80) != 0) header_len += 4;
+    try connection.ensureBufferedWithDeadline(header_len, deadline);
+
+    const header = try websocket.FrameHeader.parse(connection.inbuf.items);
+    const payload_len = std.math.cast(
+        usize,
+        header.payload_len,
+    ) orelse return error.PayloadTooLarge;
+    if (payload_len > connection.limits.max_frame_bytes) {
+        return error.MessageTooLarge;
+    }
+    const payload_out = if (header.opcode.isControl())
+        control_out[0..]
+    else
+        out;
+    if (payload_len > payload_out.len) return error.PayloadTooLarge;
+    const total_len = std.math.add(
+        usize,
+        header.header_len,
+        payload_len,
+    ) catch return error.PayloadTooLarge;
+    try ensureIncomingFrameBuffered(connection, header, total_len, deadline);
+    const parse_options: websocket.ParseFrameOptions = switch (connection.role) {
+        .client => .{
+            .expect_mask = .unmasked,
+            .allow_rsv1 = connection.permessage_deflate,
+            .validate_utf8 = false,
+        },
+        .server => .{
+            .expect_mask = .masked,
+            .allow_rsv1 = connection.permessage_deflate,
+            .validate_utf8 = false,
+        },
+    };
+    const frame = try websocket.parseFrameInto(
+        payload_out,
+        connection.inbuf.items[0..total_len],
+        parse_options,
+    );
+    connection.discardBuffered(frame.consumed);
+    if (connection.close_received and frame.header.opcode != .close) {
+        return error.ConnectionClosed;
+    }
+    return frame;
 }
 
 fn closeAfterReceiveError(connection: anytype, err: anyerror) void {

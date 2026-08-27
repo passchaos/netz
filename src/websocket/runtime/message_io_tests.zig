@@ -6,6 +6,7 @@ const compression_scratch = @import("compression_scratch.zig");
 const Server = runtime.Server;
 const Client = runtime.Client;
 const Connection = runtime.Connection;
+const H2Connection = runtime.H2Connection;
 
 test "WebSocket receiveMessageInto assembles fragments in caller storage" {
     const allocator = std.testing.allocator;
@@ -966,6 +967,110 @@ test "WebSocket receiveMessageInto buffered fast path does not allocate" {
     var storage: [32]u8 = undefined;
     const message = try connection.receiveMessageInto(&storage);
     try std.testing.expectEqualStrings("allocation-free", message.payload);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "WebSocket HTTP2 caller-buffer receive reuses compression scratch" {
+    const allocator = std.testing.allocator;
+    const payload = "h2 caller-buffer compressed message " ** 8;
+    const compressed = try websocket.compressMessage(allocator, payload);
+    defer allocator.free(compressed);
+    const split = compressed.len / 2;
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (0..2) |_| {
+        try websocket.writeFrameExtended(
+            &encoded,
+            allocator,
+            .binary,
+            compressed[0..split],
+            .{ .fin = false, .rsv1 = true },
+        );
+        try websocket.writeFrameExtended(
+            &encoded,
+            allocator,
+            .continuation,
+            compressed[split..],
+            .{},
+        );
+    }
+
+    var connection = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .permessage_deflate = true,
+        .limits = .{
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    };
+    defer connection.close();
+    try connection.inbuf.appendSlice(allocator, encoded.items);
+
+    var storage: [payload.len]u8 = undefined;
+    const first = try connection.receiveMessageInto(&storage);
+    try std.testing.expectEqualStrings(payload, first.payload);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    connection.allocator = failing.allocator();
+    defer connection.allocator = allocator;
+    failing.fail_index = failing.alloc_index;
+    const second = try connection.receiveMessageInto(&storage);
+    try std.testing.expectEqualStrings(payload, second.payload);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "WebSocket HTTP2 caller-buffer receive needs no message scratch" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try websocket.writeFrameExtended(
+        &encoded,
+        allocator,
+        .text,
+        "direct ",
+        .{ .fin = false },
+    );
+    try websocket.writeFrameExtended(
+        &encoded,
+        allocator,
+        .ping,
+        "",
+        .{},
+    );
+    try websocket.writeFrameExtended(
+        &encoded,
+        allocator,
+        .continuation,
+        "caller buffer",
+        .{},
+    );
+
+    var connection = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+        // Suppress automatic Pong because this buffer-only test has no live
+        // tunnel. The receive state machine must still skip the control frame.
+        .close_sent = true,
+        .limits = .{
+            .max_frame_bytes = 32,
+            .max_message_bytes = 32,
+        },
+    };
+    defer connection.close();
+    try connection.inbuf.appendSlice(allocator, encoded.items);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    connection.allocator = failing.allocator();
+    defer connection.allocator = allocator;
+    failing.fail_index = failing.alloc_index;
+    var storage: [32]u8 = undefined;
+    const message = try connection.receiveMessageInto(&storage);
+    try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+    try std.testing.expectEqualStrings("direct caller buffer", message.payload);
     try std.testing.expect(!failing.has_induced_failure);
 }
 
