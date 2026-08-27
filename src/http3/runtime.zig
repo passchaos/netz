@@ -7248,10 +7248,10 @@ pub const HandshakeClient = struct {
             push_id,
         );
         try self.push_streams.observePeerCancellation(push_id);
-        try self.applyPendingPushCancellations();
-        if (self.push_aggregate.push_id == push_id) {
+        defer if (self.push_aggregate.push_id == push_id) {
             self.push_aggregate.deinit(self.allocator);
-        }
+        };
+        try self.applyPendingPushCancellations();
     }
 
     pub fn cancelRequest(
