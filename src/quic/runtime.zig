@@ -121,12 +121,60 @@ pub const Server = struct {
         return self.endpoint.receiveBytesHandlingVersionNegotiation(supported_versions);
     }
 
+    pub fn receiveBytesHandlingVersionNegotiationWithTimeout(
+        self: *Server,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.endpoint.receiveBytesHandlingVersionNegotiationWithTimeout(
+            supported_versions,
+            timeout,
+        );
+    }
+
+    pub fn receiveBytesHandlingVersionNegotiationWithDeadline(
+        self: *Server,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.endpoint.receiveBytesHandlingVersionNegotiationWithDeadline(
+            supported_versions,
+            deadline,
+        );
+    }
+
     pub fn receiveRoutedBytesHandlingVersionNegotiation(
         self: *Server,
         router: quic.connection_router.Router,
         supported_versions: []const u32,
     ) Error!RoutedBytes {
         return self.endpoint.receiveRoutedBytesHandlingVersionNegotiation(router, supported_versions);
+    }
+
+    pub fn receiveRoutedBytesHandlingVersionNegotiationWithTimeout(
+        self: *Server,
+        router: quic.connection_router.Router,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!RoutedBytes {
+        return self.endpoint.receiveRoutedBytesHandlingVersionNegotiationWithTimeout(
+            router,
+            supported_versions,
+            timeout,
+        );
+    }
+
+    pub fn receiveRoutedBytesHandlingVersionNegotiationWithDeadline(
+        self: *Server,
+        router: quic.connection_router.Router,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!RoutedBytes {
+        return self.endpoint.receiveRoutedBytesHandlingVersionNegotiationWithDeadline(
+            router,
+            supported_versions,
+            deadline,
+        );
     }
 
     pub fn sendFrames(self: *Server, to: net.IpAddress, frames: []const quic.Frame) Error!void {
@@ -1160,9 +1208,48 @@ pub const Endpoint = struct {
     /// through normal routing/packet processing. This mirrors mature QUIC
     /// endpoint loops that perform Version Negotiation before CID routing.
     pub fn receiveBytesHandlingVersionNegotiation(self: *Endpoint, supported_versions: []const u32) Error!OwnedBytes {
+        return self.receiveBytesHandlingVersionNegotiationUntil(
+            supported_versions,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveBytesHandlingVersionNegotiationWithTimeout(
+        self: *Endpoint,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.receiveBytesHandlingVersionNegotiationUntil(
+            supported_versions,
+            timeout.toDeadline(self.io),
+        );
+    }
+
+    pub fn receiveBytesHandlingVersionNegotiationWithDeadline(
+        self: *Endpoint,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.receiveBytesHandlingVersionNegotiationUntil(
+            supported_versions,
+            .{ .deadline = deadline },
+        );
+    }
+
+    fn receiveBytesHandlingVersionNegotiationUntil(
+        self: *Endpoint,
+        supported_versions: []const u32,
+        timeout: ?std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
         try validateSupportedVersions(supported_versions);
         while (true) {
-            var raw = try self.receiveBytes();
+            var raw = if (timeout) |bounded|
+                try self.receiveBytesTimeout(bounded)
+            else
+                try self.receiveBytes();
             errdefer raw.deinit(self.allocator);
             if (try self.sendVersionNegotiationIfUnsupported(raw.from, raw.bytes, supported_versions)) {
                 raw.deinit(self.allocator);
@@ -1188,6 +1275,46 @@ pub const Endpoint = struct {
         errdefer raw.deinit(self.allocator);
         const routed = (try router.routeDatagramFrom(raw.from, raw.bytes)) orelse return error.NoConnectionRoute;
         return .{ .datagram = raw, .route = routed.route, .destination_connection_id = routed.destination_connection_id };
+    }
+
+    pub fn receiveRoutedBytesHandlingVersionNegotiationWithTimeout(
+        self: *Endpoint,
+        router: quic.connection_router.Router,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!RoutedBytes {
+        var raw = try self.receiveBytesHandlingVersionNegotiationWithTimeout(
+            supported_versions,
+            timeout,
+        );
+        errdefer raw.deinit(self.allocator);
+        const routed = (try router.routeDatagramFrom(raw.from, raw.bytes)) orelse
+            return error.NoConnectionRoute;
+        return .{
+            .datagram = raw,
+            .route = routed.route,
+            .destination_connection_id = routed.destination_connection_id,
+        };
+    }
+
+    pub fn receiveRoutedBytesHandlingVersionNegotiationWithDeadline(
+        self: *Endpoint,
+        router: quic.connection_router.Router,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!RoutedBytes {
+        var raw = try self.receiveBytesHandlingVersionNegotiationWithDeadline(
+            supported_versions,
+            deadline,
+        );
+        errdefer raw.deinit(self.allocator);
+        const routed = (try router.routeDatagramFrom(raw.from, raw.bytes)) orelse
+            return error.NoConnectionRoute;
+        return .{
+            .datagram = raw,
+            .route = routed.route,
+            .destination_connection_id = routed.destination_connection_id,
+        };
     }
 
     pub fn receiveManyConcurrent(self: *Endpoint, count: usize) Error!OwnedDatagramBatch {
@@ -2065,6 +2192,80 @@ test "QUIC UDP endpoint sends Version Negotiation before returning next datagram
     var accepted = shared.received.?;
     defer accepted.deinit(allocator);
     try std.testing.expect(accepted.from.eql(&client.address()));
+    try std.testing.expectEqualSlices(u8, &supported, accepted.bytes);
+}
+
+test "QUIC Version Negotiation receive keeps one absolute deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+
+    const supported_versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+    };
+    const unsupported = [_]u8{
+        0xc0, 0xfa, 0xce, 0xb0, 0x0c,
+        3,    's',  'r',  'v',  3,
+        'c',  'l',  'i',  0,
+    };
+    try client.endpoint.sendBytes(server.address(), &unsupported);
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveBytesHandlingVersionNegotiationWithDeadline(
+            &supported_versions,
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    var response = try client.endpoint.receiveBytesTimeout(.{
+        .duration = .{ .raw = .fromSeconds(1), .clock = .awake },
+    });
+    defer response.deinit(allocator);
+    var parsed = try quic.parseVersionNegotiationPacket(
+        allocator,
+        response.bytes,
+    );
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u32,
+        &supported_versions,
+        parsed.versions,
+    );
+
+    const supported = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x03, 's',  'r',  'v',  0x03,
+        'c',  'l',  'i',  0x00,
+    };
+    try client.endpoint.sendBytes(server.address(), &supported);
+    var accepted = try server
+        .receiveBytesHandlingVersionNegotiationWithTimeout(
+        &supported_versions,
+        .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } },
+    );
+    defer accepted.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &supported, accepted.bytes);
 }
 

@@ -2342,6 +2342,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "versionNegotiationResponse"));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "sendVersionNegotiationIfUnsupported"));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesHandlingVersionNegotiation"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveBytesHandlingVersionNegotiationWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveBytesHandlingVersionNegotiationWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveRoutedBytesHandlingVersionNegotiationWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveRoutedBytesHandlingVersionNegotiationWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Server,
+        "receiveBytesHandlingVersionNegotiationWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Server,
+        "receiveRoutedBytesHandlingVersionNegotiationWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "sendManyBytes"));
     try std.testing.expect(@hasDecl(netz.quic, "RetryPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "writeRetryPacket"));
