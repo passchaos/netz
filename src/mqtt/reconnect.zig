@@ -1360,15 +1360,41 @@ pub const Client = struct {
         options: PollOptions,
     ) (Error || std.Io.Cancelable)!?ClientEvent {
         if (options.timeout.nanoseconds <= 0) return error.Timeout;
-        if (options.ping_response_timeout) |timeout| {
+        return self.pollUntil(
+            std.Io.Clock.awake.now(self.io).addDuration(options.timeout),
+            options.ping_response_timeout,
+            options.cancellation_check_interval,
+        );
+    }
+
+    /// Drive one ordered event until an absolute awake-clock deadline. Keep
+    /// Alive and shutdown polling may shorten socket waits but never renew the
+    /// caller's total budget.
+    pub fn pollWithDeadline(
+        self: *Client,
+        deadline: std.Io.Timestamp,
+        ping_response_timeout: ?std.Io.Duration,
+        cancellation_check_interval: std.Io.Duration,
+    ) (Error || std.Io.Cancelable)!?ClientEvent {
+        return self.pollUntil(
+            deadline,
+            ping_response_timeout,
+            cancellation_check_interval,
+        );
+    }
+
+    fn pollUntil(
+        self: *Client,
+        call_deadline: std.Io.Timestamp,
+        ping_response_timeout: ?std.Io.Duration,
+        cancellation_check_interval: std.Io.Duration,
+    ) (Error || std.Io.Cancelable)!?ClientEvent {
+        if (ping_response_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.Timeout;
         }
-        if (options.cancellation_check_interval.nanoseconds <= 0) {
+        if (cancellation_check_interval.nanoseconds <= 0) {
             return error.Timeout;
         }
-        const call_deadline = std.Io.Clock.awake.now(self.io).addDuration(
-            options.timeout,
-        );
 
         while (true) {
             if (self.shutdown.isSet()) return error.Canceled;
@@ -1393,7 +1419,8 @@ pub const Client = struct {
                         .fromSeconds(active.keep_alive_seconds),
                     );
                     self.ping_response_deadline = sent_at.addDuration(
-                        self.pingResponseTimeout(options),
+                        ping_response_timeout orelse
+                            .fromSeconds(active.keep_alive_seconds),
                     );
                     return .{ .pingreq = {} };
                 }
@@ -1405,11 +1432,11 @@ pub const Client = struct {
             const read_deadline = self.nextPollDeadline(
                 call_deadline,
                 now,
-                options.cancellation_check_interval,
+                cancellation_check_interval,
             );
-            const wait = now.durationTo(read_deadline);
-            var packet_event = self.connection().?.readClientPacketEventWithTimeout(
-                wait,
+            var packet_event = self.connection().?
+                .readClientPacketEventWithDeadline(
+                read_deadline.withClock(.awake),
             ) catch |err| {
                 if (err == error.Timeout) continue;
                 if (!retryableConnectError(err)) return err;

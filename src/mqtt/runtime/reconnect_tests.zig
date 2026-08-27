@@ -1272,6 +1272,74 @@ test "MQTT reconnect poll timeout preserves a fragmented TCP packet" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect poll accepts one caller-owned deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{ .protocol = .v5 }) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer accepted.deinit(self.server.allocator);
+            std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(120),
+                .awake,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "poll-deadline" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+    const deadline = std.Io.Clock.awake.now(io).addDuration(
+        .fromMilliseconds(30),
+    );
+    try std.testing.expect((try client.pollWithDeadline(
+        deadline,
+        null,
+        .fromMilliseconds(5),
+    )) == null);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect poll observes cancellation while idle" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -64,6 +64,87 @@ test "MQTT client PING timeout bounds a silent TCP broker" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT client PING absolute deadline preserves queued publish" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{});
+            defer accepted.deinit(self.server.allocator);
+            try accepted.connection.readPingReq();
+            try accepted.connection.publish(
+                "deadline/queued",
+                "preserved",
+                .{},
+            );
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(80),
+                .awake,
+            );
+            try accepted.connection.writePingResp();
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .client_id = "ping-absolute-deadline" },
+    );
+    defer client.close();
+    try std.testing.expectError(
+        error.Timeout,
+        client.pingWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(30), .clock = .awake },
+        )),
+    );
+    var publish = try client.readClientPacketEventWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer publish.deinit(allocator);
+    try std.testing.expect(publish == .publish);
+    try std.testing.expectEqualStrings(
+        "deadline/queued",
+        publish.publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "preserved",
+        publish.publish.publish.payload,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT client PING timeout covers the complete TCP response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -1260,6 +1260,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
+        "pollWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
         "pollWithOptions",
     ));
     try std.testing.expect(@hasDecl(
@@ -1666,6 +1670,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubAck"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "readConnectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "pingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "readClientPacketEventWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "readBrokerEvent",

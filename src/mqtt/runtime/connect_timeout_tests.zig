@@ -85,6 +85,50 @@ test "MQTT zero CONNECT timeout fails before reading" {
     );
 }
 
+test "MQTT absolute CONNECT deadline preserves partial packet" {
+    const allocator = std.testing.allocator;
+    const connect = try encodedConnect(allocator, "resume-connect");
+    defer allocator.free(connect);
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    var connection = runtime.Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, receiver),
+    };
+    defer connection.close();
+
+    try writeAll(io, sender, connect[0..3]);
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readConnectWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(20), .clock = .awake },
+        )),
+    );
+    try writeAll(io, sender, connect[3..]);
+    var decoded = try connection.readConnectWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "resume-connect",
+        decoded.connect.client_id,
+    );
+}
+
 test "MQTT CONNECT timeout is absolute across packet fragments" {
     const allocator = std.testing.allocator;
     const connect = try encodedConnect(allocator, "slow-connect");

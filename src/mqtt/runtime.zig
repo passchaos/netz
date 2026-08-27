@@ -1943,7 +1943,10 @@ pub const Connection = struct {
         return self.readConnectWithDeadline(deadline);
     }
 
-    fn readConnectWithDeadline(
+    /// Read CONNECT under a caller-owned absolute deadline. Partial fixed
+    /// headers, Remaining Length, and payload bytes remain transport-buffered
+    /// and can be resumed by a later receive attempt.
+    pub fn readConnectWithDeadline(
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedConnect {
@@ -2690,6 +2693,16 @@ pub const Connection = struct {
         return self.pingInternal(self.transport.deadlineFromNow(timeout));
     }
 
+    /// Send PINGREQ and wait for PINGRESP until a caller-owned absolute
+    /// deadline. Interleaved MQTT packets retain their original wire order.
+    pub fn pingWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        try self.ensurePingQueueAvailable();
+        return self.pingInternal(deadline);
+    }
+
     fn pingInternal(
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
@@ -3078,6 +3091,19 @@ pub const Connection = struct {
     ) Error!ClientPacketEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         const deadline = self.transport.deadlineFromNow(timeout);
+        const packet = if (self.popPendingPingPacket()) |pending|
+            pending
+        else
+            try self.readTransportPacketWithDeadline(deadline);
+        return self.finishClientPacketEvent(packet);
+    }
+
+    /// Absolute-deadline counterpart for event loops that share one budget
+    /// across MQTT operations. Already queued packets are returned first.
+    pub fn readClientPacketEventWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ClientPacketEvent {
         const packet = if (self.popPendingPingPacket()) |pending|
             pending
         else
@@ -3517,9 +3543,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
-        // Handshake callers have no pending PING traffic. Keeping this helper
-        // transport-only also prevents a future bounded wait from recycling a
-        // pre-existing queued packet under an unrelated deadline.
+        if (self.popPendingPingPacket()) |packet| return packet;
         return self.readTransportPacketWithDeadline(deadline);
     }
 
