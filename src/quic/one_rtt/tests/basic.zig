@@ -326,13 +326,62 @@ test "QUIC 1-RTT receive pumps discard late long-header packets" {
     try std.testing.expect(timed.frames[0] == .ping);
     try std.testing.expectEqual(@as(u64, 3), server.stats().packets_received);
 
+    try sender.sendBytes(receiver.address(), &.{0xc0});
+    try client.send(&.{.{ .ping = {} }});
+    var serviced_timed = try server.receivePacketServicingTimersTimeout(.{
+        .duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(100),
+        },
+    });
+    defer serviced_timed.deinit(allocator);
+    try std.testing.expect(serviced_timed.frames[0] == .ping);
+    try std.testing.expectEqual(@as(u64, 4), server.stats().packets_received);
+
     try sender.sendBytes(receiver.address(), &.{0xe0});
     try client.send(&.{.{ .ping = {} }});
     var batch = try server.receivePacketBatchServicingTimers();
     defer batch.deinit();
     try std.testing.expectEqual(@as(usize, 1), batch.packets.len);
     try std.testing.expect(batch.packets[0].frames[0] == .ping);
-    try std.testing.expectEqual(@as(u64, 4), server.stats().packets_received);
+    try std.testing.expectEqual(@as(u64, 5), server.stats().packets_received);
+}
+
+test "QUIC timer-servicing receive honors caller timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x91} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timed-local",
+        .peer_connection_id = "timed-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.servicePacketServicingTimersTimeout(.{ .duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(1),
+        } }),
+    );
 }
 
 test "QUIC 1-RTT batch send preflights storage and all packets" {
