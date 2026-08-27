@@ -869,6 +869,14 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClient,
         "receiveResponseWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveDetachedResponseProgressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveDetachedResponseProgressWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
@@ -2269,6 +2277,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
         "receiveRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receiveDetachedRequestProgressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receiveDetachedRequestProgressWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseWithPush"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));

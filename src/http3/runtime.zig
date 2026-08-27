@@ -4560,6 +4560,21 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    pub fn receiveDetachedRequestProgressWithTimeout(
+        self: *HandshakeServerSession,
+        detached_stream_id: u62,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDetachedRequestProgressWithDeadline(
+            detached_stream_id,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     pub fn receiveDetachedRequestProgressWithDeadline(
         self: *HandshakeServerSession,
         detached_stream_id: u62,
@@ -6707,6 +6722,21 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             detached_stream_id,
+        );
+    }
+
+    pub fn receiveDetachedResponseProgressWithTimeout(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDetachedResponseProgressWithDeadline(
+            detached_stream_id,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
         );
     }
 
@@ -24258,6 +24288,20 @@ test "HTTP/3 handshake client batches request DATA across streams" {
     }
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 detached progress timeout validates budget before state" {
+    var server: HandshakeServerSession = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveDetachedRequestProgressWithTimeout(0, .zero),
+    );
+
+    var client: HandshakeClient = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveDetachedResponseProgressWithTimeout(0, .zero),
+    );
 }
 
 test "HTTP/3 handshake runtime streams request and response DATA chunks" {
