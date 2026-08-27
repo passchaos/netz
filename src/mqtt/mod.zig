@@ -4261,6 +4261,7 @@ test {
     _ = @import("runtime/connect_timeout_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/reconnect_tests.zig");
+    _ = @import("reconnect/command_queue.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/information_preferences_tests.zig");
     _ = @import("tls_runtime_tests.zig");

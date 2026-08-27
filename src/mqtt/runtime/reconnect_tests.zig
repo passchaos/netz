@@ -1429,3 +1429,246 @@ test "MQTT reconnect serveUntil dispatches owned events and shuts down" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT queued reconnect loop serializes concurrent producers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const publish_count = 8;
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            for (0..publish_count) |_| {
+                var publish = try accepted.connection.readPublish();
+                defer publish.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "queued/publish",
+                    publish.publish.topic,
+                );
+                try accepted.connection.writePubAck(
+                    publish.publish.packet_id.?,
+                    0,
+                );
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "queued-loop" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var queue = try reconnect.CommandQueue.init(allocator, io, 2);
+    defer queue.deinit();
+
+    const Handler = struct {
+        io: std.Io,
+        shutdown: *std.Io.Event,
+        acknowledgements: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            _: *reconnect.Client,
+            event: *reconnect.ClientEvent,
+        ) !void {
+            switch (event.*) {
+                .connected => {},
+                .puback => {
+                    self.acknowledgements += 1;
+                    if (self.acknowledgements == publish_count) {
+                        self.shutdown.set(self.io);
+                    }
+                },
+                else => return error.UnexpectedPacket,
+            }
+        }
+    };
+    const Producer = struct {
+        queue: *reconnect.CommandQueue,
+        payload: []const u8,
+        packet_id: ?u16 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.packet_id = self.queue.publish(
+                "queued/publish",
+                self.payload,
+                .{ .qos = .at_least_once },
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var handler = Handler{ .io = io, .shutdown = &shutdown };
+    const Loop = struct {
+        client: *reconnect.Client,
+        queue: *reconnect.CommandQueue,
+        handler: *Handler,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.client.serveQueuedUntil(
+                self.queue,
+                Handler,
+                self.handler,
+                Handler.handle,
+                .{ .poll = .{ .timeout = .fromMilliseconds(50) } },
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var loop = Loop{
+        .client = &client,
+        .queue = &queue,
+        .handler = &handler,
+    };
+    const loop_thread = try std.Thread.spawn(.{}, Loop.run, .{&loop});
+
+    var producers: [publish_count]Producer = undefined;
+    var producer_threads: [publish_count]std.Thread = undefined;
+    for (&producers, 0..) |*producer, index| {
+        producer.* = .{
+            .queue = &queue,
+            .payload = if (index % 2 == 0) "even" else "odd",
+        };
+        producer_threads[index] = try std.Thread.spawn(
+            .{},
+            Producer.run,
+            .{producer},
+        );
+    }
+    for (&producer_threads) |*thread| thread.join();
+    loop_thread.join();
+    try std.testing.expect(loop.err == null);
+    for (producers) |producer| {
+        if (producer.err) |err| return err;
+        try std.testing.expect(producer.packet_id != null);
+    }
+    try std.testing.expectEqual(publish_count, handler.acknowledgements);
+
+    server_thread.join();
+    server_joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT managed queued run owns worker lifecycle" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try accepted.connection.writePubAck(
+                publish.publish.packet_id.?,
+                0,
+            );
+        }
+    };
+    const Handler = struct {
+        io: std.Io,
+        shutdown: *std.Io.Event,
+        fn handle(
+            self: *@This(),
+            _: *reconnect.Client,
+            event: *reconnect.ClientEvent,
+        ) !void {
+            if (event.* == .puback) self.shutdown.set(self.io);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "managed-queue" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler = Handler{ .io = io, .shutdown = &shutdown };
+    var run = try client.runQueued(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 1,
+            .serve = .{
+                .poll = .{ .timeout = .fromMilliseconds(50) },
+            },
+        },
+    );
+    const packet_id = try run.publish(
+        "managed/queue",
+        "payload",
+        .{ .qos = .at_least_once },
+    );
+    try std.testing.expect(packet_id != null);
+    if (run.deinit()) |err| return err;
+
+    server_thread.join();
+    server_joined = true;
+    if (shared.err) |err| return err;
+}

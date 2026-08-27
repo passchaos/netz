@@ -11,8 +11,12 @@ const mqtt = @import("mod.zig");
 const owned_properties = @import("owned_properties.zig");
 const runtime = @import("runtime.zig");
 const session = @import("session/mod.zig");
+const command_queue = @import("reconnect/command_queue.zig");
 
 const net = std.Io.net;
+
+pub const CommandQueue = command_queue.CommandQueue;
+pub const CommandQueueError = command_queue.Error;
 
 pub const Error = runtime.Error || session.Error || error{
     InvalidReconnectPolicy,
@@ -242,6 +246,67 @@ pub const PollOptions = struct {
     /// shared shutdown event. Short bounded reads preserve single ownership
     /// while making cancellation independent of the MQTT Keep Alive value.
     cancellation_check_interval: std.Io.Duration = .fromMilliseconds(100),
+};
+
+pub const QueuedServeOptions = struct {
+    poll: PollOptions,
+    /// Maximum socket wait before newly queued commands are observed.
+    command_poll_interval: std.Io.Duration = .fromMilliseconds(10),
+    /// Bound command work between socket reads so sustained producers cannot
+    /// starve inbound acknowledgements or Keep Alive traffic.
+    max_commands_per_tick: usize = 64,
+};
+
+pub const RunQueuedOptions = struct {
+    queue_capacity: usize = 16,
+    serve: QueuedServeOptions,
+};
+
+pub const QueuedRun = struct {
+    io: std.Io,
+    shutdown: *std.Io.Event,
+    queue: *CommandQueue,
+    worker: std.Thread,
+    result: *?anyerror,
+
+    pub fn publish(
+        self: *QueuedRun,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+    ) CommandQueueError!?u16 {
+        return self.queue.publish(topic, payload, options);
+    }
+
+    pub fn flushPending(self: *QueuedRun) CommandQueueError!void {
+        return self.queue.flushPending();
+    }
+
+    pub fn beginReauthentication(
+        self: *QueuedRun,
+        properties: []const mqtt.Property,
+    ) CommandQueueError!void {
+        return self.queue.beginReauthentication(properties);
+    }
+
+    pub fn stop(self: *QueuedRun) void {
+        self.shutdown.set(self.io);
+    }
+
+    /// Join the managed worker and release its command-channel resources. The
+    /// reconnect Client and shutdown Event must still be alive at this point.
+    /// Deinitialization requests shutdown, so joining an idle worker is safe.
+    pub fn deinit(self: *QueuedRun) ?anyerror {
+        self.stop();
+        self.worker.join();
+        const result = self.result.*;
+        const allocator = self.queue.allocator;
+        allocator.destroy(self.result);
+        self.queue.deinit();
+        allocator.destroy(self.queue);
+        self.* = undefined;
+        return result;
+    }
 };
 
 /// One observable transition from the reconnecting client's ordered event
@@ -858,10 +923,123 @@ pub const Client = struct {
         options: PollOptions,
     ) anyerror!void {
         while (!self.shutdown.isSet()) {
-            var event = (try self.pollWithOptions(options)) orelse continue;
+            var event = self.pollWithOptions(options) catch |err| {
+                if (err == error.Canceled and self.shutdown.isSet()) return;
+                return err;
+            } orelse continue;
             defer event.deinit(self.allocator);
             try handler(context, self, &event);
         }
+    }
+
+    /// Drive a bounded multi-producer command channel and inbound MQTT events
+    /// from one transport owner. Command execution errors are returned to the
+    /// submitting producer; only poll or event-handler failures stop the loop.
+    pub fn serveQueuedUntil(
+        self: *Client,
+        queue: *CommandQueue,
+        comptime Context: type,
+        context: *Context,
+        comptime handler: *const fn (
+            *Context,
+            *Client,
+            *ClientEvent,
+        ) anyerror!void,
+        options: QueuedServeOptions,
+    ) anyerror!void {
+        if (options.command_poll_interval.nanoseconds <= 0 or
+            options.max_commands_per_tick == 0)
+        {
+            return error.InvalidProperty;
+        }
+        defer queue.stop(error.CommandQueueClosed);
+        while (!self.shutdown.isSet()) {
+            // Establish transport ownership before accepting commands. This
+            // lets producers enqueue immediately after startup without racing
+            // a transient ConnectionUnavailable result.
+            if (self.connection_state == null) {
+                var event = self.pollWithOptions(options.poll) catch |err| {
+                    if (err == error.Canceled and self.shutdown.isSet()) return;
+                    return err;
+                } orelse continue;
+                defer event.deinit(self.allocator);
+                try handler(context, self, &event);
+                continue;
+            }
+            var handled: usize = 0;
+            while (handled < options.max_commands_per_tick) : (handled += 1) {
+                const command = queue.take() catch |err| switch (err) {
+                    error.CommandQueueClosed => return,
+                    else => return err,
+                } orelse break;
+                self.executeQueuedCommand(command);
+            }
+            var poll = options.poll;
+            poll.timeout = .fromNanoseconds(@min(
+                poll.timeout.nanoseconds,
+                options.command_poll_interval.nanoseconds,
+            ));
+            var event = self.pollWithOptions(poll) catch |err| {
+                if (err == error.Canceled and self.shutdown.isSet()) return;
+                return err;
+            } orelse continue;
+            defer event.deinit(self.allocator);
+            try handler(context, self, &event);
+        }
+    }
+
+    /// Spawn a managed OS thread that owns all MQTT transport access. The
+    /// returned handle may be shared by producers; signal the Client's
+    /// shutdown Event before `QueuedRun.deinit` when the handler does not stop
+    /// the loop itself.
+    pub fn runQueued(
+        self: *Client,
+        comptime Context: type,
+        context: *Context,
+        comptime handler: *const fn (
+            *Context,
+            *Client,
+            *ClientEvent,
+        ) anyerror!void,
+        options: RunQueuedOptions,
+    ) (std.mem.Allocator.Error || std.Thread.SpawnError)!QueuedRun {
+        const result = try self.allocator.create(?anyerror);
+        errdefer self.allocator.destroy(result);
+        result.* = null;
+        const queue = try self.allocator.create(CommandQueue);
+        errdefer self.allocator.destroy(queue);
+        queue.* = try CommandQueue.init(
+            self.allocator,
+            self.io,
+            options.queue_capacity,
+        );
+        errdefer queue.deinit();
+        const worker = try std.Thread.spawn(.{}, struct {
+            fn run(
+                client: *Client,
+                command_channel: *CommandQueue,
+                handler_context: *Context,
+                result_ptr: *?anyerror,
+                serve_options: QueuedServeOptions,
+            ) void {
+                client.serveQueuedUntil(
+                    command_channel,
+                    Context,
+                    handler_context,
+                    handler,
+                    serve_options,
+                ) catch |err| {
+                    result_ptr.* = err;
+                };
+            }
+        }.run, .{ self, queue, context, result, options.serve });
+        return .{
+            .io = self.io,
+            .shutdown = self.shutdown,
+            .queue = queue,
+            .worker = worker,
+            .result = result,
+        };
     }
 
     /// Initiate MQTT 5 re-authentication. Subsequent AUTH challenges and the
@@ -1099,6 +1277,39 @@ pub const Client = struct {
                 break :blk .{ .auth = owned };
             },
         };
+    }
+
+    fn executeQueuedCommand(
+        self: *Client,
+        command: *command_queue.Command,
+    ) void {
+        switch (command.operation) {
+            .publish => |publish_command| {
+                const packet_id = self.publish(
+                    publish_command.topic,
+                    publish_command.payload,
+                    publish_command.options,
+                ) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+                command.finishSuccess(self.io, packet_id);
+                return;
+            },
+            .flush_pending => {
+                self.flushPending() catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+            },
+            .begin_reauthentication => |properties| {
+                self.beginReauthentication(properties) catch |err| {
+                    command.finishFailure(self.io, err);
+                    return;
+                };
+            },
+        }
+        command.finishSuccess(self.io, null);
     }
 
     fn applyOutgoingAck(
