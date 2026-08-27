@@ -29,6 +29,7 @@ pub fn main(init: std.process.Init) !void {
             args[2],
         );
     }
+
     // Exercise the production response deadline against Hyper on every
     // aggregate, streaming, informational, Expect and tunnel handshake below.
     // The generous value is a liveness guard, not a latency assertion.
@@ -37,6 +38,7 @@ pub fn main(init: std.process.Init) !void {
         .response_head_timeout = .fromSeconds(5),
     };
     std.debug.print("response_head_timeout=5000ms\n", .{});
+
     var client = try connect(
         allocator,
         io,
@@ -416,6 +418,48 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "netz HTTP/1 client interoperated with Hyper generic Upgrade: transport={s} buffered_server_bytes=19 client_bytes=18 reply_bytes=19\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
+
+    var pool = try netz.http1.client_pool.Pool.init(
+        allocator,
+        io,
+        .{
+            .limits = limits,
+            .tls = .{
+                .ca_bundle = if (tls_enabled) .{
+                    .bundle = &ca_bundle,
+                    .lock = &ca_lock,
+                } else null,
+            },
+        },
+    );
+    defer pool.deinit();
+    const pool_scheme = if (tls_enabled) "https" else "http";
+    const pool_one_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-one?from=netz",
+        .{ pool_scheme, port },
+    );
+    defer allocator.free(pool_one_uri);
+    const pool_two_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://LOCALHOST:{d}/pool-two?from=netz",
+        .{ pool_scheme, port },
+    );
+    defer allocator.free(pool_two_uri);
+    var pool_one = try pool.requestUri(pool_one_uri, .{});
+    defer pool_one.deinit(allocator);
+    var pool_two = try pool.requestUri(pool_two_uri, .{});
+    defer pool_two.deinit(allocator);
+    if (!std.mem.eql(u8, pool_one.response.body, "pool-one") or
+        !std.mem.eql(u8, pool_two.response.body, "pool-two") or
+        pool.idleCount() != 1)
+    {
+        return error.InvalidPooledResponse;
+    }
+    std.debug.print(
+        "netz HTTP/1 pool reused Hyper connection: transport={s} requests=2 idle=1\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 }

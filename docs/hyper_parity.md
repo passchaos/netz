@@ -548,6 +548,13 @@ connection credit while a more urgent stream has no stream credit.
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
 | HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |
 | HTTP/1 chunked 1-MiB duplex | 284.04-286.06 us/op pinned | 414.64-417.45 us/op pinned |
+
+The Hyper process gate now also establishes a dedicated persistent connection
+for two URI-based requests through `http1.client_pool.Pool`, in both cleartext
+and certificate-verified TLS modes. Hyper counts exactly two requests on that
+single accepted socket, while netz verifies case-insensitive authority reuse
+and one idle pooled connection afterward. This is direct cross-process evidence
+for the pool rather than inference from the standalone persistent Client tests.
 | HTTP/2 consecutive empty | 9.55-9.96 us/op pinned | 12.51-12.54 us/op pinned |
 | HTTP/2 consecutive 10-byte POST | 10.09-10.38 us/op pinned, coalesced frame submission | 41.15-41.37 ms/op pinned, delayed-ACK cliff on this host |
 | HTTP/2 consecutive 100-KiB POST | 23.52-23.57 us/op pinned, streaming receive | 37.24-38.68 us/op pinned |

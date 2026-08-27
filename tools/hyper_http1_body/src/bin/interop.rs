@@ -58,7 +58,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
     let mut connections = Vec::new();
-    for connection_index in 0..7 {
+    for connection_index in 0..8 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let tls_acceptor = cert_path.as_ref().map(|cert| {
@@ -138,6 +138,20 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         .expect("Upgrade task completion")
                         .expect("Upgrade exchange");
                 }
+                7 => {
+                    let requests = Arc::new(AtomicUsize::new(0));
+                    let observed = requests.clone();
+                    server_http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(io),
+                            service_fn(move |request| {
+                                handle_pool_request(request, observed.clone())
+                            }),
+                        )
+                        .await
+                        .expect("serve netz pooled HTTP/1 requests");
+                    assert_eq!(requests.load(Ordering::SeqCst), 2);
+                }
                 _ => unreachable!(),
             }
         }));
@@ -145,7 +159,33 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, and Upgrade boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1");
+}
+
+async fn handle_pool_request(
+    request: Request<Incoming>,
+    requests: Arc<AtomicUsize>,
+) -> Result<Response<Body>, std::io::Error> {
+    let index = requests.fetch_add(1, Ordering::SeqCst);
+    let expected = if index == 0 {
+        "/pool-one?from=netz"
+    } else {
+        "/pool-two?from=netz"
+    };
+    if index >= 2
+        || request.method() != Method::GET
+        || request.uri().path_and_query().map(|value| value.as_str()) != Some(expected)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected netz pooled request",
+        ));
+    }
+    Ok(Response::new(body_with_trailers(
+        if index == 0 { b"pool-one" } else { b"pool-two" },
+        b"",
+        HeaderMap::new(),
+    )))
 }
 
 async fn serve_informational(mut stream: MaybeTls) -> Result<(), std::io::Error> {
