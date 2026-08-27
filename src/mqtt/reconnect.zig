@@ -32,12 +32,23 @@ pub const Backoff = enum {
     exponential,
 };
 
+pub const Jitter = enum {
+    none,
+    /// Uniformly choose a delay in [0, backoff]. This is the AWS-style full
+    /// jitter strategy and minimizes synchronized reconnect storms.
+    full,
+    /// Uniformly choose a delay in [backoff/2, backoff]. Equal jitter retains
+    /// a minimum cooldown while still spreading reconnect attempts.
+    equal,
+};
+
 /// Retry delays are bounded and saturating. `max_delay` may equal
 /// `initial_delay`, yielding a fixed delay independently of `backoff`.
 pub const ReconnectPolicy = struct {
     initial_delay: std.Io.Duration = .fromSeconds(1),
     max_delay: std.Io.Duration = .fromSeconds(30),
     backoff: Backoff = .exponential,
+    jitter: Jitter = .none,
     /// Zero means retry until cancellation, matching long-lived client loops.
     max_attempts: usize = 0,
 
@@ -70,6 +81,36 @@ pub const ReconnectPolicy = struct {
             },
         };
         return .fromNanoseconds(@min(scaled, self.max_delay.nanoseconds));
+    }
+
+    /// Apply the configured jitter using an explicit sample. Keeping this
+    /// calculation pure makes bounds and edge values deterministic in tests.
+    pub fn jitteredDelay(
+        self: ReconnectPolicy,
+        failed_attempts: usize,
+        random_sample: u64,
+    ) std.Io.Duration {
+        const base = self.delay(failed_attempts).nanoseconds;
+        if (base <= 0 or self.jitter == .none) {
+            return .fromNanoseconds(base);
+        }
+        const base_unsigned: u128 = @intCast(base);
+        const minimum: u128 = switch (self.jitter) {
+            .none => unreachable,
+            .full => 0,
+            .equal => base_unsigned / 2,
+        };
+        const width = base_unsigned - minimum;
+        // Multiplication-high maps every u64 sample into an inclusive bounded
+        // interval without modulo bias. `width + 1` is safe because durations
+        // are positive i96 values.
+        const offset: u128 = if (random_sample == std.math.maxInt(u64))
+            width
+        else
+            @intCast(
+                (@as(u192, random_sample) * @as(u192, width + 1)) >> 64,
+            );
+        return .fromNanoseconds(@intCast(minimum + offset));
     }
 };
 
@@ -439,7 +480,17 @@ pub const Client = struct {
                 {
                     return error.ConnectionUnavailable;
                 }
-                try self.waitBackoff(self.policy.delay(failed_attempts));
+                const retry_delay = if (self.policy.jitter == .none)
+                    self.policy.delay(failed_attempts)
+                else blk: {
+                    var random_bytes: [8]u8 = undefined;
+                    self.io.random(&random_bytes);
+                    break :blk self.policy.jitteredDelay(
+                        failed_attempts,
+                        std.mem.readInt(u64, &random_bytes, .little),
+                    );
+                };
+                try self.waitBackoff(retry_delay);
             }
 
             var attempt = self.connectAttempt() catch |err| {
@@ -1169,4 +1220,54 @@ test "MQTT reconnect policy bounds fixed linear and exponential delays" {
         .initial_delay = .fromMilliseconds(2),
         .max_delay = .fromMilliseconds(1),
     }).validate());
+}
+
+test "MQTT reconnect jitter remains inside policy bounds" {
+    const base = ReconnectPolicy{
+        .initial_delay = .fromMilliseconds(100),
+        .max_delay = .fromMilliseconds(800),
+        .jitter = .full,
+    };
+    try std.testing.expectEqual(
+        @as(i96, 0),
+        base.jitteredDelay(3, 0).nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(i96, 400_000_000),
+        base.jitteredDelay(3, std.math.maxInt(u64)).nanoseconds,
+    );
+
+    var equal = base;
+    equal.jitter = .equal;
+    try std.testing.expectEqual(
+        @as(i96, 200_000_000),
+        equal.jitteredDelay(3, 0).nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(i96, 400_000_000),
+        equal.jitteredDelay(3, std.math.maxInt(u64)).nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(i96, 0),
+        equal.jitteredDelay(0, std.math.maxInt(u64)).nanoseconds,
+    );
+
+    var none = base;
+    none.jitter = .none;
+    try std.testing.expectEqual(
+        @as(i96, 400_000_000),
+        none.jitteredDelay(3, 0).nanoseconds,
+    );
+
+    const huge_ns = std.math.maxInt(i96) - 1;
+    const huge = ReconnectPolicy{
+        .initial_delay = .fromNanoseconds(huge_ns),
+        .max_delay = .fromNanoseconds(huge_ns),
+        .backoff = .fixed,
+        .jitter = .full,
+    };
+    try std.testing.expectEqual(
+        huge_ns,
+        huge.jitteredDelay(1, std.math.maxInt(u64)).nanoseconds,
+    );
 }

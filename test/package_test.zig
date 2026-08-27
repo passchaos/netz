@@ -821,6 +821,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ReconnectPolicy"));
+    try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Jitter"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ClientEvent"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "PollOptions"));
     try std.testing.expect(@hasDecl(
