@@ -159,3 +159,38 @@ test "MQTT command queue supports zero-capacity rendezvous storage" {
     defer queue.deinit();
     try std.testing.expectEqual(@as(usize, 0), queue.queue.capacity());
 }
+
+test "MQTT command queue stop wakes a pending producer" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 0);
+    defer queue.deinit();
+
+    const Producer = struct {
+        io: std.Io,
+        queue: *CommandQueue,
+        started: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.started.set(self.io);
+            self.queue.flushPending() catch |err| {
+                self.err = err;
+                return;
+            };
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var producer = Producer{ .io = io, .queue = &queue };
+    const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
+    producer.started.waitUncancelable(io);
+    queue.stop(error.CommandQueueClosed);
+    thread.join();
+    try std.testing.expectEqual(
+        error.CommandQueueClosed,
+        producer.err.?,
+    );
+}

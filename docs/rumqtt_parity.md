@@ -1060,7 +1060,7 @@ The reconnect layer remains synchronous. Broad client-loop parity still
 requires a fully asynchronous fire-and-forget request/completion API. The
 single-owner bounded poll path, callback driver, managed background-thread
 wrapper, and bounded synchronous-completion command queue already support
-explicit client-initiated re-authentication and drives both directions of
+explicit client-initiated re-authentication and drive both directions of
 multi-step MQTT 5 re-authentication, idle
 keep-alive and automatic reconnect without competing socket readers. Current
 tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
