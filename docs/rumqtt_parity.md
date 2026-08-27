@@ -1087,12 +1087,12 @@ prompt cancellation during a thirty-second backoff, and multi-step live AUTH
 including callback-produced User Properties and missing-handler failure.
 Native TLS, cleartext WebSocket and authenticated WSS connector tests each
 establish two successive MQTT sessions through the same reconnect client.
-The high-volume asynchronous PUBLISH path offers both immediate bounded enqueue
-and `publishAsyncTimeout`: the latter waits for consumer capacity under one
-duration while retaining deep ownership, reports queue closure distinctly, and
-still reports socket/QoS completion through the original correlated callback.
-This covers both rumqttc-style `try_publish` and waiting send behavior without
-introducing another network reader.
+Every owned asynchronous producer operation offers both immediate bounded
+enqueue and a `*AsyncTimeout` form. The latter waits for consumer capacity
+under one duration while retaining deep ownership, reports queue closure
+distinctly, and still reports protocol completion through the original
+correlated callback. This covers both rumqttc-style `try_*` and waiting send
+behavior without introducing another network reader.
 
 The public `listener_namespace.Namespace` module defines Mosquitto-compatible
 mount points. It validates literal UTF-8 prefixes, enforces MQTT's u16 wire

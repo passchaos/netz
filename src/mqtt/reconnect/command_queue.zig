@@ -178,6 +178,40 @@ pub const CommandQueue = struct {
         options: runtime.SubscribeOptions,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.subscribeAsyncInternal(
+            subscriptions,
+            options,
+            completion,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn subscribeAsyncTimeout(
+        self: *CommandQueue,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.subscribeAsyncInternal(
+            subscriptions,
+            options,
+            completion,
+            timeout,
+        );
+    }
+
+    fn subscribeAsyncInternal(
+        self: *CommandQueue,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -208,7 +242,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
         return command_id;
     }
 
@@ -220,6 +254,40 @@ pub const CommandQueue = struct {
         options: runtime.UnsubscribeOptions,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.unsubscribeAsyncInternal(
+            filters,
+            options,
+            completion,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn unsubscribeAsyncTimeout(
+        self: *CommandQueue,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.unsubscribeAsyncInternal(
+            filters,
+            options,
+            completion,
+            timeout,
+        );
+    }
+
+    fn unsubscribeAsyncInternal(
+        self: *CommandQueue,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -247,7 +315,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
         return command_id;
     }
 
@@ -274,6 +342,40 @@ pub const CommandQueue = struct {
         properties: []const mqtt.Property,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.disconnectAsyncInternal(
+            reason_code,
+            properties,
+            completion,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn disconnectAsyncTimeout(
+        self: *CommandQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.disconnectAsyncInternal(
+            reason_code,
+            properties,
+            completion,
+            timeout,
+        );
+    }
+
+    fn disconnectAsyncInternal(
+        self: *CommandQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -299,7 +401,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
         return command_id;
     }
 
@@ -328,6 +430,44 @@ pub const CommandQueue = struct {
         options: runtime.AcknowledgeOptions,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.acknowledgeAsyncInternal(
+            packet_id,
+            qos,
+            options,
+            completion,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn acknowledgeAsyncTimeout(
+        self: *CommandQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acknowledgeAsyncInternal(
+            packet_id,
+            qos,
+            options,
+            completion,
+            timeout,
+        );
+    }
+
+    fn acknowledgeAsyncInternal(
+        self: *CommandQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -355,7 +495,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
         return command_id;
     }
 
@@ -369,6 +509,27 @@ pub const CommandQueue = struct {
         self: *CommandQueue,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.flushPendingAsyncInternal(completion, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn flushPendingAsyncTimeout(
+        self: *CommandQueue,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.flushPendingAsyncInternal(completion, timeout);
+    }
+
+    fn flushPendingAsyncInternal(
+        self: *CommandQueue,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -382,7 +543,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
         return command_id;
     }
 
@@ -405,6 +566,36 @@ pub const CommandQueue = struct {
         properties: []const mqtt.Property,
         completion: CompletionHandler,
     ) Error!u64 {
+        return self.beginReauthenticationAsyncInternal(
+            properties,
+            completion,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn beginReauthenticationAsyncTimeout(
+        self: *CommandQueue,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+        timeout: std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.beginReauthenticationAsyncInternal(
+            properties,
+            completion,
+            timeout,
+        );
+    }
+
+    fn beginReauthenticationAsyncInternal(
+        self: *CommandQueue,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+        enqueue_timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
         const command = try self.allocator.create(Command);
@@ -429,8 +620,19 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwned(command);
+        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
         return command_id;
+    }
+
+    fn enqueueOwnedMaybeTimeout(
+        self: *CommandQueue,
+        command: *Command,
+        timeout: ?std.Io.Duration,
+    ) EnqueueTimeoutError!void {
+        if (timeout) |duration| {
+            return self.enqueueOwnedTimeout(command, duration);
+        }
+        return self.enqueueOwned(command);
     }
 
     fn submit(self: *CommandQueue, command: *Command) Error!void {
@@ -1523,6 +1725,61 @@ test "MQTT async publish timeout releases an unqueued command" {
     first.finishFailure(io, error.CommandQueueClosed);
     try std.testing.expectEqual(@as(usize, 1), completion.calls);
     try std.testing.expectEqual(first_id, completion.ids[0]);
+}
+
+test "MQTT asynchronous command timeout variants reject expired waits" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var queue = try CommandQueue.init(
+        std.testing.allocator,
+        threaded.io(),
+        1,
+    );
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    const handler = completion.handler();
+
+    try std.testing.expectError(error.Timeout, queue.subscribeAsyncTimeout(
+        &.{.{ .topic_filter = "timed/+" }},
+        .{},
+        handler,
+        .zero,
+    ));
+    try std.testing.expectError(error.Timeout, queue.unsubscribeAsyncTimeout(
+        &.{"timed/+"},
+        .{},
+        handler,
+        .zero,
+    ));
+    try std.testing.expectError(error.Timeout, queue.disconnectAsyncTimeout(
+        0,
+        &.{},
+        handler,
+        .zero,
+    ));
+    try std.testing.expectError(error.Timeout, queue.acknowledgeAsyncTimeout(
+        1,
+        .at_least_once,
+        .{},
+        handler,
+        .zero,
+    ));
+    try std.testing.expectError(error.Timeout, queue.flushPendingAsyncTimeout(
+        handler,
+        .zero,
+    ));
+    try std.testing.expectError(
+        error.Timeout,
+        queue.beginReauthenticationAsyncTimeout(
+            &.{},
+            handler,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), completion.calls);
+    try std.testing.expectEqual(@as(usize, 0), queue.async_commands.load(
+        .acquire,
+    ));
 }
 
 test "MQTT async publish waits for bounded queue capacity" {
