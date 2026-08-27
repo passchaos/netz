@@ -580,6 +580,13 @@ non-incremental stream in one candidate scan rather than two. The priority-aware
 1.26–1.28 GiB/s across three CPU-0 runs; the immediately preceding two-scan
 sample was 8.03 ms/batch. HTTP/2 and HTTP/3 both carry replacement-order tests.
 
+HTTP/1 CONNECT and Upgrade tunnels now expose timeout and absolute-deadline
+reads across cleartext, standard-library TLS, and vail TLS transports. Bytes
+that the HTTP parser read past the switching response/request are returned
+before validating or arming the timeout, while later TLS record reads retain
+one absolute caller budget. A regression covers buffered upgrade bytes, a
+silent-peer timeout, and successful reuse of the same tunnel afterward.
+
 Netz exposes `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
 keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, and WINDOW_UPDATE readers

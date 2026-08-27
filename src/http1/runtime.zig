@@ -3260,6 +3260,31 @@ pub const Tunnel = struct {
         return self.transport().read(buffer);
     }
 
+    pub fn readWithTimeout(
+        self: *Tunnel,
+        buffer: []u8,
+        timeout: std.Io.Duration,
+    ) Error!usize {
+        if (self.inbuf.items.len != 0) return self.read(buffer);
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readWithDeadline(
+            buffer,
+            try self.transport().deadlineFromNow(timeout),
+        );
+    }
+
+    /// Read upgraded-protocol bytes without letting partial TLS records renew
+    /// the caller's absolute budget. Parser-read bytes are always drained
+    /// first and therefore do not require a live timeout backend.
+    pub fn readWithDeadline(
+        self: *Tunnel,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        if (self.inbuf.items.len != 0) return self.read(buffer);
+        return self.transport().readWithDeadline(buffer, deadline);
+    }
+
     /// Preserve post-handshake TLS control for server-side CONNECT/Upgrade
     /// tunnels after the HTTP parser relinquishes ownership of the stream.
     pub fn updateTrafficKeys(
@@ -5427,6 +5452,108 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
     if (shared.err) |err| return err;
 
     try std.testing.expectError(error.MalformedStartLine, client.openConnectTunnel("/not-authority", &.{}));
+}
+
+test "HTTP/1 tunnel deadline preserves buffered bytes and recovers after timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        io: std.Io,
+        buffered_read: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.buffered_read.set(self.io);
+                self.timed_out.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            var tunnel = try connection.acceptUpgrade(
+                request.request,
+                "netz-timeout",
+                &.{},
+            );
+
+            var buffer: [16]u8 = undefined;
+            const buffered = try tunnel.readWithTimeout(
+                &buffer,
+                .fromNanoseconds(0),
+            );
+            try std.testing.expectEqualStrings(
+                "buffered",
+                buffer[0..buffered],
+            );
+            self.buffered_read.set(self.io);
+
+            try std.testing.expectError(
+                error.Timeout,
+                tunnel.readWithTimeout(
+                    &buffer,
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.timed_out.set(self.io);
+
+            const resumed = try tunnel.readWithDeadline(
+                &buffer,
+                .fromNow(
+                    self.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                ),
+            );
+            try std.testing.expectEqualStrings(
+                "after-timeout",
+                buffer[0..resumed],
+            );
+        }
+    };
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    try writeAllToStream(
+        io,
+        client.stream,
+        "GET /upgrade HTTP/1.1\r\nHost: localhost\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Upgrade: netz-timeout\r\n\r\nbuffered",
+    );
+    var tunnel = try client.finishUpgrade("netz-timeout");
+    try shared.buffered_read.wait(io);
+    try shared.timed_out.wait(io);
+    try tunnel.write("after-timeout");
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {

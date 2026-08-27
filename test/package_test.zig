@@ -254,6 +254,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Tunnel,
+        "readWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
+        "readWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
         "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
