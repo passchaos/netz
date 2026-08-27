@@ -62,6 +62,7 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
 };
 pub const HandshakeAdmissionError = Error ||
     quic.endpoint_dispatcher.Error || std.Io.ConcurrentError;
+pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 const client_control_stream_id: u62 = 2;
 const client_qpack_encoder_stream_id: u62 = 6;
@@ -6078,19 +6079,73 @@ pub const HandshakeClient = struct {
         return self.receiveResponseWithInformational(stream_id, null);
     }
 
+    pub fn receiveResponseWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseWithInformationalUntil(
+            stream_id,
+            null,
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receiveResponseWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        return self.receiveResponseWithInformationalUntil(
+            stream_id,
+            null,
+            deadline,
+        );
+    }
+
     /// Aggregate a response while observing ordered, callback-scoped 1xx heads.
     pub fn receiveResponseWithInformational(
         self: *HandshakeClient,
         stream_id: u62,
         informational: ?http3.InformationalObserver,
     ) Error!OwnedHandshakeResponse {
+        return self.receiveResponseWithInformationalInternal(
+            stream_id,
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveResponseWithInformationalUntil(
+        self: *HandshakeClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        return self.receiveResponseWithInformationalInternal(
+            stream_id,
+            informational,
+            deadline,
+        );
+    }
+
+    fn receiveResponseWithInformationalInternal(
+        self: *HandshakeClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
         if (self.streaming_responses.find(stream_id) != null) {
             return error.UnexpectedStream;
         }
-        const assembled = receiveConnectionResponseStreamBytes(
+        const assembled = receiveConnectionResponseStreamBytesUntil(
             &self.established.connection,
             &self.receive_packets,
             stream_id,
@@ -6102,6 +6157,7 @@ pub const HandshakeClient = struct {
             &self.streaming_responses,
             &self.push_streams,
             &self.request_lifecycle,
+            deadline,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
@@ -6253,6 +6309,38 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        return self.receiveResponseEventInternal(stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveResponseEventWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        return self.receiveResponseEventInternal(stream_id, deadline);
+    }
+
+    pub fn receiveResponseEventWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseEventInternal(
+            stream_id,
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn receiveResponseEventInternal(
+        self: *HandshakeClient,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?StreamingEvent {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -6286,7 +6374,7 @@ pub const HandshakeClient = struct {
             try self.applyStreamingResponseEvent(stream_id, owned_event);
             return owned_event;
         }
-        try receiveConnectionResponsePacket(
+        try receiveConnectionResponsePacketUntil(
             &self.established.connection,
             &self.receive_packets,
             &self.control,
@@ -6297,6 +6385,7 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             null,
+            deadline,
         );
         if (self.response_streams.takeReset(stream_id)) |code| {
             try self.sendQpackFeedback();
@@ -6321,6 +6410,10 @@ pub const HandshakeClient = struct {
             return owned_event;
         }
         return null;
+    }
+
+    fn connectionIo(self: *const HandshakeClient) std.Io {
+        return self.established.connection.endpoint.io;
     }
 
     /// Copy currently available DATA bytes into caller-owned storage.
@@ -12944,6 +13037,39 @@ fn receiveConnectionResponseStreamBytes(
     push_streams: *PushStreamSet,
     request_lifecycle: *const ClientRequestLifecycle,
 ) Error!AssembledStream {
+    return receiveConnectionResponseStreamBytesUntil(
+        connection,
+        receive_packets,
+        expected_stream_id,
+        options,
+        control,
+        qpack_decode,
+        qpack_encode,
+        response_streams,
+        streaming_responses,
+        push_streams,
+        request_lifecycle,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn receiveConnectionResponseStreamBytesUntil(
+    connection: *quic.one_rtt.Connection,
+    receive_packets: *ConnectionPacketCursor,
+    expected_stream_id: u62,
+    options: HandshakeSessionOptions,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    response_streams: *ResponseStreamSet,
+    streaming_responses: *StreamingResponseSet,
+    push_streams: *PushStreamSet,
+    request_lifecycle: *const ClientRequestLifecycle,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!AssembledStream {
     if (response_streams.takeReset(expected_stream_id)) |code| {
         return if (code == http3.ApplicationErrorCode.request_rejected)
             error.RequestRejected
@@ -12957,7 +13083,7 @@ fn receiveConnectionResponseStreamBytes(
     )) |ready| return ready;
 
     while (true) {
-        try receiveConnectionResponsePacket(
+        try receiveConnectionResponsePacketUntil(
             connection,
             receive_packets,
             control,
@@ -12968,6 +13094,7 @@ fn receiveConnectionResponseStreamBytes(
             push_streams,
             request_lifecycle,
             null,
+            deadline,
         );
         if (response_streams.takeReset(expected_stream_id)) |code| {
             return if (code == http3.ApplicationErrorCode.request_rejected)
@@ -12997,6 +13124,37 @@ fn receiveConnectionResponsePacket(
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
 ) Error!void {
+    return receiveConnectionResponsePacketUntil(
+        connection,
+        receive_packets,
+        control,
+        qpack_decode,
+        qpack_encode,
+        response_streams,
+        streaming_responses,
+        push_streams,
+        request_lifecycle,
+        detached_stream_id,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn receiveConnectionResponsePacketUntil(
+    connection: *quic.one_rtt.Connection,
+    receive_packets: *ConnectionPacketCursor,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    response_streams: *ResponseStreamSet,
+    streaming_responses: ?*StreamingResponseSet,
+    push_streams: ?*PushStreamSet,
+    request_lifecycle: ?*const ClientRequestLifecycle,
+    detached_stream_id: ?u62,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
     var context: ConnectionResponseReceiveContext = .{
         .connection = connection,
         .control = control,
@@ -13008,11 +13166,20 @@ fn receiveConnectionResponsePacket(
         .request_lifecycle = request_lifecycle,
         .detached_stream_id = detached_stream_id,
     };
-    try receive_packets.visit(
-        connection,
-        &context,
-        visitConnectionResponsePacket,
-    );
+    if (deadline) |absolute| {
+        try receive_packets.visitWithDeadline(
+            connection,
+            absolute,
+            &context,
+            visitConnectionResponsePacket,
+        );
+    } else {
+        try receive_packets.visit(
+            connection,
+            &context,
+            visitConnectionResponsePacket,
+        );
+    }
 }
 
 const ConnectionResponseReceiveContext = struct {
@@ -22777,6 +22944,113 @@ test "HTTP/3 handshake client retains interleaved responses" {
             status,
         );
     }
+}
+
+test "HTTP/3 handshake client response deadline preserves progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const client_cid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c };
+    const server_cid = [_]u8{ 0x3d, 0x3e, 0x3f, 0x40 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x43} ** 32,
+            .x25519_secret_key = [_]u8{0x44} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.Io.sleep(
+                session.established.connection.endpoint.io,
+                .fromMilliseconds(80),
+                .awake,
+            );
+            try session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "after-timeout",
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x41} ** 32,
+            .x25519_secret_key = [_]u8{0x42} ** 32,
+        } },
+    );
+    defer client.deinit();
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/deadline",
+        .authority = "localhost",
+    });
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveResponseWithTimeout(
+            stream_id,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(stream_id));
+
+    var response = try client.receiveResponseWithTimeout(
+        stream_id,
+        .fromSeconds(1),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "after-timeout",
+        response.response.body,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
