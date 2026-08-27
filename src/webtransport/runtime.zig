@@ -2898,6 +2898,19 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Poll a queued DATAGRAM for this session without reading UDP.
+    pub fn pollDatagram(
+        self: *HandshakeClientSession,
+    ) Error!?OwnedHandshakeDatagram {
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return popHandshakeDatagramFromConnection(
+            &self.h3.established.connection,
+        );
+    }
+
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
@@ -3159,6 +3172,34 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
+    /// control/QPACK and unrelated responses progress while the detached
+    /// WebTransport CONNECT stream and associated streams remain available to
+    /// the session-specific pollers below.
+    pub fn processPacket(
+        self: *HandshakeClientSession,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        try self.h3.processDetachedResponsePacket(
+            self.session_id.value,
+            packet,
+        );
+    }
+
+    /// Poll already-buffered associated stream state without reading UDP.
+    pub fn pollStream(
+        self: *HandshakeClientSession,
+        out: []u8,
+    ) Error!?StreamRead {
+        if (out.len == 0) return error.BufferTooShort;
+        return incremental_stream.poll(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            out,
+        );
+    }
+
     /// Read the next stream data/control event without waiting for FIN.
     pub fn readStream(
         self: *HandshakeClientSession,
@@ -3282,10 +3323,20 @@ pub const HandshakeClientSession = struct {
     pub fn receiveSessionEvent(
         self: *HandshakeClientSession,
     ) Error!SessionEvent {
-        const event = self.control.receive(
+        return while (true) {
+            if (try self.pollSessionEvent()) |ready| break ready;
+            try self.receiveControlProgress();
+        };
+    }
+
+    /// Poll the detached CONNECT stream for DRAIN/CLOSE/reset state without
+    /// reading UDP. Terminal events perform the same FIN and associated-stream
+    /// cleanup as the blocking receive helpers.
+    pub fn pollSessionEvent(
+        self: *HandshakeClientSession,
+    ) Error!?SessionEvent {
+        const event = self.control.poll(
             &self.h3.established.connection,
-            self,
-            HandshakeClientSession.receiveControlProgress,
         ) catch |err| switch (err) {
             error.InvalidCapsule => {
                 try self.h3.established.connection.resetStream(
@@ -3296,20 +3347,7 @@ pub const HandshakeClientSession = struct {
             },
             else => return err,
         };
-        if (event == .closed or event == .reset) {
-            if (event == .closed and !self.control.local_close_sent) {
-                try self.h3.sendRequestBodyPaced(
-                    self.session_id.value,
-                    &.{},
-                    true,
-                );
-                self.control.local_close_sent = true;
-            }
-            try session_control.terminateStreams(
-                &self.h3.established.connection,
-                &self.streams,
-            );
-        }
+        if (event) |value| try self.finishPolledSessionEvent(value);
         return event;
     }
 
@@ -3322,55 +3360,26 @@ pub const HandshakeClientSession = struct {
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
         );
-        const event = self.control.receive(
-            &self.h3.established.connection,
-            .{ self, deadline },
-            receiveControlProgressWithDeadline,
-        ) catch |err| switch (err) {
-            error.InvalidCapsule => {
-                try self.h3.established.connection.resetStream(
-                    self.session_id.value,
-                    http3.ApplicationErrorCode.message_error,
-                );
-                return err;
-            },
-            else => return err,
+        return while (true) {
+            if (try self.pollSessionEvent()) |ready| break ready;
+            try self.receiveControlProgressWithDeadline(deadline);
         };
-        if (event == .closed or event == .reset) {
-            if (event == .closed and !self.control.local_close_sent) {
-                try self.h3.sendRequestBodyPaced(
-                    self.session_id.value,
-                    &.{},
-                    true,
-                );
-                self.control.local_close_sent = true;
-            }
-            try session_control.terminateStreams(
-                &self.h3.established.connection,
-                &self.streams,
-            );
-        }
-        return event;
     }
 
     pub fn receiveSessionEventWithDeadline(
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!SessionEvent {
-        const event = self.control.receive(
-            &self.h3.established.connection,
-            .{ self, deadline },
-            receiveControlProgressWithDeadline,
-        ) catch |err| switch (err) {
-            error.InvalidCapsule => {
-                try self.h3.established.connection.resetStream(
-                    self.session_id.value,
-                    http3.ApplicationErrorCode.message_error,
-                );
-                return err;
-            },
-            else => return err,
+        return while (true) {
+            if (try self.pollSessionEvent()) |ready| break ready;
+            try self.receiveControlProgressWithDeadline(deadline);
         };
+    }
+
+    fn finishPolledSessionEvent(
+        self: *HandshakeClientSession,
+        event: SessionEvent,
+    ) Error!void {
         if (event == .closed or event == .reset) {
             if (event == .closed and !self.control.local_close_sent) {
                 try self.h3.sendRequestBodyPaced(
@@ -3385,7 +3394,6 @@ pub const HandshakeClientSession = struct {
                 &self.streams,
             );
         }
-        return event;
     }
 
     fn receiveControlProgress(
@@ -4109,6 +4117,20 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.pollCompleteStream();
     }
 
+    pub fn processPacket(
+        self: *StatefulProtectedClientSession,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        return self.session.processPacket(packet);
+    }
+
+    pub fn pollStream(
+        self: *StatefulProtectedClientSession,
+        out: []u8,
+    ) Error!?StreamRead {
+        return self.session.pollStream(out);
+    }
+
     pub fn readStream(
         self: *StatefulProtectedClientSession,
         out: []u8,
@@ -4181,6 +4203,12 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.receiveDatagramWithDeadline(deadline);
     }
 
+    pub fn pollDatagram(
+        self: *StatefulProtectedClientSession,
+    ) Error!?OwnedHandshakeDatagram {
+        return self.session.pollDatagram();
+    }
+
     pub fn receiveManyDatagrams(
         self: *StatefulProtectedClientSession,
         count: usize,
@@ -4238,6 +4266,12 @@ pub const StatefulProtectedClientSession = struct {
         self: *StatefulProtectedClientSession,
     ) Error!SessionEvent {
         return self.session.receiveSessionEvent();
+    }
+
+    pub fn pollSessionEvent(
+        self: *StatefulProtectedClientSession,
+    ) Error!?SessionEvent {
+        return self.session.pollSessionEvent();
     }
 
     pub fn receiveSessionEventWithTimeout(

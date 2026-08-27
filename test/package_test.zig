@@ -885,6 +885,10 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClient,
         "receiveDetachedResponseProgressWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "processDetachedResponsePacket",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
@@ -3028,6 +3032,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
+        "processPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "pollStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "pollDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "pollSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
         "readStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -3081,6 +3101,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "pollCompleteStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "processPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "pollStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "pollDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "pollSessionEvent",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,

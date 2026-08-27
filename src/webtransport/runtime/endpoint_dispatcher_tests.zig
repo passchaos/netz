@@ -293,6 +293,227 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
     }
 }
 
+test "WebTransport client polls a dispatcher-injected packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = "wt-routed-client";
+    const server_cid = "wt-routed-server";
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe2} ** quic.protection.secret_len,
+    );
+    var transport_parameters = quic.practical_transport_parameters;
+    transport_parameters.max_datagram_frame_size = 1200;
+    const settings = webtransport.defaultSettings(.{});
+    const limits = http3.runtime.Limits{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 16,
+    } };
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits.quic,
+    );
+    defer server_endpoint.deinit();
+    var client_h3 = try http3.runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        limits,
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .local_transport_parameters = transport_parameters,
+            .peer_transport_parameters = transport_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    var client_h3_owned = true;
+    defer if (client_h3_owned) client_h3.deinit();
+    client_h3.control.settings.markSent(settings);
+    client_h3.control.settings.markReceived(settings);
+
+    const session_id = try client_h3.startRequest(.{
+        .method = "CONNECT",
+        .scheme = "https",
+        .authority = "localhost",
+        .path = "/routed",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "webtransport" },
+            http3.capsule.protocol_header,
+        },
+    }, null);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(session_id),
+        .client,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var session = runtime.HandshakeClientSession{
+        .h3 = client_h3,
+        .session_id = .init(session_id),
+        .response = .{
+            .status = 200,
+            .headers = try allocator.alloc(http3.Qpack.HeaderField, 0),
+            .content_length = null,
+            .body_allowed = true,
+            .consumed = 0,
+            .qpack_section_acknowledgments = 0,
+        },
+        .streams = streams,
+        .control = try session_control.Control.init(.init(session_id)),
+    };
+    client_h3_owned = false;
+    streams_owned = false;
+    defer session.deinit();
+
+    var server = try quic.one_rtt.Connection.init(&server_endpoint, .{
+        .peer = session.h3.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = server_cid,
+        .peer_connection_id = client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    var stream_header: std.ArrayList(u8) = .empty;
+    defer stream_header.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &stream_header,
+        allocator,
+        session.session_id,
+    );
+    var control_storage: [16]u8 = undefined;
+    const drain = try session_control.writeDrainInto(&control_storage);
+    var framed_control: [32]u8 = undefined;
+    const framed_control_len = try writeDataFrame(&framed_control, drain);
+    const frames = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = 3,
+            .data = stream_header.items,
+        } },
+        .{ .stream = .{
+            .stream_id = 3,
+            .offset = stream_header.items.len,
+            .data = "incremental",
+            .fin = true,
+        } },
+        .{ .stream = .{
+            .stream_id = 15,
+            .data = stream_header.items,
+        } },
+        .{ .stream = .{
+            .stream_id = 15,
+            .offset = stream_header.items.len,
+            .data = "complete",
+            .fin = true,
+        } },
+        .{ .stream = .{
+            .stream_id = session_id,
+            .data = framed_control[0..framed_control_len],
+        } },
+    };
+    try server.send(&frames);
+    try sendDatagram(&server, session.session_id, "client-datagram");
+
+    try std.testing.expect((try session.pollCompleteStream()) == null);
+    try std.testing.expect((try session.pollDatagram()) == null);
+    try std.testing.expect((try session.pollSessionEvent()) == null);
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        session.h3.endpoint,
+    );
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &session.h3.established.connection);
+
+    var saw_incremental_stream = false;
+    var saw_complete_stream = false;
+    var saw_datagram = false;
+    var saw_drain = false;
+    var stream_buffer: [32]u8 = undefined;
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    while (!saw_incremental_stream or !saw_complete_stream or
+        !saw_datagram or !saw_drain)
+    {
+        var event = try dispatcher.receive(&versions);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*routed| {
+                try std.testing.expectEqual(
+                    @as(usize, 1),
+                    routed.connection_handle,
+                );
+                try session.processPacket(&routed.packet);
+                try dispatcher.refreshConnectionTimer(1);
+
+                if (try session.pollStream(&stream_buffer)) |stream| {
+                    if (stream != .data) return error.TestUnexpectedResult;
+                    try std.testing.expectEqual(@as(u62, 3), stream.data.stream_id);
+                    try std.testing.expect(stream.data.fin);
+                    try std.testing.expectEqualStrings(
+                        "incremental",
+                        stream_buffer[0..stream.data.bytes],
+                    );
+                    saw_incremental_stream = true;
+                }
+                if (try session.pollCompleteStream()) |stream_value| {
+                    var stream = stream_value;
+                    defer stream.deinit();
+                    try std.testing.expectEqual(@as(u62, 15), stream.stream_id);
+                    try std.testing.expectEqual(
+                        webtransport.StreamDirection.unidirectional,
+                        stream.direction,
+                    );
+                    try std.testing.expect(!stream.locally_initiated);
+                    try std.testing.expect(stream.fin);
+                    try std.testing.expectEqualStrings(
+                        "complete",
+                        stream.payload,
+                    );
+                    saw_complete_stream = true;
+                }
+                if (try session.pollDatagram()) |datagram_value| {
+                    var datagram = datagram_value;
+                    defer datagram.deinit(allocator);
+                    try std.testing.expectEqualStrings(
+                        "client-datagram",
+                        datagram.datagram.payload,
+                    );
+                    saw_datagram = true;
+                }
+                if (try session.pollSessionEvent()) |control| {
+                    try std.testing.expect(control == .draining);
+                    saw_drain = true;
+                }
+            },
+            .consumed, .timer => {},
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+}
+
 test "WebTransport handshake admission polls routed CONNECT state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

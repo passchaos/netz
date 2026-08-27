@@ -6723,6 +6723,7 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             detached_stream_id,
         );
+        try self.flushResponsePacketFeedback();
     }
 
     pub fn receiveDetachedResponseProgressWithTimeout(
@@ -6765,6 +6766,49 @@ pub const HandshakeClient = struct {
             &context,
             visitConnectionResponsePacket,
         );
+        try self.flushResponsePacketFeedback();
+    }
+
+    /// Apply a dispatcher-owned packet while preserving bytes on one detached
+    /// Extended CONNECT stream for its WebTransport owner. The packet remains
+    /// caller-owned and this method never reads the UDP socket.
+    pub fn processDetachedResponsePacket(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        if (self.receive_packets.ack_pending) {
+            try self.established.connection.sendAck(0);
+            self.receive_packets.ack_pending = false;
+        }
+        _ = self.established.connection.sendAckForPacketIfNeeded(
+            packet.packet.packet_number,
+            packet.frames,
+        ) catch {
+            self.receive_packets.ack_pending = true;
+        };
+        var context: ConnectionResponseReceiveContext = .{
+            .connection = &self.established.connection,
+            .control = &self.control,
+            .qpack_decode = &self.qpack_decode,
+            .qpack_encode = &self.qpack_encode,
+            .response_streams = &self.response_streams,
+            .streaming_responses = &self.streaming_responses,
+            .push_streams = &self.push_streams,
+            .request_lifecycle = &self.request_lifecycle,
+            .detached_stream_id = detached_stream_id,
+        };
+        try visitConnectionResponsePacket(&context, packetView(packet.*));
+        try self.flushResponsePacketFeedback();
+    }
+
+    fn flushResponsePacketFeedback(self: *HandshakeClient) Error!void {
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback();
+        }
     }
 
     fn releaseStreamingResponseCapacity(self: *HandshakeClient) Error!void {
@@ -13631,6 +13675,18 @@ fn visitConnectionResponsePacket(
         {
             continue;
         }
+        if (detached_stream_id != null and
+            shouldPreserveDetachedStream(
+                connection,
+                frame.stream,
+                request_lifecycle,
+            ))
+        {
+            // QUIC has already retained these bytes. Classify WebTransport
+            // before the fixed-ID QPACK fallback so extension streams may use
+            // any legal peer-initiated unidirectional stream number.
+            continue;
+        }
         if (isPeerQpackStreamFrame(
             control.*,
             qpack_encode.decoder_stream,
@@ -14972,6 +15028,35 @@ fn messageStreamDisposition(stream_id: u64) Error!MessageStreamDisposition {
     // bidirectional stream is a connection-level H3_STREAM_CREATION_ERROR.
     if ((stream_id & 0x01) != 0) return error.StreamCreationError;
     return .request_response;
+}
+
+fn shouldPreserveDetachedStream(
+    connection: *quic.one_rtt.Connection,
+    stream: quic.StreamFrame,
+    request_lifecycle: ?*const ClientRequestLifecycle,
+) bool {
+    if ((stream.stream_id & 0x02) == 0) {
+        const stream_id: u62 = @intCast(stream.stream_id);
+        const lifecycle = request_lifecycle orelse return false;
+        // Server-initiated bidirectional streams and reverse directions of
+        // locally opened WebTransport streams are not HTTP/3 responses. A
+        // detached CONNECT is the only standard HTTP/3 context that permits
+        // them, so leave all non-request IDs in QUIC reassembly.
+        return !lifecycle.contains(stream_id) and
+            !lifecycle.isFinished(stream_id);
+    }
+    if (stream.offset == 0) {
+        return peekUniStreamType(stream) ==
+            .webtransport_unidirectional;
+    }
+    // Transport applies every frame before invoking the HTTP/3 visitor, so a
+    // contiguous offset-zero prefix can classify later ranges from the same
+    // packet without adding a second extension-stream registry here.
+    const available = connection.availableReceivedStream(stream.stream_id) orelse
+        return false;
+    const prefix = quic.varint.decodeSlice(available) catch return false;
+    return @as(http3.StreamType, @enumFromInt(prefix.value)) ==
+        .webtransport_unidirectional;
 }
 
 fn findMessageStreamFrame(frames: []const quic.Frame) Error!?quic.StreamFrame {
