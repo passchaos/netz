@@ -3679,6 +3679,79 @@ pub const Connection = struct {
         return self.pollStreamEntry(entry, out);
     }
 
+    pub fn receiveStream(self: *Connection, out: []u8) Error!StreamRead {
+        while (true) {
+            if (try self.pollStream(out)) |event| return event;
+            try self.servicePacketServicingTimers();
+        }
+    }
+
+    pub fn receiveStreamWithTimeout(
+        self: *Connection,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamWithDeadline(
+            out,
+            .fromNow(
+                self.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveStreamWithDeadline(
+        self: *Connection,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
+        while (true) {
+            if (try self.pollStream(out)) |event| return event;
+            try self.servicePacketServicingTimersDeadline(deadline);
+        }
+    }
+
+    pub fn receiveStreamId(
+        self: *Connection,
+        stream_id: u62,
+        out: []u8,
+    ) Error!StreamRead {
+        while (true) {
+            if (try self.pollStreamId(stream_id, out)) |event| return event;
+            try self.servicePacketServicingTimers();
+        }
+    }
+
+    pub fn receiveStreamIdWithTimeout(
+        self: *Connection,
+        stream_id: u62,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamIdWithDeadline(
+            stream_id,
+            out,
+            .fromNow(
+                self.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveStreamIdWithDeadline(
+        self: *Connection,
+        stream_id: u62,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
+        while (true) {
+            if (try self.pollStreamId(stream_id, out)) |event| return event;
+            try self.servicePacketServicingTimersDeadline(deadline);
+        }
+    }
+
     fn pollStreamEntry(
         self: *Connection,
         entry: *StreamRecvFlowEntry,

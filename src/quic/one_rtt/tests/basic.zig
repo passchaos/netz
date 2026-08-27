@@ -1208,6 +1208,14 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     try std.testing.expectError(error.BufferTooShort, server.pollStream(&empty));
     var out: [4]u8 = undefined;
     try std.testing.expect((try server.pollStream(&out)) == null);
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveStreamWithTimeout(&out, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveStreamIdWithTimeout(0, &out, .zero),
+    );
 
     try client.send(&.{.{ .stream = .{
         .stream_id = 0,
@@ -1278,6 +1286,28 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     try std.testing.expectEqual(@as(u62, 12), targeted.data.stream_id);
     try std.testing.expectEqualStrings("aa", out[0..targeted.data.bytes]);
     try std.testing.expect((try server.pollStreamId(999, &out)) == null);
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 20,
+        .data = "bounded",
+        .fin = true,
+    } }});
+    const bounded = try server.receiveStreamIdWithDeadline(
+        20,
+        &out,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expect(bounded == .data);
+    try std.testing.expectEqual(@as(u62, 20), bounded.data.stream_id);
+    try std.testing.expectEqualStrings("boun", out[0..bounded.data.bytes]);
+    const bounded_final = try server.receiveStreamIdWithTimeout(
+        20,
+        &out,
+        .fromSeconds(1),
+    );
+    try std.testing.expect(bounded_final == .data);
+    try std.testing.expect(bounded_final.data.fin);
+    try std.testing.expectEqualStrings("ded", out[0..bounded_final.data.bytes]);
 }
 
 test "QUIC 1-RTT stats include datagram queue drops" {

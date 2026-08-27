@@ -2543,6 +2543,30 @@ test "public modules are reachable" {
         netz.quic.one_rtt.Connection,
         "pollStreamId",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receiveStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receiveStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receiveStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receiveStreamId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receiveStreamIdWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receiveStreamIdWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamStopped"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendHandshakeDone"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendNewToken"));
