@@ -16,6 +16,9 @@ pub const Error = runtime.Error || error{
 pub const Options = struct {
     max_idle_connections: usize = 32,
     max_idle_per_authority: usize = 8,
+    /// Retire connections idle for at least this monotonic duration. Null
+    /// disables age-based eviction.
+    idle_timeout: ?std.Io.Duration = .fromSeconds(90),
     limits: runtime.Limits = .{},
     tls: runtime.TlsClientOptions = .{},
 };
@@ -28,6 +31,7 @@ const Slot = struct {
     authority: []u8,
     tls_host: []u8,
     last_used: u64,
+    idle_since_ns: i96,
 
     fn deinit(self: *Slot, allocator: std.mem.Allocator) void {
         self.client.close();
@@ -54,21 +58,28 @@ pub const Pool = struct {
         if (options.max_idle_per_authority > options.max_idle_connections) {
             return error.InvalidPoolOptions;
         }
+        if (options.idle_timeout) |timeout| {
+            if (timeout.nanoseconds <= 0) return error.InvalidPoolOptions;
+        }
         return .{ .allocator = allocator, .io = io, .options = options };
     }
 
     pub fn deinit(self: *Pool) void {
         // All leases must be returned first; a Lease retains a pointer to this
         // object so destroying it concurrently would violate ownership.
+        self.close();
+        self.idle.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// Reject new acquisitions and close all currently idle connections.
+    /// Outstanding leases remain valid and are closed when returned.
+    pub fn close(self: *Pool) void {
         self.mutex.lockUncancelable(self.io);
         self.closed = true;
-        const idle = self.idle;
-        self.idle = .empty;
+        for (self.idle.items) |*slot| slot.deinit(self.allocator);
+        self.idle.clearRetainingCapacity();
         self.mutex.unlock(self.io);
-        for (idle.items) |*slot| slot.deinit(self.allocator);
-        var mutable = idle;
-        mutable.deinit(self.allocator);
-        self.* = undefined;
     }
 
     pub fn requestUri(
@@ -133,7 +144,16 @@ pub const Pool = struct {
     pub fn idleCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
         return self.idle.items.len;
+    }
+
+    pub fn pruneExpired(self: *Pool) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const before = self.idle.items.len;
+        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        return before - self.idle.items.len;
     }
 
     fn acquire(
@@ -146,6 +166,7 @@ pub const Pool = struct {
             self.mutex.unlock(self.io);
             return error.PoolClosed;
         }
+        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
         var index = self.idle.items.len;
         while (index != 0) {
             index -= 1;
@@ -218,6 +239,7 @@ pub const Pool = struct {
             .authority = authority,
             .tls_host = tls_host,
             .last_used = 0,
+            .idle_since_ns = 0,
         } };
     }
 
@@ -247,6 +269,7 @@ pub const Pool = struct {
         }
         self.sequence +%= 1;
         slot.last_used = self.sequence;
+        slot.idle_since_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (self.idle.items.len >= self.options.max_idle_connections) {
             var oldest_index: usize = 0;
             for (self.idle.items[1..], 1..) |idle, index| {
@@ -260,6 +283,21 @@ pub const Pool = struct {
         self.idle.append(self.allocator, slot) catch {
             slot.deinit(self.allocator);
         };
+    }
+
+    fn pruneExpiredLocked(self: *Pool, now_ns: i96) void {
+        const timeout = self.options.idle_timeout orelse return;
+        var index: usize = self.idle.items.len;
+        while (index != 0) {
+            index -= 1;
+            if (now_ns - self.idle.items[index].idle_since_ns <
+                timeout.nanoseconds)
+            {
+                continue;
+            }
+            var expired = self.idle.swapRemove(index);
+            expired.deinit(self.allocator);
+        }
     }
 };
 

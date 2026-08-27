@@ -412,3 +412,153 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "HTTP/1 client pool expires idle connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(.{ .body = "idle" });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .idle_timeout = .fromMilliseconds(20),
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/idle");
+    defer allocator.free(uri);
+    var response = try pool.requestUri(uri, .{});
+    response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.Io.sleep(io, .fromMilliseconds(30), .awake);
+    try std.testing.expectEqual(@as(usize, 1), pool.pruneExpired());
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 client pool evicts least recently used authority" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var first_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer first_server.deinit();
+    var second_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer second_server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(.{ .body = "ok" });
+            // Give the pool time to evict and close the older idle socket.
+            var byte: [1]u8 = undefined;
+            const tcp = connection.stream;
+            var bufs = [_][]u8{&byte};
+            const count = try self.server.io.vtable.netRead(
+                self.server.io.userdata,
+                tcp.socket.handle,
+                &bufs,
+            );
+            try std.testing.expectEqual(@as(usize, 0), count);
+        }
+    };
+    const Once = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            var request = connection.readRequest(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit(self.server.allocator);
+            connection.writeResponse(.{ .body = "ok" }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var first_shared = Shared{ .server = &first_server };
+    var second_shared = Once{ .server = &second_server };
+    const first_thread = try std.Thread.spawn(.{}, Shared.run, .{&first_shared});
+    const second_thread = try std.Thread.spawn(.{}, Once.run, .{&second_shared});
+    var first_joined = false;
+    var second_joined = false;
+    defer if (!first_joined) first_thread.join();
+    defer if (!second_joined) second_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+        .idle_timeout = null,
+    });
+    defer pool.deinit();
+    const first_uri = try uriFor(allocator, first_server.address(), "/one");
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(allocator, second_server.address(), "/two");
+    defer allocator.free(second_uri);
+    var first = try pool.requestUri(first_uri, .{});
+    first.deinit(allocator);
+    var second = try pool.requestUri(second_uri, .{});
+    second.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+
+    first_thread.join();
+    first_joined = true;
+    second_thread.join();
+    second_joined = true;
+    if (first_shared.err) |err| return err;
+    if (second_shared.err) |err| return err;
+}
