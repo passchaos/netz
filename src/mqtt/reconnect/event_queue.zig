@@ -11,9 +11,12 @@ pub fn Queue(comptime Event: type) type {
         pub const OwnedEvent = struct {
             value: Event,
             allocator: std.mem.Allocator,
+            owner: *Self,
 
             pub fn deinit(self: *OwnedEvent) void {
                 self.value.deinit(self.allocator);
+                const previous = self.owner.outstanding.fetchSub(1, .release);
+                std.debug.assert(previous != 0);
                 self.* = undefined;
             }
         };
@@ -22,6 +25,7 @@ pub fn Queue(comptime Event: type) type {
         io: std.Io,
         storage: []OwnedEvent,
         queue: std.Io.Queue(OwnedEvent),
+        outstanding: std.atomic.Value(usize) = .init(0),
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -38,7 +42,8 @@ pub fn Queue(comptime Event: type) type {
         }
 
         /// Close the queue and destroy events that have not been received.
-        /// Events already returned to a consumer remain independently owned.
+        /// Every event already returned to a consumer must be deinitialized
+        /// first because it retains this queue for ownership accounting.
         pub fn deinit(self: *Self) void {
             self.close();
             while (true) {
@@ -51,6 +56,9 @@ pub fn Queue(comptime Event: type) type {
                 if (count == 0) break;
                 events[0].deinit();
             }
+            // Returned events retain this queue pointer for accounting and
+            // must be released before the queue's storage is destroyed.
+            std.debug.assert(self.outstanding.load(.acquire) == 0);
             self.allocator.free(self.storage);
             self.* = undefined;
         }
@@ -85,9 +93,15 @@ pub fn Queue(comptime Event: type) type {
             event: Event,
             event_allocator: std.mem.Allocator,
         ) Error!void {
+            _ = self.outstanding.fetchAdd(1, .monotonic);
+            errdefer {
+                const previous = self.outstanding.fetchSub(1, .release);
+                std.debug.assert(previous != 0);
+            }
             self.queue.putOne(self.io, .{
                 .value = event,
                 .allocator = event_allocator,
+                .owner = self,
             }) catch |err| switch (err) {
                 error.Closed => return error.EventQueueClosed,
                 error.Canceled => return error.Canceled,
@@ -159,10 +173,11 @@ test "MQTT event queue close wakes a blocked producer" {
                     },
                 },
                 .allocator = std.testing.allocator,
+                .owner = self.queue,
             };
             self.started.set(self.io);
             self.queue.send(event.value, event.allocator) catch |err| {
-                event.deinit();
+                event.value.deinit(event.allocator);
                 self.err = err;
                 return;
             };
