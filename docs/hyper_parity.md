@@ -718,14 +718,17 @@ keep-alive, cancellation and GOAWAY gate remains green.
    three runs; stable samples were 7.08-7.10 ms/batch and peak live memory
    remained about 1.29 MB. Push-promise ownership uses the same block-aware
    deinitializer, and tests cover both ordinary and pushed headers.
-   A matched CPU-0 run of the documented 10-stream/1-MiB/8-KiB-window, five-
-   warmup/twenty-iteration shape measured netz at 10.258 ms/batch and Hyper at
-   11.560 ms/batch. Netz used 5,164 allocation calls, 12,992,891 cumulative
-   allocated bytes and 1,309,495 peak live bytes; Hyper used 53,886 allocation
-   calls, 11,617 reallocations, 297,019,815 cumulative allocated bytes and
-   1,334,388 peak live bytes. Thus netz used 90.4% fewer allocation calls,
-   95.6% fewer cumulative requested bytes and 1.9% less peak live memory in
-   this exact workload. These process-wide counters include runtime setup and
+   Three matched CPU-0 runs of the documented 10-stream/1-MiB/8-KiB-window,
+   five-warmup/twenty-iteration shape were repeated on 2026-08-27. Netz took
+   7.433-7.458 ms/batch (7.448 ms median) versus Hyper's 10.096-10.126 ms
+   (10.122 ms median), a 1.36x median throughput advantage. Both sides verified
+   the identical 262,144,000-byte checksum. Netz used exactly 1,606 allocation
+   calls, 1,569,363 cumulative allocated bytes and 1,288,070 peak live bytes;
+   Hyper used 54,086-54,224 allocation calls, 11,664-11,760 reallocations,
+   298,232,879-299,587,537 cumulative allocated bytes and 1,346,882-1,346,885
+   peak live bytes. Against the median Hyper run, netz therefore used 97.0%
+   fewer allocation calls, 99.5% fewer cumulative requested bytes and 4.4%
+   less peak live memory. These process-wide counters include runtime setup and
    warmup in both implementations and are a matched workload result, not a
    universal allocator or RSS claim.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
