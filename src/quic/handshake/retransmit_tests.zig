@@ -261,7 +261,7 @@ test "handshake caller deadline bounds active retransmission budget" {
             Context.send,
         ),
     );
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).raw;
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
     try std.testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
     try std.testing.expect(context.calls >= 1);
 }
