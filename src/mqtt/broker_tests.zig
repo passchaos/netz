@@ -778,6 +778,11 @@ test "broker statistics form one coherent live and offline snapshot" {
 
     const empty = broker.stats();
     try std.testing.expectEqual(@as(usize, 0), empty.active_connections);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty.maximum_active_connections,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty.expired_sessions);
     try std.testing.expectEqual(@as(usize, 0), empty.sessions);
     try std.testing.expectEqual(@as(usize, 0), empty.subscriptions);
 
@@ -836,6 +841,11 @@ test "broker statistics form one coherent live and offline snapshot" {
 
     const live = broker.stats();
     try std.testing.expectEqual(@as(usize, 2), live.active_connections);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        live.maximum_active_connections,
+    );
+    try std.testing.expectEqual(@as(usize, 0), live.expired_sessions);
     try std.testing.expectEqual(@as(usize, 2), live.sessions);
     try std.testing.expectEqual(@as(usize, 2), live.connected_sessions);
     try std.testing.expectEqual(@as(usize, 0), live.disconnected_sessions);
@@ -860,6 +870,11 @@ test "broker statistics form one coherent live and offline snapshot" {
 
     const offline = broker.stats();
     try std.testing.expectEqual(@as(usize, 0), offline.active_connections);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        offline.maximum_active_connections,
+    );
+    try std.testing.expectEqual(@as(usize, 0), offline.expired_sessions);
     try std.testing.expectEqual(@as(usize, 1), offline.sessions);
     try std.testing.expectEqual(@as(usize, 0), offline.connected_sessions);
     try std.testing.expectEqual(@as(usize, 1), offline.disconnected_sessions);
@@ -908,7 +923,7 @@ test "broker publishes coherent retained system statistics" {
 
     try broker.publishSystemStats();
     var received: usize = 0;
-    while (received < 3) : (received += 1) {
+    while (received < 5) : (received += 1) {
         var publish = try subscriber.readPublish();
         defer publish.deinit(allocator);
         // Live subscribers follow normal MQTT routing semantics: retained
@@ -924,7 +939,19 @@ test "broker publishes coherent retained system statistics" {
         } else if (std.mem.eql(
             u8,
             publish.publish.topic,
+            "$SYS/broker/clients/maximum",
+        )) {
+            try std.testing.expectEqualStrings("1", publish.publish.payload);
+        } else if (std.mem.eql(
+            u8,
+            publish.publish.topic,
             "$SYS/broker/clients/disconnected",
+        )) {
+            try std.testing.expectEqualStrings("0", publish.publish.payload);
+        } else if (std.mem.eql(
+            u8,
+            publish.publish.topic,
+            "$SYS/broker/clients/expired",
         )) {
             try std.testing.expectEqualStrings("0", publish.publish.payload);
         } else if (std.mem.eql(

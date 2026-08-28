@@ -494,6 +494,8 @@ const ClientSlot = struct {
 /// one coherent instant rather than a mixture of concurrent updates.
 pub const Stats = struct {
     active_connections: usize,
+    maximum_active_connections: usize,
+    expired_sessions: usize,
     sessions: usize,
     connected_sessions: usize,
     disconnected_sessions: usize,
@@ -517,7 +519,9 @@ pub const Stats = struct {
 /// topic strings.
 pub const SystemMetric = enum {
     clients_connected,
+    clients_maximum,
     clients_disconnected,
+    clients_expired,
     clients_total,
     subscriptions,
     shared_subscriptions,
@@ -536,7 +540,9 @@ pub const SystemMetric = enum {
     pub fn topic(self: SystemMetric) []const u8 {
         return switch (self) {
             .clients_connected => "$SYS/broker/clients/connected",
+            .clients_maximum => "$SYS/broker/clients/maximum",
             .clients_disconnected => "$SYS/broker/clients/disconnected",
+            .clients_expired => "$SYS/broker/clients/expired",
             .clients_total => "$SYS/broker/clients/total",
             .subscriptions => "$SYS/broker/subscriptions/count",
             .shared_subscriptions => "$SYS/broker/shared_subscriptions/count",
@@ -623,7 +629,9 @@ pub const ServeListenersUntilOptions = struct {
 
 pub const system_metrics = [_]SystemMetric{
     .clients_connected,
+    .clients_maximum,
     .clients_disconnected,
+    .clients_expired,
     .clients_total,
     .subscriptions,
     .shared_subscriptions,
@@ -666,6 +674,11 @@ pub const Broker = struct {
     commit_log: ?commit_log_mod.Log = null,
     persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
+    /// Cumulative lifecycle counters protected by `state_mutex`. They are
+    /// intentionally process-local like Mosquitto's `$SYS` counters and are
+    /// not restored from protocol-state snapshots.
+    maximum_active_connections: usize = 0,
+    expired_sessions: usize = 0,
     next_system_stats_ns: ?i96 = null,
 
     pub fn listen(
@@ -893,6 +906,8 @@ pub const Broker = struct {
         const sessions = self.sessions.aggregateStats();
         return .{
             .active_connections = active_connections,
+            .maximum_active_connections = self.maximum_active_connections,
+            .expired_sessions = self.expired_sessions,
             .sessions = sessions.session_count,
             .connected_sessions = sessions.connected_count,
             .disconnected_sessions = sessions.disconnected_count,
@@ -2107,6 +2122,16 @@ pub const Broker = struct {
         );
         slot.connection = connection.*;
         connection.* = undefined;
+        var active_connections: usize = 0;
+        for (self.slots) |candidate| {
+            active_connections +|= @intFromBool(
+                candidate.active and candidate.connection != null,
+            );
+        }
+        self.maximum_active_connections = @max(
+            self.maximum_active_connections,
+            active_connections,
+        );
     }
 
     fn abortRegistration(
@@ -3235,7 +3260,7 @@ pub const Broker = struct {
             now: std.Io.Timestamp,
         };
         var context = RemovalContext{ .broker = self, .now = now };
-        return self.sessions.pruneExpiredWithContext(
+        const removed = self.sessions.pruneExpiredWithContext(
             now,
             &context,
             struct {
@@ -3253,6 +3278,8 @@ pub const Broker = struct {
                 }
             }.removed,
         );
+        self.expired_sessions +|= removed;
+        return removed;
     }
 
     fn expireWillForSessionRouteLocked(
@@ -4524,7 +4551,9 @@ fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
 fn systemMetricValue(stats_value: Stats, metric: SystemMetric) usize {
     return switch (metric) {
         .clients_connected => stats_value.active_connections,
+        .clients_maximum => stats_value.maximum_active_connections,
         .clients_disconnected => stats_value.disconnected_sessions,
+        .clients_expired => stats_value.expired_sessions,
         .clients_total => stats_value.sessions,
         .subscriptions => stats_value.subscriptions,
         .shared_subscriptions => stats_value.shared_subscriptions,

@@ -651,6 +651,7 @@ test "broker caps persistent Session lifetime across MQTT versions" {
         defer first.close();
         try first.disconnect(0);
         try waitForPeerClose(&first);
+        const expired_before = broker.stats().expired_sessions;
 
         // The configured global cap shortens both MQTT 3.1.1's otherwise
         // unbounded persistent Session and MQTT 5's longer requested expiry.
@@ -671,6 +672,9 @@ test "broker caps persistent Session lifetime across MQTT versions" {
         defer resumed_result.connack.deinit(allocator);
         try std.testing.expect(
             !resumed_result.connack.connack.session_present,
+        );
+        try std.testing.expect(
+            broker.stats().expired_sessions > expired_before,
         );
         try resumed.disconnect(0);
         try waitForPeerClose(&resumed);
