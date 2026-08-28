@@ -1827,6 +1827,7 @@ pub const Connection = struct {
     /// bounded recent-ID ring lets another response reader discard those late
     /// frames without adding attacker-controlled, connection-lifetime memory.
     locally_reset_streams: std.ArrayList(u31) = .empty,
+    locally_reset_stream_index: std.AutoHashMapUnmanaged(u31, void) = .empty,
     locally_reset_stream_next: usize = 0,
     /// Most recently consumed peer reset. Readers still return
     /// `error.StreamReset`; protocol adapters can take this payload
@@ -1866,6 +1867,7 @@ pub const Connection = struct {
         self.alternative_services.deinit(self.allocator);
         self.alternative_service_index.deinit(self.allocator);
         self.locally_reset_streams.deinit(self.allocator);
+        self.locally_reset_stream_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.header_block_scratch.deinit(self.allocator);
@@ -6287,9 +6289,17 @@ pub const Connection = struct {
     ) std.mem.Allocator.Error!void {
         const limit = self.limits.max_reset_stream_history;
         if (limit == 0 or self.locally_reset_streams.items.len >= limit) return;
+        const desired = @min(
+            limit,
+            self.locally_reset_streams.items.len +| additional,
+        );
         try self.locally_reset_streams.ensureTotalCapacity(
             self.allocator,
-            @min(limit, self.locally_reset_streams.items.len +| additional),
+            desired,
+        );
+        try self.locally_reset_stream_index.ensureTotalCapacity(
+            self.allocator,
+            @intCast(desired),
         );
     }
 
@@ -6297,27 +6307,33 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
     ) void {
-        const retained = self.locally_reset_streams.items;
-        if (std.mem.indexOfScalar(u31, retained, stream_id) != null) return;
+        if (self.locally_reset_stream_index.contains(stream_id)) return;
         const limit = self.limits.max_reset_stream_history;
         if (limit == 0) return;
-        if (retained.len < limit) {
+        if (self.locally_reset_streams.items.len < limit) {
             self.locally_reset_streams.appendAssumeCapacity(stream_id);
+            self.locally_reset_stream_index.putAssumeCapacityNoClobber(
+                stream_id,
+                {},
+            );
             return;
         }
+        _ = self.locally_reset_stream_index.remove(
+            self.locally_reset_streams.items[self.locally_reset_stream_next],
+        );
         self.locally_reset_streams.items[self.locally_reset_stream_next] =
             stream_id;
+        self.locally_reset_stream_index.putAssumeCapacityNoClobber(
+            stream_id,
+            {},
+        );
         self.locally_reset_stream_next =
             (self.locally_reset_stream_next + 1) %
             limit;
     }
 
     fn wasLocallyReset(self: *const Connection, stream_id: u31) bool {
-        return std.mem.indexOfScalar(
-            u31,
-            self.locally_reset_streams.items,
-            stream_id,
-        ) != null;
+        return self.locally_reset_stream_index.contains(stream_id);
     }
 
     fn discardLateFrameForLocallyResetStream(
@@ -17262,6 +17278,7 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
         connection.recv_stream_windows.deinit(allocator);
         connection.recv_stream_window_index.deinit(allocator);
         connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.frame_reader.deinit(allocator);
     }
@@ -17423,12 +17440,19 @@ test "HTTP/2 local reset history honors its configured bound" {
         .role = .client,
         .limits = .{ .max_reset_stream_history = 2 },
     };
-    defer connection.locally_reset_streams.deinit(allocator);
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+    }
 
     try connection.prepareLocallyResetStreams(3);
     try std.testing.expect(connection.locally_reset_streams.capacity >= 2);
     connection.rememberLocallyResetStreamAssumeCapacity(1);
     connection.rememberLocallyResetStreamAssumeCapacity(3);
+    try std.testing.expectEqual(
+        connection.locally_reset_streams.items.len,
+        connection.locally_reset_stream_index.count(),
+    );
     // Duplicate resets neither consume another slot nor advance eviction.
     connection.rememberLocallyResetStreamAssumeCapacity(1);
     try std.testing.expectEqual(
@@ -17436,10 +17460,18 @@ test "HTTP/2 local reset history honors its configured bound" {
         connection.locally_reset_streams.items.len,
     );
     connection.rememberLocallyResetStreamAssumeCapacity(5);
+    try std.testing.expectEqual(
+        connection.locally_reset_streams.items.len,
+        connection.locally_reset_stream_index.count(),
+    );
     try std.testing.expect(!connection.wasLocallyReset(1));
     try std.testing.expect(connection.wasLocallyReset(3));
     try std.testing.expect(connection.wasLocallyReset(5));
     connection.rememberLocallyResetStreamAssumeCapacity(7);
+    try std.testing.expectEqual(
+        connection.locally_reset_streams.items.len,
+        connection.locally_reset_stream_index.count(),
+    );
     try std.testing.expect(!connection.wasLocallyReset(3));
     try std.testing.expect(connection.wasLocallyReset(5));
     try std.testing.expect(connection.wasLocallyReset(7));
@@ -17454,7 +17486,10 @@ test "HTTP/2 local reset history may be disabled" {
         .role = .client,
         .limits = .{ .max_reset_stream_history = 0 },
     };
-    defer connection.locally_reset_streams.deinit(allocator);
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+    }
 
     try connection.prepareLocallyResetStreams(1);
     connection.rememberLocallyResetStreamAssumeCapacity(1);
@@ -17476,6 +17511,7 @@ test "HTTP/2 configured reset history controls late-frame tolerance" {
     };
     defer {
         connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
     }
 
@@ -17543,6 +17579,7 @@ test "HTTP/2 reset history allocation failure precedes wire write" {
         connection.active_local_streams.deinit(allocator);
         connection.active_local_index.deinit(allocator);
         connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
     }
     try connection.addActiveLocalStream(1);
 

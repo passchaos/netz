@@ -690,7 +690,8 @@ fallback only for larger diagnostics. The public helpers retain ArrayList
 compatibility while wire-parity and short-buffer tests cover the direct form.
 Late DATA, HEADERS, and duplicate RST_STREAM frames for locally reset streams
 are ignored through a bounded, configurable `Limits.max_reset_stream_history`
-ring. The default retains 64 stream IDs, while zero disables tolerance; unlike
+ring with an O(1) membership index. The default retains 64 stream IDs, while
+zero disables tolerance; unlike
 Rust h2's time-based reset retention this stays deterministic under a blocking
 runtime without an always-running timer task. Capacity is reserved before a
 RST_STREAM becomes visible, including batch cancellation, so allocation failure
