@@ -2168,6 +2168,43 @@ pub const Connection = struct {
         );
     }
 
+    /// Wait for a previously sent complete request. These split forms are
+    /// useful when an event loop or batch sender already owns the stream ID.
+    pub fn readResponseWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn readResponseWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        return self.readResponseUntil(
+            stream_id,
+            request_method,
+            extended_connect,
+            null,
+            deadline,
+        );
+    }
+
     /// Send a complete request and observe each ordered interim response before
     /// returning the final response. Header slices borrow decoder storage only
     /// for the callback duration. Status 101 remains final HTTP semantics.
@@ -10800,6 +10837,13 @@ pub const testing = struct {
         connection: *Connection,
     ) Error!u31 {
         return connection.reserveNextClientStreamId();
+    }
+
+    pub fn sendCompleteRequest(
+        connection: *Connection,
+        options: RequestOptions,
+    ) Error!Connection.PendingResponse {
+        return connection.sendCompleteRequest(options);
     }
 
     pub fn releaseLocalStream(
