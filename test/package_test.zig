@@ -1590,6 +1590,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "SystemMetric"));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "system_metrics"));
     try std.testing.expect(@hasField(netz.mqtt.broker.Stats, "uptime_seconds"));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Stats,
+        "connections_received",
+    ));
     try std.testing.expect(@hasField(netz.mqtt.broker.Stats, "load"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficStats"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficCounters"));
@@ -3092,6 +3096,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport, "ensureDatagramsNegotiated"));
     try std.testing.expectEqual(@as(?usize, 1199), netz.webtransport.maxDatagramPayloadSize(1200, .init(0)));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
+    try std.testing.expect(@hasField(
+        netz.webtransport.runtime.HandshakeUriConnectOptions,
+        "h3",
+    ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "ProtectedClientSession"));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,

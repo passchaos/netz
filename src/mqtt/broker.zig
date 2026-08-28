@@ -498,6 +498,8 @@ const ClientSlot = struct {
 /// one coherent instant rather than a mixture of concurrent updates.
 pub const Stats = struct {
     uptime_seconds: u64,
+    /// Successfully parsed CONNECT packets admitted to the broker core.
+    connections_received: u64,
     active_connections: usize,
     maximum_active_connections: usize,
     expired_sessions: usize,
@@ -595,6 +597,9 @@ pub const SystemMetric = enum {
     load_bytes_sent_1min,
     load_bytes_sent_5min,
     load_bytes_sent_15min,
+    load_connections_1min,
+    load_connections_5min,
+    load_connections_15min,
 
     pub fn topic(self: SystemMetric) []const u8 {
         return switch (self) {
@@ -647,6 +652,9 @@ pub const SystemMetric = enum {
             .load_bytes_sent_1min => "$SYS/broker/load/bytes/sent/1min",
             .load_bytes_sent_5min => "$SYS/broker/load/bytes/sent/5min",
             .load_bytes_sent_15min => "$SYS/broker/load/bytes/sent/15min",
+            .load_connections_1min => "$SYS/broker/load/connections/1min",
+            .load_connections_5min => "$SYS/broker/load/connections/5min",
+            .load_connections_15min => "$SYS/broker/load/connections/15min",
         };
     }
 };
@@ -767,6 +775,9 @@ pub const system_metrics = [_]SystemMetric{
     .load_bytes_sent_1min,
     .load_bytes_sent_5min,
     .load_bytes_sent_15min,
+    .load_connections_1min,
+    .load_connections_5min,
+    .load_connections_15min,
 };
 
 /// A bounded broker core with an optional compatibility TCP listener.
@@ -799,6 +810,7 @@ pub const Broker = struct {
     /// intentionally process-local like Mosquitto's `$SYS` counters and are
     /// not restored from protocol-state snapshots.
     maximum_active_connections: usize = 0,
+    connections_received: u64 = 0,
     expired_sessions: usize = 0,
     traffic: runtime.TrafficCounters = .{},
     publish_messages_received: usize = 0,
@@ -1044,6 +1056,7 @@ pub const Broker = struct {
                 self.started_at_ns,
                 std.Io.Clock.awake.now(self.io).nanoseconds,
             ),
+            .connections_received = self.connections_received,
             .active_connections = active_connections,
             .maximum_active_connections = self.maximum_active_connections,
             .expired_sessions = self.expired_sessions,
@@ -1767,6 +1780,7 @@ pub const Broker = struct {
         for (self.slots, 0..) |slot, index| {
             if (!slot.active) {
                 self.slots[index].active = true;
+                self.connections_received +|= 1;
                 return index;
             }
         }
@@ -4765,6 +4779,7 @@ fn uptimeSeconds(started_at_ns: i96, now_ns: i96) u64 {
 
 fn loadCounters(stats_value: Stats) load_metrics.Counters {
     return .{
+        .connections = stats_value.connections_received,
         .messages_received = stats_value.messages_received,
         .messages_sent = stats_value.messages_sent,
         .publish_messages_dropped = @intCast(stats_value.publish_messages_dropped),
@@ -4823,6 +4838,9 @@ fn systemMetricLoadValue(
         .load_bytes_sent_1min => stats_value.load.one_minute.bytes_sent,
         .load_bytes_sent_5min => stats_value.load.five_minutes.bytes_sent,
         .load_bytes_sent_15min => stats_value.load.fifteen_minutes.bytes_sent,
+        .load_connections_1min => stats_value.load.one_minute.connections,
+        .load_connections_5min => stats_value.load.five_minutes.connections,
+        .load_connections_15min => stats_value.load.fifteen_minutes.connections,
         else => null,
     };
 }
@@ -4882,6 +4900,9 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
         .load_bytes_sent_1min,
         .load_bytes_sent_5min,
         .load_bytes_sent_15min,
+        .load_connections_1min,
+        .load_connections_5min,
+        .load_connections_15min,
         => unreachable,
     };
 }

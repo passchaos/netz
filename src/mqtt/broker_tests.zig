@@ -910,6 +910,7 @@ test "broker statistics form one coherent live and offline snapshot" {
     try std.testing.expectEqual(@as(usize, 0), offline.expired_sessions);
     try std.testing.expectEqual(@as(u64, 7), offline.messages_received);
     try std.testing.expectEqual(@as(u64, 5), offline.messages_sent);
+    try std.testing.expectEqual(@as(u64, 2), offline.connections_received);
     try std.testing.expectEqual(@as(usize, 1), offline.sessions);
     try std.testing.expectEqual(@as(usize, 0), offline.connected_sessions);
     try std.testing.expectEqual(@as(usize, 1), offline.disconnected_sessions);
@@ -1099,6 +1100,15 @@ test "broker publishes coherent retained system statistics" {
     try std.testing.expectEqual(@as(usize, 1), retained.len);
     try std.testing.expectEqualStrings("0", retained[0].payload);
     try std.testing.expectEqual(mqtt.QoS.at_most_once, retained[0].qos);
+    const connection_count = try broker.retained.matchInto(
+        "$SYS/broker/load/connections/1min",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), connection_count.len);
+    try std.testing.expect(
+        (try std.fmt.parseFloat(f64, connection_count[0].payload)) > 0,
+    );
 
     const traffic_metrics = [_]broker_mod.SystemMetric{
         .messages_received,
@@ -1161,6 +1171,9 @@ test "broker publishes coherent retained system statistics" {
     );
 
     const load_metrics_to_check = [_]broker_mod.SystemMetric{
+        .load_connections_1min,
+        .load_connections_5min,
+        .load_connections_15min,
         .load_messages_received_1min,
         .load_messages_received_5min,
         .load_messages_received_15min,
