@@ -333,6 +333,7 @@ pub fn Pool(comptime Runtime: type) type {
                 client.deinit();
                 return;
             }
+            const idle_before = self.idle.idleCount();
             self.idle.releaseKey(
                 client,
                 origin_key,
@@ -343,6 +344,16 @@ pub fn Pool(comptime Runtime: type) type {
                 client.deinit();
                 return err;
             };
+            const idle_after = self.idle.idleCount();
+            // The released lease already occupies one counted slot. A normal
+            // append raises idle count by one. Anything less means the generic
+            // idle pool dropped this client, an older client, or both under a
+            // per-origin/global idle limit; mirror those closes in the owning
+            // pool's total count.
+            const expected_idle = idle_before +| 1;
+            const dropped = expected_idle -| idle_after;
+            std.debug.assert(self.connections >= dropped);
+            self.connections -= dropped;
             self.mutex.unlock(self.io);
         }
 
@@ -835,6 +846,109 @@ test "HTTP/3 handshake client pool releases failed reservations" {
         try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
     }
     try std.testing.expectEqual(@as(usize, 2), refusing.calls);
+}
+
+test "HTTP/3 handshake client pool zero idle capacity releases totals" {
+    const Runtime = @import("../runtime.zig");
+    const tls_testing = @import("../../tls/testing.zig");
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const server_cid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    var server = try Runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+        } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Runtime.HandshakeServer,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            var session = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer session.deinit();
+            var request = session.receiveRequest() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit(self.server.allocator);
+            session.sendResponse(request.stream_id, .{
+                .status = 204,
+                .request_method = request.request.method,
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var connector_context = DefaultConnectorContext(Runtime){ .options = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+        },
+    } };
+    const ClientPool = Pool(Runtime);
+    var pool = try ClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .unspecified(0) },
+        .max_connections = 1,
+        .idle = .{
+            .max_idle_per_origin = 0,
+            .max_idle_total = 0,
+        },
+        .limits = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .connector = connector_context.connector(),
+    });
+    defer pool.deinit();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/no-idle",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+
+    var response = try pool.requestUri(uri, .{});
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 fn nowMillis(io: std.Io) u64 {
