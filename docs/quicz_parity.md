@@ -336,10 +336,19 @@ encode age; each release therefore records an independent monotonic sequence
 and capacity replacement scans the configured small idle set by timestamp plus
 sequence. Focused tests force a middle acquisition to swap a newer connection
 into index zero, then prove the genuinely oldest connection is evicted, and
-also cover several releases in the same millisecond. This repairs the reusable
-pool primitive without overstating integration: the one-shot
-`HandshakeClient.requestUri` helper still opens a fresh connection, and an
-owning shared-endpoint H3 client pool remains a separate runtime task.
+also cover several releases in the same millisecond.
+
+`HandshakeClientPool` now integrates that policy with real authenticated HTTP/3
+clients. Its exclusive leases retain QPACK/control state, normalize URI origins,
+discard GOAWAY/closed/non-quiescent clients, retry one stale reused connection
+only for idempotent methods, and accept a connector callback so certificate,
+resumption, CID generation, and endpoint ownership policy stay explicit. A
+real TLS/QUIC regression issues two differently cased URI requests through one
+accepted connection and verifies the second lease is reused; a companion case
+marks GOAWAY before release and proves the connection is not cached. Each
+pooled connection currently owns its UDP endpoint. Sharing one endpoint across
+several pooled origins remains a separate dispatcher integration task rather
+than allowing competing socket readers.
 
 The endpoint foundation now includes a concrete single-receive-owner
 `quic.endpoint_dispatcher.Dispatcher`. It owns established-connection CID

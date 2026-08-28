@@ -900,6 +900,26 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ProtectedClient"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "HandshakeClient"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeClientPool",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeClientPoolOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeClientPoolDefaultConnector",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClientPool,
+        "requestUri",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "isReusable",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "UriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "uriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendGoAway"));

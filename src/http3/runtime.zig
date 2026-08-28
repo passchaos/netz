@@ -3,6 +3,7 @@ const round_robin = @import("../internal/round_robin.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
+const handshake_client_pool = @import("runtime/handshake_client_pool.zig");
 const response_scheduler = @import("runtime/response_scheduler.zig");
 
 const net = std.Io.net;
@@ -6234,6 +6235,27 @@ pub const HandshakeClient = struct {
         return self.control.peer_goaway_id;
     }
 
+    /// Return whether this connection can move into an exclusive idle pool.
+    /// HTTP/3 compression/control state is intentionally retained, but no
+    /// application request, response, push, reset, or outbound body may leak
+    /// into the next lease. A GOAWAY or QUIC close state is never reusable.
+    pub fn isReusable(self: *const HandshakeClient) bool {
+        return self.control.peer_goaway_id == null and
+            !self.established.connection.closed() and
+            !self.established.connection.closing() and
+            !self.established.connection.draining() and
+            self.request_lifecycle.outstanding.items.len == 0 and
+            self.outbound_bodies.entries.items.len == 0 and
+            self.response_streams.entries.items.len == 0 and
+            self.response_streams.resets.count() == 0 and
+            self.streaming_responses.retainedCount() == 0 and
+            self.push_streams.entries.items.len == 0 and
+            self.push_streams.promises.items.len == 0 and
+            self.push_streams.cancelled_stream_head ==
+                self.push_streams.cancelled_stream_ids.items.len and
+            !self.push_aggregate.active();
+    }
+
     pub fn goAwayRetryDisposition(
         self: HandshakeClient,
         stream_id: u62,
@@ -7968,6 +7990,16 @@ pub const HandshakeClient = struct {
         self.streaming_responses.remove(stream_id);
     }
 };
+
+pub const HandshakeClientPool = handshake_client_pool.Pool(@This());
+pub const HandshakeClientPoolOptions =
+    handshake_client_pool.Options(@This());
+pub const HandshakeClientPoolConnector =
+    handshake_client_pool.Connector(@This());
+pub const HandshakeClientPoolDefaultConnector =
+    handshake_client_pool.DefaultConnectorContext(@This());
+pub const HandshakeClientPoolStats = http3.origin_pool.Stats;
+pub const HandshakeClientPoolError = handshake_client_pool.Error;
 
 pub const OwnedHandshakeRequest = struct {
     from: net.IpAddress,
@@ -26639,6 +26671,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 }
 
 test {
+    _ = handshake_client_pool;
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");
