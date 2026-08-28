@@ -166,7 +166,9 @@ pub const UnaryCallOptions = struct {
 
 pub const UnaryResponse = struct {
     allocator: std.mem.Allocator,
-    transport: http2.runtime.OwnedResponse,
+    /// Null when the peer reset the stream before a complete HTTP response.
+    transport: ?http2.runtime.OwnedResponse,
+    reset: ?http2.ResetStreamPayload = null,
     status: Status,
     status_message: []u8,
     message: ?Message,
@@ -177,7 +179,9 @@ pub const UnaryResponse = struct {
     pub fn deinit(self: *UnaryResponse) void {
         if (self.owned_message) |owned| self.allocator.free(owned);
         self.allocator.free(self.status_message);
-        self.transport.deinit(self.allocator);
+        if (self.transport) |*transport| {
+            transport.deinit(self.allocator);
+        }
         self.* = undefined;
     }
 };
@@ -266,14 +270,20 @@ pub fn unaryCall(
     headers.appendSliceAssumeCapacity(options.metadata);
     headers.appendSliceAssumeCapacity(binary_metadata.fields);
 
-    const response = try connection.request(.{
+    const response = connection.request(.{
         .method = "POST",
         .path = options.path,
         .scheme = options.scheme,
         .authority = options.authority,
         .headers = headers.items,
         .body = framed.items,
-    });
+    }) catch |err| switch (err) {
+        error.StreamReset => {
+            const reset = connection.takeLastPeerReset() orelse return err;
+            return resetUnaryResponse(allocator, reset);
+        },
+        else => return err,
+    };
     return parseUnaryResponse(
         allocator,
         response,
@@ -557,12 +567,33 @@ fn parseUnaryResponse(
     return .{
         .allocator = allocator,
         .transport = owned,
+        .reset = null,
         .status = status,
         .status_message = status_message,
         .message = message,
         .was_compressed = was_compressed,
         .encoding = encoding,
         .owned_message = owned_message,
+    };
+}
+
+fn resetUnaryResponse(
+    allocator: std.mem.Allocator,
+    reset: http2.ResetStreamPayload,
+) Error!UnaryResponse {
+    return .{
+        .allocator = allocator,
+        .transport = null,
+        .reset = reset,
+        .status = statusFromHttp2Error(reset.error_code),
+        .status_message = try resetStatusMessageAlloc(
+            allocator,
+            reset.error_code,
+        ),
+        .message = null,
+        .was_compressed = false,
+        .encoding = null,
+        .owned_message = null,
     };
 }
 
@@ -660,6 +691,50 @@ pub fn statusFromHttp(status: u16) Status {
         404 => .unimplemented,
         429, 502, 503, 504 => .unavailable,
         else => .unknown,
+    };
+}
+
+/// Map an HTTP/2 RST_STREAM reason according to gRPC's HTTP/2 transport
+/// specification. Unknown extension codes are protocol failures and therefore
+/// surface as INTERNAL rather than being mistaken for an application status.
+pub fn statusFromHttp2Error(error_code: http2.ErrorCode) Status {
+    return switch (error_code) {
+        .refused_stream => .unavailable,
+        .cancel => .cancelled,
+        .enhance_your_calm => .resource_exhausted,
+        .inadequate_security => .permission_denied,
+        else => .internal,
+    };
+}
+
+pub fn resetStatusMessageAlloc(
+    allocator: std.mem.Allocator,
+    error_code: http2.ErrorCode,
+) std.mem.Allocator.Error![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "RST_STREAM received with HTTP/2 error {s} ({d})",
+        .{ http2ErrorName(error_code), @intFromEnum(error_code) },
+    );
+}
+
+fn http2ErrorName(error_code: http2.ErrorCode) []const u8 {
+    return switch (error_code) {
+        .no_error => "no_error",
+        .protocol_error => "protocol_error",
+        .internal_error => "internal_error",
+        .flow_control_error => "flow_control_error",
+        .settings_timeout => "settings_timeout",
+        .stream_closed => "stream_closed",
+        .frame_size_error => "frame_size_error",
+        .refused_stream => "refused_stream",
+        .cancel => "cancel",
+        .compression_error => "compression_error",
+        .connect_error => "connect_error",
+        .enhance_your_calm => "enhance_your_calm",
+        .inadequate_security => "inadequate_security",
+        .http_1_1_required => "http_1_1_required",
+        _ => "unknown",
     };
 }
 

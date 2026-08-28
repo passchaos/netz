@@ -70,6 +70,7 @@ pub const ClientWriter = struct {
             error.ResponseAvailable => {
                 return try self.readResponse(context, consume);
             },
+            error.StreamReset => return try self.takeResetResponse(),
             else => return err,
         };
         return null;
@@ -85,7 +86,10 @@ pub const ClientWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !Response {
-        try self.finish();
+        self.finish() catch |err| switch (err) {
+            error.StreamReset => return try self.takeResetResponse(),
+            else => return err,
+        };
         return self.readResponse(context, consume);
     }
 
@@ -108,7 +112,10 @@ pub const ClientWriter = struct {
             @TypeOf(bridge).consumeData,
         ) catch |err| {
             self.transport.completed = true;
-            return err;
+            switch (err) {
+                error.StreamReset => return try self.takeResetResponse(),
+                else => return err,
+            }
         };
         errdefer response.deinit(self.allocator);
         bridge.finish() catch |err| {
@@ -127,10 +134,21 @@ pub const ClientWriter = struct {
         return .{
             .allocator = self.allocator,
             .transport = response,
+            .reset = null,
             .status = result.status,
             .status_message = result.status_message,
             .encoding = result.encoding,
         };
+    }
+
+    fn takeResetResponse(self: *ClientWriter) Error!Response {
+        const reset = self.transport.connection.takeLastPeerReset() orelse
+            return error.StreamReset;
+        // RST_STREAM fully closes both halves. Suppress RequestWriter.deinit's
+        // fallback cancellation now that the peer's terminal state is owned
+        // by the typed gRPC response.
+        self.transport.completed = true;
+        return resetResponse(self.allocator, reset);
     }
 };
 
@@ -224,16 +242,37 @@ pub fn startClient(
     };
 }
 
+fn resetResponse(
+    allocator: std.mem.Allocator,
+    reset: http2.ResetStreamPayload,
+) Error!Response {
+    return .{
+        .allocator = allocator,
+        .transport = null,
+        .reset = reset,
+        .status = call.statusFromHttp2Error(reset.error_code),
+        .status_message = try call.resetStatusMessageAlloc(
+            allocator,
+            reset.error_code,
+        ),
+        .encoding = null,
+    };
+}
+
 pub const Response = struct {
     allocator: std.mem.Allocator,
-    transport: http2.runtime.StreamingResponse,
+    /// Null when the peer reset the stream before a complete HTTP response.
+    transport: ?http2.runtime.StreamingResponse,
+    reset: ?http2.ResetStreamPayload = null,
     status: wire.Status,
     status_message: []u8,
     encoding: ?[]const u8,
 
     pub fn deinit(self: *Response) void {
         self.allocator.free(self.status_message);
-        self.transport.deinit(self.allocator);
+        if (self.transport) |*transport| {
+            transport.deinit(self.allocator);
+        }
         self.* = undefined;
     }
 };

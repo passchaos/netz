@@ -62,6 +62,7 @@ pub const parseUnaryRequest = call.parseUnaryRequest;
 pub const unaryCall = call.unaryCall;
 pub const writeUnaryResponse = call.writeUnaryResponse;
 pub const statusFromHttp = call.statusFromHttp;
+pub const statusFromHttp2Error = call.statusFromHttp2Error;
 pub const validateCustomMetadata = call.validateCustomMetadata;
 pub const validateCustomBinaryMetadata =
     call.validateCustomBinaryMetadata;

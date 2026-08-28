@@ -55,6 +55,9 @@ existing HTTP/2 runtime:
   owned typed gRPC response when a server returns before a flow-control-blocked
   client upload finishes; the request direction is half-closed, partial-write
   accounting is retained, and trailers-only OK/error status remains visible.
+- typed unary and streaming client responses for peer `RST_STREAM`, preserving
+  the HTTP/2 reason while mapping REFUSED_STREAM, CANCEL, ENHANCE_YOUR_CALM, and
+  INADEQUATE_SECURITY to the gRPC status codes required by the protocol.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -108,8 +111,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    needed beyond netz's HTTP/2 Hyper gate.
 3. Build generated service/client bindings on `pbz`, including unary and all
    streaming method shapes.
-4. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
-   policy, health checking, reflection, and conformance/interop runners.
+4. Add cancellation/deadline enforcement, retry policy, health checking,
+   reflection, and conformance/interop runners.
 
 The current tests establish unary plus sequential client/server message
 streaming, not full gRPC Core feature parity.

@@ -1827,6 +1827,11 @@ pub const Connection = struct {
         @splat(0),
     locally_reset_stream_count: usize = 0,
     locally_reset_stream_next: usize = 0,
+    /// Most recently consumed peer reset. Readers still return
+    /// `error.StreamReset`; protocol adapters can take this payload
+    /// immediately afterward to preserve the wire reason in their own error
+    /// model. A later reset replaces an untaken value.
+    last_peer_reset: ?http2.ResetStreamPayload = null,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// constructors set this to `http`, while the ALPN-authenticated TLS
@@ -1998,6 +2003,20 @@ pub const Connection = struct {
         };
     }
 
+    /// Take the peer's most recently consumed RST_STREAM payload.
+    ///
+    /// This is intended for the error path immediately following
+    /// `error.StreamReset`. The connection allows only one active frame
+    /// reader, so taking rather than retaining the payload prevents a stale
+    /// reset from being attributed to a later operation.
+    pub fn takeLastPeerReset(
+        self: *Connection,
+    ) ?http2.ResetStreamPayload {
+        const reset = self.last_peer_reset;
+        self.last_peer_reset = null;
+        return reset;
+    }
+
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
         return self.requestWithInformational(options, null);
     }
@@ -2110,6 +2129,10 @@ pub const Connection = struct {
         options: RequestOptions,
     ) Error!PendingResponse {
         if (self.role != .client) return error.UnexpectedFrame;
+        // A previous reset reason is useful only to the operation that
+        // returned StreamReset. Starting a new request invalidates any value
+        // that its caller chose not to consume.
+        self.last_peer_reset = null;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
         const scheme = request_options.scheme orelse self.default_scheme orelse "https";
@@ -2229,6 +2252,7 @@ pub const Connection = struct {
         options: StreamingRequestOptions,
     ) Error!RequestWriter {
         if (self.role != .client) return error.UnexpectedFrame;
+        self.last_peer_reset = null;
         if (methodIsConnect(options.method)) {
             return error.InvalidContentLength;
         }
@@ -3316,7 +3340,13 @@ pub const Connection = struct {
                         remaining -= 1;
                     }
                 },
-                .rst_stream => return error.StreamReset,
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    self.recordResetStream(reset);
+                    return error.StreamReset;
+                },
                 else => return error.UnexpectedFrame,
             }
         }
@@ -3517,7 +3547,11 @@ pub const Connection = struct {
                         remaining -= 1;
                     }
                 },
-                .rst_stream => return error.StreamReset,
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(frame);
+                    self.recordResetStream(reset);
+                    return error.StreamReset;
+                },
                 else => return error.UnexpectedFrame,
             }
         }
@@ -6306,6 +6340,7 @@ pub const Connection = struct {
         self: *Connection,
         reset: http2.ResetStreamPayload,
     ) void {
+        self.last_peer_reset = reset;
         // A reset is legal on a reserved stream even though that stream is not
         // counted as active. Preserve a server-side cancellation marker until
         // writePushedResponse observes it; client-side reservations can be
@@ -6861,7 +6896,13 @@ pub const Connection = struct {
                         break;
                     }
                 },
-                .rst_stream => return error.StreamReset,
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    self.recordResetStream(reset);
+                    return error.StreamReset;
+                },
                 else => continue,
             }
         }
@@ -7093,7 +7134,11 @@ pub const Connection = struct {
                         break;
                     }
                 },
-                .rst_stream => return error.StreamReset,
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(frame);
+                    self.recordResetStream(reset);
+                    return error.StreamReset;
+                },
                 else => return error.UnexpectedFrame,
             }
         }

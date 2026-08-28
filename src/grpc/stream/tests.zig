@@ -386,7 +386,7 @@ test "gRPC request and response message streams cross HTTP2 DATA frames" {
     try std.testing.expectEqual(@as(usize, 1), collector.compressed);
     try std.testing.expectEqualStrings(
         "complete",
-        headerValue(response.transport.trailers, "x-stream").?,
+        headerValue(response.transport.?.trailers, "x-stream").?,
     );
 }
 
@@ -498,11 +498,96 @@ test "gRPC streaming upload returns early cancelled status while flow blocked" {
     );
     try std.testing.expectEqualStrings(
         "cancelled",
-        headerValue(early.transport.headers, "x-early").?,
+        headerValue(early.transport.?.headers, "x-early").?,
     );
     try std.testing.expect(client.transport.body_finished);
     try std.testing.expect(client.transport.completed);
     try std.testing.expectEqual(first_wire_len, client.transport.written);
+}
+
+test "gRPC streaming response returns typed status for HTTP2 reset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            var request = connection.readRequest() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit(self.server.allocator);
+            connection.sendResetStream(
+                request.stream_id,
+                .enhance_your_calm,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+
+    const Consumer = struct {
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var client = try runtime.startClient(&connection, allocator, .{
+        .path = "/demo.Reset/Stream",
+        .authority = "localhost",
+    });
+    defer client.deinit();
+    var response = try client.finishAndRead({}, Consumer.consume);
+    defer response.deinit();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        wire.Status.resource_exhausted,
+        response.status,
+    );
+    try std.testing.expectEqual(
+        http2.ErrorCode.enhance_your_calm,
+        response.reset.?.error_code,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        response.status_message,
+        "enhance_your_calm",
+    ) != null);
+    try std.testing.expect(response.transport == null);
 }
 
 test "gRPC streaming request rejects a truncated message and resets HTTP2" {

@@ -42,6 +42,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "unaryCall"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseUnaryRequest"));
     try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
+    try std.testing.expect(@hasDecl(netz.grpc, "statusFromHttp2Error"));
+    try std.testing.expect(@hasField(netz.grpc.UnaryResponse, "reset"));
     try std.testing.expect(@hasDecl(netz.grpc, "runtime"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Server"));
@@ -114,6 +116,7 @@ test "public modules are reachable" {
         netz.grpc.StreamingServerWriter,
         "finishOk",
     ));
+    try std.testing.expect(@hasField(netz.grpc.StreamingResponse, "reset"));
     try std.testing.expect(@hasDecl(netz, "tls"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(
@@ -381,6 +384,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "keyUpdateCounts",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "takeLastPeerReset",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,

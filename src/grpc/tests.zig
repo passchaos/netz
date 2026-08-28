@@ -12,6 +12,7 @@ const parseUnaryRequest = grpc.parseUnaryRequest;
 const writeUnaryResponse = grpc.writeUnaryResponse;
 const unaryCall = grpc.unaryCall;
 const statusFromHttp = grpc.statusFromHttp;
+const statusFromHttp2Error = grpc.statusFromHttp2Error;
 const CompressionAlgorithm = grpc.CompressionAlgorithm;
 
 fn findHeader(
@@ -114,6 +115,33 @@ test "gRPC timeout status and percent-message codecs" {
     );
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings("bad value%XY", decoded);
+}
+
+test "gRPC maps HTTP2 reset reasons to transport status" {
+    try std.testing.expectEqual(
+        Status.internal,
+        statusFromHttp2Error(.no_error),
+    );
+    try std.testing.expectEqual(
+        Status.unavailable,
+        statusFromHttp2Error(.refused_stream),
+    );
+    try std.testing.expectEqual(
+        Status.cancelled,
+        statusFromHttp2Error(.cancel),
+    );
+    try std.testing.expectEqual(
+        Status.resource_exhausted,
+        statusFromHttp2Error(.enhance_your_calm),
+    );
+    try std.testing.expectEqual(
+        Status.permission_denied,
+        statusFromHttp2Error(.inadequate_security),
+    );
+    try std.testing.expectEqual(
+        Status.internal,
+        statusFromHttp2Error(@enumFromInt(0xffff_fffe)),
+    );
 }
 
 test "gRPC binary metadata encodes unpadded and decodes joined values" {
@@ -640,13 +668,13 @@ test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
     try std.testing.expectEqualStrings(
         "ok",
         findHeader(
-            response.transport.trailers,
+            response.transport.?.trailers,
             "server-meta",
         ).?,
     );
     var initial_binary: [2]u8 = undefined;
     var initial_metadata = try grpc.BinaryMetadataIterator.init(
-        response.transport.headers,
+        response.transport.?.headers,
         "initial-bin",
         &initial_binary,
     );
@@ -657,7 +685,7 @@ test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
     );
     var trailing_binary: [6]u8 = undefined;
     var trailing_metadata = try grpc.BinaryMetadataIterator.init(
-        response.transport.trailers,
+        response.transport.?.trailers,
         "result-bin",
         &trailing_binary,
     );
@@ -756,7 +784,7 @@ test "gRPC unary call accepts trailers-only error and HTTP fallback" {
     try std.testing.expectEqualStrings(
         "present",
         findHeader(
-            response.transport.headers,
+            response.transport.?.headers,
             "failure-meta",
         ).?,
     );
@@ -765,6 +793,80 @@ test "gRPC unary call accepts trailers-only error and HTTP fallback" {
         Status.unavailable,
         statusFromHttp(503),
     );
+}
+
+test "gRPC unary call returns typed status for HTTP2 reset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            var request = connection.readRequest() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit(self.server.allocator);
+            connection.sendResetStream(
+                request.stream_id,
+                .refused_stream,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    var response = try unaryCall(&client, allocator, .{
+        .path = "/demo.Reset/Unary",
+        .authority = "localhost",
+        .message = "request",
+    });
+    defer response.deinit();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(Status.unavailable, response.status);
+    try std.testing.expectEqual(
+        http2.ErrorCode.refused_stream,
+        response.reset.?.error_code,
+    );
+    try std.testing.expectEqual(@as(u31, 1), response.reset.?.stream_id);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        response.status_message,
+        "refused_stream",
+    ) != null);
+    try std.testing.expect(response.message == null);
+    try std.testing.expect(response.transport == null);
 }
 
 test "gRPC validates custom metadata and HTTP fallback response" {
