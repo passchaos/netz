@@ -1915,6 +1915,7 @@ pub const Client = struct {
     tls_conn: ?*TlsClientConnection = null,
     tls_vail_conn: ?*tls_stream.ClientConnection = null,
     response_head_deadline: ?std.Io.Clock.Timestamp = null,
+    response_deadline: ?std.Io.Clock.Timestamp = null,
     response_head_sequence_active: bool = false,
 
     fn transport(self: *Client) RuntimeTransport {
@@ -2210,6 +2211,37 @@ pub const Client = struct {
         );
     }
 
+    /// Bound the complete response, including its body and trailers, with one
+    /// absolute awake-clock budget. The existing response-head timeout remains
+    /// active and whichever deadline expires first wins. HTTP/1 has no stream
+    /// reset, so any read failure after the request write marks the connection
+    /// unusable through the ordinary request error path.
+    pub fn requestWithTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithDeadline(
+            request_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn requestWithDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.request(request_options);
+    }
+
     /// Send a complete request and observe each valid interim response before
     /// returning the final response. The observer borrows parser storage only
     /// for the callback duration.
@@ -2238,6 +2270,7 @@ pub const Client = struct {
             request_options.method,
             informational,
             null,
+            self.response_deadline,
         ) catch |err| {
             self.writer_state.phase = .unusable;
             return err;
@@ -2266,6 +2299,38 @@ pub const Client = struct {
             ignoreStreamingResponseHead,
             consume,
         );
+    }
+
+    pub fn requestStreamingWithTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithDeadline(
+            request_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.requestStreaming(request_options, context, consume);
     }
 
     /// Streaming response counterpart that enables explicit parser
@@ -3588,6 +3653,7 @@ pub const RequestWriter = struct {
                 &self.client.inbuf,
                 self.method,
                 response_head_deadline,
+                null,
             ) catch |err| {
                 self.body.fail();
                 return err;
@@ -3629,6 +3695,30 @@ pub const RequestWriter = struct {
         return self.readResponseWithInformational(null);
     }
 
+    pub fn readResponseWithTimeout(
+        self: *RequestWriter,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithDeadline(.fromNow(
+            self.client.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readResponseWithDeadline(
+        self: *RequestWriter,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        if (deadline.durationFromNow(self.client.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponse();
+    }
+
     /// Read the final response while synchronously observing preceding 1xx
     /// heads. This is the streaming-request counterpart to
     /// `Client.requestWithInformational`.
@@ -3648,6 +3738,7 @@ pub const RequestWriter = struct {
             self.method,
             informational,
             &self.body.state.informational_responses_seen,
+            self.client.response_deadline,
         ) catch |err| {
             self.body.fail();
             return err;
@@ -3666,6 +3757,38 @@ pub const RequestWriter = struct {
             ignoreStreamingResponseHead,
             consume,
         );
+    }
+
+    pub fn readResponseStreamingWithTimeout(
+        self: *RequestWriter,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithDeadline(
+            .fromNow(self.client.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithDeadline(
+        self: *RequestWriter,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (deadline.durationFromNow(self.client.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponseStreaming(context, consume);
     }
 
     pub fn readResponseStreamingWithParseOptions(
@@ -3811,6 +3934,9 @@ fn clientReadSome(
     buffer: []u8,
 ) Error!usize {
     const client: *Client = @ptrCast(@alignCast(context.?));
+    if (client.response_deadline) |deadline| {
+        return client.transport().readWithDeadline(buffer, deadline);
+    }
     return client.transport().read(buffer);
 }
 
@@ -3821,16 +3947,19 @@ fn clientReadHeadSome(
     const client: *Client = @ptrCast(@alignCast(context.?));
     std.debug.assert(client.response_head_sequence_active);
     if (client.response_head_deadline == null) {
-        const timeout = client.limits.response_head_timeout orelse
-            return client.transport().read(buffer);
-        client.response_head_deadline = try headReadDeadline(
-            client.transport(),
-            timeout,
-        );
+        client.response_head_deadline = if (client.limits.response_head_timeout) |timeout|
+            earlierDeadline(
+                client.response_deadline,
+                try headReadDeadline(client.transport(), timeout),
+            )
+        else
+            client.response_deadline;
     }
+    const deadline = client.response_head_deadline orelse
+        return client.transport().read(buffer);
     return client.transport().readWithDeadline(
         buffer,
-        client.response_head_deadline.?,
+        deadline,
     );
 }
 
@@ -3858,6 +3987,25 @@ fn headReadDeadline(
 ) Error!std.Io.Clock.Timestamp {
     if (timeout.nanoseconds <= 0) return error.Timeout;
     return transport.deadlineFromNow(timeout);
+}
+
+fn earlierDeadline(
+    a: ?std.Io.Clock.Timestamp,
+    b: std.Io.Clock.Timestamp,
+) std.Io.Clock.Timestamp {
+    const left = a orelse return b;
+    return if (std.Io.Clock.Timestamp.compare(left, .lt, b)) left else b;
+}
+
+fn readTransportUntil(
+    transport: RuntimeTransport,
+    buffer: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!usize {
+    return if (deadline) |absolute|
+        transport.readWithDeadline(buffer, absolute)
+    else
+        transport.read(buffer);
 }
 
 fn ensureResponseHeadDeadlineForBuffer(
@@ -3983,6 +4131,7 @@ fn readRequestFromTransportBuffered(
         true,
         false,
         head_deadline,
+        null,
     );
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
@@ -4176,6 +4325,7 @@ pub fn readResponseFromStreamBufferedObserved(
             false,
             true,
             response_head_deadline,
+            null,
         );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
@@ -4249,6 +4399,7 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             false,
             true,
             response_head_deadline,
+            null,
         );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
@@ -4747,6 +4898,7 @@ fn readResponseFromTransportBufferedForRequest(
         request_method,
         null,
         null,
+        null,
     );
 }
 
@@ -4759,6 +4911,7 @@ fn readResponseFromTransportBufferedForRequestObserved(
     request_method: http1.Method,
     informational: ?InformationalObserver,
     prior_informational_count: ?*usize,
+    response_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
     var local_informational_count: usize = 0;
     const informational_count = prior_informational_count orelse
@@ -4771,6 +4924,10 @@ fn readResponseFromTransportBufferedForRequestObserved(
             inbuf.items,
             &response_head_deadline,
         );
+        const effective_head_deadline = if (response_deadline) |deadline|
+            earlierDeadline(response_head_deadline, deadline)
+        else
+            response_head_deadline;
         var response = try readOneResponseFromTransportBufferedForRequest(
             allocator,
             transport,
@@ -4778,7 +4935,8 @@ fn readResponseFromTransportBufferedForRequestObserved(
             options,
             inbuf,
             request_method,
-            response_head_deadline,
+            effective_head_deadline,
+            response_deadline,
         );
         if (informationalResponseToSkip(response.response.status)) {
             validateAndCountInformationalResponse(
@@ -4843,6 +5001,7 @@ fn readOneResponseFromTransportBufferedForRequest(
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
     head_deadline: ?std.Io.Clock.Timestamp,
+    body_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
     const bytes = try readMessageBytesBufferedWithContext(
         allocator,
@@ -4854,6 +5013,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         false,
         true,
         head_deadline,
+        body_deadline,
     );
     errdefer allocator.free(bytes);
     var response = try parseResponseForRuntime(
@@ -4877,6 +5037,7 @@ fn readMessageBytesBufferedWithContext(
     auto_continue: bool,
     close_delimited_when_unknown: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
+    body_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
@@ -4915,7 +5076,11 @@ fn readMessageBytesBufferedWithContext(
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(inbuf.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
         while (true) {
-            const n = try transport.read(&scratch);
+            const n = try readTransportUntil(
+                transport,
+                &scratch,
+                body_deadline,
+            );
             if (n == 0) break;
             try inbuf.appendSlice(allocator, scratch[0..n]);
             if (inbuf.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
@@ -4931,7 +5096,11 @@ fn readMessageBytesBufferedWithContext(
     } else while (true) {
         const len = messageTargetLength(inbuf.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
             error.BufferTooShort => {
-                const n = try transport.read(&scratch);
+                const n = try readTransportUntil(
+                    transport,
+                    &scratch,
+                    body_deadline,
+                );
                 if (n == 0) return error.ConnectionClosed;
                 try inbuf.appendSlice(allocator, scratch[0..n]);
                 if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -4948,7 +5117,11 @@ fn readMessageBytesBufferedWithContext(
     // fully buffered yet.
     try inbuf.ensureTotalCapacity(allocator, target_len);
     while (inbuf.items.len < target_len) {
-        const n = try transport.read(&scratch);
+        const n = try readTransportUntil(
+            transport,
+            &scratch,
+            body_deadline,
+        );
         if (n == 0) return error.ConnectionClosed;
         try inbuf.appendSlice(allocator, scratch[0..n]);
         if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -4977,6 +5150,7 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
         null,
         false,
         true,
+        null,
         null,
     );
     defer allocator.free(bytes);

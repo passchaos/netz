@@ -616,6 +616,12 @@ that the HTTP parser read past the switching response/request are returned
 before validating or arming the timeout, while later TLS record reads retain
 one absolute caller budget. A regression covers buffered upgrade bytes, a
 silent-peer timeout, and successful reuse of the same tunnel afterward.
+Complete aggregate HTTP/1 client requests and streaming request writers also
+expose response timeout/deadline methods. Their deadline spans informational
+heads, the final head, fixed/chunked/close-delimited body, and trailers; a
+configured response-head timeout is still enforced when it expires earlier.
+Because HTTP/1 cannot cancel one exchange independently, timeout marks the
+connection unusable so pools cannot replay against ambiguous leftover bytes.
 
 HTTP/2 aggregate client requests now expose relative-timeout and absolute-
 deadline forms. One deadline covers the complete response, including permitted

@@ -97,6 +97,215 @@ test "HTTP/1 client response head timeout starts before first byte" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 complete response deadline bounds a fixed body" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request: [4096]u8 = undefined;
+            try readUntilHead(self.io, stream, &request);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nb",
+            );
+            try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        listener.socket.address,
+        .{},
+    );
+    defer client.close();
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithTimeout(
+            .{ .host = "localhost" },
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(!client.isReusable());
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.request(.{ .host = "localhost" }),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 complete response deadline bounds chunk framing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request: [4096]u8 = undefined;
+            try readUntilHead(self.io, stream, &request);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+            );
+            try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        listener.socket.address,
+        .{},
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .host = "localhost",
+        .body_length = 0,
+    });
+    defer writer.deinit();
+    try writer.finish();
+    try std.testing.expectError(
+        error.Timeout,
+        writer.readResponseWithDeadline(.fromNow(io, .{
+            .raw = .fromMilliseconds(20),
+            .clock = .awake,
+        })),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 streaming response deadline bounds body delivery" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request: [4096]u8 = undefined;
+            try readUntilHead(self.io, stream, &request);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nb",
+            );
+            try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+        }
+    };
+    const Sink = struct {
+        bytes: usize = 0,
+
+        fn consume(self: *@This(), part: []const u8) !void {
+            self.bytes += part.len;
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        listener.socket.address,
+        .{},
+    );
+    defer client.close();
+    var sink: Sink = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestStreamingWithTimeout(
+            .{ .host = "localhost" },
+            .fromMilliseconds(20),
+            &sink,
+            Sink.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), sink.bytes);
+    try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 standalone response reader honors head timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
