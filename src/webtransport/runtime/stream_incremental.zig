@@ -386,7 +386,7 @@ test "WebTransport incremental polling rotates across busy streams" {
         allocator,
         session_id,
         .server,
-        .{ .max_peer_bidi = 2 },
+        .{ .max_peer_bidi = 3 },
     );
     defer registry.deinit();
 
@@ -398,11 +398,22 @@ test "WebTransport incremental polling rotates across busy streams" {
         session_id,
     );
     try encoded.appendSlice(allocator, "busy");
+    var idle: std.ArrayList(u8) = .empty;
+    defer idle.deinit(allocator);
+    try webtransport.BidirectionalStreamHeader.write(
+        &idle,
+        allocator,
+        session_id,
+    );
     try quic.one_rtt.testing.applyReceivedFrames(
         &connection,
         0,
         &.{
+            // An unrelated HTTP/3 unidirectional stream and an associated but
+            // idle stream must not interfere with the ready-stream rotation.
+            .{ .stream = .{ .stream_id = 2, .data = &.{0} } },
             .{ .stream = .{ .stream_id = 4, .data = encoded.items } },
+            .{ .stream = .{ .stream_id = 12, .data = idle.items } },
             .{ .stream = .{ .stream_id = 8, .data = encoded.items } },
         },
         null,
@@ -441,77 +452,4 @@ test "WebTransport incremental polling rotates across busy streams" {
     try std.testing.expect(wrapped == .data);
     try std.testing.expectEqual(@as(u62, 4), wrapped.data.stream_id);
     try std.testing.expectEqualStrings("u", &byte);
-}
-
-test "WebTransport incremental polling includes the cursor stream" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var receiver = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer receiver.deinit();
-    var sender = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer sender.deinit();
-
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x93} ** quic.protection.secret_len,
-    );
-    var connection = try quic.one_rtt.Connection.init(&receiver, .{
-        .peer = sender.address(),
-        .receive_keys = keys,
-        .send_keys = keys,
-        .local_connection_id = "wt-single-server",
-        .peer_connection_id = "wt-single-client",
-        .local_endpoint = .server,
-        .enable_pacing = false,
-    });
-    defer connection.deinit();
-    const session_id: webtransport.SessionId = .init(0);
-    var registry = try webtransport.StreamRegistry.init(
-        allocator,
-        session_id,
-        .server,
-        .{ .max_peer_bidi = 1 },
-    );
-    defer registry.deinit();
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try webtransport.BidirectionalStreamHeader.write(
-        &encoded,
-        allocator,
-        session_id,
-    );
-    try encoded.appendSlice(allocator, "two");
-    try quic.one_rtt.testing.applyReceivedFrames(
-        &connection,
-        0,
-        &.{.{ .stream = .{ .stream_id = 4, .data = encoded.items } }},
-        null,
-        .not_ect,
-    );
-
-    var byte: [1]u8 = undefined;
-    for ("two") |expected| {
-        const event = (try poll(
-            &connection,
-            &registry,
-            session_id,
-            &byte,
-        )) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(event == .data);
-        try std.testing.expectEqual(@as(u62, 4), event.data.stream_id);
-        try std.testing.expectEqual(expected, byte[0]);
-    }
 }
