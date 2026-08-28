@@ -238,6 +238,32 @@ def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def deep_topic_hierarchy(executable: Path, mqtt_packets) -> None:
+    # Mosquitto 02-subpub-qos0-long-topic.py accepts 200 hierarchy levels and
+    # rejects 201 as an implementation guard. MQTT's actual UTF-8 field limit
+    # is 65,535 bytes, so netz intentionally has no shallower arbitrary cap.
+    # This exact-wire case goes one level beyond Mosquitto while remaining a
+    # small packet, and proves both subscription storage and iterative match.
+    topic = "/" * 201
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_client(sock, mqtt_packets, "deep-topic-levels", 4)
+            sock.sendall(
+                mqtt_packets.gen_subscribe(53, topic, 0, proto_ver=4)
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_suback(53, 0, proto_ver=4),
+                "201-level topic SUBACK",
+            )
+            publish = mqtt_packets.gen_publish(
+                topic, qos=0, payload="message", proto_ver=4
+            )
+            sock.sendall(publish)
+            expect_packet(sock, publish, "201-level topic PUBLISH")
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
+
+
 def assigned_client_identifier(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -5827,6 +5853,7 @@ def main() -> None:
     import mqtt_packets  # type: ignore
 
     proxy_protocol_v1_v2(args.broker, mqtt_packets)
+    deep_topic_hierarchy(args.broker, mqtt_packets)
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     server_reference_connack(args.broker, mqtt_packets, mqtt5_props)
     subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
@@ -5944,7 +5971,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 141 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 142 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
