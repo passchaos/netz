@@ -10,10 +10,15 @@ const sibling_response_bytes = 16 * 1024;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const tls_enabled = args.len == 3;
+    const pool_mode = std.mem.eql(u8, args[args.len - 1], "--pool");
+    const effective_len = args.len - @intFromBool(pool_mode);
+    if (effective_len != 2 and effective_len != 3) {
+        return error.InvalidArgument;
+    }
+    const tls_enabled = effective_len == 3;
     if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
@@ -39,6 +44,17 @@ pub fn main(init: std.process.Init) !void {
             io,
             std.Io.Clock.real.now(io),
             args[2],
+        );
+    }
+    if (pool_mode) {
+        return runPoolInterop(
+            allocator,
+            io,
+            port,
+            tls_enabled,
+            &ca_bundle,
+            &ca_lock,
+            limits,
         );
     }
     var connection = if (tls_enabled)
@@ -231,6 +247,57 @@ pub fn main(init: std.process.Init) !void {
     );
     std.debug.print(
         "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=9 new_request_refused=true\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
+}
+
+fn runPoolInterop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+    tls_enabled: bool,
+    ca_bundle: *std.crypto.Certificate.Bundle,
+    ca_lock: *std.Io.RwLock,
+    limits: netz.http2.runtime.Limits,
+) !void {
+    var pool = try netz.http2.client_pool.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+        .limits = limits,
+        .tls = .{ .ca_bundle = if (tls_enabled) .{
+            .bundle = ca_bundle,
+            .lock = ca_lock,
+        } else null },
+    });
+    defer pool.deinit();
+    const scheme = if (tls_enabled) "https" else "http";
+    const first_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-one?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(first_uri);
+    const second_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://LOCALHOST:{d}/pool-two?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(second_uri);
+
+    var first = try pool.requestUri(first_uri, .{});
+    defer first.deinit(allocator);
+    var second = try pool.requestUri(second_uri, .{});
+    defer second.deinit(allocator);
+    if (first.status != 200 or second.status != 200 or
+        !std.mem.eql(u8, first.body, "pool-one") or
+        !std.mem.eql(u8, second.body, "pool-two") or
+        pool.idleCount() != 1 or pool.connectionCount() != 1)
+    {
+        return error.InvalidResponse;
+    }
+    std.debug.print(
+        "netz HTTP/2 pool reused Hyper connection: transport={s} requests=2 idle=1 total=1\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

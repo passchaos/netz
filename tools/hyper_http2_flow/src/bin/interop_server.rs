@@ -10,7 +10,7 @@ use std::future::Future;
 use std::io::{self, BufReader, Write};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -44,9 +44,19 @@ fn main() {
         .parse()
         .expect("valid port");
     assert_ne!(port, 0);
-    let tls_paths = args
-        .next()
-        .map(|cert| (cert, args.next().expect("TLS private key argument")));
+    let first = args.next();
+    let (tls_paths, pool_mode) = match first.as_deref() {
+        Some("--pool") => (None, true),
+        Some(cert) => {
+            let key = args.next().expect("TLS private key argument");
+            let mode = args.next();
+            if let Some(value) = mode.as_deref() {
+                assert_eq!(value, "--pool", "unexpected mode");
+            }
+            (Some((cert.to_owned(), key)), mode.is_some())
+        }
+        None => (None, false),
+    };
     assert!(args.next().is_none(), "unexpected extra argument");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -96,7 +106,11 @@ fn main() {
                     move |request| handle(request, signals.clone())
                 }),
             ));
-        let mut graceful_started = Box::pin(signals.graceful_started.notified());
+        let mut graceful_started = Box::pin(if pool_mode {
+            signals.pool_finished.notified()
+        } else {
+            signals.graceful_started.notified()
+        });
         futures_util::future::poll_fn(|cx| {
             if let Poll::Ready(result) = connection.as_mut().poll(cx) {
                 result.expect("serve netz HTTP/2 client before drain");
@@ -108,18 +122,26 @@ fn main() {
             }
         })
         .await;
-        // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY, synchronizes
-        // one RTT with PING, then narrows the boundary to the highest request
-        // it processed. Release the active response only after shutdown starts
-        // so the netz client must drain that stream through both GOAWAYs.
-        connection.as_mut().graceful_shutdown();
-        signals.graceful_release.notify_one();
-        connection
-            .await
-            .expect("gracefully drain netz HTTP/2 client");
-        println!(
-            "Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true"
-        );
+        if pool_mode {
+            // The pool process closes its idle socket after proving both
+            // requests shared it. That can surface as a reset after all
+            // asserted work, which is a valid shutdown for this scenario.
+            let _ = connection.await;
+            println!("Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1");
+        } else {
+            // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY,
+            // synchronizes one RTT with PING, then narrows the boundary to the
+            // highest request it processed. Release the active response only
+            // after shutdown starts so netz must drain through both GOAWAYs.
+            connection.as_mut().graceful_shutdown();
+            signals.graceful_release.notify_one();
+            connection
+                .await
+                .expect("gracefully drain netz HTTP/2 client");
+            println!(
+                "Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true"
+            );
+        }
     });
 }
 
@@ -146,6 +168,22 @@ async fn handle(
     request: Request<Incoming>,
     signals: Arc<LifecycleSignals>,
 ) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, io::Error> {
+    if let Some(path) = request.uri().path_and_query().map(|value| value.as_str()) {
+        let body = match path {
+            "/pool-one?from=netz" => Some(Bytes::from_static(b"pool-one")),
+            "/pool-two?from=netz" => Some(Bytes::from_static(b"pool-two")),
+            _ => None,
+        };
+        if let Some(body) = body {
+            ensure_request(&request, Method::GET, path)?;
+            if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 2 {
+                signals.pool_finished.notify_one();
+            }
+            return Ok(Response::new(
+                StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(body))])).boxed(),
+            ));
+        }
+    }
     if request.uri().path_and_query().map(|value| value.as_str()) == Some("/cancel?from=netz") {
         ensure_request(&request, Method::GET, "/cancel?from=netz")?;
         let mut response = Response::new(
@@ -287,6 +325,8 @@ struct LifecycleSignals {
     cancel: Arc<CancelSignal>,
     graceful_started: Notify,
     graceful_release: Notify,
+    pool_requests: AtomicUsize,
+    pool_finished: Notify,
 }
 
 struct CancelResponseFrames {

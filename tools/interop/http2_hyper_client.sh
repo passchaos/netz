@@ -108,6 +108,28 @@ echo 'Hyper HTTP/2 server -> netz client interop passed'
 
 port=$(free_tcp_port)
 
+"$server_binary" "$port" --pool >"$work/pool-server.log" 2>&1 &
+server_pid=$!
+wait_for_server "$work/pool-server.log" 'Hyper HTTP/2 interop server listening'
+if ! timeout 10s "$client" "$port" --pool \
+    >"$work/pool-client.log" 2>&1; then
+  cat "$work/pool-client.log" >&2
+  cat "$work/pool-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz HTTP/2 pool reused Hyper connection: transport=h2c requests=2 idle=1 total=1' \
+  "$work/pool-client.log"
+grep -Fq \
+  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1' \
+  "$work/pool-server.log"
+cat "$work/pool-client.log"
+echo 'netz HTTP/2 pool -> Hyper h2c reuse interop passed'
+
+port=$(free_tcp_port)
+
 "$server" "$port" >"$work/netz-server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
@@ -199,6 +221,29 @@ grep -Fq \
   "$work/tls-netz-client.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper TLS HTTP/2 server -> netz client interop passed'
+
+port=$(free_tcp_port)
+"$server_binary" "$port" "$work/cert.pem" "$work/key.pem" --pool \
+  >"$work/tls-pool-server.log" 2>&1 &
+server_pid=$!
+wait_for_server "$work/tls-pool-server.log" \
+  'Hyper HTTP/2 interop server listening'
+if ! timeout 10s "$client" "$port" "$work/cert.pem" --pool \
+    >"$work/tls-pool-client.log" 2>&1; then
+  cat "$work/tls-pool-client.log" >&2
+  cat "$work/tls-pool-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz HTTP/2 pool reused Hyper connection: transport=tls requests=2 idle=1 total=1' \
+  "$work/tls-pool-client.log"
+grep -Fq \
+  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1' \
+  "$work/tls-pool-server.log"
+cat "$work/tls-pool-client.log"
+echo 'netz HTTP/2 pool -> Hyper TLS reuse interop passed'
 
 port=$(free_tcp_port)
 "$server" "$port" --tls >"$work/tls-netz-server.log" 2>&1 &

@@ -671,6 +671,10 @@ direction Hyper enables its actual 25 ms background keep-alive with idle probes
 using the harness's Tokio-backed implementation of Hyper's timer interface,
 waits 100 ms, and then completes another request through the netz server. This
 proves netz services external PINGs rather than relying only on local peers.
+The same process gate now runs two URI requests through `http2.client_pool.Pool`
+over both h2c and certificate-verified TLS, requires distinct response bodies,
+and verifies one idle/total connection afterward while the Hyper process
+confirms that both requests arrived on its single accepted connection.
 Single-stream cancellation and ordinary GOAWAY now use caller-buffer frame
 encoders: the fixed 13-byte RST_STREAM always stays on the stack, and common
 GOAWAY debug strings use a bounded 256-byte stack path with an exact heap
