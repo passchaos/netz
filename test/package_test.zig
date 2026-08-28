@@ -1507,6 +1507,10 @@ test "public modules are reachable" {
         "TlsHostReconnectConnector",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime,
+        "TlsAddressReconnectConnector",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "pollWithTimeout",
     ));
@@ -2002,6 +2006,18 @@ test "public modules are reachable" {
         "connectTlsHostAttempt",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsAddress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsAddressWithConnAck",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsAddressAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "pendingSource",
     ));
@@ -2460,6 +2476,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
         "connectTlsHost",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsAddress",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,

@@ -373,10 +373,12 @@ test "MQTT WSS client connects and reconnects through hostname" {
                 "wss-host",
                 "wss-reconnect-host",
                 "wss-reconnect-host",
+                "wss-address",
+                "wss-address",
             }, 0..) |client_id, index| {
                 var accepted = try self.server.accept(.{
                     .protocol = .v5,
-                    .session_present = index == 2,
+                    .session_present = index == 2 or index == 4,
                 });
                 try std.testing.expectEqualStrings(
                     client_id,
@@ -445,6 +447,31 @@ test "MQTT WSS client connects and reconnects through hostname" {
     const second = try client.connect();
     try std.testing.expect(second.session_present);
     try client.disconnect(0);
+
+    var address_connector = mqtt_ws.TlsAddressReconnectConnector{
+        .address = server.address(),
+        .tls_host = "localhost",
+        .options = options,
+    };
+    var address_shutdown: std.Io.Event = .unset;
+    var address_client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        address_connector.connector(),
+        .{
+            .protocol = .v5,
+            .client_id = "wss-address",
+            .clean_start = false,
+        },
+        .{},
+        &address_shutdown,
+    );
+    defer address_client.deinit();
+    _ = try address_client.connect();
+    try address_client.disconnect(0);
+    const address_second = try address_client.connect();
+    try std.testing.expect(address_second.session_present);
+    try address_client.disconnect(0);
 
     thread.join();
     joined = true;

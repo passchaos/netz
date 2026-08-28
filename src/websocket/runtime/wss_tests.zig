@@ -126,6 +126,78 @@ test "WSS server completes verified WebSocket echo" {
     if (shared.err) |err| return err;
 }
 
+test "WSS client connects to resolved address with separate TLS host" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            var message = connection.receiveMessage() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer message.deinit(self.server.allocator);
+            connection.sendBinary(message.payload) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var client = try runtime.Client.connectTlsAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{ .target = "/resolved" },
+        .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    );
+    defer client.close();
+    try client.sendBinary("resolved wss");
+    var echoed = try client.receiveMessage();
+    defer echoed.deinit(allocator);
+    try std.testing.expectEqualStrings("resolved wss", echoed.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "ordinary vail WSS client exposes TLS state and KeyUpdate" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

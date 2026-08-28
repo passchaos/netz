@@ -1101,6 +1101,69 @@ pub const Client = struct {
         return connectStream(allocator, io, stream, tls_conn, connect_options);
     }
 
+    /// Connect to a resolved address while verifying TLS against a separate
+    /// hostname. This keeps caller-controlled DNS/service discovery distinct
+    /// from SNI and certificate identity. `options.host`, when empty, defaults
+    /// to `tls_host:address-port` for the HTTP Upgrade authority.
+    pub fn connectTlsAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        _ = try net.HostName.init(tls_host);
+        const stream = try tcp_connect.ip(
+            io,
+            address,
+            options.connect_timeout,
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        const default_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ tls_host, address.getPort() },
+        );
+        defer allocator.free(default_host);
+        var connect_options = options;
+        if (connect_options.host.len == 0) {
+            connect_options.host = default_host;
+        }
+        if (connect_options.vail_tls orelse
+            connect_options.tls_identity) |identity|
+        {
+            const tls_conn = try tls_client_identity.init(
+                allocator,
+                io,
+                stream,
+                tls_host,
+                tls_options,
+                identity,
+            );
+            stream_owned = false;
+            errdefer tls_conn.deinit();
+            return connectVailStream(
+                allocator,
+                io,
+                stream,
+                tls_conn,
+                connect_options,
+            );
+        }
+        const tls_conn = try http1_runtime.TlsClientConnection.init(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            tls_options,
+        );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        return connectStream(allocator, io, stream, tls_conn, connect_options);
+    }
+
     pub fn connectUri(
         allocator: std.mem.Allocator,
         io: std.Io,

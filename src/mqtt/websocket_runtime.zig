@@ -743,6 +743,62 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    /// Connect to a resolved address while keeping an independent hostname
+    /// for WSS SNI, certificate verification, and the default HTTP authority.
+    pub fn connectTlsAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectTlsAddressWithConnAck(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectTlsAddressWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectTlsAddressAttempt(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsAddressAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const ws = try websocket_runtime.Client.connectTlsAddress(
+            allocator,
+            io,
+            address,
+            tls_host,
+            websocketConnectOptions(options),
+            options.tls,
+        );
+        return connectWebSocketAttempt(allocator, ws, options.mqtt);
+    }
+
     pub fn connectUnix(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1016,6 +1072,42 @@ pub const TlsHostReconnectConnector = struct {
             io,
             self.host,
             self.port,
+            reconnectOptions(self.options, mqtt_options),
+        );
+    }
+};
+
+/// Borrowed fixed-address WSS target with independent certificate identity.
+/// This avoids DNS when an application already owns endpoint discovery while
+/// preserving SNI and hostname verification on every reconnect attempt.
+pub const TlsAddressReconnectConnector = struct {
+    address: net.IpAddress,
+    tls_host: []const u8,
+    options: ConnectOptions,
+
+    pub fn connector(
+        self: *TlsAddressReconnectConnector,
+    ) runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsAddressReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectTlsAddressAttempt(
+            allocator,
+            io,
+            self.address,
+            self.tls_host,
             reconnectOptions(self.options, mqtt_options),
         );
     }
