@@ -627,6 +627,65 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    /// Resolve a hostname and establish cleartext MQTT-over-WebSocket. The
+    /// HTTP Host authority is synthesized by the underlying WebSocket client
+    /// when `options.host` is empty, while an explicit override is preserved.
+    pub fn connectHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectHostWithConnAck(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectHostWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectHostAttempt(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectHostAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (options.client_identity != null or options.use_vail_tls) {
+            return error.UnsupportedScheme;
+        }
+        const ws = try websocket_runtime.Client.connectHost(
+            allocator,
+            io,
+            host,
+            port,
+            websocketConnectOptions(options),
+        );
+        return connectWebSocketAttempt(allocator, ws, options.mqtt);
+    }
+
     pub fn connectUnix(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -826,19 +885,60 @@ pub const ReconnectConnector = struct {
         mqtt_options: runtime.ConnectOptions,
     ) runtime.Error!runtime.ConnectAttempt {
         const self: *ReconnectConnector = @ptrCast(@alignCast(context));
-        var options = self.options;
-        const network_connect_timeout =
-            options.mqtt.network_connect_timeout;
-        options.mqtt = mqtt_options;
-        options.mqtt.network_connect_timeout = network_connect_timeout;
         return Client.connectUriAttempt(
             allocator,
             io,
             self.uri,
-            options,
+            reconnectOptions(self.options, mqtt_options),
         );
     }
 };
+
+/// Borrowed cleartext WebSocket hostname target for the reconnect client. Each
+/// attempt re-runs DNS under the connector-owned network timeout. TLS client
+/// configuration is rejected by the same public hostname path rather than
+/// silently ignored.
+pub const HostReconnectConnector = struct {
+    host: []const u8,
+    port: u16,
+    options: ConnectOptions,
+
+    pub fn connector(self: *HostReconnectConnector) runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *HostReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectHostAttempt(
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptions(self.options, mqtt_options),
+        );
+    }
+};
+
+fn reconnectOptions(
+    configured: ConnectOptions,
+    mqtt_options: runtime.ConnectOptions,
+) ConnectOptions {
+    var options = configured;
+    const network_connect_timeout = options.mqtt.network_connect_timeout;
+    options.mqtt = mqtt_options;
+    options.mqtt.network_connect_timeout = network_connect_timeout;
+    return options;
+}
 
 fn websocketLimits(
     limits: runtime.Limits,

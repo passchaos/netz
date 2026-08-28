@@ -712,6 +712,151 @@ test "MQTT WebSocket client connects through ws URI" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WebSocket client connects through hostname" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{ .max_packet_size = max_packet_size } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "mqtt-ws-host",
+                accepted.connect.connect.client_id,
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try mqtt_ws.Client.connectHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-ws-host",
+                .network_connect_timeout = .fromSeconds(1),
+            },
+            .target = "/mqtt",
+        },
+    );
+    defer client.close();
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT WebSocket reconnect client reuses hostname connector" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{ .max_packet_size = max_packet_size } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..2) |index| {
+                var accepted = try self.server.accept(.{
+                    .protocol = .v5,
+                    .session_present = index != 0,
+                });
+                try std.testing.expectEqualStrings(
+                    "reconnect-ws-host",
+                    accepted.connect.connect.client_id,
+                );
+                var disconnect = try accepted.connection.readDisconnect();
+                disconnect.deinit(self.server.allocator);
+                accepted.deinit(self.server.allocator);
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var connector = mqtt_ws.HostReconnectConnector{
+        .host = "localhost",
+        .port = server.address().ip4.port,
+        .options = .{
+            .mqtt = .{
+                .client_id = "placeholder",
+                .network_connect_timeout = .fromSeconds(1),
+            },
+            .target = "/mqtt",
+        },
+    };
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector.connector(),
+        .{
+            .protocol = .v5,
+            .client_id = "reconnect-ws-host",
+            .clean_start = false,
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    try client.disconnect(0);
+    const second = try client.connect();
+    try std.testing.expect(second.session_present);
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT WebSocket client follows Server Reference CONNACK" {
     const allocator = std.testing.allocator;
 
