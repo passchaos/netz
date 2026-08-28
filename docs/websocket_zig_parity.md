@@ -53,11 +53,12 @@ bidirectional process-boundary coverage against the independently maintained
 quic-go v0.59.0 HTTP/3 stack, for both QUIC v1 and v2. In each direction it
 requires peer SETTINGS support, TLS certificate verification on the client,
 Origin and subprotocol negotiation, masked fragmented client text, an unmasked
-server response, Ping/Pong, and an echoed Close 1000/`done`. The Go fixture
+server response, two independently reset no-context-takeover
+permessage-deflate messages in both directions,
+Ping/Pong, and an echoed Close 1000/`done`. The Go fixture
 implements its own bounded RFC 6455 frame reader/writer, so this is external
 wire evidence rather than two netz adapters sharing a codec. Browser
-interoperability and external permessage-deflate coverage remain follow-up
-work.
+interoperability remains follow-up work.
 
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.

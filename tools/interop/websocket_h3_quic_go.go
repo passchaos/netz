@@ -4,6 +4,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -31,27 +33,46 @@ import (
 const (
 	opContinuation = 0x0
 	opText         = 0x1
+	opBinary       = 0x2
 	opClose        = 0x8
 	opPing         = 0x9
 	opPong         = 0xa
 )
 
 const (
-	websocketPath   = "/rfc9220"
-	origin          = "https://example.test"
-	protocol        = "netz-chat"
-	clientMessage   = "netz websocket h3"
-	serverMessage   = "quic-go websocket h3"
-	pingPayload     = "probe"
-	closeReason     = "done"
-	normalCloseCode = 1000
+	websocketPath           = "/rfc9220"
+	origin                  = "https://example.test"
+	protocol                = "netz-chat"
+	perMessageDeflate       = "permessage-deflate; server_no_context_takeover; client_no_context_takeover"
+	clientMessage           = "netz websocket h3"
+	serverMessage           = "quic-go websocket h3"
+	clientCompressedMessage = "netz compressed websocket h3 netz compressed websocket h3 netz compressed websocket h3"
+	serverCompressedMessage = "quic-go compressed websocket h3 quic-go compressed websocket h3 quic-go compressed websocket h3"
+	clientCompressedAgain   = "netz second compressed message netz second compressed message netz second compressed message"
+	serverCompressedAgain   = "quic-go second compressed message quic-go second compressed message quic-go second compressed message"
+	pingPayload             = "probe"
+	closeReason             = "done"
+	normalCloseCode         = 1000
+	maxFramePayload         = 4096
 )
 
 type frame struct {
 	fin     bool
 	opcode  byte
 	masked  bool
+	rsv1    bool
 	payload []byte
+}
+
+type frameReadOptions struct {
+	expectMasked bool
+	allowRSV1    bool
+}
+
+type frameWriteOptions struct {
+	fin    bool
+	masked bool
+	rsv1   bool
 }
 
 func main() {
@@ -141,7 +162,7 @@ func runServer(address, caOut string, v2Only bool) {
 		log.Fatal("timed out stopping HTTP/3 server")
 	}
 	verifyVersion(<-negotiatedVersion, v2Only)
-	fmt.Printf("quic-go RFC 9220 server interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true ping_pong=true close=1000/%s\n", versionNumber(v2Only), protocol, closeReason)
+	fmt.Printf("quic-go RFC 9220 server interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/%s\n", versionNumber(v2Only), protocol, closeReason)
 }
 
 func serveWebSocket(writer http.ResponseWriter, request *http.Request) error {
@@ -149,10 +170,12 @@ func serveWebSocket(writer http.ResponseWriter, request *http.Request) error {
 		request.ProtoMajor != 3 || request.URL.RequestURI() != websocketPath ||
 		request.Host != "localhost" || request.Header.Get("Origin") != origin ||
 		request.Header.Get("Sec-WebSocket-Version") != "13" ||
-		request.Header.Get("Sec-WebSocket-Protocol") != protocol {
+		request.Header.Get("Sec-WebSocket-Protocol") != protocol ||
+		request.Header.Get("Sec-WebSocket-Extensions") != perMessageDeflate {
 		return fmt.Errorf("unexpected RFC 9220 request: method=%s protocol=%s target=%s host=%s headers=%v", request.Method, request.Proto, request.URL.RequestURI(), request.Host, request.Header)
 	}
 	writer.Header().Set("Sec-WebSocket-Protocol", protocol)
+	writer.Header().Set("Sec-WebSocket-Extensions", perMessageDeflate)
 	writer.WriteHeader(http.StatusOK)
 	stream := writer.(http3.HTTPStreamer).HTTPStream()
 	if err := stream.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -162,11 +185,11 @@ func serveWebSocket(writer http.ResponseWriter, request *http.Request) error {
 }
 
 func serverConversation(stream io.ReadWriter) error {
-	first, err := readFrame(stream, true)
+	first, err := readFrame(stream, frameReadOptions{expectMasked: true})
 	if err != nil {
 		return err
 	}
-	second, err := readFrame(stream, true)
+	second, err := readFrame(stream, frameReadOptions{expectMasked: true})
 	if err != nil {
 		return err
 	}
@@ -175,20 +198,55 @@ func serverConversation(stream io.ReadWriter) error {
 		second.opcode != opContinuation || string(combined) != clientMessage {
 		return fmt.Errorf("unexpected fragmented client message: first=%+v second=%+v", first, second)
 	}
-	if err := writeFrame(stream, opText, true, false, []byte(serverMessage)); err != nil {
+	if err := writeFrame(stream, opText, []byte(serverMessage), frameWriteOptions{fin: true}); err != nil {
 		return err
 	}
-	ping, err := readFrame(stream, true)
+	for index, exchange := range []struct {
+		client string
+		server string
+	}{
+		{clientCompressedMessage, serverCompressedMessage},
+		{clientCompressedAgain, serverCompressedAgain},
+	} {
+		compressed, err := readFrame(stream, frameReadOptions{
+			expectMasked: true,
+			allowRSV1:    true,
+		})
+		if err != nil {
+			return err
+		}
+		if !compressed.fin || compressed.opcode != opText || !compressed.rsv1 {
+			return fmt.Errorf("unexpected compressed client frame %d: %+v", index, compressed)
+		}
+		decoded, err := decompressMessage(compressed.payload)
+		if err != nil || string(decoded) != exchange.client {
+			return fmt.Errorf("unexpected compressed client message %d: payload=%q err=%v", index, decoded, err)
+		}
+		encoded, err := compressMessage([]byte(exchange.server))
+		if err != nil {
+			return err
+		}
+		if len(encoded) >= len(exchange.server) {
+			return fmt.Errorf("server permessage-deflate payload %d did not shrink", index)
+		}
+		if err := writeFrame(stream, opText, encoded, frameWriteOptions{
+			fin:  true,
+			rsv1: true,
+		}); err != nil {
+			return err
+		}
+	}
+	ping, err := readFrame(stream, frameReadOptions{expectMasked: true})
 	if err != nil {
 		return err
 	}
 	if !ping.fin || ping.opcode != opPing || string(ping.payload) != pingPayload {
 		return fmt.Errorf("unexpected ping: %+v", ping)
 	}
-	if err := writeFrame(stream, opPong, true, false, ping.payload); err != nil {
+	if err := writeFrame(stream, opPong, ping.payload, frameWriteOptions{fin: true}); err != nil {
 		return err
 	}
-	closeFrame, err := readFrame(stream, true)
+	closeFrame, err := readFrame(stream, frameReadOptions{expectMasked: true})
 	if err != nil {
 		return err
 	}
@@ -196,7 +254,7 @@ func serverConversation(stream io.ReadWriter) error {
 	if err != nil || code != normalCloseCode || reason != closeReason {
 		return fmt.Errorf("unexpected close: code=%d reason=%q err=%v", code, reason, err)
 	}
-	return writeFrame(stream, opClose, true, false, closeFrame.payload)
+	return writeFrame(stream, opClose, closeFrame.payload, frameWriteOptions{fin: true})
 }
 
 func runClient(address, caPath string, v2Only bool) {
@@ -246,6 +304,7 @@ func runClient(address, caPath string, v2Only bool) {
 	request.Header.Set("Origin", origin)
 	request.Header.Set("Sec-WebSocket-Version", "13")
 	request.Header.Set("Sec-WebSocket-Protocol", protocol)
+	request.Header.Set("Sec-WebSocket-Extensions", perMessageDeflate)
 	if err := stream.SendRequestHeader(request); err != nil {
 		log.Fatalf("send RFC 9220 request: %v", err)
 	}
@@ -254,35 +313,77 @@ func runClient(address, caPath string, v2Only bool) {
 		log.Fatalf("read RFC 9220 response: %v", err)
 	}
 	if response.StatusCode != http.StatusOK ||
-		response.Header.Get("Sec-WebSocket-Protocol") != protocol {
+		response.Header.Get("Sec-WebSocket-Protocol") != protocol ||
+		response.Header.Get("Sec-WebSocket-Extensions") != perMessageDeflate {
 		log.Fatalf("unexpected RFC 9220 response: status=%d headers=%v", response.StatusCode, response.Header)
 	}
 	if err := clientConversation(stream); err != nil {
 		log.Fatal(err)
 	}
 	verifyVersion(connection.ConnectionState().Version, v2Only)
-	fmt.Printf("quic-go RFC 9220 client interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true ping_pong=true close=1000/%s\n", versionNumber(v2Only), protocol, closeReason)
+	fmt.Printf("quic-go RFC 9220 client interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/%s\n", versionNumber(v2Only), protocol, closeReason)
 }
 
 func clientConversation(stream io.ReadWriter) error {
 	split := len(clientMessage) / 2
-	if err := writeFrame(stream, opText, false, true, []byte(clientMessage[:split])); err != nil {
+	if err := writeFrame(stream, opText, []byte(clientMessage[:split]), frameWriteOptions{
+		masked: true,
+	}); err != nil {
 		return err
 	}
-	if err := writeFrame(stream, opContinuation, true, true, []byte(clientMessage[split:])); err != nil {
+	if err := writeFrame(stream, opContinuation, []byte(clientMessage[split:]), frameWriteOptions{
+		fin:    true,
+		masked: true,
+	}); err != nil {
 		return err
 	}
-	response, err := readFrame(stream, false)
+	response, err := readFrame(stream, frameReadOptions{})
 	if err != nil {
 		return err
 	}
 	if !response.fin || response.opcode != opText || string(response.payload) != serverMessage {
 		return fmt.Errorf("unexpected text response: %+v", response)
 	}
-	if err := writeFrame(stream, opPing, true, true, []byte(pingPayload)); err != nil {
+	for index, exchange := range []struct {
+		client string
+		server string
+	}{
+		{clientCompressedMessage, serverCompressedMessage},
+		{clientCompressedAgain, serverCompressedAgain},
+	} {
+		encoded, err := compressMessage([]byte(exchange.client))
+		if err != nil {
+			return err
+		}
+		if len(encoded) >= len(exchange.client) {
+			return fmt.Errorf("client permessage-deflate payload %d did not shrink", index)
+		}
+		if err := writeFrame(stream, opText, encoded, frameWriteOptions{
+			fin:    true,
+			masked: true,
+			rsv1:   true,
+		}); err != nil {
+			return err
+		}
+		compressed, err := readFrame(stream, frameReadOptions{allowRSV1: true})
+		if err != nil {
+			return err
+		}
+		if !compressed.fin || compressed.opcode != opText || !compressed.rsv1 {
+			return fmt.Errorf("unexpected compressed server frame %d: %+v", index, compressed)
+		}
+		decoded, err := decompressMessage(compressed.payload)
+		if err != nil || string(decoded) != exchange.server {
+			return fmt.Errorf("unexpected compressed server message %d: payload=%q err=%v", index, decoded, err)
+		}
+	}
+	if err := writeFrame(stream, opPing, []byte(pingPayload), frameWriteOptions{
+		fin:    true,
+		masked: true,
+	}); err != nil {
 		return err
 	}
-	pong, err := readFrame(stream, false)
+	pong, err := readFrame(stream, frameReadOptions{})
 	if err != nil {
 		return err
 	}
@@ -292,10 +393,13 @@ func clientConversation(stream io.ReadWriter) error {
 	closePayload := make([]byte, 2+len(closeReason))
 	binary.BigEndian.PutUint16(closePayload, normalCloseCode)
 	copy(closePayload[2:], closeReason)
-	if err := writeFrame(stream, opClose, true, true, closePayload); err != nil {
+	if err := writeFrame(stream, opClose, closePayload, frameWriteOptions{
+		fin:    true,
+		masked: true,
+	}); err != nil {
 		return err
 	}
-	closeFrame, err := readFrame(stream, false)
+	closeFrame, err := readFrame(stream, frameReadOptions{})
 	if err != nil {
 		return err
 	}
@@ -306,16 +410,26 @@ func clientConversation(stream io.ReadWriter) error {
 	return nil
 }
 
-func readFrame(reader io.Reader, expectMasked bool) (frame, error) {
+func readFrame(reader io.Reader, options frameReadOptions) (frame, error) {
 	var header [2]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return frame{}, err
 	}
-	result := frame{fin: header[0]&0x80 != 0, opcode: header[0] & 0x0f, masked: header[1]&0x80 != 0}
-	if header[0]&0x70 != 0 || result.masked != expectMasked {
+	result := frame{
+		fin: header[0]&0x80 != 0, opcode: header[0] & 0x0f,
+		masked: header[1]&0x80 != 0, rsv1: header[0]&0x40 != 0,
+	}
+	if !validOpcode(result.opcode) {
+		return frame{}, fmt.Errorf("invalid RFC 6455 opcode: %#x", result.opcode)
+	}
+	if header[0]&0x30 != 0 || result.masked != options.expectMasked ||
+		(result.rsv1 && (!options.allowRSV1 || result.opcode == opContinuation || result.opcode >= opClose)) {
 		return frame{}, fmt.Errorf("invalid RFC 6455 header: %#x %#x", header[0], header[1])
 	}
 	length := uint64(header[1] & 0x7f)
+	if result.opcode >= opClose && (!result.fin || length > 125) {
+		return frame{}, errors.New("invalid RFC 6455 control frame")
+	}
 	switch length {
 	case 126:
 		var extended [2]byte
@@ -323,6 +437,9 @@ func readFrame(reader io.Reader, expectMasked bool) (frame, error) {
 			return frame{}, err
 		}
 		length = uint64(binary.BigEndian.Uint16(extended[:]))
+		if length <= 125 {
+			return frame{}, errors.New("non-minimal WebSocket payload length")
+		}
 	case 127:
 		var extended [8]byte
 		if _, err := io.ReadFull(reader, extended[:]); err != nil {
@@ -332,8 +449,11 @@ func readFrame(reader io.Reader, expectMasked bool) (frame, error) {
 		if length>>63 != 0 {
 			return frame{}, errors.New("invalid 64-bit WebSocket payload length")
 		}
+		if length <= 65535 {
+			return frame{}, errors.New("non-minimal WebSocket payload length")
+		}
 	}
-	if length > 4096 {
+	if length > maxFramePayload {
 		return frame{}, fmt.Errorf("WebSocket payload too large: %d", length)
 	}
 	var mask [4]byte
@@ -354,15 +474,24 @@ func readFrame(reader io.Reader, expectMasked bool) (frame, error) {
 	return result, nil
 }
 
-func writeFrame(writer io.Writer, opcode byte, fin, masked bool, payload []byte) error {
-	if opcode >= opClose && (!fin || len(payload) > 125) {
+func writeFrame(writer io.Writer, opcode byte, payload []byte, options frameWriteOptions) error {
+	if !validOpcode(opcode) || len(payload) > maxFramePayload {
+		return errors.New("invalid WebSocket frame")
+	}
+	if opcode >= opClose && (!options.fin || len(payload) > 125) {
 		return errors.New("invalid control frame")
 	}
+	if options.rsv1 && (opcode == opContinuation || opcode >= opClose) {
+		return errors.New("invalid compressed frame opcode")
+	}
 	header := []byte{opcode, 0}
-	if fin {
+	if options.fin {
 		header[0] |= 0x80
 	}
-	if masked {
+	if options.rsv1 {
+		header[0] |= 0x40
+	}
+	if options.masked {
 		header[1] |= 0x80
 	}
 	switch {
@@ -376,7 +505,7 @@ func writeFrame(writer io.Writer, opcode byte, fin, masked bool, payload []byte)
 		header = binary.BigEndian.AppendUint64(header, uint64(len(payload)))
 	}
 	wirePayload := payload
-	if masked {
+	if options.masked {
 		var mask [4]byte
 		if _, err := rand.Read(mask[:]); err != nil {
 			return err
@@ -387,11 +516,79 @@ func writeFrame(writer io.Writer, opcode byte, fin, masked bool, payload []byte)
 			wirePayload[index] = value ^ mask[index%len(mask)]
 		}
 	}
-	if _, err := writer.Write(header); err != nil {
+	if err := writeAll(writer, header); err != nil {
 		return err
 	}
-	_, err := writer.Write(wirePayload)
-	return err
+	return writeAll(writer, wirePayload)
+}
+
+func validOpcode(opcode byte) bool {
+	switch opcode {
+	case opContinuation, opText, opBinary, opClose, opPing, opPong:
+		return true
+	default:
+		return false
+	}
+}
+
+func writeAll(writer io.Writer, payload []byte) error {
+	for len(payload) != 0 {
+		n, err := writer.Write(payload)
+		if n > 0 {
+			payload = payload[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
+}
+
+func compressMessage(payload []byte) ([]byte, error) {
+	var output bytes.Buffer
+	compressor, err := flate.NewWriter(&output, flate.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := compressor.Write(payload); err != nil {
+		return nil, err
+	}
+	if err := compressor.Flush(); err != nil {
+		return nil, err
+	}
+	const tail = "\x00\x00\xff\xff"
+	encoded := output.Bytes()
+	if !bytes.HasSuffix(encoded, []byte(tail)) {
+		return nil, errors.New("permessage-deflate sync-flush tail missing")
+	}
+	// Clone before Close appends a final DEFLATE block to the same buffer. Each
+	// call owns a fresh compressor, implementing both no-context-takeover flags.
+	wire := append([]byte(nil), encoded[:len(encoded)-len(tail)]...)
+	if err := compressor.Close(); err != nil {
+		return nil, err
+	}
+	return wire, nil
+}
+
+func decompressMessage(payload []byte) ([]byte, error) {
+	// RFC 7692 removes the sync-flush marker. Restore it and a final empty
+	// block so Go's raw DEFLATE reader can finish the standalone message.
+	encoded := make([]byte, 0, len(payload)+9)
+	encoded = append(encoded, payload...)
+	encoded = append(encoded, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff)
+	reader := flate.NewReader(bytes.NewReader(encoded))
+	defer reader.Close()
+	decoded, err := io.ReadAll(io.LimitReader(reader, 4097))
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) > 4096 {
+		return nil, errors.New("inflated WebSocket message too large")
+	}
+	return decoded, nil
 }
 
 func parseClose(value frame) (uint16, string, error) {

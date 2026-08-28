@@ -57,13 +57,15 @@ pub fn main(init: std.process.Init) !void {
             },
             // Splitting HTTP/3 DATA prevents the external exchange from
             // accidentally depending on one WebSocket frame per QUIC write.
-            .session = .{ .max_stream_frame_data = 5 },
+            .session = .{ .max_stream_frame_data = 16 },
         },
         .{
             .authority = "localhost",
             .path = "/rfc9220",
             .origin = "https://example.test",
             .protocols = &.{"netz-chat"},
+            .enable_permessage_deflate = true,
+            .compression_threshold = 1,
             .limits = websocketLimits(),
         },
     );
@@ -71,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, connection.negotiatedAlpn(), "h3") or
         connection.peerCertificates() == null or
         connection.peerCertificates().?.len == 0 or
+        !connection.permessage_deflate or
         connection.selectedProtocol() == null or
         !std.mem.eql(
             u8,
@@ -93,6 +96,40 @@ pub fn main(init: std.process.Init) !void {
         !std.mem.eql(u8, response.payload, "quic-go websocket h3"))
     {
         return error.UnexpectedWebSocketMessage;
+    }
+    try connection.sendText(
+        "netz compressed websocket h3 netz compressed websocket h3 netz compressed websocket h3",
+    );
+    var compressed_response = try connection.receiveMessageWithTimeout(
+        .fromSeconds(5),
+    );
+    defer compressed_response.deinit(allocator);
+    if (compressed_response.opcode != .text or
+        !compressed_response.was_compressed or
+        !std.mem.eql(
+            u8,
+            compressed_response.payload,
+            "quic-go compressed websocket h3 quic-go compressed websocket h3 quic-go compressed websocket h3",
+        ))
+    {
+        return error.UnexpectedCompressedMessage;
+    }
+    try connection.sendText(
+        "netz second compressed message netz second compressed message netz second compressed message",
+    );
+    var compressed_again = try connection.receiveMessageWithTimeout(
+        .fromSeconds(5),
+    );
+    defer compressed_again.deinit(allocator);
+    if (compressed_again.opcode != .text or
+        !compressed_again.was_compressed or
+        !std.mem.eql(
+            u8,
+            compressed_again.payload,
+            "quic-go second compressed message quic-go second compressed message quic-go second compressed message",
+        ))
+    {
+        return error.UnexpectedCompressedMessage;
     }
 
     try connection.sendPing("probe");
@@ -117,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz RFC 9220 client interoperated with quic-go: version={d} extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true ping_pong=true close=1000/done\n",
+        "netz RFC 9220 client interoperated with quic-go: version={d} extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done\n",
         .{versionNumber(version)},
     );
 }

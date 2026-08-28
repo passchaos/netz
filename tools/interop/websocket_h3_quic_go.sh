@@ -87,10 +87,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  "netz RFC 9220 client interoperated with quic-go: version=$version extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true ping_pong=true close=1000/done" \
+  "netz RFC 9220 client interoperated with quic-go: version=$version extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/netz-client.log"
 grep -Fq \
-  "quic-go RFC 9220 server interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true ping_pong=true close=1000/done" \
+  "quic-go RFC 9220 server interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/quic-go-server.log"
 cat "$work/netz-client.log"
 cat "$work/quic-go-server.log"
@@ -132,10 +132,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  "quic-go RFC 9220 client interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true ping_pong=true close=1000/done" \
+  "quic-go RFC 9220 client interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/quic-go-client.log"
 grep -Fq \
-  "netz RFC 9220 server interoperated with quic-go: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true ping_pong=true close=1000/done" \
+  "netz RFC 9220 server interoperated with quic-go: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/netz-server.log"
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"
