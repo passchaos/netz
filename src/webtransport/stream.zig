@@ -152,6 +152,9 @@ pub const StreamRegistry = struct {
     opened_peer_uni: u64 = 0,
     streams: std.ArrayList(StreamState) = .empty,
     index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    /// Last productive stream for the incremental whichever-ready reader.
+    /// Stable IDs remain valid when registry storage reallocates.
+    incremental_poll_cursor: ?u62 = null,
 
     pub const Config = struct {
         max_local_bidi: u64 = webtransport.default_initial_max_streams_bidi,

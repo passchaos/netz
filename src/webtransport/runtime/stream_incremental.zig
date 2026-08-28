@@ -122,17 +122,49 @@ pub fn poll(
     if (pollKnownStopped(connection, registry)) |event| return event;
 
     var stream_ids: [256]u62 = undefined;
+    const previous = registry.incremental_poll_cursor;
+    var found_previous = previous == null;
     var start: usize = 0;
     while (true) {
-        const ids = connection.receivedStreamIdsFromInto(
-            start,
-            &stream_ids,
-        );
+        const ids = connection.receivedStreamIdsFromInto(start, &stream_ids);
         for (ids) |stream_id| {
-            // Association-prefix parsing, rather than numeric guesses,
-            // distinguishes HTTP/3 critical/push streams from WebTransport.
-            if (stream_id == session_id.value) continue;
-            if (try pollStream(
+            if (!found_previous) {
+                found_previous = stream_id == previous.?;
+                continue;
+            }
+            if (try pollStreamId(
+                connection,
+                registry,
+                session_id,
+                stream_id,
+                out,
+            )) |event| return event;
+        }
+        start += ids.len;
+        if (ids.len < stream_ids.len) break;
+    }
+    if (previous == null) return null;
+
+    // A removed/stale cursor has no tail to wrap from. The first pass skipped
+    // everything while looking for it, so restart and inspect every stream.
+    const wrap_limit = if (found_previous) previous else null;
+    start = 0;
+    while (true) {
+        const ids = connection.receivedStreamIdsFromInto(start, &stream_ids);
+        for (ids) |stream_id| {
+            if (wrap_limit) |stop_stream_id| {
+                if (stream_id == stop_stream_id) {
+                    const event = try pollStreamId(
+                        connection,
+                        registry,
+                        session_id,
+                        stream_id,
+                        out,
+                    );
+                    return event;
+                }
+            }
+            if (try pollStreamId(
                 connection,
                 registry,
                 session_id,
@@ -143,6 +175,29 @@ pub fn poll(
         start += ids.len;
         if (ids.len < stream_ids.len) return null;
     }
+}
+
+fn pollStreamId(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    out: []u8,
+) Error!?Read {
+    // Association-prefix parsing, rather than numeric guesses, distinguishes
+    // HTTP/3 critical/push streams from WebTransport.
+    if (stream_id == session_id.value) return null;
+    const event = try pollStream(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        out,
+    ) orelse return null;
+    registry.incremental_poll_cursor = switch (event) {
+        inline else => |value| value.stream_id,
+    };
+    return event;
 }
 
 fn pollStream(
@@ -290,4 +345,173 @@ fn stoppedEvent(
         .locally_initiated = stream.locally_initiated,
         .error_info = stream.stopped.?,
     } };
+}
+
+test "WebTransport incremental polling rotates across busy streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x91} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-fair-server",
+        .peer_connection_id = "wt-fair-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try webtransport.BidirectionalStreamHeader.write(
+        &encoded,
+        allocator,
+        session_id,
+    );
+    try encoded.appendSlice(allocator, "busy");
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{ .stream_id = 4, .data = encoded.items } },
+            .{ .stream = .{ .stream_id = 8, .data = encoded.items } },
+        },
+        null,
+        .not_ect,
+    );
+
+    var byte: [1]u8 = undefined;
+    const first = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &byte,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try std.testing.expectEqual(@as(u62, 4), first.data.stream_id);
+    try std.testing.expectEqualStrings("b", &byte);
+
+    // Stream four still has immediately readable bytes, but the stable cursor
+    // gives its equally busy sibling the next application scheduling turn.
+    const second = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &byte,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(second == .data);
+    try std.testing.expectEqual(@as(u62, 8), second.data.stream_id);
+    try std.testing.expectEqualStrings("b", &byte);
+
+    const wrapped = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &byte,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(wrapped == .data);
+    try std.testing.expectEqual(@as(u62, 4), wrapped.data.stream_id);
+    try std.testing.expectEqualStrings("u", &byte);
+}
+
+test "WebTransport incremental polling includes the cursor stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x93} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-single-server",
+        .peer_connection_id = "wt-single-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 1 },
+    );
+    defer registry.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try webtransport.BidirectionalStreamHeader.write(
+        &encoded,
+        allocator,
+        session_id,
+    );
+    try encoded.appendSlice(allocator, "two");
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 4, .data = encoded.items } }},
+        null,
+        .not_ect,
+    );
+
+    var byte: [1]u8 = undefined;
+    for ("two") |expected| {
+        const event = (try poll(
+            &connection,
+            &registry,
+            session_id,
+            &byte,
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(event == .data);
+        try std.testing.expectEqual(@as(u62, 4), event.data.stream_id);
+        try std.testing.expectEqual(expected, byte[0]);
+    }
 }

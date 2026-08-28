@@ -146,7 +146,12 @@ Session-ID-only prefix with an ordinary HTTP/3 DATA/HEADERS frame.
 `readStream`
 copies only the next contiguous prefix into caller storage, releases it to QUIC
 flow control immediately, and returns data/FIN, RESET_STREAM, or STOP_SENDING
-events. `writeStream` waits for positive transport credit but submits at most
+events. Whichever-ready reads resume after the last productive associated
+stream through a stable stream-ID cursor, skipping HTTP/3, whole-read, idle,
+and stopped streams without allowing one continuously readable stream to starve
+its siblings. This supplies the fairness that wtransport obtains from separate
+per-stream `accept_bi`/`accept_uni` handles while retaining netz's unified event
+API. `writeStream` waits for positive transport credit but submits at most
 one packet-sized application prefix and returns its actual length, allowing
 callers to round-robin many active streams; `finishStream` submits FIN
 independently. `writeStreams` stages one fair packet-sized slice per sendable
