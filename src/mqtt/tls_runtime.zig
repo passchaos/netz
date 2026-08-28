@@ -543,11 +543,7 @@ pub const ReconnectConnector = struct {
         mqtt_options: mqtt_runtime.ConnectOptions,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const self: *ReconnectConnector = @ptrCast(@alignCast(context));
-        var options = self.options;
-        const network_connect_timeout =
-            options.mqtt.network_connect_timeout;
-        options.mqtt = mqtt_options;
-        options.mqtt.network_connect_timeout = network_connect_timeout;
+        const options = reconnectOptions(self.options, mqtt_options);
         return Client.connectAddressAttempt(
             allocator,
             io,
@@ -557,6 +553,91 @@ pub const ReconnectConnector = struct {
         );
     }
 };
+
+/// Borrowed hostname target for `mqtt.reconnect.Client`. Each attempt performs
+/// a fresh DNS lookup under the connector's `network_connect_timeout`; the
+/// host and TLS option storage must outlive the reconnecting client.
+pub const HostReconnectConnector = struct {
+    host: []const u8,
+    port: u16,
+    options: ConnectOptions,
+
+    pub fn connector(
+        self: *HostReconnectConnector,
+    ) mqtt_runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt_runtime.ConnectOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const self: *HostReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectHostAttempt(
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptions(self.options, mqtt_options),
+        );
+    }
+};
+
+/// Borrowed `mqtts://`/`ssl://` target for `mqtt.reconnect.Client`. URI and
+/// TLS option storage must outlive the reconnecting client. Reusing the public
+/// URI attempt path keeps scheme validation, SNI, and DNS behavior identical
+/// between initial connections and retries.
+pub const UriReconnectConnector = struct {
+    uri: []const u8,
+    options: ConnectOptions,
+
+    pub fn connector(
+        self: *UriReconnectConnector,
+    ) mqtt_runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt_runtime.ConnectOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const self: *UriReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectUriAttempt(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptions(self.options, mqtt_options),
+        );
+    }
+};
+
+/// MQTT CONNECT state belongs to the reconnecting client, while the connector
+/// retains network policy. In particular, copying reconnect-owned options must
+/// not silently replace the timeout selected for DNS/TCP establishment.
+fn reconnectOptions(
+    configured: ConnectOptions,
+    mqtt_options: mqtt_runtime.ConnectOptions,
+) ConnectOptions {
+    var options = configured;
+    const network_connect_timeout = options.mqtt.network_connect_timeout;
+    options.mqtt = mqtt_options;
+    options.mqtt.network_connect_timeout = network_connect_timeout;
+    return options;
+}
 
 fn connectStreamAttempt(
     allocator: std.mem.Allocator,

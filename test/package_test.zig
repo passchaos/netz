@@ -1487,6 +1487,14 @@ test "public modules are reachable" {
         "ReconnectConnector",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "HostReconnectConnector",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "UriReconnectConnector",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,
         "ReconnectConnector",
     ));

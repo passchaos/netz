@@ -419,6 +419,148 @@ test "MQTT reconnect client reuses native TLS connector" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect client reuses TLS hostname and URI connectors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for ([_][]const u8{ "tls-host", "tls-uri" }) |client_id| {
+                var accepted = try self.server.accept(.{ .protocol = .v5 });
+                try std.testing.expectEqualStrings(
+                    client_id,
+                    accepted.connect.connect.client_id,
+                );
+                var disconnect = try accepted.connection.readDisconnect();
+                disconnect.deinit(self.server.allocator);
+                accepted.deinit(self.server.allocator);
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const tls_options: mqtt_tls.ConnectOptions = .{
+        .mqtt = undefined,
+        .tls = .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    };
+
+    var host_connector = mqtt_tls.HostReconnectConnector{
+        .host = "localhost",
+        .port = server.address().ip4.port,
+        .options = tls_options,
+    };
+    var host_shutdown: std.Io.Event = .unset;
+    var host_client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        host_connector.connector(),
+        .{ .protocol = .v5, .client_id = "tls-host" },
+        .{},
+        &host_shutdown,
+    );
+    defer host_client.deinit();
+    _ = try host_client.connect();
+    try host_client.disconnect(0);
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "mqtts://localhost:{d}",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var uri_connector = mqtt_tls.UriReconnectConnector{
+        .uri = uri,
+        .options = tls_options,
+    };
+    var uri_shutdown: std.Io.Event = .unset;
+    var uri_client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        uri_connector.connector(),
+        .{ .protocol = .v5, .client_id = "tls-uri" },
+        .{},
+        &uri_shutdown,
+    );
+    defer uri_client.deinit();
+    _ = try uri_client.connect();
+    try uri_client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TLS URI reconnect connector preserves validation and network timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var invalid = mqtt_tls.UriReconnectConnector{
+        .uri = "mqtt://localhost",
+        .options = .{ .mqtt = undefined },
+    };
+    try std.testing.expectError(
+        error.UnsupportedScheme,
+        invalid.connector().connectAttempt(allocator, io, .{
+            .client_id = "tls-invalid-uri",
+        }),
+    );
+
+    var timeout = mqtt_tls.UriReconnectConnector{
+        .uri = "mqtts://localhost:8883",
+        .options = .{ .mqtt = .{
+            .client_id = "placeholder",
+            .network_connect_timeout = .zero,
+        } },
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        timeout.connector().connectAttempt(allocator, io, .{
+            .client_id = "tls-uri-timeout",
+            .network_connect_timeout = .fromSeconds(1),
+        }),
+    );
+}
+
 test "MQTT TLS server consumes PROXY v2 before TLS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
