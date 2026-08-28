@@ -121,6 +121,11 @@ absolute application deadline spans unrelated QUIC packets while earlier PTO,
 delayed-ACK, keep-alive, path-validation, idle and close timers continue to
 run; neither transport maintenance nor control traffic renews the caller's
 budget.
+URI clients inherit HTTP/3's total `connect_timeout`: DNS resolution and each
+address-specific QUIC/TLS attempt share one absolute deadline across Initial,
+Retry, Version Negotiation, and passive Handshake flights. A real silent-UDP
+test verifies the WebTransport adapter reaches that deadline instead of
+waiting for the lower-level multi-PTO default.
 
 ## Important interoperability correction
 

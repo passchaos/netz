@@ -4147,9 +4147,10 @@ pub const EndpointServer = struct {
 pub const HandshakeClientOptions = struct {
     handshake: quic.handshake.ClientOptions,
     session: HandshakeSessionOptions = .{},
-    /// Absolute budget for URI hostname resolution plus every address-specific
-    /// QUIC/TLS handshake attempt. Direct-address `connect` continues to use
-    /// `handshake.handshake_recovery`; this field bounds only URI fallback.
+    /// Absolute budget for the complete QUIC/TLS connection. URI entry points
+    /// include hostname resolution and every address fallback in this same
+    /// budget; direct-address and caller-owned-endpoint entry points begin it
+    /// immediately before the handshake.
     connect_timeout: ?std.Io.Duration = null,
 };
 

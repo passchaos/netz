@@ -18,6 +18,53 @@ test "WebTransport endpoint server exposes stable session API" {
     ));
 }
 
+test "WebTransport URI connect forwards HTTP3 total handshake timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/timeout",
+        .{silent.address().ip4.port},
+    );
+    defer allocator.free(uri);
+
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClientSession.connectUri(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            .{ .h3 = .{
+                .connect_timeout = .fromMilliseconds(20),
+                .handshake = .{
+                    .original_destination_connection_id = "wt-timeout-origin",
+                    .local_connection_id = "wt-timeout-client",
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 1_000,
+                        .max_pto_ms = 4_000,
+                        .max_retries = 3,
+                    },
+                },
+            } },
+        ),
+    );
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    try std.testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
+}
+
 test "WebTransport endpoint server rotates ready sessions fairly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
