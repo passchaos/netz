@@ -90,6 +90,9 @@ pub const TlsClientOptions = struct {
     /// Forward EOF without close_notify.  This is useful only when the HTTP
     /// layer independently verifies body length (for example Content-Length).
     allow_truncation_attacks: bool = false,
+    /// Absolute receive budget for the TLS 1.3 handshake. This is independent
+    /// from the TCP connect and HTTP response-head budgets.
+    handshake_timeout: ?std.Io.Duration = null,
 };
 
 /// Opt-in vail TLS 1.3 client features that Zig's standard client does not
@@ -575,6 +578,14 @@ pub const TlsClientConnection = struct {
         conn.net_reader = net.Stream.reader(stream, io, conn.net_read_buf);
         conn.net_reader.interface.vtable = &tls_client_reader_vtable;
         conn.net_writer = net.Stream.writer(stream, io, conn.net_write_buf);
+        if (options.handshake_timeout) |timeout| {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            conn.timed_read_deadline = .fromNow(io, .{
+                .raw = timeout,
+                .clock = .awake,
+            });
+        }
+        defer conn.timed_read_deadline = null;
 
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
         try std.Io.randomSecure(io, &entropy);
@@ -604,7 +615,16 @@ pub const TlsClientConnection = struct {
             };
         }
 
-        conn.client = try tls.Client.init(&conn.net_reader.interface, &conn.net_writer.interface, client_options);
+        conn.client = tls.Client.init(
+            &conn.net_reader.interface,
+            &conn.net_writer.interface,
+            client_options,
+        ) catch |err| {
+            if (err == error.ReadFailed and conn.net_reader.err != null) {
+                return conn.takeReadError();
+            }
+            return err;
+        };
         return conn;
     }
 

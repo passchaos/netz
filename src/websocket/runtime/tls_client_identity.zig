@@ -56,7 +56,8 @@ pub fn init(
             .alpn_protocols = identity_options.alpn_protocols,
             .cipher_suites = identity_options.cipher_suites,
             .max_server_handshake_size = identity_options.max_server_handshake_size,
-            .handshake_timeout = identity_options.handshake_timeout,
+            .handshake_timeout = identity_options.handshake_timeout orelse
+                tls_options.handshake_timeout,
         },
     );
 }

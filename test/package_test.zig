@@ -165,6 +165,10 @@ test "public modules are reachable" {
         netz.http1.runtime.Limits,
         "connect_timeout",
     ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.TlsClientOptions,
+        "handshake_timeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http1, "client_pool"));
     try std.testing.expect(@hasDecl(netz.http1.client_pool, "Pool"));

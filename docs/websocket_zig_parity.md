@@ -97,7 +97,8 @@ hostname, URI and Unix-socket helpers. The connect task is cancellation-aware,
 and a connection that wins concurrently with the timer is explicitly closed if
 it was not selected. This is separate from the TLS and HTTP Upgrade handshake
 budgets, so enabling it cannot silently shorten a configured response-head
-deadline. The audited websocket.zig client also exposes connect timeouts; netz
+deadline. Standard-library and vail-backed WSS clients both expose an
+independent TLS handshake timeout. The audited websocket.zig client also exposes connect timeouts; netz
 now covers the same liveness boundary without its POSIX-only nonblocking/poll
 implementation.
 
