@@ -34,7 +34,7 @@ pub fn validateH2(
     try validateValue(origin, allowed_origins);
 }
 
-fn validateValue(
+pub fn validateValue(
     origin: ?[]const u8,
     allowed_origins: []const []const u8,
 ) Error!void {
