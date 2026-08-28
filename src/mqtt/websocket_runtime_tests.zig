@@ -328,6 +328,129 @@ test "MQTT WSS server negotiates mqtt and completes QoS 1" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WSS client connects and reconnects through hostname" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try mqtt_ws.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{ .max_packet_size = max_packet_size },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for ([_][]const u8{
+                "wss-host",
+                "wss-reconnect-host",
+                "wss-reconnect-host",
+            }, 0..) |client_id, index| {
+                var accepted = try self.server.accept(.{
+                    .protocol = .v5,
+                    .session_present = index == 2,
+                });
+                try std.testing.expectEqualStrings(
+                    client_id,
+                    accepted.connect.connect.client_id,
+                );
+                var disconnect = try accepted.connection.readDisconnect();
+                disconnect.deinit(self.server.allocator);
+                accepted.deinit(self.server.allocator);
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const options: mqtt_ws.ConnectOptions = .{
+        .mqtt = .{
+            .client_id = "placeholder",
+            .network_connect_timeout = .fromSeconds(1),
+        },
+        .target = "/mqtt",
+        .tls = .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    };
+
+    var direct = try mqtt_ws.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        blk: {
+            var direct_options = options;
+            direct_options.mqtt.client_id = "wss-host";
+            break :blk direct_options;
+        },
+    );
+    defer direct.close();
+    try direct.disconnect(0);
+
+    var connector = mqtt_ws.TlsHostReconnectConnector{
+        .host = "localhost",
+        .port = server.address().ip4.port,
+        .options = options,
+    };
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector.connector(),
+        .{
+            .protocol = .v5,
+            .client_id = "wss-reconnect-host",
+            .clean_start = false,
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    try client.disconnect(0);
+    const second = try client.connect();
+    try std.testing.expect(second.session_present);
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT WSS server consumes PROXY v2 before TLS and Upgrade" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

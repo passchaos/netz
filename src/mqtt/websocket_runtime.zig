@@ -686,6 +686,63 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    /// Resolve a hostname and establish MQTT-over-WebSocket over TLS. The
+    /// hostname supplies both DNS resolution and certificate identity; TLS
+    /// credentials and verification remain in `ConnectOptions`.
+    pub fn connectTlsHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectTlsHostWithConnAck(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectTlsHostWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectTlsHostAttempt(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsHostAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const ws = try websocket_runtime.Client.connectTlsHost(
+            allocator,
+            io,
+            host,
+            port,
+            websocketConnectOptions(options),
+            options.tls,
+        );
+        return connectWebSocketAttempt(allocator, ws, options.mqtt);
+    }
+
     pub fn connectUnix(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -920,6 +977,41 @@ pub const HostReconnectConnector = struct {
             @alignCast(context),
         );
         return Client.connectHostAttempt(
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptions(self.options, mqtt_options),
+        );
+    }
+};
+
+/// Borrowed WSS hostname target for the reconnect client. The hostname is
+/// resolved again and used as TLS SNI/certificate identity on every attempt.
+pub const TlsHostReconnectConnector = struct {
+    host: []const u8,
+    port: u16,
+    options: ConnectOptions,
+
+    pub fn connector(
+        self: *TlsHostReconnectConnector,
+    ) runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsHostReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectTlsHostAttempt(
             allocator,
             io,
             self.host,
