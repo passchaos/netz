@@ -13,6 +13,7 @@ const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
+const load_metrics = @import("broker/load_metrics.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
 const qos2_mod = @import("broker/qos2.zig");
@@ -25,6 +26,9 @@ const session_mod = @import("session/mod.zig");
 const will_mod = @import("will/mod.zig");
 
 const net = std.Io.net;
+
+pub const LoadRates = load_metrics.Rates;
+pub const LoadSnapshot = load_metrics.Snapshot;
 
 pub const Error = runtime.Error || router_mod.Error ||
     retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
@@ -493,6 +497,7 @@ const ClientSlot = struct {
 /// lock as routing and Session transitions, so cross-field invariants describe
 /// one coherent instant rather than a mixture of concurrent updates.
 pub const Stats = struct {
+    uptime_seconds: u64,
     active_connections: usize,
     maximum_active_connections: usize,
     expired_sessions: usize,
@@ -532,12 +537,16 @@ pub const Stats = struct {
     scheduled_wills: usize,
     scheduled_will_bytes: usize,
     session_owned_bytes: usize,
+    /// Latest rates sampled by `publishSystemStats`. Values are expressed as
+    /// events/bytes per minute and begin at zero until a second sample.
+    load: LoadSnapshot,
 };
 
 /// Stable `$SYS` gauge names emitted by `publishSystemStats`. Applications may
 /// expose the same snapshot through another telemetry backend without parsing
 /// topic strings.
 pub const SystemMetric = enum {
+    uptime,
     clients_connected,
     clients_maximum,
     clients_disconnected,
@@ -565,9 +574,31 @@ pub const SystemMetric = enum {
     scheduled_wills,
     scheduled_will_bytes,
     session_owned_bytes,
+    load_messages_received_1min,
+    load_messages_received_5min,
+    load_messages_received_15min,
+    load_messages_sent_1min,
+    load_messages_sent_5min,
+    load_messages_sent_15min,
+    load_publish_dropped_1min,
+    load_publish_dropped_5min,
+    load_publish_dropped_15min,
+    load_publish_received_1min,
+    load_publish_received_5min,
+    load_publish_received_15min,
+    load_publish_sent_1min,
+    load_publish_sent_5min,
+    load_publish_sent_15min,
+    load_bytes_received_1min,
+    load_bytes_received_5min,
+    load_bytes_received_15min,
+    load_bytes_sent_1min,
+    load_bytes_sent_5min,
+    load_bytes_sent_15min,
 
     pub fn topic(self: SystemMetric) []const u8 {
         return switch (self) {
+            .uptime => "$SYS/broker/uptime",
             .clients_connected => "$SYS/broker/clients/connected",
             .clients_maximum => "$SYS/broker/clients/maximum",
             .clients_disconnected => "$SYS/broker/clients/disconnected",
@@ -595,6 +626,27 @@ pub const SystemMetric = enum {
             .scheduled_wills => "$SYS/broker/wills/scheduled/count",
             .scheduled_will_bytes => "$SYS/broker/wills/scheduled/bytes",
             .session_owned_bytes => "$SYS/broker/store/session/bytes",
+            .load_messages_received_1min => "$SYS/broker/load/messages/received/1min",
+            .load_messages_received_5min => "$SYS/broker/load/messages/received/5min",
+            .load_messages_received_15min => "$SYS/broker/load/messages/received/15min",
+            .load_messages_sent_1min => "$SYS/broker/load/messages/sent/1min",
+            .load_messages_sent_5min => "$SYS/broker/load/messages/sent/5min",
+            .load_messages_sent_15min => "$SYS/broker/load/messages/sent/15min",
+            .load_publish_dropped_1min => "$SYS/broker/load/publish/dropped/1min",
+            .load_publish_dropped_5min => "$SYS/broker/load/publish/dropped/5min",
+            .load_publish_dropped_15min => "$SYS/broker/load/publish/dropped/15min",
+            .load_publish_received_1min => "$SYS/broker/load/publish/received/1min",
+            .load_publish_received_5min => "$SYS/broker/load/publish/received/5min",
+            .load_publish_received_15min => "$SYS/broker/load/publish/received/15min",
+            .load_publish_sent_1min => "$SYS/broker/load/publish/sent/1min",
+            .load_publish_sent_5min => "$SYS/broker/load/publish/sent/5min",
+            .load_publish_sent_15min => "$SYS/broker/load/publish/sent/15min",
+            .load_bytes_received_1min => "$SYS/broker/load/bytes/received/1min",
+            .load_bytes_received_5min => "$SYS/broker/load/bytes/received/5min",
+            .load_bytes_received_15min => "$SYS/broker/load/bytes/received/15min",
+            .load_bytes_sent_1min => "$SYS/broker/load/bytes/sent/1min",
+            .load_bytes_sent_5min => "$SYS/broker/load/bytes/sent/5min",
+            .load_bytes_sent_15min => "$SYS/broker/load/bytes/sent/15min",
         };
     }
 };
@@ -666,6 +718,7 @@ pub const ServeListenersUntilOptions = struct {
 };
 
 pub const system_metrics = [_]SystemMetric{
+    .uptime,
     .clients_connected,
     .clients_maximum,
     .clients_disconnected,
@@ -693,6 +746,27 @@ pub const system_metrics = [_]SystemMetric{
     .scheduled_wills,
     .scheduled_will_bytes,
     .session_owned_bytes,
+    .load_messages_received_1min,
+    .load_messages_received_5min,
+    .load_messages_received_15min,
+    .load_messages_sent_1min,
+    .load_messages_sent_5min,
+    .load_messages_sent_15min,
+    .load_publish_dropped_1min,
+    .load_publish_dropped_5min,
+    .load_publish_dropped_15min,
+    .load_publish_received_1min,
+    .load_publish_received_5min,
+    .load_publish_received_15min,
+    .load_publish_sent_1min,
+    .load_publish_sent_5min,
+    .load_publish_sent_15min,
+    .load_bytes_received_1min,
+    .load_bytes_received_5min,
+    .load_bytes_received_15min,
+    .load_bytes_sent_1min,
+    .load_bytes_sent_5min,
+    .load_bytes_sent_15min,
 };
 
 /// A bounded broker core with an optional compatibility TCP listener.
@@ -732,6 +806,8 @@ pub const Broker = struct {
     publish_messages_dropped: usize = 0,
     publish_messages_sent: usize = 0,
     publish_payload_bytes_sent: usize = 0,
+    started_at_ns: i96,
+    load_tracker: load_metrics.Tracker = .{},
     next_system_stats_ns: ?i96 = null,
 
     pub fn listen(
@@ -861,6 +937,7 @@ pub const Broker = struct {
             allocator,
             @intCast(options.will.max_wills),
         );
+        const started_at_ns = std.Io.Clock.awake.now(io).nanoseconds;
         return .{
             .allocator = allocator,
             .io = io,
@@ -873,6 +950,10 @@ pub const Broker = struct {
             .session_owners = session_owners,
             .will_publishers = will_publishers,
             .slots = slots,
+            .started_at_ns = started_at_ns,
+            // Establish a zero-counter baseline at process start so the first
+            // periodic `$SYS` update covers the complete initial interval.
+            .load_tracker = .init(started_at_ns),
         };
     }
 
@@ -949,7 +1030,7 @@ pub const Broker = struct {
         try self.appendCommitIfEnabled();
     }
 
-    fn statsLocked(self: Broker) Stats {
+    fn statsLocked(self: *const Broker) Stats {
         var active_connections: usize = 0;
         var live_queued_deliveries: usize = 0;
         for (self.slots) |slot| {
@@ -959,6 +1040,10 @@ pub const Broker = struct {
         const sessions = self.sessions.aggregateStats();
         const traffic = self.traffic.stats();
         return .{
+            .uptime_seconds = uptimeSeconds(
+                self.started_at_ns,
+                std.Io.Clock.awake.now(self.io).nanoseconds,
+            ),
             .active_connections = active_connections,
             .maximum_active_connections = self.maximum_active_connections,
             .expired_sessions = self.expired_sessions,
@@ -987,6 +1072,7 @@ pub const Broker = struct {
             .scheduled_wills = self.wills.count(),
             .scheduled_will_bytes = self.wills.totalBytes(),
             .session_owned_bytes = sessions.owned_wire_bytes,
+            .load = self.load_tracker.snapshot,
         };
     }
 
@@ -1003,16 +1089,20 @@ pub const Broker = struct {
         defer for (plans[0..plan_count]) |plan| {
             self.allocator.free(plan.storage);
         };
-        var payloads: [system_metrics.len][32]u8 = undefined;
+        var payloads: [system_metrics.len][64]u8 = undefined;
 
         self.state_mutex.lockUncancelable(self.io);
-        const snapshot = self.statsLocked();
+        var snapshot = self.statsLocked();
+        snapshot.load = self.load_tracker.sample(
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+            loadCounters(snapshot),
+        );
         for (system_metrics, 0..) |metric, index| {
-            const payload = std.fmt.bufPrint(
+            const payload = formatSystemMetric(
                 &payloads[index],
-                "{d}",
-                .{systemMetricValue(snapshot, metric)},
-            ) catch unreachable;
+                snapshot,
+                metric,
+            );
             const plan = self.enqueuePublishLocked(
                 null,
                 .{
@@ -4667,12 +4757,83 @@ fn earliestDeadline(
     return if (left.nanoseconds <= right.nanoseconds) left else right;
 }
 
+fn uptimeSeconds(started_at_ns: i96, now_ns: i96) u64 {
+    if (now_ns <= started_at_ns) return 0;
+    const elapsed = @divTrunc(now_ns - started_at_ns, std.time.ns_per_s);
+    return @intCast(@min(elapsed, std.math.maxInt(u64)));
+}
+
+fn loadCounters(stats_value: Stats) load_metrics.Counters {
+    return .{
+        .messages_received = stats_value.messages_received,
+        .messages_sent = stats_value.messages_sent,
+        .publish_messages_dropped = @intCast(stats_value.publish_messages_dropped),
+        .publish_messages_received = @intCast(stats_value.publish_messages_received),
+        .publish_messages_sent = @intCast(stats_value.publish_messages_sent),
+        .bytes_received = stats_value.bytes_received,
+        .bytes_sent = stats_value.bytes_sent,
+    };
+}
+
+fn formatSystemMetric(
+    buffer: []u8,
+    stats_value: Stats,
+    metric: SystemMetric,
+) []const u8 {
+    if (metric == .uptime) {
+        return std.fmt.bufPrint(
+            buffer,
+            "{d} seconds",
+            .{stats_value.uptime_seconds},
+        ) catch unreachable;
+    }
+    return if (systemMetricLoadValue(stats_value, metric)) |value|
+        std.fmt.bufPrint(buffer, "{d:.2}", .{value}) catch unreachable
+    else
+        std.fmt.bufPrint(
+            buffer,
+            "{d}",
+            .{systemMetricValue(stats_value, metric)},
+        ) catch unreachable;
+}
+
+fn systemMetricLoadValue(
+    stats_value: Stats,
+    metric: SystemMetric,
+) ?f64 {
+    return switch (metric) {
+        .load_messages_received_1min => stats_value.load.one_minute.messages_received,
+        .load_messages_received_5min => stats_value.load.five_minutes.messages_received,
+        .load_messages_received_15min => stats_value.load.fifteen_minutes.messages_received,
+        .load_messages_sent_1min => stats_value.load.one_minute.messages_sent,
+        .load_messages_sent_5min => stats_value.load.five_minutes.messages_sent,
+        .load_messages_sent_15min => stats_value.load.fifteen_minutes.messages_sent,
+        .load_publish_dropped_1min => stats_value.load.one_minute.publish_messages_dropped,
+        .load_publish_dropped_5min => stats_value.load.five_minutes.publish_messages_dropped,
+        .load_publish_dropped_15min => stats_value.load.fifteen_minutes.publish_messages_dropped,
+        .load_publish_received_1min => stats_value.load.one_minute.publish_messages_received,
+        .load_publish_received_5min => stats_value.load.five_minutes.publish_messages_received,
+        .load_publish_received_15min => stats_value.load.fifteen_minutes.publish_messages_received,
+        .load_publish_sent_1min => stats_value.load.one_minute.publish_messages_sent,
+        .load_publish_sent_5min => stats_value.load.five_minutes.publish_messages_sent,
+        .load_publish_sent_15min => stats_value.load.fifteen_minutes.publish_messages_sent,
+        .load_bytes_received_1min => stats_value.load.one_minute.bytes_received,
+        .load_bytes_received_5min => stats_value.load.five_minutes.bytes_received,
+        .load_bytes_received_15min => stats_value.load.fifteen_minutes.bytes_received,
+        .load_bytes_sent_1min => stats_value.load.one_minute.bytes_sent,
+        .load_bytes_sent_5min => stats_value.load.five_minutes.bytes_sent,
+        .load_bytes_sent_15min => stats_value.load.fifteen_minutes.bytes_sent,
+        else => null,
+    };
+}
+
 fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
 }
 
 fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
     return switch (metric) {
+        .uptime => stats_value.uptime_seconds,
         .clients_connected => @intCast(stats_value.active_connections),
         .clients_maximum => @intCast(stats_value.maximum_active_connections),
         .clients_disconnected => @intCast(stats_value.disconnected_sessions),
@@ -4700,6 +4861,28 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
         .scheduled_wills => @intCast(stats_value.scheduled_wills),
         .scheduled_will_bytes => @intCast(stats_value.scheduled_will_bytes),
         .session_owned_bytes => @intCast(stats_value.session_owned_bytes),
+        .load_messages_received_1min,
+        .load_messages_received_5min,
+        .load_messages_received_15min,
+        .load_messages_sent_1min,
+        .load_messages_sent_5min,
+        .load_messages_sent_15min,
+        .load_publish_dropped_1min,
+        .load_publish_dropped_5min,
+        .load_publish_dropped_15min,
+        .load_publish_received_1min,
+        .load_publish_received_5min,
+        .load_publish_received_15min,
+        .load_publish_sent_1min,
+        .load_publish_sent_5min,
+        .load_publish_sent_15min,
+        .load_bytes_received_1min,
+        .load_bytes_received_5min,
+        .load_bytes_received_15min,
+        .load_bytes_sent_1min,
+        .load_bytes_sent_5min,
+        .load_bytes_sent_15min,
+        => unreachable,
     };
 }
 
@@ -4762,6 +4945,7 @@ fn validateProblemInformationProperties(
 }
 
 test {
+    _ = load_metrics;
     _ = @import("broker_tests.zig");
     _ = @import("broker/persistence_tests.zig");
 }

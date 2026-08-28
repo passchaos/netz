@@ -1561,8 +1561,12 @@ test "public modules are reachable" {
         "publishSystemStats",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Stats"));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "LoadRates"));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "LoadSnapshot"));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "SystemMetric"));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "system_metrics"));
+    try std.testing.expect(@hasField(netz.mqtt.broker.Stats, "uptime_seconds"));
+    try std.testing.expect(@hasField(netz.mqtt.broker.Stats, "load"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficStats"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficCounters"));
     try std.testing.expect(@hasDecl(

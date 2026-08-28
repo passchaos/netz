@@ -1146,6 +1146,63 @@ test "broker publishes coherent retained system statistics" {
         };
         try std.testing.expectEqualStrings(expected, matched[0].payload);
     }
+
+    const uptime = try broker.retained.matchInto(
+        broker_mod.SystemMetric.uptime.topic(),
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), uptime.len);
+    try std.testing.expect(std.mem.endsWith(u8, uptime[0].payload, " seconds"));
+    _ = try std.fmt.parseInt(
+        u64,
+        uptime[0].payload[0 .. uptime[0].payload.len - " seconds".len],
+        10,
+    );
+
+    const load_metrics_to_check = [_]broker_mod.SystemMetric{
+        .load_messages_received_1min,
+        .load_messages_received_5min,
+        .load_messages_received_15min,
+        .load_messages_sent_1min,
+        .load_messages_sent_5min,
+        .load_messages_sent_15min,
+        .load_publish_dropped_1min,
+        .load_publish_dropped_5min,
+        .load_publish_dropped_15min,
+        .load_publish_received_1min,
+        .load_publish_received_5min,
+        .load_publish_received_15min,
+        .load_publish_sent_1min,
+        .load_publish_sent_5min,
+        .load_publish_sent_15min,
+        .load_bytes_received_1min,
+        .load_bytes_received_5min,
+        .load_bytes_received_15min,
+        .load_bytes_sent_1min,
+        .load_bytes_sent_5min,
+        .load_bytes_sent_15min,
+    };
+    for (load_metrics_to_check) |metric| {
+        const matched = try broker.retained.matchInto(
+            metric.topic(),
+            std.Io.Clock.awake.now(io),
+            &storage,
+        );
+        try std.testing.expectEqual(@as(usize, 1), matched.len);
+        const value = try std.fmt.parseFloat(f64, matched[0].payload);
+        try std.testing.expect(std.math.isFinite(value));
+        try std.testing.expect(value >= 0);
+    }
+    const sampled = broker.stats().load;
+    try std.testing.expect(
+        sampled.one_minute.messages_received >
+            sampled.five_minutes.messages_received,
+    );
+    try std.testing.expect(
+        sampled.five_minutes.messages_received >
+            sampled.fifteen_minutes.messages_received,
+    );
 }
 
 test "broker periodically publishes system statistics" {
