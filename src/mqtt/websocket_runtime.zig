@@ -857,6 +857,7 @@ fn websocketConnectOptions(
         .origin = options.origin,
         .protocols = &.{mqtt_subprotocol},
         .tcp_nodelay = options.tcp_nodelay,
+        .connect_timeout = options.mqtt.network_connect_timeout,
         .limits = websocketLimits(
             options.mqtt.limits,
             options.max_head_bytes,

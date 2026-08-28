@@ -278,6 +278,65 @@ test "MQTT client bounds CONNACK wait" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT network connect timeout is independent from CONNACK timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connect(
+            allocator,
+            io,
+            listener.socket.address,
+            .{
+                .client_id = "network-timeout",
+                .network_connect_timeout = .fromSeconds(1),
+                .connect_timeout = .fromMilliseconds(20),
+            },
+        ),
+    );
+    thread.join();
+}
+
+test "MQTT client rejects non-positive network connect timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            .{
+                .client_id = "no-dial",
+                .network_connect_timeout = .zero,
+            },
+        ),
+    );
+}
+
 test "MQTT client CONNACK timeout is absolute across packet fragments" {
     const allocator = std.testing.allocator;
     var connack: std.ArrayList(u8) = .empty;

@@ -3,6 +3,7 @@ const mqtt_runtime = @import("runtime.zig");
 const redirect = @import("redirect.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
+const tcp_connect = @import("../internal/tcp_connect.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
@@ -302,7 +303,12 @@ pub const Client = struct {
         options: ConnectOptions,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const host_name = try net.HostName.init(host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(
+            io,
+            host_name,
+            port,
+            options.mqtt.network_connect_timeout,
+        );
         return connectStreamAttempt(
             allocator,
             io,
@@ -355,7 +361,11 @@ pub const Client = struct {
         tls_host: []const u8,
         options: ConnectOptions,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(
+            io,
+            address,
+            options.mqtt.network_connect_timeout,
+        );
         return connectStreamAttempt(
             allocator,
             io,
@@ -416,7 +426,19 @@ pub const Client = struct {
         );
         defer endpoint.deinit();
 
-        const stream = try endpoint.connect(io);
+        const stream = switch (endpoint.target) {
+            .host => |host| try tcp_connect.host(
+                io,
+                host,
+                endpoint.port,
+                options.mqtt.network_connect_timeout,
+            ),
+            .ip => |address| try tcp_connect.ip(
+                io,
+                address,
+                options.mqtt.network_connect_timeout,
+            ),
+        };
         return connectStreamAttempt(
             allocator,
             io,

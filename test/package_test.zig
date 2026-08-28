@@ -1703,6 +1703,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.mqtt.Connect, "will"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "username"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "password"));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.ConnectOptions,
+        "network_connect_timeout",
+    ));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.mqtt.runtime.Limits{}).max_packet_size);
     try std.testing.expect(@hasField(
         netz.mqtt.runtime.Limits,

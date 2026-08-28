@@ -12,6 +12,7 @@ const proxy_protocol = @import("proxy_protocol.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
+const tcp_connect = @import("../internal/tcp_connect.zig");
 
 const net = std.Io.net;
 
@@ -1072,7 +1073,11 @@ pub const Client = struct {
     }
 
     pub fn connectAttempt(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectAttempt {
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(
+            io,
+            address,
+            options.network_connect_timeout,
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (options.limits.tcp_nodelay) {
@@ -1130,7 +1135,11 @@ pub const Client = struct {
         address: net.UnixAddress,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
-        const stream = try address.connect(io);
+        const stream = try tcp_connect.unix(
+            io,
+            address,
+            options.network_connect_timeout,
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         var limits = options.limits;
@@ -1183,7 +1192,19 @@ pub const Client = struct {
                 redirect.Transport.tcp.defaultPort(),
             ) catch return error.InvalidServerReference;
             defer endpoint.deinit();
-            const address_stream = try endpoint.connect(io);
+            const address_stream = switch (endpoint.target) {
+                .host => |host| try tcp_connect.host(
+                    io,
+                    host,
+                    endpoint.port,
+                    options.network_connect_timeout,
+                ),
+                .ip => |address| try tcp_connect.ip(
+                    io,
+                    address,
+                    options.network_connect_timeout,
+                ),
+            };
             var stream_owned = true;
             errdefer if (stream_owned) address_stream.close(io);
             if (options.limits.tcp_nodelay) {
@@ -1263,6 +1284,9 @@ pub const ConnectOptions = struct {
     /// Absolute receive budget from the transmitted CONNECT through the final
     /// CONNACK. Interim Enhanced Authentication packets do not renew it.
     connect_timeout: ?std.Io.Duration = null,
+    /// Absolute budget for opening the underlying network transport. MQTT's
+    /// CONNECT/CONNACK exchange keeps the independent `connect_timeout` above.
+    network_connect_timeout: ?std.Io.Duration = null,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
     /// Baseline broker publish capabilities to enforce when MQTT 5 CONNACK
