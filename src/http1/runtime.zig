@@ -5,6 +5,7 @@ const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const wire = @import("../internal/wire.zig");
@@ -64,6 +65,9 @@ pub const Limits = struct {
     /// Maximum interim responses accepted before one final response. This
     /// bounds callback work even when a peer emits an endless 1xx sequence.
     max_informational_responses: usize = 16,
+    /// Absolute budget for DNS resolution plus all TCP connection attempts.
+    /// TLS and HTTP response-head timeouts remain independent.
+    connect_timeout: ?std.Io.Duration = null,
     /// Disable Nagle for application-driven streaming writes. HTTP/1 has no
     /// frame coalescer, so a complete chunk followed by a small terminator or
     /// response can otherwise stall behind Linux delayed ACKs.
@@ -1900,7 +1904,7 @@ pub const Client = struct {
     }
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Client {
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         errdefer stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         return .{
@@ -1921,7 +1925,7 @@ pub const Client = struct {
         host: []const u8,
         limits: Limits,
     ) Error!Client {
-        const stream = try address.connect(io);
+        const stream = try tcp_connect.unix(io, address, limits.connect_timeout);
         errdefer stream.close(io);
         const owned_host = try allocator.dupe(u8, host);
         errdefer allocator.free(owned_host);
@@ -1944,7 +1948,7 @@ pub const Client = struct {
         const host_name = try net.HostName.init(host);
         const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         errdefer allocator.free(owned_host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         errdefer stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         return .{
@@ -1965,7 +1969,7 @@ pub const Client = struct {
         tls_options: TlsClientOptions,
     ) Error!Client {
         const host_name = try net.HostName.init(host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
@@ -1993,7 +1997,7 @@ pub const Client = struct {
         limits: Limits,
         tls_options: TlsClientOptions,
     ) Error!Client {
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
@@ -2026,7 +2030,7 @@ pub const Client = struct {
         tls_options: VailTlsClientOptions,
     ) Error!Client {
         const host_name = try net.HostName.init(host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         return connectVailTlsStream(
             allocator,
             io,
@@ -2046,7 +2050,7 @@ pub const Client = struct {
         limits: Limits,
         tls_options: VailTlsClientOptions,
     ) Error!Client {
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         const port = switch (address) {
             .ip4 => |ip4| ip4.port,
             .ip6 => |ip6| ip6.port,
@@ -2437,7 +2441,19 @@ pub const Client = struct {
         var endpoint = try uriEndpoint(allocator, uri, if (is_https) 443 else 80);
         defer endpoint.deinit();
 
-        const stream = try endpoint.connect(io);
+        const stream = switch (endpoint.target) {
+            .host => |host| try tcp_connect.host(
+                io,
+                host,
+                endpoint.port,
+                limits.connect_timeout,
+            ),
+            .ip => |address| try tcp_connect.ip(
+                io,
+                address,
+                limits.connect_timeout,
+            ),
+        };
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);

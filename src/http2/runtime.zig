@@ -9,6 +9,7 @@ const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
 const stream_io = @import("../internal/stream_io.zig");
+const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
@@ -286,6 +287,9 @@ pub const Limits = struct {
     /// HEADERS, and duplicate RST_STREAM frames can be discarded without
     /// terminating the connection. Zero disables this tolerance.
     max_reset_stream_history: usize = 64,
+    /// Absolute budget for DNS resolution plus all TCP connection attempts.
+    /// TLS and HTTP/2 handshake timeouts remain independent.
+    connect_timeout: ?std.Io.Duration = null,
     /// Optional absolute budget for the HTTP/2 connection preface and initial
     /// SETTINGS exchange after TCP/TLS setup. Interleaved permitted control
     /// frames do not renew this deadline. For h2c Upgrade, the same duration
@@ -1209,7 +1213,7 @@ fn ServeTask(comptime HandlerContext: type) type {
 pub const Client = struct {
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Connection {
         try validateLocalLimits(limits);
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_scheme = "http";
         return connection;
@@ -1229,7 +1233,7 @@ pub const Client = struct {
         if (authority.len == 0) return error.InvalidHeader;
         const owned_authority = try allocator.dupe(u8, authority);
         errdefer allocator.free(owned_authority);
-        const stream = try address.connect(io);
+        const stream = try tcp_connect.unix(io, address, limits.connect_timeout);
         var connection = try connectStreamWithoutTcpOptions(
             allocator,
             io,
@@ -1252,7 +1256,7 @@ pub const Client = struct {
         const host_name = try net.HostName.init(host);
         const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         errdefer allocator.free(owned_host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_authority = owned_host;
         connection.default_scheme = "http";
@@ -1269,7 +1273,7 @@ pub const Client = struct {
     ) Error!Connection {
         try validateLocalLimits(limits);
         const host_name = try net.HostName.init(host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
@@ -1328,7 +1332,7 @@ pub const Client = struct {
         request_options: RequestOptions,
     ) Error!OwnedResponse {
         try validateLocalLimits(limits);
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         // connectStreamUpgrade takes ownership at entry and closes the stream
@@ -1359,7 +1363,19 @@ pub const Client = struct {
         defer endpoint.deinit();
 
         try validateLocalLimits(limits);
-        const stream = try endpoint.connect(io);
+        const stream = switch (endpoint.target) {
+            .host => |host| try tcp_connect.host(
+                io,
+                host,
+                endpoint.port,
+                limits.connect_timeout,
+            ),
+            .ip => |address| try tcp_connect.ip(
+                io,
+                address,
+                limits.connect_timeout,
+            ),
+        };
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         var options = request_options;
@@ -1629,7 +1645,19 @@ pub const Client = struct {
                 tls_options,
             )
         else blk: {
-            const stream = try endpoint.connect(io);
+            const stream = switch (endpoint.target) {
+                .host => |host| try tcp_connect.host(
+                    io,
+                    host,
+                    endpoint.port,
+                    limits.connect_timeout,
+                ),
+                .ip => |address| try tcp_connect.ip(
+                    io,
+                    address,
+                    limits.connect_timeout,
+                ),
+            };
             var stream_owned = true;
             errdefer if (stream_owned) stream.close(io);
             const established = try connectStream(allocator, io, stream, limits);

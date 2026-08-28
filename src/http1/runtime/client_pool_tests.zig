@@ -144,6 +144,29 @@ test "HTTP/1 client pool normalizes explicit default port keys" {
     ));
 }
 
+test "HTTP/1 client connect timeout is available through direct and pool APIs" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1) };
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connect(allocator, io, address, .{
+            .connect_timeout = .zero,
+        }),
+    );
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .limits = .{ .connect_timeout = .zero },
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, address, "/connect-timeout");
+    defer allocator.free(uri);
+    try std.testing.expectError(error.Timeout, pool.acquireUri(uri));
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "HTTP/1 client pool retries a stale idempotent connection" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -409,6 +432,7 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
     var joined = false;
     defer if (!joined) server_thread.join();
     var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = request_count,
         .max_idle_connections = request_count,
         .max_idle_per_authority = request_count,
     });

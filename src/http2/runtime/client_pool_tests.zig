@@ -91,6 +91,34 @@ test "HTTP/2 client pool reuses one persistent connection" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "HTTP/2 client connect timeout is available through direct and pool APIs" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1) };
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connect(allocator, io, address, .{
+            .connect_timeout = .zero,
+        }),
+    );
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .limits = .{ .connect_timeout = .zero },
+    });
+    defer pool.deinit();
+    const uri = try uriFor(
+        allocator,
+        "http",
+        address,
+        "/connect-timeout",
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(error.Timeout, pool.acquireUri(uri));
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "HTTP/2 client pool retries stale reused idempotent connection once" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
