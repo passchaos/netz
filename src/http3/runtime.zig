@@ -10775,6 +10775,10 @@ const ResponseStreamSet = struct {
 
 const StreamingMessageSet = struct {
     const Kind = enum { request, response };
+    const ReadyEvent = struct {
+        entry: *Entry,
+        event: StreamingEvent,
+    };
 
     const Reset = struct {
         from: net.IpAddress,
@@ -10796,6 +10800,10 @@ const StreamingMessageSet = struct {
     entries: std.ArrayList(Entry) = .empty,
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     lowest_entry_index: ?usize = null,
+    /// Stable identity of the stream that most recently produced an event.
+    /// `entries` uses swap removal, so retaining a physical index here would
+    /// silently skip or repeat streams whenever an entry is removed.
+    last_event_stream_id: ?u62 = null,
     resets: std.ArrayList(Reset) = .empty,
     reset_head: usize = 0,
     reset_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
@@ -10913,27 +10921,10 @@ const StreamingMessageSet = struct {
         buffered: *ResponseStreamSet,
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
-    ) Error!?struct {
-        entry: *Entry,
-        event: StreamingEvent,
-    } {
+    ) Error!?ReadyEvent {
         if (self.kind != .response) return error.UnexpectedStream;
         try self.activateBufferedResponses(buffered);
-        var blocked_streams: u64 = 0;
-        for (self.entries.items) |*entry| {
-            const event = entry.reader.next(table) catch |err| switch (err) {
-                error.QpackBlocked => {
-                    blocked_streams += 1;
-                    if (blocked_streams > max_blocked_streams) {
-                        return error.QpackDecompressionFailed;
-                    }
-                    continue;
-                },
-                else => return err,
-            };
-            if (event) |value| return .{ .entry = entry, .event = value };
-        }
-        return null;
+        return self.nextEvent(table, max_blocked_streams);
     }
 
     fn activateRequest(
@@ -11205,25 +11196,59 @@ const StreamingMessageSet = struct {
         buffered: *RequestStreamSet,
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
-    ) Error!?struct {
-        entry: *Entry,
-        event: StreamingEvent,
-    } {
+    ) Error!?ReadyEvent {
         if (self.kind != .request) return error.UnexpectedStream;
         try self.activateBufferedRequests(buffered);
+        return self.nextEvent(table, max_blocked_streams);
+    }
+
+    fn nextEvent(
+        self: *StreamingMessageSet,
+        table: http3.Qpack.DynamicTable,
+        max_blocked_streams: u64,
+    ) Error!?ReadyEvent {
+        const entry_count = self.entries.items.len;
+        if (entry_count == 0) {
+            self.last_event_stream_id = null;
+            return null;
+        }
+
+        // Resume after the last productive stream and wrap once. The cursor is
+        // a stream ID rather than an ArrayList index because `takeEntry` uses
+        // swapRemove. If that stream has since disappeared, a complete scan
+        // from index zero is the only ordering that cannot omit a live entry.
+        var index: usize = 0;
+        if (self.last_event_stream_id) |stream_id| {
+            if (self.entry_index.get(stream_id)) |previous_index| {
+                index = if (previous_index + 1 == entry_count)
+                    0
+                else
+                    previous_index + 1;
+            }
+        }
+
         var blocked_streams: u64 = 0;
-        for (self.entries.items) |*entry| {
+        var remaining = entry_count;
+        while (remaining != 0) : (remaining -= 1) {
+            const entry = &self.entries.items[index];
             const event = entry.reader.next(table) catch |err| switch (err) {
                 error.QpackBlocked => {
                     blocked_streams += 1;
                     if (blocked_streams > max_blocked_streams) {
                         return error.QpackDecompressionFailed;
                     }
+                    index = if (index + 1 == entry_count) 0 else index + 1;
                     continue;
                 },
                 else => return err,
             };
-            if (event) |value| return .{ .entry = entry, .event = value };
+            if (event) |value| {
+                self.last_event_stream_id = @intCast(
+                    entry.reader.receive.stream_id,
+                );
+                return .{ .entry = entry, .event = value };
+            }
+            index = if (index + 1 == entry_count) 0 else index + 1;
         }
         return null;
     }
@@ -18150,6 +18175,138 @@ test "HTTP/3 streaming message set indexes active readers" {
     try std.testing.expect(!responses.contains(0));
     responses.remove(0);
     try std.testing.expect(responses.takeEntry(0) == null);
+}
+
+test "HTTP/3 streaming request polling rotates between busy streams" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+
+    var requests = StreamingRequestSet.init(allocator, 2, 512, .{}, .request);
+    defer requests.deinit();
+    var buffered = RequestStreamSet.init(allocator, 512, 2);
+    defer buffered.deinit();
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Request{
+        .method = "POST",
+        .path = "/fair",
+        .authority = "example.test",
+        .body = "busy",
+    }).write(&encoded, allocator);
+    for ([_]u62{ 0, 4 }) |stream_id| {
+        try buffered.insert(from, .{
+            .stream_id = stream_id,
+            .data = encoded.items,
+            .fin = true,
+        });
+    }
+
+    var first = (try requests.nextRequest(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        first.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(first.event == .head);
+    first.event.deinit(allocator);
+
+    // Stream zero can already emit DATA here. The next poll must nevertheless
+    // let stream four publish its head instead of repeatedly selecting zero.
+    var second = (try requests.nextRequest(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        second.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(second.event == .head);
+    second.event.deinit(allocator);
+
+    const third = (try requests.nextRequest(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        third.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(third.event == .data_available);
+    const fourth = (try requests.nextRequest(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        fourth.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(fourth.event == .data_available);
+}
+
+test "HTTP/3 streaming response polling skips idle and stale cursors" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+
+    var responses = StreamingResponseSet.init(allocator, 3, 512, .{}, .response);
+    defer responses.deinit();
+    var buffered = ResponseStreamSet.init(allocator, 512, 3);
+    defer buffered.deinit();
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+
+    // Activate stream four without bytes so every scan must pass an idle entry.
+    _ = try responses.activateResponse(&buffered, 4);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "busy",
+    }).write(&encoded, allocator);
+    for ([_]u62{ 0, 8 }) |stream_id| {
+        try buffered.insert(from, .{
+            .stream_id = stream_id,
+            .data = encoded.items,
+            .fin = true,
+        });
+    }
+
+    var first = (try responses.nextResponse(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        first.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(first.event == .head);
+    first.event.deinit(allocator);
+
+    var second = (try responses.nextResponse(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        second.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(second.event == .head);
+    second.event.deinit(allocator);
+
+    // Wrapping skips idle stream four and returns to stream zero. Removing that
+    // producer then leaves a stale ID cursor; the following full scan must still
+    // find stream eight after swapRemove moved it to a different index.
+    const wrapped = (try responses.nextResponse(&buffered, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        wrapped.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(wrapped.event == .data_available);
+    responses.removeEntry(0);
+
+    const after_removal = (try responses.nextResponse(
+        &buffered,
+        table,
+        0,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        after_removal.entry.reader.receive.stream_id,
+    );
+    try std.testing.expect(after_removal.event == .data_available);
 }
 
 test "HTTP/3 buffered stream sets index reassembly entries" {
