@@ -544,7 +544,10 @@ pub const ReconnectConnector = struct {
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const self: *ReconnectConnector = @ptrCast(@alignCast(context));
         var options = self.options;
+        const network_connect_timeout =
+            options.mqtt.network_connect_timeout;
         options.mqtt = mqtt_options;
+        options.mqtt.network_connect_timeout = network_connect_timeout;
         return Client.connectAddressAttempt(
             allocator,
             io,
@@ -588,7 +591,14 @@ fn connectStreamAttempt(
         io,
         stream,
         tls_host,
-        options.tls,
+        blk: {
+            var tls_options = options.tls;
+            if (tls_options.handshake_timeout == null) {
+                tls_options.handshake_timeout =
+                    options.tls_handshake_timeout;
+            }
+            break :blk tls_options;
+        },
     );
     stream_owned = false;
 

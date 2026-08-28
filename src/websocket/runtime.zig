@@ -1172,7 +1172,12 @@ pub const Client = struct {
                     connect_options,
                 );
             }
-            const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, tls_options);
+            var standard_tls_options = tls_options;
+            if (standard_tls_options.handshake_timeout == null) {
+                standard_tls_options.handshake_timeout =
+                    connect_options.tls_handshake_timeout;
+            }
+            const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, standard_tls_options);
             stream_owned = false;
             errdefer tls_conn.deinit();
             return connectStream(allocator, io, stream, tls_conn, connect_options);
@@ -1406,6 +1411,9 @@ pub const ConnectOptions = struct {
     /// enables peer-chain, ALPN, exporter and KeyUpdate APIs for ordinary WSS.
     /// Cleartext connect helpers reject this field.
     vail_tls: ?TlsClientIdentityOptions = null,
+    /// Optional TLS handshake budget used by the standard WSS client. The
+    /// vail path uses this value when its nested option leaves one unset.
+    tls_handshake_timeout: ?std.Io.Duration = null,
 };
 
 pub const OwnedMessage = common.OwnedMessage;

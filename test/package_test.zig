@@ -696,6 +696,10 @@ test "public modules are reachable" {
         netz.websocket.runtime.ConnectOptions,
         "connect_timeout",
     ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.ConnectOptions,
+        "tls_handshake_timeout",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket, "ExtensionNegotiation"));
     try std.testing.expect(@hasDecl(netz.websocket, "compressMessage"));
     try std.testing.expect(@hasDecl(netz.websocket, "decompressMessage"));

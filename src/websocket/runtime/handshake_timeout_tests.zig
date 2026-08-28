@@ -396,6 +396,48 @@ test "WSS standard client bounds an idle TLS handshake" {
     thread.join();
 }
 
+test "WSS connect options forward TLS timeout to standard client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://127.0.0.1:{d}/timeout",
+        .{listener.socket.address.ip4.port},
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectUriTls(
+            allocator,
+            io,
+            uri,
+            .{ .tls_handshake_timeout = .fromMilliseconds(20) },
+            .{ .verify_host = false },
+        ),
+    );
+    thread.join();
+}
+
 test "WebSocket io_uring rejects unsupported handshake timeout" {
     if (comptime @import("builtin").os.tag != .linux) {
         return error.SkipZigTest;

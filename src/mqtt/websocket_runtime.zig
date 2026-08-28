@@ -827,7 +827,10 @@ pub const ReconnectConnector = struct {
     ) runtime.Error!runtime.ConnectAttempt {
         const self: *ReconnectConnector = @ptrCast(@alignCast(context));
         var options = self.options;
+        const network_connect_timeout =
+            options.mqtt.network_connect_timeout;
         options.mqtt = mqtt_options;
+        options.mqtt.network_connect_timeout = network_connect_timeout;
         return Client.connectUriAttempt(
             allocator,
             io,
@@ -858,6 +861,7 @@ fn websocketConnectOptions(
         .protocols = &.{mqtt_subprotocol},
         .tcp_nodelay = options.tcp_nodelay,
         .connect_timeout = options.mqtt.network_connect_timeout,
+        .tls_handshake_timeout = options.tls_handshake_timeout,
         .limits = websocketLimits(
             options.mqtt.limits,
             options.max_head_bytes,

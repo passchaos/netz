@@ -1509,6 +1509,68 @@ test "MQTT vail TLS client bounds an idle server handshake" {
     joined = true;
 }
 
+test "MQTT standard TLS client bounds an idle server handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *std.Io.net.Server,
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_tls.Client.connectAddress(
+            allocator,
+            io,
+            listener.socket.address,
+            "localhost",
+            .{
+                .mqtt = .{ .client_id = "tls-std-timeout" },
+                .tls = .{ .verify_host = false },
+                .tls_handshake_timeout = .fromMilliseconds(20),
+            },
+        ),
+    );
+    thread.join();
+}
+
+test "MQTT TLS reconnect connector preserves network timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var connector = mqtt_tls.ReconnectConnector{
+        .address = .{ .ip4 = .loopback(1) },
+        .tls_host = "localhost",
+        .options = .{ .mqtt = .{
+            .client_id = "placeholder",
+            .network_connect_timeout = .zero,
+        } },
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connector.connector().connectAttempt(allocator, io, .{
+            .client_id = "reconnect-timeout",
+            .network_connect_timeout = .fromSeconds(1),
+        }),
+    );
+}
+
 fn localCaBundle(
     allocator: std.mem.Allocator,
     io: std.Io,
