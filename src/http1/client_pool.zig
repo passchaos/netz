@@ -274,6 +274,7 @@ pub const Pool = struct {
         transport: Transport,
         endpoint: runtime.UriEndpoint,
     ) Error!Lease {
+        var displaced: ?Slot = null;
         self.mutex.lockUncancelable(self.io);
         if (self.closed) {
             self.mutex.unlock(self.io);
@@ -304,11 +305,24 @@ pub const Pool = struct {
         if (self.options.max_connections != 0 and
             self.connections >= self.options.max_connections)
         {
-            self.mutex.unlock(self.io);
-            return error.ConnectionLimitReached;
+            if (self.idle.items.len == 0) {
+                self.mutex.unlock(self.io);
+                return error.ConnectionLimitReached;
+            }
+
+            // An idle socket for another authority must not pin the entire
+            // global budget. Detach the least-recently-used idle socket while
+            // holding the lock, then close it after unlocking so TLS shutdown
+            // cannot serialize unrelated pool operations. Its accounting slot
+            // transfers directly to this connection attempt.
+            displaced = self.idle.swapRemove(
+                self.oldestIdleIndexLocked(),
+            );
+        } else {
+            self.connections += 1;
         }
-        self.connections += 1;
         self.mutex.unlock(self.io);
+        if (displaced) |*slot| slot.deinit(self.allocator);
         var connection_reserved = true;
         errdefer if (connection_reserved) self.releaseConnectionSlot();
 
@@ -401,13 +415,9 @@ pub const Pool = struct {
         slot.last_used = self.sequence;
         slot.idle_since_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (self.idle.items.len >= self.options.max_idle_connections) {
-            var oldest_index: usize = 0;
-            for (self.idle.items[1..], 1..) |idle, index| {
-                if (idle.last_used < self.idle.items[oldest_index].last_used) {
-                    oldest_index = index;
-                }
-            }
-            var oldest = self.idle.swapRemove(oldest_index);
+            var oldest = self.idle.swapRemove(
+                self.oldestIdleIndexLocked(),
+            );
             oldest.deinit(self.allocator);
             self.connections -= 1;
             self.notifyCapacityWaiters();
@@ -421,6 +431,17 @@ pub const Pool = struct {
         // Idle entries are authority-specific. Wake all waiters so a waiter
         // for this authority is not stranded behind one for another host.
         self.notifyCapacityWaiters();
+    }
+
+    fn oldestIdleIndexLocked(self: *const Pool) usize {
+        std.debug.assert(self.idle.items.len != 0);
+        var oldest_index: usize = 0;
+        for (self.idle.items[1..], 1..) |idle, index| {
+            if (idle.last_used < self.idle.items[oldest_index].last_used) {
+                oldest_index = index;
+            }
+        }
+        return oldest_index;
     }
 
     fn releaseConnectionSlot(self: *Pool) void {

@@ -571,6 +571,16 @@ for the pool rather than inference from the standalone persistent Client tests.
 | HTTP/2 parallel x10 × 1-MiB responses | 1.663-1.671 ms/batch pinned | 2.957-3.035 ms/batch pinned |
 | HTTP/2 parallel x10 × 1-MiB responses, 8-KiB stream window | 7.367-7.447 ms/batch pinned | 10.192-10.379 ms/batch pinned |
 
+Both bounded client pools now treat idle sockets as reclaimable rather than as
+permanent occupants of the global connection budget. If an acquisition for a
+new authority reaches `max_connections` while another authority has idle
+capacity, the least-recently-used idle socket is closed and its accounting slot
+is transferred directly to the new connection attempt. Checked-out leases are
+never evicted, and a genuinely all-leased/all-connecting pool still returns or
+waits on `ConnectionLimitReached`. Cross-authority TCP regressions for HTTP/1
+and HTTP/2 set total and idle capacity to one, proving the second origin
+connects, the first socket observes EOF, and the live count never exceeds one.
+
 Native HTTP/1 vail TLS client and server connections expose their authenticated
 peer chain, negotiated ALPN/cipher suite/hash, RFC 8446 exporter, explicit
 KeyUpdate and update counters. The client keeps the standard-library HTTPS

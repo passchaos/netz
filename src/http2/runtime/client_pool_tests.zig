@@ -296,7 +296,7 @@ test "HTTP/2 client pool discards GOAWAY connections" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 client pool evicts least recently used authority" {
+test "HTTP/2 client pool replaces an idle authority at total capacity" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -346,6 +346,7 @@ test "HTTP/2 client pool evicts least recently used authority" {
     defer if (!first_joined) first_thread.join();
     defer if (!second_joined) second_thread.join();
     var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
         .max_idle_connections = 1,
         .max_idle_per_authority = 1,
     });
@@ -369,6 +370,7 @@ test "HTTP/2 client pool evicts least recently used authority" {
     var second = try pool.requestUri(second_uri, .{});
     second.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     try std.testing.expectEqual(
         @as(usize, 0),
         try pool.idleCountForUri(first_uri),
