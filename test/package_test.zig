@@ -209,6 +209,22 @@ test "public modules are reachable" {
         "isReusable",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.RequestWriter,
+        "readResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.RequestWriter,
+        "readResponseWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,
         "connectTlsAddress",
     ));
