@@ -343,6 +343,11 @@ clients. Its exclusive leases retain QPACK/control state, normalize URI origins,
 discard GOAWAY/closed/non-quiescent clients, retry one stale reused connection
 only for idempotent methods, and accept a connector callback so certificate,
 resumption, CID generation, and endpoint ownership policy stay explicit. A
+total connection limit includes idle, leased, and in-progress handshakes; a new
+origin may replace the global least-recently-used idle client without exceeding
+that cap, while a pool containing only leases/handshakes rejects new admission
+and failed connects release their reservation. A default connector securely
+generates fresh CIDs while retaining caller TLS/resumption policy. A
 real TLS/QUIC regression issues two differently cased URI requests through one
 accepted connection and verifies the second lease is reused; a companion case
 marks GOAWAY before release and proves the connection is not cached. Each

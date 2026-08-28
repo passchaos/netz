@@ -10,6 +10,7 @@ const http3 = @import("../mod.zig");
 
 pub const Error = error{
     InvalidPoolOptions,
+    ConnectionLimitReached,
 };
 
 pub fn DefaultConnectorContext(comptime Runtime: type) type {
@@ -70,6 +71,8 @@ pub fn Options(comptime Runtime: type) type {
         local_address: std.Io.net.IpAddress,
         limits: Runtime.Limits = .{},
         idle: http3.origin_pool.Config = .{},
+        /// Maximum idle, leased, and connecting clients. Zero is unbounded.
+        max_connections: usize = 32,
         connector: Connector(Runtime),
     };
 }
@@ -82,6 +85,7 @@ pub fn Pool(comptime Runtime: type) type {
         mutex: std.Io.Mutex = .init,
         idle: IdlePool,
         leased: usize = 0,
+        connections: usize = 0,
 
         const Self = @This();
         const Client = Runtime.HandshakeClient;
@@ -147,6 +151,7 @@ pub fn Pool(comptime Runtime: type) type {
             // Leases retain a pool pointer; the caller must return them before
             // destroying the pool just as with HTTP/1 and HTTP/2 pools.
             std.debug.assert(self.leased == 0);
+            std.debug.assert(self.connections == self.idle.idleCount());
             self.idle.deinit();
             self.* = undefined;
         }
@@ -154,7 +159,7 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn acquireUri(
             self: *Self,
             uri_text: []const u8,
-        ) Runtime.Error!Lease {
+        ) (Runtime.Error || Error)!Lease {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
@@ -162,15 +167,36 @@ pub fn Pool(comptime Runtime: type) type {
                 uri.scheme,
                 endpoint.authority,
             );
-            var origin_key = try http3.originKeyFromOrigin(
+            const origin_key = try http3.originKeyFromOrigin(
                 self.allocator,
                 origin,
             );
-            errdefer origin_key.deinit();
 
             self.mutex.lockUncancelable(self.io);
+            _ = self.pruneExpiredLocked();
             const reused = self.idle.acquire(origin, nowMillis(self.io));
-            if (reused != null) self.leased += 1;
+            if (reused != null) {
+                self.leased += 1;
+            } else if (self.options.max_connections != 0 and
+                self.connections >= self.options.max_connections)
+            {
+                // Only idle clients are eligible for replacement. Checked-out
+                // leases and connection attempts retain their reservation.
+                const displaced = self.idle.takeOldest() orelse {
+                    self.mutex.unlock(self.io);
+                    var key = origin_key;
+                    key.deinit();
+                    return error.ConnectionLimitReached;
+                };
+                // `connections` is intentionally unchanged: the evicted idle
+                // client's slot becomes this in-progress reservation.
+                self.mutex.unlock(self.io);
+                var old = displaced;
+                old.deinit();
+                return self.connectReserved(uri, origin_key);
+            } else {
+                self.connections += 1;
+            }
             self.mutex.unlock(self.io);
             if (reused) |client| {
                 const lease: Lease = .{
@@ -179,10 +205,21 @@ pub fn Pool(comptime Runtime: type) type {
                     .origin_key = origin_key,
                     .was_reused = true,
                 };
-                origin_key = undefined;
                 return lease;
             }
 
+            return self.connectReserved(uri, origin_key);
+        }
+
+        fn connectReserved(
+            self: *Self,
+            uri: std.Uri,
+            origin_key_value: http3.OriginKey,
+        ) Runtime.Error!Lease {
+            var origin_key = origin_key_value;
+            errdefer origin_key.deinit();
+            var reservation_active = true;
+            errdefer if (reservation_active) self.releaseReservation();
             var client = try self.options.connector.connect(
                 self.options.connector.context,
                 self.allocator,
@@ -195,6 +232,7 @@ pub fn Pool(comptime Runtime: type) type {
             self.mutex.lockUncancelable(self.io);
             self.leased += 1;
             self.mutex.unlock(self.io);
+            reservation_active = false;
             const lease: Lease = .{
                 .pool = self,
                 .client_value = client,
@@ -209,7 +247,7 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             uri_text: []const u8,
             request_options: Runtime.UriRequestOptions,
-        ) Runtime.Error!Runtime.OwnedHandshakeResponse {
+        ) (Runtime.Error || Error)!Runtime.OwnedHandshakeResponse {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
@@ -250,7 +288,7 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn idleCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            _ = self.idle.pruneExpired(nowMillis(self.io));
+            _ = self.pruneExpiredLocked();
             return self.idle.idleCount();
         }
 
@@ -266,6 +304,18 @@ pub fn Pool(comptime Runtime: type) type {
             return self.leased;
         }
 
+        pub fn connectionCount(self: *Self) usize {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.connections;
+        }
+
+        pub fn pruneExpired(self: *Self) usize {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.pruneExpiredLocked();
+        }
+
         fn release(
             self: *Self,
             client_value: Client,
@@ -276,6 +326,7 @@ pub fn Pool(comptime Runtime: type) type {
             std.debug.assert(self.leased != 0);
             self.leased -= 1;
             if (!client.isReusable()) {
+                self.connections -= 1;
                 self.mutex.unlock(self.io);
                 var key = origin_key;
                 key.deinit();
@@ -287,6 +338,7 @@ pub fn Pool(comptime Runtime: type) type {
                 origin_key,
                 nowMillis(self.io),
             ) catch |err| {
+                self.connections -= 1;
                 self.mutex.unlock(self.io);
                 client.deinit();
                 return err;
@@ -305,6 +357,8 @@ pub fn Pool(comptime Runtime: type) type {
             self.mutex.lockUncancelable(self.io);
             std.debug.assert(self.leased != 0);
             self.leased -= 1;
+            std.debug.assert(self.connections != 0);
+            self.connections -= 1;
             self.mutex.unlock(self.io);
             client.deinit();
         }
@@ -312,6 +366,20 @@ pub fn Pool(comptime Runtime: type) type {
         fn dropClient(_: std.mem.Allocator, client_value: Client) void {
             var client = client_value;
             client.deinit();
+        }
+
+        fn releaseReservation(self: *Self) void {
+            self.mutex.lockUncancelable(self.io);
+            std.debug.assert(self.connections != 0);
+            self.connections -= 1;
+            self.mutex.unlock(self.io);
+        }
+
+        fn pruneExpiredLocked(self: *Self) usize {
+            const removed = self.idle.pruneExpired(nowMillis(self.io));
+            std.debug.assert(self.connections >= removed);
+            self.connections -= removed;
+            return removed;
         }
 
         test "HTTP/3 handshake client pool validates idle limits" {
@@ -460,6 +528,7 @@ test "HTTP/3 handshake client pool reuses one authenticated connection" {
     const ClientPool = Pool(Runtime);
     var pool = try ClientPool.init(allocator, io, .{
         .local_address = .{ .ip4 = .unspecified(0) },
+        .max_connections = 1,
         .limits = .{ .quic = .{
             .max_datagram_size = 4096,
             .max_frames_per_datagram = 8,
@@ -492,12 +561,122 @@ test "HTTP/3 handshake client pool reuses one authenticated connection" {
     try std.testing.expectEqual(@as(usize, 1), connect_context.connects);
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     try std.testing.expectEqual(@as(u64, 1), pool.stats().total_reused);
 
     server_thread.join();
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), shared.requests);
+}
+
+test "HTTP/3 handshake client pool enforces checked-out capacity" {
+    const Runtime = @import("../runtime.zig");
+    const tls_testing = @import("../../tls/testing.zig");
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const server_cid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
+    var server = try Runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Runtime.HandshakeServer,
+        accepted: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var session = self.server.accept() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.quic_server.endpoint.io);
+                return;
+            };
+            defer session.deinit();
+            self.accepted.set(self.server.quic_server.endpoint.io);
+            self.release.wait(self.server.quic_server.endpoint.io) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        server_thread.join();
+    };
+
+    var connector_context = DefaultConnectorContext(Runtime){ .options = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+        },
+    } };
+    const ClientPool = Pool(Runtime);
+    var pool = try ClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .unspecified(0) },
+        .max_connections = 1,
+        .limits = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .connector = connector_context.connector(),
+    });
+    defer pool.deinit();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/held",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+
+    var first = try pool.acquireUri(uri);
+    try shared.accepted.wait(io);
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectError(
+        error.ConnectionLimitReached,
+        pool.acquireUri(uri),
+    );
+    first.discard();
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    shared.release.set(io);
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake client pool discards GOAWAY leases" {
@@ -607,10 +786,55 @@ test "HTTP/3 handshake client pool discards GOAWAY leases" {
     try lease.release();
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
 
     server_thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 handshake client pool releases failed reservations" {
+    const Runtime = @import("../runtime.zig");
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Refusing = struct {
+        calls: usize = 0,
+        fn connect(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: Runtime.Limits,
+        ) Runtime.Error!Runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return error.ConnectionRefused;
+        }
+    };
+    var refusing = Refusing{};
+    const ClientPool = Pool(Runtime);
+    var pool = try ClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .loopback(0) },
+        .max_connections = 1,
+        .connector = .{
+            .context = &refusing,
+            .connect = Refusing.connect,
+        },
+    });
+    defer pool.deinit();
+
+    inline for (0..2) |_| {
+        try std.testing.expectError(
+            error.ConnectionRefused,
+            pool.acquireUri("https://localhost/"),
+        );
+        try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+        try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
+    }
+    try std.testing.expectEqual(@as(usize, 2), refusing.calls);
 }
 
 fn nowMillis(io: std.Io) u64 {

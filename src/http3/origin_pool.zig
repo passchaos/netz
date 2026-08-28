@@ -189,6 +189,17 @@ pub fn Pool(comptime Handle: type) type {
             return handle;
         }
 
+        /// Remove the globally least-recently-released idle handle. This is
+        /// used by owning pools when a new origin needs to replace idle
+        /// capacity without temporarily exceeding their total connection cap.
+        pub fn takeOldest(self: *Self) ?Handle {
+            if (self.entries.items.len == 0) return null;
+            var entry = self.removeEntryAt(self.oldestEntryIndex());
+            const handle = entry.handle;
+            entry.key.deinit();
+            return handle;
+        }
+
         fn removeEntryAt(self: *Self, index: usize) Entry {
             const old_len = self.entries.items.len;
             self.detachOriginIndex(index);
