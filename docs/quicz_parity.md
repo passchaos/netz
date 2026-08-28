@@ -371,7 +371,9 @@ resolution and every address-specific QUIC/TLS attempt. That same deadline is
 carried through Initial, Retry, Version Negotiation and passive Handshake
 flight reads rather than restarting for each stage or fallback address. Direct-
 address clients use the same total timeout directly in addition to the lower-
-level bounded PTO/retry policy. Each
+level bounded PTO/retry policy. Explicit `connectWithDeadline` and
+`connectUriWithDeadline` entry points let a larger operation share its existing
+awake-clock budget instead of converting it back into a relative timeout. Each
 pooled connection currently owns its UDP endpoint. Sharing one endpoint across
 several pooled origins remains a separate dispatcher integration task rather
 than allowing competing socket readers.

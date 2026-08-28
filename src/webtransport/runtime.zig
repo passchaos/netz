@@ -2800,6 +2800,26 @@ pub const HandshakeClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: HandshakeUriConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClientSession {
+        var attempt = try connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
     pub fn connectUriAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2825,6 +2845,46 @@ pub const HandshakeClientSession = struct {
             uri,
             options.limits.http3,
             webTransportHandshakeClientOptions(h3_options),
+        );
+        errdefer h3_client.deinit();
+        return connectStatefulAttempt(
+            &h3_client,
+            endpoint.authority,
+            path,
+            options.origin,
+            options.headers,
+            options.limits,
+        );
+    }
+
+    pub fn connectUriAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: HandshakeUriConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeConnectAttempt {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        const path = try http3.runtime.uriRequestTargetAlloc(allocator, uri);
+        defer allocator.free(path);
+
+        var h3_options = options.h3;
+        h3_options.connect_timeout = null;
+        if (h3_options.handshake.server_name == null) {
+            h3_options.handshake.server_name = endpoint.tls_host;
+        }
+        var h3_client = try http3.runtime.HandshakeClient.connectUriWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            options.limits.http3,
+            webTransportHandshakeClientOptions(h3_options),
+            deadline,
         );
         errdefer h3_client.deinit();
         return connectStatefulAttempt(

@@ -344,6 +344,17 @@ fn connectDeadline(
     return .fromNow(io, .{ .raw = duration, .clock = .awake });
 }
 
+fn usableConnectDeadline(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+) Error!std.Io.Clock.Timestamp {
+    if (deadline.clock != .awake) return error.InvalidHandshakeRecovery;
+    if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+        return error.HandshakeTimeout;
+    }
+    return deadline;
+}
+
 fn resolveEndpointBefore(
     endpoint: UriEndpoint,
     allocator: std.mem.Allocator,
@@ -5872,6 +5883,46 @@ pub const HandshakeClient = struct {
     }
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
+        return connectBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            try connectDeadline(io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            try usableConnectDeadline(io, deadline),
+        );
+    }
+
+    fn connectBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
         try validateBlockedStreamLimit(
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
@@ -5881,7 +5932,6 @@ pub const HandshakeClient = struct {
         endpoint.* = try quic.runtime.Endpoint.bind(allocator, io, local_address, limits.quic);
         errdefer endpoint.deinit();
 
-        const deadline = try connectDeadline(io, options.connect_timeout);
         var handshake_options = options.handshake;
         if (deadline) |absolute| {
             handshake_options.handshake_recovery = try handshakeRecoveryBefore(
@@ -5916,13 +5966,41 @@ pub const HandshakeClient = struct {
         server: net.IpAddress,
         options: HandshakeClientOptions,
     ) Error!HandshakeClient {
+        return connectFromBefore(
+            endpoint,
+            source,
+            server,
+            options,
+            try connectDeadline(endpoint.io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectFromWithDeadline(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectFromBefore(
+            endpoint,
+            source,
+            server,
+            options,
+            try usableConnectDeadline(endpoint.io, deadline),
+        );
+    }
+
+    fn connectFromBefore(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
         try validateBlockedStreamLimit(
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
-        );
-        const deadline = try connectDeadline(
-            endpoint.io,
-            options.connect_timeout,
         );
         var handshake_options = options.handshake;
         if (deadline) |absolute| {
@@ -6184,7 +6262,46 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!HandshakeClient {
-        const deadline = try connectDeadline(io, options.connect_timeout);
+        return connectUriBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            limits,
+            options,
+            try connectDeadline(io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectUriBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            limits,
+            options,
+            try usableConnectDeadline(io, deadline),
+        );
+    }
+
+    fn connectUriBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
         const servers = try resolveEndpointBefore(

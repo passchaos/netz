@@ -65,6 +65,27 @@ test "WebTransport URI connect forwards HTTP3 total handshake timeout" {
     try std.testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
 }
 
+test "WebTransport URI connect exposes an absolute handshake deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClientSession.connectUriWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            "https://localhost/",
+            .{ .h3 = .{ .handshake = .{
+                .original_destination_connection_id = "wt-deadline-origin",
+                .local_connection_id = "wt-deadline-client",
+            } } },
+            .fromNow(io, .{ .raw = .zero, .clock = .awake }),
+        ),
+    );
+}
+
 test "WebTransport endpoint server rotates ready sessions fairly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

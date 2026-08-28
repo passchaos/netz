@@ -39,6 +39,45 @@ test "HTTP/3 URI connect timeout validates and preserves one deadline" {
     try std.testing.expectEqual(base.max_retries, bounded.max_retries);
 }
 
+test "HTTP/3 direct and URI deadline APIs reject expired deadlines" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const expired: std.Io.Clock.Timestamp = .fromNow(io, .{
+        .raw = .zero,
+        .clock = .awake,
+    });
+    const options: runtime.HandshakeClientOptions = .{ .handshake = .{
+        .original_destination_connection_id = "deadline-origin",
+        .local_connection_id = "deadline-client",
+    } };
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClient.connectWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(443) },
+            .{},
+            options,
+            expired,
+        ),
+    );
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClient.connectUriWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            try std.Uri.parse("https://localhost/"),
+            .{},
+            options,
+            expired,
+        ),
+    );
+}
+
 test "HTTP/3 pool releases a timed-out URI handshake reservation" {
     const quic = @import("../../quic/mod.zig");
     const allocator = std.testing.allocator;

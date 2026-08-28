@@ -937,6 +937,14 @@ test "public modules are reachable" {
         "connect_timeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClientPool,
         "requestUri",
     ));
@@ -3103,6 +3111,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.webtransport.runtime.HandshakeUriConnectOptions,
         "h3",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectUriWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "ProtectedClientSession"));
     try std.testing.expect(@hasDecl(

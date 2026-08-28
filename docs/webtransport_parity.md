@@ -125,7 +125,8 @@ URI clients inherit HTTP/3's total `connect_timeout`: DNS resolution and each
 address-specific QUIC/TLS attempt share one absolute deadline across Initial,
 Retry, Version Negotiation, and passive Handshake flights. A real silent-UDP
 test verifies the WebTransport adapter reaches that deadline instead of
-waiting for the lower-level multi-PTO default.
+waiting for the lower-level multi-PTO default. `connectUriWithDeadline` also
+accepts an existing absolute awake-clock budget from an application workflow.
 
 ## Important interoperability correction
 
