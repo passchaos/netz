@@ -405,6 +405,139 @@ test "QUIC server handshake receives its later flight from one socket owner" {
     try std.testing.expect(try dispatcher.unregisterConnection(72));
 }
 
+test "QUIC client handshake receives through one socket owner" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "client-dispatch";
+    const client_cid = "client-route";
+    const server_cid = "server-route";
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{client_cid},
+        server_endpoint.address(),
+        4096,
+    );
+    defer inbox.deinit();
+
+    const Server = struct {
+        endpoint: *quic.runtime.Endpoint,
+        established: ?handshake.EstablishedConnection = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.established = handshake.accept(self.endpoint, .{
+                .local_connection_id = server_cid,
+                .random = [_]u8{0xb0} ** 32,
+                .x25519_secret_key = [_]u8{0xb1} ** 32,
+                .handshake_recovery = .{
+                    .initial_pto_ms = 20,
+                    .max_pto_ms = 40,
+                    .max_duration_ms = 2_000,
+                },
+            }) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    const Client = struct {
+        endpoint: *quic.runtime.Endpoint,
+        inbox: *quic.handshake_inbox.Inbox,
+        server: std.Io.net.IpAddress,
+        done: std.atomic.Value(bool) = .init(false),
+        established: ?handshake.EstablishedConnection = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.established = handshake.connectFrom(
+                self.endpoint,
+                self.inbox.datagramSource(),
+                self.server,
+                .{
+                    .original_destination_connection_id = original_dcid,
+                    .local_connection_id = client_cid,
+                    .server_name = "localhost",
+                    .random = [_]u8{0xb2} ** 32,
+                    .x25519_secret_key = [_]u8{0xb3} ** 32,
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
+                },
+            ) catch |err| {
+                self.err = err;
+                self.done.store(true, .release);
+                return;
+            };
+            self.done.store(true, .release);
+        }
+    };
+
+    var server = Server{ .endpoint = &server_endpoint };
+    const server_thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+    var client = Client{
+        .endpoint = &client_endpoint,
+        .inbox = &inbox,
+        .server = server_endpoint.address(),
+    };
+    const client_thread = try std.Thread.spawn(.{}, Client.run, .{&client});
+
+    var owner_err: ?anyerror = null;
+    owner: while (!client.done.load(.acquire)) {
+        var datagram = client_endpoint.receiveBytesTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(20),
+            },
+        }) catch |err| switch (err) {
+            error.Timeout => continue,
+            else => {
+                owner_err = err;
+                break :owner;
+            },
+        };
+        inbox.push(datagram) catch |err| {
+            datagram.deinit(allocator);
+            owner_err = err;
+            break :owner;
+        };
+    }
+
+    if (!client.done.load(.acquire)) inbox.close();
+    client_thread.join();
+    server_thread.join();
+    if (owner_err) |err| return err;
+    if (client.err) |err| return err;
+    if (server.err) |err| return err;
+    var client_established = client.established orelse
+        return error.TestUnexpectedResult;
+    defer client_established.deinit();
+    var server_established = server.established orelse
+        return error.TestUnexpectedResult;
+    defer server_established.deinit();
+    try std.testing.expectEqualStrings("h3", client_established.alpn);
+    try std.testing.expectEqualStrings("h3", server_established.alpn);
+}
+
 test "QUIC server handshake releases an invalid injected Initial" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

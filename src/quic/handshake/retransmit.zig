@@ -270,6 +270,29 @@ pub fn sendAndReceiveMatchingContext(
     accept_context: *anyopaque,
     accept_fn: AcceptContextFn,
 ) Error!quic.runtime.OwnedBytes {
+    return sendAndReceiveMatchingContextFrom(
+        endpoint,
+        quic.runtime.DatagramSource.fromEndpoint(endpoint),
+        config,
+        context,
+        send_fn,
+        accept_context,
+        accept_fn,
+    );
+}
+
+/// Source-driven form for clients whose endpoint has a single receive owner.
+/// The source owns filtering and transfers each accepted datagram to this
+/// helper, while retransmissions continue to use the caller's endpoint.
+pub fn sendAndReceiveMatchingContextFrom(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    config: Config,
+    context: *anyopaque,
+    send_fn: SendFn,
+    accept_context: *anyopaque,
+    accept_fn: AcceptContextFn,
+) Error!quic.runtime.OwnedBytes {
     try config.validate();
     var retransmission: u8 = 0;
     var transmitted: u8 = 0;
@@ -291,7 +314,7 @@ pub fn sendAndReceiveMatchingContext(
             hard_deadline,
         );
         while (true) {
-            var datagram = endpoint.receiveBytesTimeout(deadline) catch |err|
+            var datagram = source.receiveTimeout(deadline) catch |err|
                 switch (err) {
                     error.Timeout => {
                         if (retryBudgetExhausted(

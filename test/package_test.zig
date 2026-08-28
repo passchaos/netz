@@ -2798,6 +2798,7 @@ test "public modules are reachable" {
         "UnroutedKind",
     ));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "acceptFromInitial"));
+    try std.testing.expect(@hasDecl(netz.quic.handshake, "connectFrom"));
     try std.testing.expect(@hasDecl(
         netz.quic.handshake,
         "acceptFromInitialSource",

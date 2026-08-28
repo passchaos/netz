@@ -369,6 +369,10 @@ datagrams by the admitted original/server CID and peer tuple while handshake
 workers consume only their inbox. A real three-party regression (client, sole
 socket owner, handshake worker) completes TLS without a second socket reader,
 then atomically promotes the pending route to established 1-RTT routing.
+The client handshake now accepts the same `DatagramSource` abstraction through
+`connectFrom`; a reciprocal three-party regression keeps a client endpoint's
+socket in one owner while its handshake worker consumes only a CID/source-bound
+inbox. The ordinary `connect` API remains the endpoint-backed convenience path.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server. The low-level ownership and routing primitive is now present, but the

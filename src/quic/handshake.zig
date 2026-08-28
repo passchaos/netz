@@ -691,27 +691,19 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
 }
 
-fn receiveNextServerDatagramUntil(
+fn replaceServerDatagramFromUntil(
     endpoint: *quic.runtime.Endpoint,
-    deadline: std.Io.Timeout,
-) Error!quic.runtime.OwnedBytes {
-    if (timeoutExpired(endpoint.io, deadline)) return error.HandshakeTimeout;
-    return endpoint.receiveBytesTimeout(deadline) catch |err| switch (err) {
-        error.Timeout => error.HandshakeTimeout,
-        error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
-        else => |other| @errorCast(other),
-    };
-}
-
-fn replaceServerDatagramUntil(
-    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     deadline: std.Io.Timeout,
     datagram: *quic.runtime.OwnedBytes,
 ) Error!void {
-    const next_datagram = try receiveNextServerDatagramUntil(
-        endpoint,
-        deadline,
-    );
+    if (timeoutExpired(endpoint.io, deadline)) return error.HandshakeTimeout;
+    const next_datagram: quic.runtime.OwnedBytes =
+        source.receiveTimeout(deadline) catch |err| switch (err) {
+            error.Timeout => return error.HandshakeTimeout,
+            error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+            else => |other| return @errorCast(other),
+        };
     datagram.deinit(endpoint.allocator);
     datagram.* = next_datagram;
 }
@@ -841,6 +833,23 @@ const EarlyDataFlight = struct {
 };
 
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
+    return connectFrom(
+        endpoint,
+        quic.runtime.DatagramSource.fromEndpoint(endpoint),
+        peer,
+        options,
+    );
+}
+
+/// Complete a client handshake while receiving through a caller-provided
+/// source. A shared socket owner can route this attempt's long-header packets
+/// into an inbox instead of allowing several clients to race on the endpoint.
+pub fn connectFrom(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    peer: net.IpAddress,
+    options: ClientOptions,
+) Error!EstablishedConnection {
     if (options.resumption_session == null and
         options.early_data == null and
         options.auto_resumption != null)
@@ -849,19 +858,32 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
         var session = (try quic.resumption.ticket.handshake.acquireFirst(
             automatic,
             options.alpn_protocols,
-        )) orelse return connectAttempt(endpoint, peer, options, false);
+        )) orelse return connectAttempt(
+            endpoint,
+            source,
+            peer,
+            options,
+            false,
+        );
         defer session.deinit();
         var resumed_options = options;
         resumed_options.resumption_session = &session;
         resumed_options.resumption_now_ms = automatic.now_ms;
         resumed_options.resumption_server_id = automatic.server_id;
-        return connectAttempt(endpoint, peer, resumed_options, false);
+        return connectAttempt(
+            endpoint,
+            source,
+            peer,
+            resumed_options,
+            false,
+        );
     }
-    return connectAttempt(endpoint, peer, options, false);
+    return connectAttempt(endpoint, source, peer, options, false);
 }
 
 fn connectAttempt(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     peer: net.IpAddress,
     options: ClientOptions,
     version_negotiation_processed: bool,
@@ -1046,8 +1068,9 @@ fn connectAttempt(
                 },
             };
             server_datagram =
-                retransmit.sendAndReceiveMatchingContext(
+                retransmit.sendAndReceiveMatchingContextFrom(
                     endpoint,
+                    source,
                     options.handshake_recovery,
                     &send_context,
                     EarlyDataFlight.send,
@@ -1089,8 +1112,9 @@ fn connectAttempt(
                 },
             };
             server_datagram =
-                try retransmit.sendAndReceiveMatchingContext(
+                try retransmit.sendAndReceiveMatchingContextFrom(
                     endpoint,
+                    source,
                     options.handshake_recovery,
                     &send_context,
                     retransmit.InitialFlight.send,
@@ -1161,7 +1185,7 @@ fn connectAttempt(
         // rather than replaying early data under the negotiated version.
         next.early_data = null;
         next.resumption_session = resumption_session;
-        return connectAttempt(endpoint, peer, next, true);
+        return connectAttempt(endpoint, source, peer, next, true);
     }
 
     const server_initial_deadline =
@@ -1180,8 +1204,9 @@ fn connectAttempt(
             error.BufferTooShort,
             error.UnsupportedVersion,
             => {
-                try replaceServerDatagramUntil(
+                try replaceServerDatagramFromUntil(
                     endpoint,
+                    source,
                     server_initial_deadline,
                     &server_datagram,
                 );
@@ -1189,8 +1214,9 @@ fn connectAttempt(
             },
             else => |other| return other,
         } orelse {
-            try replaceServerDatagramUntil(
+            try replaceServerDatagramFromUntil(
                 endpoint,
+                source,
                 server_initial_deadline,
                 &server_datagram,
             );
@@ -1215,8 +1241,9 @@ fn connectAttempt(
             error.BufferTooShort,
             error.AuthenticationFailed,
             => {
-                try replaceServerDatagramUntil(
+                try replaceServerDatagramFromUntil(
                     endpoint,
+                    source,
                     server_initial_deadline,
                     &server_datagram,
                 );
@@ -1282,6 +1309,7 @@ fn connectAttempt(
 
     var server_handshake = try receiveServerHandshakeCrypto(
         endpoint,
+        source,
         server_initial.from,
         server_datagram.bytes[server_initial_info.len..],
         server_datagram.ecn,
@@ -2737,6 +2765,7 @@ fn receiveRetriedClientInitial(
 
 fn receiveServerHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     from: net.IpAddress,
     coalesced_tail: []const u8,
     coalesced_ecn: quic.packet_space.EcnCodepoint,
@@ -2766,10 +2795,12 @@ fn receiveServerHandshakeCrypto(
             &pending_tail,
             allow_zero_fixed_bit,
         )) |packet| packet else blk: {
-            owned_datagram = try receiveNextServerDatagramUntil(
-                endpoint,
-                passive_deadline,
-            );
+            owned_datagram = source.receiveTimeout(passive_deadline) catch |err|
+                switch (err) {
+                    error.Timeout => return error.HandshakeTimeout,
+                    error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                    else => |other| return @errorCast(other),
+                };
             response_from = owned_datagram.?.from;
             response_ecn = owned_datagram.?.ecn;
             var datagram_tail: []const u8 = owned_datagram.?.bytes;
@@ -3011,6 +3042,7 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
 
     var received = try receiveServerHandshakeCrypto(
         &endpoint,
+        quic.runtime.DatagramSource.fromEndpoint(&endpoint),
         endpoint.address(),
         coalesced.items,
         .ce,
