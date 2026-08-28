@@ -496,6 +496,14 @@ pub const Stats = struct {
     active_connections: usize,
     maximum_active_connections: usize,
     expired_sessions: usize,
+    /// Complete MQTT Control Packets and their encoded MQTT bytes across all
+    /// broker connections and transports. TCP/TLS/WebSocket framing is not
+    /// included, matching Mosquitto's `$SYS/broker/messages/*` and
+    /// `$SYS/broker/bytes/*` counter boundary.
+    messages_received: u64,
+    messages_sent: u64,
+    bytes_received: u64,
+    bytes_sent: u64,
     /// Successfully parsed client PUBLISH packets accepted by the broker
     /// dispatch loop. Retransmissions count as packets, matching Mosquitto's
     /// `$SYS/broker/publish/messages/received` counter.
@@ -535,6 +543,10 @@ pub const SystemMetric = enum {
     clients_disconnected,
     clients_expired,
     clients_total,
+    messages_received,
+    messages_sent,
+    bytes_received,
+    bytes_sent,
     publish_messages_received,
     publish_messages_dropped,
     publish_messages_sent,
@@ -561,6 +573,10 @@ pub const SystemMetric = enum {
             .clients_disconnected => "$SYS/broker/clients/disconnected",
             .clients_expired => "$SYS/broker/clients/expired",
             .clients_total => "$SYS/broker/clients/total",
+            .messages_received => "$SYS/broker/messages/received",
+            .messages_sent => "$SYS/broker/messages/sent",
+            .bytes_received => "$SYS/broker/bytes/received",
+            .bytes_sent => "$SYS/broker/bytes/sent",
             .publish_messages_received => "$SYS/broker/publish/messages/received",
             .publish_messages_dropped => "$SYS/broker/publish/messages/dropped",
             .publish_messages_sent => "$SYS/broker/publish/messages/sent",
@@ -655,6 +671,10 @@ pub const system_metrics = [_]SystemMetric{
     .clients_disconnected,
     .clients_expired,
     .clients_total,
+    .messages_received,
+    .messages_sent,
+    .bytes_received,
+    .bytes_sent,
     .publish_messages_received,
     .publish_messages_dropped,
     .publish_messages_sent,
@@ -706,6 +726,7 @@ pub const Broker = struct {
     /// not restored from protocol-state snapshots.
     maximum_active_connections: usize = 0,
     expired_sessions: usize = 0,
+    traffic: runtime.TrafficCounters = .{},
     publish_messages_received: usize = 0,
     publish_payload_bytes_received: usize = 0,
     publish_messages_dropped: usize = 0,
@@ -936,10 +957,15 @@ pub const Broker = struct {
             live_queued_deliveries +|= slot.queuedCount();
         }
         const sessions = self.sessions.aggregateStats();
+        const traffic = self.traffic.stats();
         return .{
             .active_connections = active_connections,
             .maximum_active_connections = self.maximum_active_connections,
             .expired_sessions = self.expired_sessions,
+            .messages_received = traffic.messages_received,
+            .messages_sent = traffic.messages_sent,
+            .bytes_received = traffic.bytes_received,
+            .bytes_sent = traffic.bytes_sent,
             .publish_messages_received = self.publish_messages_received,
             .publish_payload_bytes_received = self.publish_payload_bytes_received,
             .publish_messages_dropped = self.publish_messages_dropped,
@@ -1355,8 +1381,11 @@ pub const Broker = struct {
         connection_count: usize,
     ) anyerror!void {
         const server = &(self.server orelse return error.InvalidProperty);
+        var accept_options = self.options.accept;
+        accept_options.traffic_counters = &self.traffic;
         const listener = Listener{
             .source = server.pendingSource(),
+            .accept = accept_options,
             .connection_count = connection_count,
         };
         return self.serveListeners(&.{listener});
@@ -1423,7 +1452,7 @@ pub const Broker = struct {
                 next_result += 1;
                 const accept_task = ListenerAcceptTask{
                     .broker = self,
-                    .listener = listener,
+                    .listener = self.listenerWithTraffic(listener),
                     .result = result,
                 };
                 group.async(
@@ -1500,7 +1529,9 @@ pub const Broker = struct {
                     ListenerSupervisorAcceptTask.run,
                     .{ListenerSupervisorAcceptTask{
                         .supervisor = &supervisor,
-                        .listener = listener,
+                        .listener = self.listenerEndpointWithTraffic(
+                            listener,
+                        ),
                         .listener_index = listener_index,
                     }},
                 );
@@ -1557,6 +1588,25 @@ pub const Broker = struct {
         if (supervisor.firstError()) |err| return err;
     }
 
+    fn listenerWithTraffic(self: *Broker, listener: Listener) Listener {
+        var result = listener;
+        var accept_options = listener.accept orelse self.options.accept;
+        accept_options.traffic_counters = &self.traffic;
+        result.accept = accept_options;
+        return result;
+    }
+
+    fn listenerEndpointWithTraffic(
+        self: *Broker,
+        listener: ListenerEndpoint,
+    ) ListenerEndpoint {
+        var result = listener;
+        var accept_options = listener.accept orelse self.options.accept;
+        accept_options.traffic_counters = &self.traffic;
+        result.accept = accept_options;
+        return result;
+    }
+
     /// Admit one already parsed CONNECT from any transport listener and run
     /// it synchronously through the shared broker state machine. This is the
     /// composable building block for external accept-loop orchestration.
@@ -1597,6 +1647,7 @@ pub const Broker = struct {
         accept_options: runtime.AcceptOptions,
         authorization: ListenerAuthorization,
     ) anyerror!void {
+        pending.connection.attachTrafficCounters(&self.traffic);
         const slot_index = try self.claimSlot();
         var slot_claimed = true;
         defer if (slot_claimed) {
@@ -1652,6 +1703,7 @@ pub const Broker = struct {
     ) Error!?ClientTask {
         var pending_owned = true;
         defer if (pending_owned) pending.deinit(self.allocator);
+        pending.connection.attachTrafficCounters(&self.traffic);
         try pending.connection.setTopicNamespace(namespace.prefix);
         var mapped_will = try namespace.mapConnectWill(
             self.allocator,
@@ -4619,31 +4671,35 @@ fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
 }
 
-fn systemMetricValue(stats_value: Stats, metric: SystemMetric) usize {
+fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
     return switch (metric) {
-        .clients_connected => stats_value.active_connections,
-        .clients_maximum => stats_value.maximum_active_connections,
-        .clients_disconnected => stats_value.disconnected_sessions,
-        .clients_expired => stats_value.expired_sessions,
-        .clients_total => stats_value.sessions,
-        .publish_messages_received => stats_value.publish_messages_received,
-        .publish_messages_dropped => stats_value.publish_messages_dropped,
-        .publish_messages_sent => stats_value.publish_messages_sent,
-        .publish_bytes_received => stats_value.publish_payload_bytes_received,
-        .publish_bytes_sent => stats_value.publish_payload_bytes_sent,
-        .subscriptions => stats_value.subscriptions,
-        .shared_subscriptions => stats_value.shared_subscriptions,
-        .retained_messages => stats_value.retained_messages,
-        .retained_bytes => stats_value.retained_bytes,
-        .live_queued_deliveries => stats_value.live_queued_deliveries,
-        .session_queued_messages => stats_value.session_queued_messages,
-        .session_queued_payload_bytes => stats_value.session_queued_payload_bytes,
-        .session_inflight_messages => stats_value.session_inflight_messages,
-        .session_inflight_payload_bytes => stats_value.session_inflight_payload_bytes,
-        .pending_incoming_qos2 => stats_value.pending_incoming_qos2,
-        .scheduled_wills => stats_value.scheduled_wills,
-        .scheduled_will_bytes => stats_value.scheduled_will_bytes,
-        .session_owned_bytes => stats_value.session_owned_bytes,
+        .clients_connected => @intCast(stats_value.active_connections),
+        .clients_maximum => @intCast(stats_value.maximum_active_connections),
+        .clients_disconnected => @intCast(stats_value.disconnected_sessions),
+        .clients_expired => @intCast(stats_value.expired_sessions),
+        .clients_total => @intCast(stats_value.sessions),
+        .messages_received => stats_value.messages_received,
+        .messages_sent => stats_value.messages_sent,
+        .bytes_received => stats_value.bytes_received,
+        .bytes_sent => stats_value.bytes_sent,
+        .publish_messages_received => @intCast(stats_value.publish_messages_received),
+        .publish_messages_dropped => @intCast(stats_value.publish_messages_dropped),
+        .publish_messages_sent => @intCast(stats_value.publish_messages_sent),
+        .publish_bytes_received => @intCast(stats_value.publish_payload_bytes_received),
+        .publish_bytes_sent => @intCast(stats_value.publish_payload_bytes_sent),
+        .subscriptions => @intCast(stats_value.subscriptions),
+        .shared_subscriptions => @intCast(stats_value.shared_subscriptions),
+        .retained_messages => @intCast(stats_value.retained_messages),
+        .retained_bytes => @intCast(stats_value.retained_bytes),
+        .live_queued_deliveries => @intCast(stats_value.live_queued_deliveries),
+        .session_queued_messages => @intCast(stats_value.session_queued_messages),
+        .session_queued_payload_bytes => @intCast(stats_value.session_queued_payload_bytes),
+        .session_inflight_messages => @intCast(stats_value.session_inflight_messages),
+        .session_inflight_payload_bytes => @intCast(stats_value.session_inflight_payload_bytes),
+        .pending_incoming_qos2 => @intCast(stats_value.pending_incoming_qos2),
+        .scheduled_wills => @intCast(stats_value.scheduled_wills),
+        .scheduled_will_bytes => @intCast(stats_value.scheduled_will_bytes),
+        .session_owned_bytes => @intCast(stats_value.session_owned_bytes),
     };
 }
 

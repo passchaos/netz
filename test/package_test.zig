@@ -1543,6 +1543,20 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Stats"));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "SystemMetric"));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "system_metrics"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficStats"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficCounters"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "trafficStats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "attachTrafficCounters",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.AcceptOptions,
+        "traffic_counters",
+    ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker.Options,
         "system_stats_interval",

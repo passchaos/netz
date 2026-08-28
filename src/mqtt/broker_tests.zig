@@ -783,6 +783,10 @@ test "broker statistics form one coherent live and offline snapshot" {
         empty.maximum_active_connections,
     );
     try std.testing.expectEqual(@as(usize, 0), empty.expired_sessions);
+    try std.testing.expectEqual(@as(u64, 0), empty.messages_received);
+    try std.testing.expectEqual(@as(u64, 0), empty.messages_sent);
+    try std.testing.expectEqual(@as(u64, 0), empty.bytes_received);
+    try std.testing.expectEqual(@as(u64, 0), empty.bytes_sent);
     try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_received);
     try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_sent);
     try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_dropped);
@@ -857,6 +861,13 @@ test "broker statistics form one coherent live and offline snapshot" {
         live.maximum_active_connections,
     );
     try std.testing.expectEqual(@as(usize, 0), live.expired_sessions);
+    // The finite broker wires its aggregate counter into every accept. Both
+    // CONNECT packets plus the subscriber's SUBSCRIBE and publisher's PUBLISH
+    // have completed before this snapshot.
+    try std.testing.expectEqual(@as(u64, 4), live.messages_received);
+    try std.testing.expectEqual(@as(u64, 5), live.messages_sent);
+    try std.testing.expect(live.bytes_received > 0);
+    try std.testing.expect(live.bytes_sent > 0);
     try std.testing.expectEqual(@as(usize, 1), live.publish_messages_received);
     try std.testing.expectEqual(@as(usize, 1), live.publish_messages_sent);
     try std.testing.expectEqual(@as(usize, 0), live.publish_messages_dropped);
@@ -897,6 +908,8 @@ test "broker statistics form one coherent live and offline snapshot" {
         offline.maximum_active_connections,
     );
     try std.testing.expectEqual(@as(usize, 0), offline.expired_sessions);
+    try std.testing.expectEqual(@as(u64, 7), offline.messages_received);
+    try std.testing.expectEqual(@as(u64, 5), offline.messages_sent);
     try std.testing.expectEqual(@as(usize, 1), offline.sessions);
     try std.testing.expectEqual(@as(usize, 0), offline.connected_sessions);
     try std.testing.expectEqual(@as(usize, 1), offline.disconnected_sessions);
@@ -1087,14 +1100,18 @@ test "broker publishes coherent retained system statistics" {
     try std.testing.expectEqualStrings("0", retained[0].payload);
     try std.testing.expectEqual(mqtt.QoS.at_most_once, retained[0].qos);
 
-    const publish_metrics = [_]broker_mod.SystemMetric{
+    const traffic_metrics = [_]broker_mod.SystemMetric{
+        .messages_received,
+        .messages_sent,
+        .bytes_received,
+        .bytes_sent,
         .publish_messages_received,
         .publish_messages_dropped,
         .publish_messages_sent,
         .publish_bytes_received,
         .publish_bytes_sent,
     };
-    for (publish_metrics) |metric| {
+    for (traffic_metrics) |metric| {
         const matched = try broker.retained.matchInto(
             metric.topic(),
             std.Io.Clock.awake.now(io),
@@ -1102,6 +1119,13 @@ test "broker publishes coherent retained system statistics" {
         );
         try std.testing.expectEqual(@as(usize, 1), matched.len);
         const expected = switch (metric) {
+            // Before the first snapshot the subscriber sent CONNECT and
+            // SUBSCRIBE. It then sent DISCONNECT, so the second snapshot sees
+            // all three complete inbound packets.
+            .messages_received => "3",
+            // CONNACK, SUBACK, and five selected client metric PUBLISH packets
+            // were complete before this second snapshot was captured.
+            .messages_sent => "7",
             .publish_messages_received,
             .publish_messages_dropped,
             .publish_bytes_received,
@@ -1110,6 +1134,14 @@ test "broker publishes coherent retained system statistics" {
             // this subscriber. Those real wire PUBLISH packets contribute to
             // the following sent count/byte snapshot, as they do in Mosquitto.
             .publish_messages_sent, .publish_bytes_sent => "5",
+            .bytes_received, .bytes_sent => {
+                try std.testing.expect(try std.fmt.parseInt(
+                    u64,
+                    matched[0].payload,
+                    10,
+                ) > 0);
+                continue;
+            },
             else => unreachable,
         };
         try std.testing.expectEqualStrings(expected, matched[0].payload);

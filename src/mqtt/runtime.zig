@@ -732,6 +732,10 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
+    /// Optional process-wide wire counter sink. Every complete MQTT Control
+    /// Packet is charged after a successful transport read or write, including
+    /// CONNECT/CONNACK and packets later rejected by semantic validation.
+    traffic_counters: ?*TrafficCounters = null,
     /// Absolute budget for receiving the first complete CONNECT packet after
     /// the underlying TCP/TLS/WebSocket transport is established. A null value
     /// preserves unbounded behavior; zero fails before reading.
@@ -762,6 +766,55 @@ pub const AcceptOptions = struct {
     wildcard_subscription_available: bool = true,
     subscription_identifier_available: bool = true,
     shared_subscription_available: bool = true,
+};
+
+/// A point-in-time MQTT Control Packet traffic snapshot. Byte counts cover the
+/// complete MQTT packet, including its fixed header and Remaining Length bytes,
+/// but deliberately exclude TCP, TLS, and WebSocket framing overhead.
+pub const TrafficStats = struct {
+    messages_received: u64,
+    messages_sent: u64,
+    bytes_received: u64,
+    bytes_sent: u64,
+};
+
+/// Thread-safe cumulative counters suitable for sharing across all connections
+/// of a broker. Connections retain their own counters as well, while attaching
+/// a broker sink transfers the already accumulated prefix exactly once.
+pub const TrafficCounters = struct {
+    messages_received: std.atomic.Value(u64) = .init(0),
+    messages_sent: std.atomic.Value(u64) = .init(0),
+    bytes_received: std.atomic.Value(u64) = .init(0),
+    bytes_sent: std.atomic.Value(u64) = .init(0),
+
+    pub fn stats(self: *const TrafficCounters) TrafficStats {
+        return .{
+            .messages_received = self.messages_received.load(.monotonic),
+            .messages_sent = self.messages_sent.load(.monotonic),
+            .bytes_received = self.bytes_received.load(.monotonic),
+            .bytes_sent = self.bytes_sent.load(.monotonic),
+        };
+    }
+
+    pub fn add(self: *TrafficCounters, values: TrafficStats) void {
+        _ = self.messages_received.fetchAdd(
+            values.messages_received,
+            .monotonic,
+        );
+        _ = self.messages_sent.fetchAdd(values.messages_sent, .monotonic);
+        _ = self.bytes_received.fetchAdd(values.bytes_received, .monotonic);
+        _ = self.bytes_sent.fetchAdd(values.bytes_sent, .monotonic);
+    }
+
+    fn recordReceived(self: *TrafficCounters, bytes: usize) void {
+        _ = self.messages_received.fetchAdd(1, .monotonic);
+        _ = self.bytes_received.fetchAdd(@intCast(bytes), .monotonic);
+    }
+
+    fn recordSent(self: *TrafficCounters, bytes: usize) void {
+        _ = self.messages_sent.fetchAdd(1, .monotonic);
+        _ = self.bytes_sent.fetchAdd(@intCast(bytes), .monotonic);
+    }
 };
 
 pub const AcceptedClient = struct {
@@ -1368,6 +1421,8 @@ fn problemInformationProperty(property: mqtt.Property) bool {
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     transport: PacketTransport,
+    traffic: TrafficCounters = .{},
+    traffic_sink: ?*TrafficCounters = null,
     protocol: mqtt.ProtocolVersion = .v5,
     limits: Limits = .{},
     next_packet_id: u16 = 1,
@@ -1539,6 +1594,27 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Attach aggregate counters before the connection is driven concurrently.
+    /// Existing private traffic is copied into a newly attached sink, which
+    /// preserves an already parsed CONNECT during broker handoff.
+    pub fn attachTrafficCounters(
+        self: *Connection,
+        counters: *TrafficCounters,
+    ) void {
+        if (self.traffic_sink == counters) return;
+        std.debug.assert(self.traffic_sink == null);
+        counters.add(self.traffic.stats());
+        // Traffic observed before attachment is now represented by the
+        // aggregate sink. Reset the private delta so a later Connection move
+        // or defensive reattachment cannot charge those packets twice.
+        self.traffic = .{};
+        self.traffic_sink = counters;
+    }
+
+    pub fn trafficStats(self: *const Connection) TrafficStats {
+        return self.traffic.stats();
+    }
+
     /// Wake a concurrent TCP reader while retaining connection ownership.
     pub fn shutdown(self: *Connection) Error!void {
         try self.transport.shutdown();
@@ -1707,6 +1783,9 @@ pub const Connection = struct {
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!PendingAcceptedClient {
+        if (options.traffic_counters) |counters| {
+            self.attachTrafficCounters(counters);
+        }
         var connect = if (deadline) |absolute|
             try self.readConnectWithDeadline(absolute)
         else
@@ -2106,6 +2185,7 @@ pub const Connection = struct {
             self.write_scratch.items,
             payload,
         );
+        self.recordPacketSent(lengths.total);
         return packet_id;
     }
 
@@ -3543,6 +3623,7 @@ pub const Connection = struct {
         );
         if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
         try self.transport.writePacket(bytes);
+        self.recordPacketSent(bytes.len);
     }
 
     fn readPacket(self: *Connection) Error!OwnedPacket {
@@ -3555,6 +3636,7 @@ pub const Connection = struct {
             self.allocator,
             self.limits.max_packet_size,
         );
+        self.recordPacketReceived(packet.bytes.len);
         return self.finishReadPacket(packet);
     }
 
@@ -3568,6 +3650,7 @@ pub const Connection = struct {
             self.limits.max_packet_size,
             timeout,
         );
+        self.recordPacketReceived(packet.bytes.len);
         return self.finishReadPacket(packet);
     }
 
@@ -3588,7 +3671,18 @@ pub const Connection = struct {
             self.limits.max_packet_size,
             deadline,
         );
+        self.recordPacketReceived(packet.bytes.len);
         return self.finishReadPacket(packet);
+    }
+
+    fn recordPacketReceived(self: *Connection, bytes: usize) void {
+        self.traffic.recordReceived(bytes);
+        if (self.traffic_sink) |counters| counters.recordReceived(bytes);
+    }
+
+    fn recordPacketSent(self: *Connection, bytes: usize) void {
+        self.traffic.recordSent(bytes);
+        if (self.traffic_sink) |counters| counters.recordSent(bytes);
     }
 
     fn pendingPingPacketCount(self: *const Connection) usize {
@@ -4156,6 +4250,64 @@ test "MQTT runtime client and server exchange over TCP" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "MQTT runtime counts complete control packets and wire bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var counters: TrafficCounters = .{};
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, server_stream),
+        .traffic_sink = &counters,
+        .protocol = .v5,
+    };
+
+    var ping_req: [mqtt.ping_packet_len]u8 = undefined;
+    const request = mqtt.writePingInto(&ping_req, false);
+    try stream_io.writeAllSlices(io, client_stream, &.{request});
+    try connection.readPingReq();
+    try connection.writePingResp();
+
+    var ping_resp: [mqtt.ping_packet_len]u8 = undefined;
+    var buffers = [_][]u8{&ping_resp};
+    const received = try io.vtable.netRead(
+        io.userdata,
+        client_stream.socket.handle,
+        &buffers,
+    );
+    try std.testing.expectEqual(ping_resp.len, received);
+    try mqtt.validatePing(&ping_resp, true);
+
+    const local = connection.trafficStats();
+    const aggregate = counters.stats();
+    try std.testing.expectEqual(@as(u64, 1), local.messages_received);
+    try std.testing.expectEqual(@as(u64, 1), local.messages_sent);
+    try std.testing.expectEqual(@as(u64, request.len), local.bytes_received);
+    try std.testing.expectEqual(@as(u64, ping_resp.len), local.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 1), aggregate.messages_received);
+    try std.testing.expectEqual(@as(u64, 1), aggregate.messages_sent);
+    try std.testing.expectEqual(
+        @as(u64, request.len),
+        aggregate.bytes_received,
+    );
+    try std.testing.expectEqual(@as(u64, ping_resp.len), aggregate.bytes_sent);
+    try std.testing.expectEqualDeep(local, aggregate);
 }
 
 test "MQTT TCP server consumes PROXY v1 before CONNECT" {
