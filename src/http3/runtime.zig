@@ -11474,6 +11474,9 @@ const PushStreamSet = struct {
     entries: std.ArrayList(Entry) = .empty,
     stream_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     push_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    /// QUIC stream ID of the last push that produced an untargeted event.
+    /// Targeted push reads intentionally do not disturb this cursor.
+    last_event_stream_id: ?u62 = null,
     promises: std.ArrayList(Promise) = .empty,
     promise_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     cancelled_stream_ids: std.ArrayList(u62) = .empty,
@@ -11720,34 +11723,64 @@ const PushStreamSet = struct {
             );
         }
 
-        var blocked_streams: u64 = 0;
-        for (self.entries.items, 0..) |*entry, index| {
-            if (entry.reader == null) continue;
-            const push_id = entry.push_id orelse continue;
-            const promise = self.findPromise(push_id) orelse continue;
-            const event = entry.reader.?.next(table) catch |err| switch (err) {
-                error.QpackBlocked => {
-                    blocked_streams += 1;
-                    if (blocked_streams > max_blocked_streams) {
-                        return error.QpackDecompressionFailed;
-                    }
-                    continue;
-                },
-                else => return err,
-            };
-            if (event) |value| {
-                return .{
-                    .index = index,
-                    .event = .{
-                        .push_id = push_id,
-                        .request_stream_id = promise.request_stream_id,
-                        .stream_id = @intCast(
-                            entry.reader.?.receive.stream_id,
-                        ),
-                        .value = value,
-                    },
-                };
+        const entry_count = self.entries.items.len;
+        if (entry_count == 0) {
+            self.last_event_stream_id = null;
+            return null;
+        }
+
+        // Push streams use the same stable-ID cursor discipline as request and
+        // response streams. `takeEntryAt` swap-removes entries, so a stale
+        // cursor restarts a complete scan instead of relying on an old index.
+        var index: usize = 0;
+        if (self.last_event_stream_id) |stream_id| {
+            if (self.stream_index.get(stream_id)) |previous_index| {
+                index = if (previous_index + 1 == entry_count)
+                    0
+                else
+                    previous_index + 1;
             }
+        }
+
+        var blocked_streams: u64 = 0;
+        var remaining = entry_count;
+        while (remaining != 0) : (remaining -= 1) {
+            const entry = &self.entries.items[index];
+            if (entry.reader) |*reader| {
+                const push_id = entry.push_id orelse unreachable;
+                if (self.findPromise(push_id)) |promise| {
+                    const event = reader.next(table) catch |err| switch (err) {
+                        error.QpackBlocked => {
+                            blocked_streams += 1;
+                            if (blocked_streams > max_blocked_streams) {
+                                return error.QpackDecompressionFailed;
+                            }
+                            index = if (index + 1 == entry_count)
+                                0
+                            else
+                                index + 1;
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    if (event) |value| {
+                        const stream_id: u62 = @intCast(
+                            reader.receive.stream_id,
+                        );
+                        self.last_event_stream_id = stream_id;
+                        return .{
+                            .index = index,
+                            .event = .{
+                                .push_id = push_id,
+                                .request_stream_id = promise.request_stream_id,
+                                .stream_id = stream_id,
+                                .value = value,
+                            },
+                        };
+                    }
+                }
+            }
+            index = if (index + 1 == entry_count) 0 else index + 1;
         }
         return null;
     }
@@ -18062,6 +18095,140 @@ test "HTTP/3 push stream set retains response until promise arrives" {
     try std.testing.expect(event.event.value == .head);
     var owned_event = event.event;
     owned_event.deinit(allocator);
+}
+
+test "HTTP/3 push polling rotates across busy streams" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    const control = http3.ControlState{ .local_max_push_id = 2 };
+
+    var pushes = PushStreamSet.init(allocator, 3, 512, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(2);
+    try pushes.registerPromise(0, 0);
+    try pushes.registerPromise(1, 0);
+
+    var response: std.ArrayList(u8) = .empty;
+    defer response.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "busy",
+    }).write(&response, allocator);
+    for ([_]struct { push_id: u64, stream_id: u62 }{
+        .{ .push_id = 0, .stream_id = 15 },
+        .{ .push_id = 1, .stream_id = 19 },
+    }) |item| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try quic.varint.encode(
+            &bytes,
+            allocator,
+            @intFromEnum(http3.StreamType.push),
+        );
+        try quic.varint.encode(&bytes, allocator, item.push_id);
+        try bytes.appendSlice(allocator, response.items);
+        try std.testing.expect(try pushes.insert(from, .{
+            .stream_id = item.stream_id,
+            .data = bytes.items,
+            .fin = true,
+        }, control));
+    }
+
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    var first = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 15), first.event.stream_id);
+    try std.testing.expect(first.event.value == .head);
+    first.event.deinit(allocator);
+
+    // Push zero can already emit DATA. Untargeted polling must nevertheless
+    // give push one its first event before returning to the busy first stream.
+    var second = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 19), second.event.stream_id);
+    try std.testing.expect(second.event.value == .head);
+    second.event.deinit(allocator);
+
+    const third = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 15), third.event.stream_id);
+    try std.testing.expect(third.event.value == .data_available);
+    const fourth = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 19), fourth.event.stream_id);
+    try std.testing.expect(fourth.event.value == .data_available);
+}
+
+test "HTTP/3 push polling skips unpromised and stale cursor streams" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    const control = http3.ControlState{ .local_max_push_id = 2 };
+
+    var pushes = PushStreamSet.init(allocator, 3, 512, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(2);
+    try pushes.registerPromise(0, 0);
+    try pushes.registerPromise(2, 0);
+
+    var response: std.ArrayList(u8) = .empty;
+    defer response.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "busy",
+    }).write(&response, allocator);
+    // Push one intentionally lacks a promise and must remain buffered without
+    // preventing either promised sibling from making progress.
+    for ([_]struct { push_id: u64, stream_id: u62 }{
+        .{ .push_id = 0, .stream_id = 15 },
+        .{ .push_id = 1, .stream_id = 19 },
+        .{ .push_id = 2, .stream_id = 23 },
+    }) |item| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try quic.varint.encode(
+            &bytes,
+            allocator,
+            @intFromEnum(http3.StreamType.push),
+        );
+        try quic.varint.encode(&bytes, allocator, item.push_id);
+        try bytes.appendSlice(allocator, response.items);
+        try std.testing.expect(try pushes.insert(from, .{
+            .stream_id = item.stream_id,
+            .data = bytes.items,
+            .fin = true,
+        }, control));
+    }
+
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    var first = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 15), first.event.stream_id);
+    first.event.deinit(allocator);
+    // A targeted read advances only that push reader. It must not perturb the
+    // cursor shared by the public whichever-push-is-ready API.
+    var targeted = (try pushes.next(table, 0, 2)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 23), targeted.event.stream_id);
+    try std.testing.expect(targeted.event.value == .head);
+    targeted.event.deinit(allocator);
+    const after_targeted = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 23), after_targeted.event.stream_id);
+    try std.testing.expect(after_targeted.event.value == .data_available);
+
+    // Return to push zero, then remove it. Push two moves during swapRemove
+    // while the stable cursor becomes stale; the next scan still finds it.
+    const wrapped = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 15), wrapped.event.stream_id);
+    try std.testing.expect(wrapped.event.value == .data_available);
+    pushes.removeByStreamId(15);
+    const after_removal = (try pushes.next(table, 0, null)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 23), after_removal.event.stream_id);
+    try std.testing.expect(after_removal.event.value == .data_available);
 }
 
 test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {

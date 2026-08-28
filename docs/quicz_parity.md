@@ -405,7 +405,11 @@ cross-record polling behavior in the audited quicz endpoint registry. Within
 each connection, multiplexed incremental request and response polling likewise
 resumes after the last productive stream via a stable stream-ID cursor; busy
 DATA streams therefore cannot starve ready sibling streams, and swap-removing
-a completed stream cannot invalidate the cursor. Its bounded
+a completed stream cannot invalidate the cursor. Untargeted server-push polling
+uses the same policy while targeted push reads leave the shared cursor intact;
+unpromised push streams may remain buffered without starving promised siblings.
+The audited local quicz H3 layer has no corresponding server-push event API.
+Its bounded
 `receiveTransportOnce` and cancellable `serveTransportUntil` APIs let protocol
 adapters retain that single receive owner without busy waiting. Expired idle
 or draining connections now emit a typed `closed` event only after their CID
