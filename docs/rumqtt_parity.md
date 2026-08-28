@@ -1518,7 +1518,10 @@ Information suppression while preserving an exact negative PUBACK reason. A
 deep-topic case then goes one level beyond Mosquitto's implementation-specific
 200-level hierarchy cap while remaining far below MQTT's 65,535-byte UTF-8
 field limit; exact SUBACK and self-delivered PUBLISH bytes prove netz retains
-standards-valid iterative routing. All 142 scenarios pass. This is deliberately
+standards-valid iterative routing. A companion MQTT 5 case exercises a flat
+65,535-byte Topic Name—the maximum representable UTF-8 field—through a
+multibyte Remaining Length, exact SUBACK, routing, and byte-identical
+self-delivery. All 143 scenarios pass. This is deliberately
 described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
@@ -1548,5 +1551,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the current result covers netz versus rumqttd at one bounded QoS 1 shape.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 142 passing packet-vector scenarios do not cover
+   persistence semantics. The 143 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

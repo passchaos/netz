@@ -263,6 +263,35 @@ def deep_topic_hierarchy(executable: Path, mqtt_packets) -> None:
             expect_packet(sock, publish, "201-level topic PUBLISH")
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
 
+    # Mosquitto's separate 02-subscribe-long-topic.py and
+    # 03-publish-long-topic.py reject a 65,535-byte slash hierarchy because of
+    # that same 200-level implementation guard. Use one flat maximum-length
+    # Topic Name instead: it reaches MQTT's two-byte UTF-8 field boundary
+    # without relying on the implementation-specific hierarchy policy.
+    maximum_topic = "t" * 65_535
+    with NetzBroker(
+        executable, extra_args=("--max-packet-size=131072",)
+    ) as broker:
+        with broker.connect() as sock:
+            connect_v5(sock, mqtt_packets, "maximum-topic-length")
+            sock.sendall(
+                mqtt_packets.gen_subscribe(54, maximum_topic, 0, proto_ver=5)
+            )
+            expect_packet(
+                sock,
+                mqtt_packets.gen_suback(54, 0, proto_ver=5),
+                "65,535-byte topic SUBACK",
+            )
+            publish = mqtt_packets.gen_publish(
+                maximum_topic,
+                qos=0,
+                payload="maximum",
+                proto_ver=5,
+            )
+            sock.sendall(publish)
+            expect_packet(sock, publish, "65,535-byte topic PUBLISH")
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
 
 def assigned_client_identifier(
     executable: Path, mqtt_packets, mqtt5_props
@@ -5971,7 +6000,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 142 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 143 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
