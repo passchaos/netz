@@ -779,7 +779,7 @@ fn parseTrailerBlock(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     options: http1.ParseOptions,
-) !ParsedTrailers {
+) !http1.ParsedTrailerFields {
     const block_end = bytes.len - 4;
     if (options.allow_obs_fold) {
         const parsed = try http1.parseTrailerFields(
@@ -837,18 +837,6 @@ fn parseTrailerBlock(
     }
     return .{ .headers = headers };
 }
-
-const ParsedTrailers = struct {
-    headers: []http1.Header = &.{},
-    value_storage: [][]u8 = &.{},
-
-    fn deinit(self: *ParsedTrailers, allocator: std.mem.Allocator) void {
-        for (self.value_storage) |value| allocator.free(value);
-        allocator.free(self.value_storage);
-        allocator.free(self.headers);
-        self.* = undefined;
-    }
-};
 
 fn addBodyBytes(
     current: usize,

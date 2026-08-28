@@ -200,7 +200,8 @@ test "HTTP/1 streaming request reads fixed body without aggregation" {
                 .connection = &connection,
                 .expected = shared.expected,
             };
-            var request = try connection.readRequestStreamingWithHead(
+            var request = try connection.readRequestStreamingWithOptionsAndHead(
+                .{},
                 &context,
                 Context.begin,
                 Context.consume,
@@ -759,7 +760,9 @@ test "HTTP/1 streaming response reads chunked trailers and writer handoff" {
         }
     };
     var context = Context{ .allocator = allocator, .body = &body };
-    var response = try writer.readResponseStreamingWithHead(
+    var response = try writer.readResponseStreamingWithOptionsAndHead(
+        .{},
+        null,
         &context,
         Context.begin,
         Context.consume,

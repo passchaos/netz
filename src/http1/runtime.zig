@@ -2245,7 +2245,7 @@ pub const Client = struct {
     }
 
     /// Streaming response counterpart that enables explicit parser
-    /// compatibility options such as Hyper's opt-in obsolete line folding.
+    /// compatibility options, including obsolete line folding in trailers.
     pub fn requestStreamingWithParseOptions(
         self: *Client,
         request_options: RequestOptions,
