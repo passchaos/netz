@@ -337,6 +337,39 @@ pub fn build(b: *std.Build) void {
     );
     http3_quic_go_step.dependOn(&http3_quic_go.step);
 
+    const websocket_h3_quic_go_client = b.addExecutable(.{
+        .name = "netz-websocket-h3-quic-go-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_h3_quic_go_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_h3_quic_go_server = b.addExecutable(.{
+        .name = "netz-websocket-h3-quic-go-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_h3_quic_go_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_h3_quic_go = b.addSystemCommand(
+        &.{"tools/interop/websocket_h3_quic_go.sh"},
+    );
+    websocket_h3_quic_go.addArtifactArg(websocket_h3_quic_go_client);
+    websocket_h3_quic_go.addArtifactArg(websocket_h3_quic_go_server);
+    const websocket_h3_quic_go_step = b.step(
+        "interop-websocket-h3-quic-go",
+        "Run bidirectional RFC 9220 interoperability with quic-go",
+    );
+    websocket_h3_quic_go_step.dependOn(&websocket_h3_quic_go.step);
+
     const http3_tquic_client = b.addExecutable(.{
         .name = "netz-http3-tquic-client",
         .root_module = b.createModule(.{

@@ -44,11 +44,20 @@ opening Extended CONNECT with `:protocol = websocket`. It validates version,
 Origin, and subprotocol fields, then carries masked client and unmasked server
 frames through streaming HTTP/3 DATA. A real QUIC/TLS test forces each frame
 across five-byte HTTP/3 stream contributions and verifies fragmented text,
-automatic Ping/Pong, and bidirectional Close. External browser/server
-interoperability remains follow-up work for this new transport rather than
-being inferred from HTTP/1 or RFC 8441. The same test negotiates
+automatic Ping/Pong, and bidirectional Close. The same test negotiates
 permessage-deflate with no-context-takeover and exercises a compressed
 fragmented text message.
+
+`zig build interop-websocket-h3-quic-go -Doptimize=ReleaseFast` adds
+bidirectional process-boundary coverage against the independently maintained
+quic-go v0.59.0 HTTP/3 stack, for both QUIC v1 and v2. In each direction it
+requires peer SETTINGS support, TLS certificate verification on the client,
+Origin and subprotocol negotiation, masked fragmented client text, an unmasked
+server response, Ping/Pong, and an echoed Close 1000/`done`. The Go fixture
+implements its own bounded RFC 6455 frame reader/writer, so this is external
+wire evidence rather than two netz adapters sharing a codec. Browser
+interoperability and external permessage-deflate coverage remain follow-up
+work.
 
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.
