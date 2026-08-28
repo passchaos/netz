@@ -10,6 +10,7 @@ pub const metadata = @import("metadata.zig");
 pub const compression = @import("compression.zig");
 pub const stream = @import("stream/mod.zig");
 pub const call = @import("call.zig");
+pub const runtime = @import("runtime.zig");
 
 pub const Error = stream.Error;
 pub const Status = wire.Status;
@@ -68,5 +69,7 @@ pub const validateMessageEncoding = call.validateMessageEncoding;
 
 test {
     _ = @import("tests.zig");
+    _ = @import("runtime_tests.zig");
+    _ = runtime;
     _ = stream;
 }

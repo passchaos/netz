@@ -42,6 +42,28 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "unaryCall"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseUnaryRequest"));
     try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
+    try std.testing.expect(@hasDecl(netz.grpc, "runtime"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "connectTlsHost"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "unary"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Client,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Client,
+        "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime, "TlsServer"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.TlsServer, "accept"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "readUnary",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "writeUnary",
+    ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
         "MessageStreamDecoder",
