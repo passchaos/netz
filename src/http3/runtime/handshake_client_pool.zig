@@ -104,15 +104,23 @@ pub fn Pool(comptime Runtime: type) type {
                     self.client_value,
                     self.origin_key,
                 ) catch |err| {
+                    // `Pool.release` consumes both owned values on every path,
+                    // including an idle-pool allocation failure.
+                    self.client_value = undefined;
+                    self.origin_key = undefined;
                     self.active = false;
                     return err;
                 };
+                self.client_value = undefined;
+                self.origin_key = undefined;
                 self.active = false;
             }
 
             pub fn discard(self: *Lease) void {
                 std.debug.assert(self.active);
                 self.pool.discard(self.client_value, self.origin_key);
+                self.client_value = undefined;
+                self.origin_key = undefined;
                 self.active = false;
             }
         };
