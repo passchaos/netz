@@ -783,6 +783,16 @@ test "broker statistics form one coherent live and offline snapshot" {
         empty.maximum_active_connections,
     );
     try std.testing.expectEqual(@as(usize, 0), empty.expired_sessions);
+    try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_received);
+    try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_sent);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty.publish_payload_bytes_received,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        empty.publish_payload_bytes_sent,
+    );
     try std.testing.expectEqual(@as(usize, 0), empty.sessions);
     try std.testing.expectEqual(@as(usize, 0), empty.subscriptions);
 
@@ -846,6 +856,16 @@ test "broker statistics form one coherent live and offline snapshot" {
         live.maximum_active_connections,
     );
     try std.testing.expectEqual(@as(usize, 0), live.expired_sessions);
+    try std.testing.expectEqual(@as(usize, 1), live.publish_messages_received);
+    try std.testing.expectEqual(@as(usize, 1), live.publish_messages_sent);
+    try std.testing.expectEqual(
+        "retained-metric".len,
+        live.publish_payload_bytes_received,
+    );
+    try std.testing.expectEqual(
+        "retained-metric".len,
+        live.publish_payload_bytes_sent,
+    );
     try std.testing.expectEqual(@as(usize, 2), live.sessions);
     try std.testing.expectEqual(@as(usize, 2), live.connected_sessions);
     try std.testing.expectEqual(@as(usize, 0), live.disconnected_sessions);
@@ -884,6 +904,89 @@ test "broker statistics form one coherent live and offline snapshot" {
         @as(usize, 0),
         offline.session_inflight_messages,
     );
+}
+
+test "broker publish counters include rejected ingress and wire delivery" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .max_payload_size = 4,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "counter-sub",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "counter/#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "counter-pub",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish("counter/accepted", "good", .{});
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings("good", delivered.publish.payload);
+
+    // Mosquitto counts a parsed inbound PUBLISH even when policy later drops
+    // it. QoS 0 has no negative acknowledgement and must not reach the peer.
+    try publisher.publish("counter/rejected", "large", .{});
+    try publisher.ping();
+    try subscriber.ping();
+
+    const stats = broker.stats();
+    try std.testing.expectEqual(@as(usize, 2), stats.publish_messages_received);
+    try std.testing.expectEqual(@as(usize, 1), stats.publish_messages_sent);
+    try std.testing.expectEqual(
+        "good".len + "large".len,
+        stats.publish_payload_bytes_received,
+    );
+    try std.testing.expectEqual(
+        "good".len,
+        stats.publish_payload_bytes_sent,
+    );
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
 }
 
 test "broker publishes coherent retained system statistics" {
@@ -960,9 +1063,7 @@ test "broker publishes coherent retained system statistics" {
             "$SYS/broker/clients/total",
         )) {
             try std.testing.expectEqualStrings("1", publish.publish.payload);
-        } else {
-            return error.UnexpectedSystemMetric;
-        }
+        } else return error.UnexpectedSystemMetric;
     }
 
     try subscriber.disconnect(0);
@@ -983,6 +1084,30 @@ test "broker publishes coherent retained system statistics" {
     try std.testing.expectEqual(@as(usize, 1), retained.len);
     try std.testing.expectEqualStrings("0", retained[0].payload);
     try std.testing.expectEqual(mqtt.QoS.at_most_once, retained[0].qos);
+
+    const publish_metrics = [_]broker_mod.SystemMetric{
+        .publish_messages_received,
+        .publish_messages_sent,
+        .publish_bytes_received,
+        .publish_bytes_sent,
+    };
+    for (publish_metrics) |metric| {
+        const matched = try broker.retained.matchInto(
+            metric.topic(),
+            std.Io.Clock.awake.now(io),
+            &storage,
+        );
+        try std.testing.expectEqual(@as(usize, 1), matched.len);
+        const expected = switch (metric) {
+            .publish_messages_received, .publish_bytes_received => "0",
+            // The first snapshot delivered five selected client metrics to
+            // this subscriber. Those real wire PUBLISH packets contribute to
+            // the following sent count/byte snapshot, as they do in Mosquitto.
+            .publish_messages_sent, .publish_bytes_sent => "5",
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(expected, matched[0].payload);
+    }
 }
 
 test "broker periodically publishes system statistics" {
