@@ -105,19 +105,16 @@ pub fn Pool(comptime Runtime: type) type {
                 return &self.client_value;
             }
 
-            pub fn release(self: *Lease) std.mem.Allocator.Error!void {
+            /// Return a quiescent client to the idle pool. Caching is
+            /// best-effort: allocation failure closes the client instead of
+            /// turning an already completed HTTP request into an application
+            /// error, matching the HTTP/1 and HTTP/2 pool contract.
+            pub fn release(self: *Lease) void {
                 std.debug.assert(self.active);
                 self.pool.release(
                     self.client_value,
                     self.origin_key,
-                ) catch |err| {
-                    // `Pool.release` consumes both owned values on every path,
-                    // including an idle-pool allocation failure.
-                    self.client_value = undefined;
-                    self.origin_key = undefined;
-                    self.active = false;
-                    return err;
-                };
+                );
                 self.client_value = undefined;
                 self.origin_key = undefined;
                 self.active = false;
@@ -361,7 +358,7 @@ pub fn Pool(comptime Runtime: type) type {
                 };
                 var owned_response = response;
                 errdefer owned_response.deinit(self.allocator);
-                try lease.release();
+                lease.release();
                 return owned_response;
             }
         }
@@ -401,7 +398,7 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             client_value: Client,
             origin_key: http3.OriginKey,
-        ) std.mem.Allocator.Error!void {
+        ) void {
             var client = client_value;
             self.mutex.lockUncancelable(self.io);
             std.debug.assert(self.leased != 0);
@@ -420,12 +417,12 @@ pub fn Pool(comptime Runtime: type) type {
                 client,
                 origin_key,
                 nowMillis(self.io),
-            ) catch |err| {
+            ) catch {
                 self.connections -= 1;
                 self.mutex.unlock(self.io);
                 client.deinit();
                 self.notifyCapacityWaiters();
-                return err;
+                return;
             };
             const idle_after = self.idle.idleCount();
             // The released lease already occupies one counted slot. A normal
@@ -1014,7 +1011,7 @@ test "HTTP/3 handshake client pool discards GOAWAY leases" {
     });
     defer response.deinit(allocator);
     lease.client().control.peer_goaway_id = lease.client().next_stream_id;
-    try lease.release();
+    lease.release();
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());

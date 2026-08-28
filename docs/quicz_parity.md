@@ -349,7 +349,10 @@ that cap, while a pool containing only leases/handshakes rejects new admission
 and failed connects release their reservation. Relative-timeout and absolute-
 deadline acquisition wait for capacity under one awake-clock budget, while
 pool close wakes every waiter and causes outstanding leases to be discarded on
-return. A default connector securely
+return. Returning a successful response uses best-effort idle caching: if pool
+metadata allocation fails, the connection is closed and the completed HTTP
+result still reaches the caller rather than being replaced by an OOM error. A
+default connector securely
 generates fresh CIDs while retaining caller TLS/resumption policy. A
 real TLS/QUIC regression issues two differently cased URI requests through one
 accepted connection and verifies the second lease is reused; a companion case
