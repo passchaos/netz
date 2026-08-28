@@ -532,6 +532,249 @@ test "HTTP/1 client pool releases failed connection reservation" {
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
 }
 
+test "HTTP/1 client pool waits for an idle lease within one deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        accepted: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                return;
+            };
+            defer connection.close();
+            self.accepted.set(self.server.io);
+            self.release.wait(self.server.io) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    const Waiter = struct {
+        pool: *pool_mod.Pool,
+        uri: []const u8,
+        acquired: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var lease = self.pool.acquireUriWithTimeout(
+                self.uri,
+                .fromSeconds(1),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            self.acquired = lease.was_reused;
+            lease.discard();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) {
+        shared.release.set(io);
+        server_thread.join();
+    };
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/wait");
+    defer allocator.free(uri);
+    var first = try pool.acquireUri(uri);
+    try shared.accepted.wait(io);
+    if (shared.err) |err| return err;
+
+    var waiter = Waiter{ .pool = &pool, .uri = uri };
+    const waiter_thread = try std.Thread.spawn(.{}, Waiter.run, .{&waiter});
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    first.release();
+    waiter_thread.join();
+    if (waiter.err) |err| return err;
+    try std.testing.expect(waiter.acquired);
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    shared.release.set(io);
+    server_thread.join();
+    server_joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 client pool acquisition timeout preserves capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        accepted: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                return;
+            };
+            defer connection.close();
+            self.accepted.set(self.server.io);
+            self.release.wait(self.server.io) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        server_thread.join();
+    };
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/timeout");
+    defer allocator.free(uri);
+    var lease = try pool.acquireUri(uri);
+    try shared.accepted.wait(io);
+    if (shared.err) |err| return err;
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithTimeout(uri, .fromMilliseconds(5)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithDeadline(
+            uri,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(5),
+            }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    lease.discard();
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    shared.release.set(io);
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 client pool close wakes blocked acquisition" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const ServerTask = struct {
+        server: *runtime.Server,
+        accepted: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                return;
+            };
+            defer connection.close();
+            self.accepted.set(self.server.io);
+            self.release.wait(self.server.io) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    const Waiter = struct {
+        pool: *pool_mod.Pool,
+        uri: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var lease = self.pool.acquireUriWithTimeout(
+                self.uri,
+                .fromSeconds(1),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            lease.discard();
+        }
+    };
+
+    var server_task = ServerTask{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerTask.run,
+        .{&server_task},
+    );
+    var server_joined = false;
+    defer if (!server_joined) {
+        server_task.release.set(io);
+        server_thread.join();
+    };
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/closed");
+    defer allocator.free(uri);
+    var lease = try pool.acquireUri(uri);
+    try server_task.accepted.wait(io);
+    if (server_task.err) |err| return err;
+
+    var waiter = Waiter{ .pool = &pool, .uri = uri };
+    const waiter_thread = try std.Thread.spawn(.{}, Waiter.run, .{&waiter});
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    pool.close();
+    waiter_thread.join();
+    try std.testing.expectEqual(error.PoolClosed, waiter.err.?);
+    lease.discard();
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    server_task.release.set(io);
+    server_thread.join();
+    server_joined = true;
+    if (server_task.err) |err| return err;
+}
+
 test "HTTP/1 client pool enforces per-authority idle limit" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
