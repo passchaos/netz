@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const websocket = @import("mod.zig");
+const common = @import("runtime/common.zig");
 const http1 = @import("../http1/mod.zig");
 const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
@@ -18,6 +19,8 @@ const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
 
 const net = std.Io.net;
+
+pub const h3 = @import("runtime/h3.zig");
 /// Default lower bound for attempting permessage-deflate. Raw DEFLATE framing
 /// cannot profitably encode very small messages, and initializing compressor
 /// state would dominate their latency. Callers may tune this per endpoint.
@@ -46,24 +49,8 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     TlsKeyUpdateUnavailable,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
 
-pub const Limits = struct {
-    max_head_bytes: usize = 64 * 1024,
-    max_frame_bytes: usize = 16 * 1024 * 1024,
-    max_message_bytes: usize = 16 * 1024 * 1024,
-    /// Optional absolute budget for the HTTP/1 Upgrade request/response head.
-    /// Partial bytes do not renew it. TLS handshake time and HTTP/2 Extended
-    /// CONNECT are intentionally governed by their own transport policies.
-    http1_handshake_timeout: ?std.Io.Duration = null,
-    /// Disable Nagle for latency-sensitive frame boundaries. WebSocket
-    /// messages are already application-framed and control replies should not
-    /// wait behind delayed ACK merely because a peer uses split writes.
-    tcp_nodelay: bool = true,
-};
-
-pub const Role = enum {
-    client,
-    server,
-};
+pub const Limits = common.Limits;
+pub const Role = common.Role;
 
 const IncomingDataKind = enum {
     none,
@@ -1395,15 +1382,7 @@ pub const ConnectOptions = struct {
     vail_tls: ?TlsClientIdentityOptions = null,
 };
 
-pub const OwnedMessage = struct {
-    opcode: websocket.Opcode,
-    payload: []u8,
-
-    pub fn deinit(self: *OwnedMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.payload);
-        self.* = undefined;
-    }
-};
+pub const OwnedMessage = common.OwnedMessage;
 
 /// One observable step while completing a locally initiated close handshake.
 /// Application frames may already be in flight when Close is sent, so they are
@@ -7403,6 +7382,8 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 }
 
 test {
+    _ = h3;
+    _ = @import("runtime/h3_tests.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/error_close_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");

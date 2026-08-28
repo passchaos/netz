@@ -11,7 +11,7 @@ superiority.
 | --- | --- | --- |
 | HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, strict duplicate critical-header checks, upgrade-body rejection, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, handler callbacks, a Unix listener, a server-side handshake timeout, worker pools and coordinated shutdown |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
-| HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
+| HTTP/2 and HTTP/3 WebSocket (RFC 8441/RFC 9220) | Covered through extended CONNECT client/server adapters. The authenticated HTTP/3 path negotiates CONNECT over QUIC/TLS, preserves masking direction, subprotocol and Origin validation, and exchanges data/control/Close frames across split HTTP/3 DATA framing | Neither transport is present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
@@ -36,6 +36,16 @@ payloads, and completes a deadline-bounded Close 1000/`done` handshake while
 checking Hyper's echoed close details. The Hyper fixture parses and writes RFC
 6455 framing independently, so this is external RFC 8441 wire evidence rather
 than a second netz endpoint.
+
+RFC 9220 now has an owning authenticated HTTP/3 client/server runtime in
+`websocket.runtime.h3`. It enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`, performs
+Extended CONNECT with `:protocol = websocket`, validates version, Origin and
+subprotocol fields, then carries masked client frames and unmasked server
+frames through streaming HTTP/3 DATA. A real QUIC/TLS test forces each frame
+across five-byte HTTP/3 stream contributions and verifies fragmented text,
+automatic Ping/Pong, and bidirectional Close. External browser/server
+interoperability and permessage-deflate remain follow-up work for this new
+transport rather than being inferred from HTTP/1 or RFC 8441.
 
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.

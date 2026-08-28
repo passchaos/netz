@@ -460,6 +460,17 @@ test "public modules are reachable" {
         netz.websocket.runtime,
         "TlsServer",
     ));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "h3"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.h3, "Client"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.h3, "Server"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "receiveFrame",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "receiveMessage",
+    ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "UnixServer",

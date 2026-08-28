@@ -4815,6 +4815,34 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    /// Send one logical Extended CONNECT byte sequence as consecutive HTTP/3
+    /// DATA contributions. This avoids joining a small protocol header and a
+    /// borrowed payload in the adapter while retaining the normal paced send
+    /// behavior and one final FIN decision.
+    pub fn sendResponseBodyPartsPaced(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        var non_empty: usize = 0;
+        for (parts) |part| non_empty += @intFromBool(part.len != 0);
+        if (non_empty == 0) {
+            try self.sendResponseBodyPaced(stream_id, &.{}, fin);
+            return;
+        }
+        var sent: usize = 0;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            sent += 1;
+            try self.sendResponseBodyPaced(
+                stream_id,
+                part,
+                fin and sent == non_empty,
+            );
+        }
+    }
+
     /// Batched counterpart to `sendResponseBodyPaced` for concurrent response
     /// streams. Each contribution becomes one QUIC packet and the socket-visible
     /// prefix commits atomically into the corresponding body stream states.
@@ -6196,6 +6224,31 @@ pub const HandshakeClient = struct {
                 fin and end == data.len,
             );
             offset = end;
+        }
+    }
+
+    /// Client counterpart to `sendResponseBodyPartsPaced`.
+    pub fn sendRequestBodyPartsPaced(
+        self: *HandshakeClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        var non_empty: usize = 0;
+        for (parts) |part| non_empty += @intFromBool(part.len != 0);
+        if (non_empty == 0) {
+            try self.sendRequestBodyPaced(stream_id, &.{}, fin);
+            return;
+        }
+        var sent: usize = 0;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            sent += 1;
+            try self.sendRequestBodyPaced(
+                stream_id,
+                part,
+                fin and sent == non_empty,
+            );
         }
     }
 
