@@ -330,6 +330,17 @@ benchmarks.
 
 ## Known blockers before declaring the goal complete
 
+The generic HTTP/3 origin-keyed idle pool now performs true global LRU
+capacity eviction. Its entry array uses `swapRemove` so array position cannot
+encode age; each release therefore records an independent monotonic sequence
+and capacity replacement scans the configured small idle set by timestamp plus
+sequence. Focused tests force a middle acquisition to swap a newer connection
+into index zero, then prove the genuinely oldest connection is evicted, and
+also cover several releases in the same millisecond. This repairs the reusable
+pool primitive without overstating integration: the one-shot
+`HandshakeClient.requestUri` helper still opens a fresh connection, and an
+owning shared-endpoint H3 client pool remains a separate runtime task.
+
 The endpoint foundation now includes a concrete single-receive-owner
 `quic.endpoint_dispatcher.Dispatcher`. It owns established-connection CID
 routes and the aggregate endpoint timer index, dispatches one UDP datagram to

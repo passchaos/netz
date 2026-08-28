@@ -92,6 +92,7 @@ pub fn Pool(comptime Handle: type) type {
         total_reused: u64 = 0,
         total_misses: u64 = 0,
         total_dropped: u64 = 0,
+        release_sequence: u64 = 0,
 
         const Self = @This();
 
@@ -99,6 +100,9 @@ pub fn Pool(comptime Handle: type) type {
             key: http3.OriginKey,
             handle: Handle,
             pooled_at_ms: u64,
+            /// Monotonic insertion order breaks equal-timestamp ties and keeps
+            /// global capacity eviction independent of `swapRemove` layout.
+            release_sequence: u64,
             origin_prev: ?usize = null,
             origin_next: ?usize = null,
         };
@@ -258,6 +262,7 @@ pub fn Pool(comptime Handle: type) type {
                         .key = owned_key,
                         .handle = handle,
                         .pooled_at_ms = now_ms,
+                        .release_sequence = self.nextReleaseSequence(),
                     }, bucket);
                     owned_key = undefined;
                     return;
@@ -267,21 +272,26 @@ pub fn Pool(comptime Handle: type) type {
                     .key = owned_key,
                     .handle = handle,
                     .pooled_at_ms = now_ms,
+                    .release_sequence = self.nextReleaseSequence(),
                 });
                 owned_key = undefined;
                 return;
             } else {
                 if (new_origin) try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
-                // Idle pool entries are interchangeable for reuse decisions;
-                // avoid preserving insertion order so capacity eviction stays
-                // O(1) instead of memmoving the rest of the pool.
-                var evicted = self.removeEntryAt(0);
+                // `swapRemove` intentionally does not preserve array order, so
+                // index zero is not necessarily the oldest surviving socket.
+                // Capacity is small and explicit; scan it once to retain true
+                // global LRU semantics without a second intrusive list.
+                var evicted = self.removeEntryAt(
+                    self.oldestEntryIndex(),
+                );
                 self.destroyEntry(&evicted);
                 if (new_origin) {
                     self.appendEntryToNewBucketAssumeCapacity(.{
                         .key = owned_key,
                         .handle = handle,
                         .pooled_at_ms = now_ms,
+                        .release_sequence = self.nextReleaseSequence(),
                     });
                     owned_key = undefined;
                     return;
@@ -292,6 +302,7 @@ pub fn Pool(comptime Handle: type) type {
                 .key = owned_key,
                 .handle = handle,
                 .pooled_at_ms = now_ms,
+                .release_sequence = self.nextReleaseSequence(),
             });
             owned_key = undefined;
         }
@@ -304,6 +315,27 @@ pub fn Pool(comptime Handle: type) type {
         fn destroyEntry(self: *Self, entry: *Entry) void {
             entry.key.deinit();
             self.dropHandle(entry.handle);
+        }
+
+        fn nextReleaseSequence(self: *Self) u64 {
+            const value = self.release_sequence;
+            self.release_sequence +%= 1;
+            return value;
+        }
+
+        fn oldestEntryIndex(self: *const Self) usize {
+            std.debug.assert(self.entries.items.len != 0);
+            var oldest: usize = 0;
+            for (self.entries.items[1..], 1..) |entry, index| {
+                const selected = self.entries.items[oldest];
+                if (entry.pooled_at_ms < selected.pooled_at_ms or
+                    (entry.pooled_at_ms == selected.pooled_at_ms and
+                        entry.release_sequence < selected.release_sequence))
+                {
+                    oldest = index;
+                }
+            }
+            return oldest;
         }
 
         fn dropHandle(self: *Self, handle: Handle) void {
@@ -438,7 +470,7 @@ test "HTTP/3 origin pool releases and acquires by normalized origin" {
     try std.testing.expectEqual(@as(f64, 1.0), pool.hitRate());
 }
 
-test "HTTP/3 origin pool indexes per-origin reuse and capacity eviction" {
+test "HTTP/3 origin pool preserves global LRU across swap removal" {
     const allocator = std.testing.allocator;
     const IntPool = Pool(usize);
     var pool = IntPool.init(allocator, .{
@@ -465,15 +497,37 @@ test "HTTP/3 origin pool indexes per-origin reuse and capacity eviction" {
     const c = try http3.requestOrigin("https", "c.example");
     try pool.release(4, c, 4);
     try pool.release(5, c, 5);
-    // The total-capacity eviction uses swapRemove and then rebuilds the origin
-    // buckets; all three surviving handles remain reachable by origin.
+    // Acquiring handle 1 swap-moves newer handle 3 into array index zero. The
+    // subsequent capacity eviction must still retire handle 2, whose release
+    // timestamp is oldest, rather than confusing array position with age.
     try std.testing.expectEqual(@as(usize, 3), pool.idleCount());
     try std.testing.expectEqual(@as(usize, 2), pool.origin_index.count());
-    try std.testing.expect(pool.acquire(b, 6) == null);
-    try std.testing.expectEqual(@as(?usize, 2), pool.acquire(a, 6));
+    try std.testing.expect(pool.acquire(a, 6) == null);
+    try std.testing.expectEqual(@as(?usize, 3), pool.acquire(b, 6));
     try std.testing.expectEqual(@as(?usize, 4), pool.acquire(c, 6));
     try std.testing.expectEqual(@as(?usize, 5), pool.acquire(c, 6));
     try std.testing.expectEqual(@as(usize, 0), pool.origin_index.count());
+}
+
+test "HTTP/3 origin pool breaks equal-time LRU ties by release order" {
+    const allocator = std.testing.allocator;
+    const IntPool = Pool(usize);
+    var pool = IntPool.init(allocator, .{
+        .max_idle_per_origin = 2,
+        .max_idle_total = 2,
+    }, dropInt);
+    defer pool.deinit();
+
+    const a = try http3.requestOrigin("https", "a.example");
+    const b = try http3.requestOrigin("https", "b.example");
+    const c = try http3.requestOrigin("https", "c.example");
+    try pool.release(1, a, 10);
+    try pool.release(2, b, 10);
+    try pool.release(3, c, 10);
+
+    try std.testing.expect(pool.acquire(a, 10) == null);
+    try std.testing.expectEqual(@as(?usize, 2), pool.acquire(b, 10));
+    try std.testing.expectEqual(@as(?usize, 3), pool.acquire(c, 10));
 }
 
 test "HTTP/3 origin pool accepts owned origin keys" {
