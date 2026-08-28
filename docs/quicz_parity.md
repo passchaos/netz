@@ -347,7 +347,10 @@ total connection limit includes idle, leased, and in-progress handshakes; a new
 origin may replace the global least-recently-used idle client without exceeding
 that cap, while a pool containing only leases/handshakes rejects new admission
 and failed connects release their reservation. Relative-timeout and absolute-
-deadline acquisition wait for capacity under one awake-clock budget, while
+deadline acquisition wait for capacity under one awake-clock budget through
+the same allocation-free FIFO admission queue used by HTTP/1 and HTTP/2. New
+callers cannot barge ahead of older blocked requests, and timeout/cancellation
+unlinks its stack-owned ticket before waking the successor, while
 pool close wakes every waiter and causes outstanding leases to be discarded on
 return. Returning a successful response uses best-effort idle caching: if pool
 metadata allocation fails, the connection is closed and the completed HTTP
@@ -361,6 +364,9 @@ two-server TLS/QUIC regression also constrains the total to one connection,
 leaves origin A idle, then requests origin B and proves that the idle A client
 is closed and its slot transferred before B is dialed; a second B request
 reuses that replacement while the pool remains at exactly one connection. Each
+Another real TLS/QUIC regression holds the only slot, queues two waiters in a
+known order, and verifies ordered admission as each predecessor is discarded.
+Each
 pooled connection currently owns its UDP endpoint. Sharing one endpoint across
 several pooled origins remains a separate dispatcher integration task rather
 than allowing competing socket readers.

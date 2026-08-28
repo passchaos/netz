@@ -617,6 +617,109 @@ test "HTTP/1 client pool waits for an idle lease within one deadline" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 client pool admits capacity waiters in FIFO order" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            for (0..3) |_| {
+                var connection = self.server.accept() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                connection.close();
+            }
+        }
+    };
+    const Waiter = struct {
+        pool: *pool_mod.Pool,
+        uri: []const u8,
+        acquired: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        order: *std.atomic.Value(u32),
+        position: u32 = 0,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            var lease = self.pool.acquireUriWithTimeout(
+                self.uri,
+                .fromSeconds(2),
+            ) catch |err| {
+                self.err = err;
+                self.acquired.set(self.pool.io);
+                return;
+            };
+            self.position = self.order.fetchAdd(1, .monotonic) + 1;
+            self.acquired.set(self.pool.io);
+            self.release.wait(self.pool.io) catch |err| {
+                self.err = err;
+            };
+            lease.discard();
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 0,
+        .max_idle_per_authority = 0,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/fifo");
+    defer allocator.free(uri);
+    var held = try pool.acquireUri(uri);
+
+    var order: std.atomic.Value(u32) = .init(0);
+    var first = Waiter{ .pool = &pool, .uri = uri, .order = &order };
+    var second = Waiter{ .pool = &pool, .uri = uri, .order = &order };
+    const first_thread = try std.Thread.spawn(.{}, Waiter.run, .{&first});
+    var first_joined = false;
+    defer if (!first_joined) {
+        first.release.set(io);
+        first_thread.join();
+    };
+    while (pool.waitingCount() != 1) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const second_thread = try std.Thread.spawn(.{}, Waiter.run, .{&second});
+    var second_joined = false;
+    defer if (!second_joined) {
+        second.release.set(io);
+        second_thread.join();
+    };
+    while (pool.waitingCount() != 2) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+
+    held.discard();
+    try first.acquired.wait(io);
+    if (first.err) |err| return err;
+    try std.testing.expectEqual(@as(u32, 1), first.position);
+    try std.testing.expect(!second.acquired.isSet());
+    first.release.set(io);
+    first_thread.join();
+    first_joined = true;
+    try second.acquired.wait(io);
+    if (second.err) |err| return err;
+    try std.testing.expectEqual(@as(u32, 2), second.position);
+    second.release.set(io);
+    second_thread.join();
+    second_joined = true;
+    try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    server_thread.join();
+    server_joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 client pool acquisition timeout preserves capacity" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

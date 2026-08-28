@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const http3 = @import("../mod.zig");
+const fifo_admission = @import("../../internal/fifo_admission.zig");
 
 pub const Error = error{
     InvalidPoolOptions,
@@ -87,7 +88,7 @@ pub fn Pool(comptime Runtime: type) type {
         idle: IdlePool,
         leased: usize = 0,
         connections: usize = 0,
-        capacity_generation: std.atomic.Value(u32) = .init(1),
+        capacity_waiters: fifo_admission.Queue = .{},
         closed: bool = false,
 
         const Self = @This();
@@ -151,6 +152,7 @@ pub fn Pool(comptime Runtime: type) type {
             // Leases retain a pool pointer; the caller must return them before
             // destroying the pool just as with HTTP/1 and HTTP/2 pools.
             std.debug.assert(self.leased == 0);
+            std.debug.assert(self.capacity_waiters.count() == 0);
             self.close();
             std.debug.assert(self.connections == self.idle.idleCount());
             self.idle.deinit();
@@ -173,13 +175,21 @@ pub fn Pool(comptime Runtime: type) type {
                 std.debug.assert(self.connections >= idle_count);
                 self.connections -= idle_count;
             }
+            self.capacity_waiters.notifyAll(self.io);
             self.mutex.unlock(self.io);
-            self.notifyCapacityWaiters();
         }
 
         pub fn acquireUri(
             self: *Self,
             uri_text: []const u8,
+        ) (Runtime.Error || Error)!Lease {
+            return self.acquireUriForWaiter(uri_text, null);
+        }
+
+        fn acquireUriForWaiter(
+            self: *Self,
+            uri_text: []const u8,
+            waiter: ?*fifo_admission.Queue.Waiter,
         ) (Runtime.Error || Error)!Lease {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
@@ -195,10 +205,24 @@ pub fn Pool(comptime Runtime: type) type {
 
             self.mutex.lockUncancelable(self.io);
             if (self.closed) {
+                if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
                 self.mutex.unlock(self.io);
                 var key = origin_key;
                 key.deinit();
                 return error.PoolClosed;
+            }
+            if (!self.capacity_waiters.mayAttempt(waiter)) {
+                if (waiter) |queued| {
+                    if (!queued.linked) {
+                        self.capacity_waiters.enqueue(queued);
+                    } else if (queued.isNotified()) {
+                        queued.rearm();
+                    }
+                }
+                self.mutex.unlock(self.io);
+                var key = origin_key;
+                key.deinit();
+                return error.ConnectionLimitReached;
             }
             _ = self.pruneExpiredLocked();
             const reused = self.idle.acquire(origin, nowMillis(self.io));
@@ -210,6 +234,13 @@ pub fn Pool(comptime Runtime: type) type {
                 // Only idle clients are eligible for replacement. Checked-out
                 // leases and connection attempts retain their reservation.
                 const displaced = self.idle.takeOldest() orelse {
+                    if (waiter) |queued| {
+                        if (!queued.linked) {
+                            self.capacity_waiters.enqueue(queued);
+                        } else {
+                            queued.rearm();
+                        }
+                    }
                     self.mutex.unlock(self.io);
                     var key = origin_key;
                     key.deinit();
@@ -217,6 +248,7 @@ pub fn Pool(comptime Runtime: type) type {
                 };
                 // `connections` is intentionally unchanged: the evicted idle
                 // client's slot becomes this in-progress reservation.
+                self.finishAdmissionLocked(waiter);
                 self.mutex.unlock(self.io);
                 var old = displaced;
                 old.deinit();
@@ -224,6 +256,7 @@ pub fn Pool(comptime Runtime: type) type {
             } else {
                 self.connections += 1;
             }
+            self.finishAdmissionLocked(waiter);
             self.mutex.unlock(self.io);
             if (reused) |client| {
                 const lease: Lease = .{
@@ -257,19 +290,13 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: std.Io.Clock.Timestamp,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
+            var waiter: fifo_admission.Queue.Waiter = .{};
+            defer self.cancelCapacityWaiter(&waiter);
             while (true) {
-                const generation = self.capacity_generation.load(.acquire);
-                return self.acquireUri(uri_text) catch |err| switch (err) {
+                return self.acquireUriForWaiter(uri_text, &waiter) catch |err| switch (err) {
                     error.ConnectionLimitReached => {
-                        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-                            return error.Timeout;
-                        }
-                        self.io.futexWaitTimeout(
-                            u32,
-                            &self.capacity_generation.raw,
-                            generation,
-                            .{ .deadline = deadline },
-                        ) catch |wait_err| switch (wait_err) {
+                        waiter.waitUntil(self.io, deadline) catch |wait_err| switch (wait_err) {
+                            error.Timeout => return error.Timeout,
                             error.Canceled => return error.Canceled,
                         };
                         if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
@@ -388,6 +415,12 @@ pub fn Pool(comptime Runtime: type) type {
             return self.connections;
         }
 
+        pub fn waitingCount(self: *Self) usize {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.capacity_waiters.count();
+        }
+
         pub fn pruneExpired(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -409,7 +442,7 @@ pub fn Pool(comptime Runtime: type) type {
                 var key = origin_key;
                 key.deinit();
                 client.deinit();
-                self.notifyCapacityWaiters();
+                self.notifyCapacityWaiter();
                 return;
             }
             const idle_before = self.idle.idleCount();
@@ -421,7 +454,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.connections -= 1;
                 self.mutex.unlock(self.io);
                 client.deinit();
-                self.notifyCapacityWaiters();
+                self.notifyCapacityWaiter();
                 return;
             };
             const idle_after = self.idle.idleCount();
@@ -434,8 +467,8 @@ pub fn Pool(comptime Runtime: type) type {
             const dropped = expected_idle -| idle_after;
             std.debug.assert(self.connections >= dropped);
             self.connections -= dropped;
+            self.notifyCapacityWaiterLocked();
             self.mutex.unlock(self.io);
-            self.notifyCapacityWaiters();
         }
 
         fn discard(
@@ -453,7 +486,9 @@ pub fn Pool(comptime Runtime: type) type {
             self.connections -= 1;
             self.mutex.unlock(self.io);
             client.deinit();
-            self.notifyCapacityWaiters();
+            // Do not let the next waiter establish a replacement before the
+            // old QUIC endpoint has actually released its socket/resources.
+            self.notifyCapacityWaiter();
         }
 
         fn dropClient(_: std.mem.Allocator, client_value: Client) void {
@@ -465,25 +500,53 @@ pub fn Pool(comptime Runtime: type) type {
             self.mutex.lockUncancelable(self.io);
             std.debug.assert(self.connections != 0);
             self.connections -= 1;
+            self.notifyCapacityWaiterLocked();
             self.mutex.unlock(self.io);
-            self.notifyCapacityWaiters();
         }
 
         fn pruneExpiredLocked(self: *Self) usize {
             const removed = self.idle.pruneExpired(nowMillis(self.io));
             std.debug.assert(self.connections >= removed);
             self.connections -= removed;
-            if (removed != 0) self.notifyCapacityWaiters();
+            if (removed != 0) self.notifyCapacityWaiterLocked();
             return removed;
         }
 
-        fn notifyCapacityWaiters(self: *Self) void {
-            _ = self.capacity_generation.fetchAdd(1, .release);
-            self.io.futexWake(
-                u32,
-                &self.capacity_generation.raw,
-                std.math.maxInt(u32),
-            );
+        fn finishAdmissionLocked(
+            self: *Self,
+            waiter: ?*fifo_admission.Queue.Waiter,
+        ) void {
+            if (waiter) |queued| {
+                if (queued.linked) {
+                    std.debug.assert(self.capacity_waiters.remove(queued));
+                }
+            }
+            if (self.hasCapacityLocked()) self.notifyCapacityWaiterLocked();
+        }
+
+        fn cancelCapacityWaiter(
+            self: *Self,
+            waiter: *fifo_admission.Queue.Waiter,
+        ) void {
+            self.mutex.lockUncancelable(self.io);
+            self.capacity_waiters.cancel(waiter, self.io);
+            self.mutex.unlock(self.io);
+        }
+
+        fn hasCapacityLocked(self: *const Self) bool {
+            return self.closed or self.idle.idleCount() != 0 or
+                self.options.max_connections == 0 or
+                self.connections < self.options.max_connections;
+        }
+
+        fn notifyCapacityWaiterLocked(self: *Self) void {
+            self.capacity_waiters.notifyHead(self.io);
+        }
+
+        fn notifyCapacityWaiter(self: *Self) void {
+            self.mutex.lockUncancelable(self.io);
+            self.notifyCapacityWaiterLocked();
+            self.mutex.unlock(self.io);
         }
 
         test "HTTP/3 handshake client pool validates idle limits" {
