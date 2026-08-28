@@ -51,12 +51,15 @@ pub fn Reader(comptime RuntimeError: type) type {
             body_bytes: usize,
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
+            trailer_value_storage: [][]u8 = &.{},
 
             pub fn deinit(
                 self: *Request,
                 allocator: std.mem.Allocator,
             ) void {
                 allocator.free(self.headers);
+                for (self.trailer_value_storage) |value| allocator.free(value);
+                allocator.free(self.trailer_value_storage);
                 allocator.free(self.trailers);
                 if (self.trailer_bytes) |bytes| allocator.free(bytes);
                 allocator.free(self.head_bytes);
@@ -91,12 +94,15 @@ pub fn Reader(comptime RuntimeError: type) type {
             body_bytes: usize,
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
+            trailer_value_storage: [][]u8 = &.{},
 
             pub fn deinit(
                 self: *Response,
                 allocator: std.mem.Allocator,
             ) void {
                 allocator.free(self.headers);
+                for (self.trailer_value_storage) |value| allocator.free(value);
+                allocator.free(self.trailer_value_storage);
                 allocator.free(self.trailers);
                 if (self.trailer_bytes) |bytes| allocator.free(bytes);
                 allocator.free(self.head_bytes);
@@ -142,11 +148,14 @@ pub fn Reader(comptime RuntimeError: type) type {
         const Trailers = struct {
             bytes: ?[]u8 = null,
             headers: []http1.Header = &.{},
+            value_storage: [][]u8 = &.{},
 
             fn deinit(
                 self: *Trailers,
                 allocator: std.mem.Allocator,
             ) void {
+                for (self.value_storage) |value| allocator.free(value);
+                allocator.free(self.value_storage);
                 allocator.free(self.headers);
                 if (self.bytes) |bytes| allocator.free(bytes);
                 self.* = undefined;
@@ -236,6 +245,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 .body_bytes = body.body_bytes,
                 .trailers = body.trailers.headers,
                 .trailer_bytes = body.trailers.bytes,
+                .trailer_value_storage = body.trailers.value_storage,
             };
         }
 
@@ -357,6 +367,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .body_bytes = body.body_bytes,
                     .trailers = body.trailers.headers,
                     .trailer_bytes = body.trailers.bytes,
+                    .trailer_value_storage = body.trailers.value_storage,
                 };
             }
         }
@@ -603,14 +614,18 @@ pub fn Reader(comptime RuntimeError: type) type {
             errdefer self.allocator.free(bytes);
             self.consumePrefix(len);
 
-            const headers = try parseTrailerBlock(
+            var trailers = try parseTrailerBlock(
                 self.allocator,
                 bytes,
                 self.options,
             );
-            errdefer self.allocator.free(headers);
-            try http1.validateTrailers(headers);
-            return .{ .bytes = bytes, .headers = headers };
+            errdefer trailers.deinit(self.allocator);
+            try http1.validateTrailers(trailers.headers);
+            return .{
+                .bytes = bytes,
+                .headers = trailers.headers,
+                .value_storage = trailers.value_storage,
+            };
         }
 
         fn readChunkSize(
@@ -764,8 +779,19 @@ fn parseTrailerBlock(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     options: http1.ParseOptions,
-) ![]http1.Header {
+) !ParsedTrailers {
     const block_end = bytes.len - 4;
+    if (options.allow_obs_fold) {
+        const parsed = try http1.parseTrailerFields(
+            allocator,
+            bytes[0..block_end],
+            options,
+        );
+        return .{
+            .headers = parsed.headers,
+            .value_storage = parsed.value_storage,
+        };
+    }
     var count: usize = 0;
     var lines = std.mem.splitSequence(
         u8,
@@ -775,10 +801,6 @@ fn parseTrailerBlock(
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         if (line[0] == ' ' or line[0] == '\t') {
-            // Streaming metadata intentionally has the same strict ownership
-            // model as borrowed heads. obs-fold would require per-value owned
-            // allocations and remains rejected here.
-            _ = options.allow_obs_fold;
             return error.MalformedHeader;
         }
         if (count >= options.max_headers) return error.TooManyHeaders;
@@ -790,7 +812,7 @@ fn parseTrailerBlock(
         );
         count += 1;
     }
-    if (count == 0) return @constCast(&[_]http1.Header{});
+    if (count == 0) return .{};
 
     const headers = try allocator.alloc(http1.Header, count);
     errdefer allocator.free(headers);
@@ -813,8 +835,20 @@ fn parseTrailerBlock(
         };
         index += 1;
     }
-    return headers;
+    return .{ .headers = headers };
 }
+
+const ParsedTrailers = struct {
+    headers: []http1.Header = &.{},
+    value_storage: [][]u8 = &.{},
+
+    fn deinit(self: *ParsedTrailers, allocator: std.mem.Allocator) void {
+        for (self.value_storage) |value| allocator.free(value);
+        allocator.free(self.value_storage);
+        allocator.free(self.headers);
+        self.* = undefined;
+    }
+};
 
 fn addBodyBytes(
     current: usize,

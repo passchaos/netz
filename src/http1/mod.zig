@@ -666,6 +666,22 @@ fn parseHeaderLines(
     return .{ .headers = owned_headers, .value_storage = owned_value_storage };
 }
 
+/// Parse an owned CRLF-delimited trailer field block using the same syntax and
+/// obs-fold policy as request/response heads. Trailer-specific forbidden field
+/// names remain validated by the caller after parsing.
+pub fn parseTrailerFields(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ParseOptions,
+) Error!struct { headers: []Header, value_storage: [][]u8 } {
+    var lines = std.mem.splitSequence(u8, bytes, "\r\n");
+    const parsed = try parseHeaderLines(allocator, &lines, options, .{});
+    return .{
+        .headers = parsed.headers,
+        .value_storage = parsed.value_storage,
+    };
+}
+
 fn parseHeaderLinesNoFold(
     allocator: std.mem.Allocator,
     lines: std.mem.SplitIterator(u8, .sequence),

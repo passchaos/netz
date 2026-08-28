@@ -348,6 +348,99 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 streaming request optionally unfolds chunked trailers" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "POST /folded HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "4\r\nbody\r\n" ++
+        "0\r\n" ++
+        "Digest: sha-256=abc\r\n" ++
+        " def\r\n" ++
+        "\tghi\r\n\r\n";
+    const TestError = runtime.Error;
+    const Reader = @import("body_reader.zig").Reader(TestError);
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+
+        fn readSome(raw_context: ?*anyopaque, out: []u8) TestError!usize {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            if (self.offset == self.bytes.len) return 0;
+            // One byte per call proves folding is independent of transport
+            // read boundaries and exercises retained trailer ownership.
+            out[0] = self.bytes[self.offset];
+            self.offset += 1;
+            return 1;
+        }
+    };
+    const Context = struct {
+        body: std.ArrayList(u8) = .empty,
+
+        fn begin(_: *@This(), _: Reader.RequestHead) !void {}
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+
+    var strict_source = Source{ .bytes = raw };
+    var strict_inbuf: std.ArrayList(u8) = .empty;
+    defer strict_inbuf.deinit(allocator);
+    var strict_context: Context = .{};
+    defer strict_context.body.deinit(allocator);
+    var strict_reader = Reader{
+        .allocator = allocator,
+        .context = &strict_source,
+        .read_some = Source.readSome,
+        .inbuf = &strict_inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{},
+    };
+    try std.testing.expectError(
+        error.MalformedHeader,
+        strict_reader.readRequest(
+            &strict_context,
+            Context.begin,
+            Context.consume,
+        ),
+    );
+
+    var source = Source{ .bytes = raw };
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    var context: Context = .{};
+    defer context.body.deinit(allocator);
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .inbuf = &inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{ .allow_obs_fold = true },
+    };
+    var request = try reader.readRequest(
+        &context,
+        Context.begin,
+        Context.consume,
+    );
+    defer request.deinit(allocator);
+    try std.testing.expectEqualStrings("body", context.body.items);
+    try std.testing.expectEqual(@as(usize, 1), request.trailers.len);
+    try std.testing.expectEqualStrings(
+        "sha-256=abc def ghi",
+        request.trailers[0].value,
+    );
+    try std.testing.expectEqual(@as(usize, 2), request.trailer_value_storage.len);
+}
+
 test "HTTP/1 streaming response observes informational heads" {
     const allocator = std.testing.allocator;
     const raw =
@@ -427,6 +520,156 @@ test "HTTP/1 streaming response observes informational heads" {
     try std.testing.expectEqual(@as(usize, 1), context.informational);
     try std.testing.expect(context.final_head);
     try std.testing.expectEqualStrings("stream", context.body.items);
+}
+
+test "HTTP/1 streaming response optionally unfolds chunked trailers" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "2\r\nok\r\n" ++
+        "0\r\n" ++
+        "Digest: sha-256=response\r\n" ++
+        " folded\r\n\r\n";
+    const TestError = runtime.Error;
+    const Reader = @import("body_reader.zig").Reader(TestError);
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+
+        fn readSome(raw_context: ?*anyopaque, out: []u8) TestError!usize {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            if (self.offset == self.bytes.len) return 0;
+            const count = @min(@as(usize, 2), @min(
+                out.len,
+                self.bytes.len - self.offset,
+            ));
+            @memcpy(out[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+    };
+    const Context = struct {
+        body: std.ArrayList(u8) = .empty,
+
+        fn begin(_: *@This(), _: Reader.ResponseHead) !void {}
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+
+    var source = Source{ .bytes = raw };
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    var context: Context = .{};
+    defer context.body.deinit(allocator);
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .inbuf = &inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{ .allow_obs_fold = true },
+    };
+    var response = try reader.readResponse(
+        .GET,
+        &context,
+        Context.begin,
+        Context.consume,
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", context.body.items);
+    try std.testing.expectEqual(@as(usize, 1), response.trailers.len);
+    try std.testing.expectEqualStrings(
+        "sha-256=response folded",
+        response.trailers[0].value,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        response.trailer_value_storage.len,
+    );
+}
+
+test "HTTP/1 client exposes streaming response trailer compatibility" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try writeAll(
+                self.server.io,
+                connection.stream,
+                "HTTP/1.1 200 OK\r\n" ++
+                    "Transfer-Encoding: chunked\r\n" ++
+                    "Connection: close\r\n\r\n" ++
+                    "2\r\nok\r\n" ++
+                    "0\r\nDigest: sha-256=abc\r\n folded\r\n\r\n",
+            );
+        }
+    };
+    const Context = struct {
+        body: std.ArrayList(u8) = .empty,
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    var context: Context = .{};
+    defer context.body.deinit(allocator);
+    var response = try client.requestStreamingWithParseOptions(
+        .{ .host = "localhost" },
+        .{ .allow_obs_fold = true },
+        &context,
+        Context.consume,
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", context.body.items);
+    try std.testing.expectEqualStrings(
+        "sha-256=abc folded",
+        response.trailers[0].value,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 streaming response reads chunked trailers and writer handoff" {

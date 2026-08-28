@@ -114,6 +114,14 @@ zig test -ODebug \
   --test-filter 'HTTP/1 invalid-header compatibility' ...
 ```
 
+The streaming chunked-body reader now applies the same opt-in obs-fold policy
+to trailers instead of silently retaining a stricter second parser. Strict
+mode continues to reject folded trailers. Compatibility mode unfolds each
+continuation to one SP, owns the resulting values independently of receive
+buffer compaction, and works when every trailer byte arrives in a separate
+transport read. Focused request and response regressions cover both directions,
+matching Hyper's documented response-side obsolete-line-folding behavior.
+
 The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the
 general path.

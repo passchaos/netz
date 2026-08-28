@@ -2244,6 +2244,25 @@ pub const Client = struct {
         );
     }
 
+    /// Streaming response counterpart that enables explicit parser
+    /// compatibility options such as Hyper's opt-in obsolete line folding.
+    pub fn requestStreamingWithParseOptions(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.requestStreamingWithOptionsAndHead(
+            request_options,
+            parse_options,
+            null,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
     /// Stream a response body while observing informational and final heads.
     pub fn requestStreamingWithInformational(
         self: *Client,
@@ -2287,6 +2306,25 @@ pub const Client = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.requestStreamingWithOptionsAndHead(
+            request_options,
+            .{},
+            informational,
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithOptionsAndHead(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         const generation = try self.writer_state.begin();
         _ = generation;
         errdefer if (self.writer_state.phase == .writing) {
@@ -2309,6 +2347,7 @@ pub const Client = struct {
         self.writer_state.phase = .awaiting_peer;
         const response = try self.readStreamingResponse(
             request_options.method,
+            parse_options,
             informational,
             null,
             context,
@@ -2656,6 +2695,7 @@ pub const Client = struct {
     fn readStreamingResponse(
         self: *Client,
         request_method: http1.Method,
+        parse_options: http1.ParseOptions,
         informational: ?InformationalObserver,
         informational_responses_seen: ?*usize,
         context: anytype,
@@ -2675,7 +2715,7 @@ pub const Client = struct {
                 .max_body_bytes = self.limits.max_body_bytes,
                 .max_informational_responses = self.limits.max_informational_responses,
             },
-            .options = .{},
+            .options = parse_options,
             .informational_context = if (informational) |observer|
                 observer.context
             else
@@ -2875,7 +2915,22 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingRequest {
-        return self.readRequestStreamingWithHead(
+        return self.readRequestStreamingWithOptionsAndHead(
+            .{},
+            context,
+            ignoreStreamingRequestHead,
+            consume,
+        );
+    }
+
+    pub fn readRequestStreamingWithOptions(
+        self: *Connection,
+        options: http1.ParseOptions,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        return self.readRequestStreamingWithOptionsAndHead(
+            options,
             context,
             ignoreStreamingRequestHead,
             consume,
@@ -2884,6 +2939,21 @@ pub const Connection = struct {
 
     pub fn readRequestStreamingWithHead(
         self: *Connection,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        return self.readRequestStreamingWithOptionsAndHead(
+            .{},
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    pub fn readRequestStreamingWithOptionsAndHead(
+        self: *Connection,
+        options: http1.ParseOptions,
         context: anytype,
         comptime begin: anytype,
         comptime consume: anytype,
@@ -2906,7 +2976,7 @@ pub const Connection = struct {
                 .max_body_bytes = self.limits.max_body_bytes,
                 .max_informational_responses = self.limits.max_informational_responses,
             },
-            .options = .{},
+            .options = options,
         };
         const result = reader.readRequest(
             context,
@@ -3562,6 +3632,21 @@ pub const RequestWriter = struct {
         );
     }
 
+    pub fn readResponseStreamingWithParseOptions(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithOptionsAndHead(
+            parse_options,
+            null,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
     /// Stream the final response body while observing preceding 1xx heads.
     pub fn readResponseStreamingWithInformational(
         self: *RequestWriter,
@@ -3598,12 +3683,30 @@ pub const RequestWriter = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithOptionsAndHead(
+            .{},
+            informational,
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithOptionsAndHead(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         try self.body.ensureExchangeActive();
         if (!self.body.isBodyFinished()) {
             return error.InvalidWriterState;
         }
         const response = self.client.readStreamingResponse(
             self.method,
+            parse_options,
             informational,
             &self.body.state.informational_responses_seen,
             context,
