@@ -1321,6 +1321,64 @@ pub const Client = struct {
         return connection;
     }
 
+    /// Connect to an already resolved address while verifying TLS against a
+    /// separate hostname. This keeps service discovery and certificate/SNI
+    /// identity independent without weakening mandatory HTTP/2 ALPN checks.
+    pub fn connectTlsAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        _ = try net.HostName.init(tls_host);
+        if (authority.len == 0) return error.InvalidHeader;
+        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+        const tls_connection = try tls_stream.ClientConnection.initVerified(
+            allocator,
+            io,
+            stream,
+            .{
+                .server_name = tls_host,
+                .verify_host = tls_options.verify_host,
+                .ca_bundle = tls_options.ca_bundle,
+                .server_verifier = tls_options.server_verifier,
+                .client_identity = tls_options.client_identity,
+                .alpn_protocols = &.{"h2"},
+                .cipher_suites = tls_options.cipher_suites,
+                .max_server_handshake_size = tls_options.max_server_handshake_size,
+                .handshake_timeout = tls_options.tls_handshake_timeout,
+            },
+        );
+        stream_owned = false;
+        var tls_owned = true;
+        errdefer if (tls_owned) tls_connection.deinit();
+        if (tls_connection.selected_alpn == null or
+            !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
+        {
+            return error.InvalidAlpn;
+        }
+        const owned_authority = try allocator.dupe(u8, authority);
+        errdefer allocator.free(owned_authority);
+        tls_owned = false;
+        var connection = try connectTransport(
+            allocator,
+            io,
+            stream,
+            .{ .tls_client = tls_connection },
+            limits,
+        );
+        connection.default_authority = owned_authority;
+        connection.default_scheme = "https";
+        return connection;
+    }
+
     /// Perform an RFC 7540 h2c Upgrade request and return the response on
     /// stream 1. `request_options` must include an authority (or Host header)
     /// because the opening request is first sent as HTTP/1.1.
@@ -1635,16 +1693,25 @@ pub const Client = struct {
         defer endpoint.deinit();
 
         try validateLocalLimits(limits);
-        var connection = if (is_https)
-            try connectTlsHost(
+        var connection = if (is_https) switch (endpoint.target) {
+            .host => try connectTlsHost(
                 allocator,
                 io,
                 endpoint.tls_host,
                 endpoint.port,
                 limits,
                 tls_options,
-            )
-        else blk: {
+            ),
+            .ip => |address| try connectTlsAddress(
+                allocator,
+                io,
+                address,
+                endpoint.tls_host,
+                endpoint.authority,
+                limits,
+                tls_options,
+            ),
+        } else blk: {
             const stream = switch (endpoint.target) {
                 .host => |host| try tcp_connect.host(
                     io,

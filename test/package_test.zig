@@ -209,6 +209,10 @@ test "public modules are reachable" {
         "isReusable",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectTlsAddress",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime.UnixServer,
         "serveConcurrent",
     ));

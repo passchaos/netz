@@ -331,14 +331,25 @@ pub const Pool = struct {
                     self.options.limits,
                 ),
             },
-            .tls => try runtime.Client.connectTlsHost(
-                self.allocator,
-                self.io,
-                endpoint.tls_host,
-                endpoint.port,
-                self.options.limits,
-                self.options.tls,
-            ),
+            .tls => switch (endpoint.target) {
+                .host => try runtime.Client.connectTlsHost(
+                    self.allocator,
+                    self.io,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    self.options.limits,
+                    self.options.tls,
+                ),
+                .ip => |address| try runtime.Client.connectTlsAddress(
+                    self.allocator,
+                    self.io,
+                    address,
+                    endpoint.tls_host,
+                    endpoint.authority,
+                    self.options.limits,
+                    self.options.tls,
+                ),
+            },
         };
         errdefer connection.close();
         if (connection.default_authority) |authority| {

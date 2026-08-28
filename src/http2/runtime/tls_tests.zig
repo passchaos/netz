@@ -159,6 +159,89 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 TLS client connects to resolved address with separate identity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        authority: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                self.authority,
+                request.authority.?,
+            );
+            try connection.writeResponse(request.stream_id, .{
+                .body = "resolved h2 tls",
+            });
+        }
+    };
+    const authority = try std.fmt.allocPrint(
+        allocator,
+        "localhost:{d}",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(authority);
+    var shared = Shared{ .server = &server, .authority = authority };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connectTlsAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        authority,
+        .{},
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+        },
+    );
+    defer client.close();
+    var response = try client.request(.{ .path = "/resolved" });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("resolved h2 tls", response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 TLS listener rejects a client without h2 ALPN" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
