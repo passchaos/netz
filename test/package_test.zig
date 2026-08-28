@@ -351,6 +351,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Connection,
+        "readRequestStreamingWithOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "requestStreamingWithParseOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.RequestWriter,
+        "readResponseStreamingWithParseOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
         "writeResponses",
     ));
     try std.testing.expect(@hasDecl(
