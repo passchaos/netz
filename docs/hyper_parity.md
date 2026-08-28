@@ -623,12 +623,13 @@ configured response-head timeout is still enforced when it expires earlier.
 Because HTTP/1 cannot cancel one exchange independently, timeout marks the
 connection unusable so pools cannot replay against ambiguous leftover bytes.
 
-HTTP/2 aggregate client requests now expose relative-timeout and absolute-
-deadline forms. One deadline covers the complete response, including permitted
-connection-control traffic and fragmented header blocks, without renewal. A
-timeout sends RST_STREAM(CANCEL) best-effort and marks the connection unusable
-because aggregate-only HPACK/body state cannot safely be reconstructed; client
-pools consequently discard that lease. Netz also exposes
+HTTP/2 aggregate and callback-streaming client requests now expose relative-
+timeout and absolute-deadline forms on both complete requests and split
+request/response flows. One deadline covers the complete response, including
+permitted connection-control traffic and fragmented header blocks, without
+renewal. A timeout sends RST_STREAM(CANCEL) best-effort and marks the connection
+unusable because discarded HPACK/body state cannot safely be reconstructed;
+client pools consequently discard that lease. Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
 keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, WINDOW_UPDATE, and RFC

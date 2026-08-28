@@ -588,6 +588,89 @@ test "HTTP/2 split response reader honors an absolute deadline" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 streaming response deadline covers a partial body" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            var response = try connection.startResponse(
+                request.stream_id,
+                .{ .headers = &.{.{
+                    .name = "content-length",
+                    .value = "4",
+                }} },
+            );
+            defer response.deinit();
+            try response.write("a");
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(request.stream_id, reset.reset.stream_id);
+        }
+    };
+    const Sink = struct {
+        bytes: usize = 0,
+
+        fn consume(self: *@This(), part: []const u8) !void {
+            self.bytes += part.len;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var sink: Sink = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestStreamingWithTimeout(
+            .{ .path = "/stream-timeout", .authority = "localhost" },
+            .fromMilliseconds(20),
+            &sink,
+            Sink.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), sink.bytes);
+    try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 bounded control reads keep one absolute deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

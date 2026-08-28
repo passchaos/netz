@@ -39,6 +39,7 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || erro
     PostHandshakeTlsUnavailable,
     InvalidServeOptions,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
+pub const ResponseTimeoutError = Error || std.Io.Timeout.Error;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
 
@@ -2142,7 +2143,7 @@ pub const Connection = struct {
         self: *Connection,
         options: RequestOptions,
         timeout: std.Io.Duration,
-    ) Error!OwnedResponse {
+    ) ResponseTimeoutError!OwnedResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.requestWithDeadline(
             options,
@@ -2154,7 +2155,7 @@ pub const Connection = struct {
         self: *Connection,
         options: RequestOptions,
         deadline: std.Io.Clock.Timestamp,
-    ) Error!OwnedResponse {
+    ) ResponseTimeoutError!OwnedResponse {
         if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
             return error.Timeout;
         }
@@ -2176,7 +2177,7 @@ pub const Connection = struct {
         request_method: []const u8,
         extended_connect: bool,
         timeout: std.Io.Duration,
-    ) Error!OwnedResponse {
+    ) ResponseTimeoutError!OwnedResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.readResponseWithDeadline(
             stream_id,
@@ -2192,7 +2193,7 @@ pub const Connection = struct {
         request_method: []const u8,
         extended_connect: bool,
         deadline: std.Io.Clock.Timestamp,
-    ) Error!OwnedResponse {
+    ) ResponseTimeoutError!OwnedResponse {
         if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
             return error.Timeout;
         }
@@ -2237,6 +2238,89 @@ pub const Connection = struct {
     ) !StreamingResponse {
         return self.requestStreamingWithHead(
             options,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithDeadline(
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        const pending = try self.sendCompleteRequest(options);
+        return self.readResponseStreamingWithHeadUntil(
+            pending,
+            null,
+            deadline,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        return self.readResponseStreamingWithHeadUntil(
+            .{
+                .stream_id = stream_id,
+                .request_method = request_method,
+                .extended_connect = extended_connect,
+            },
+            null,
+            deadline,
             context,
             ignoreStreamingResponseHead,
             consume,
@@ -6766,6 +6850,7 @@ pub const Connection = struct {
     }
 
     fn reserveNextClientStreamId(self: *Connection) Error!u31 {
+        if (self.response_timeout_unusable) return error.ConnectionClosed;
         const stream_id = self.next_client_stream_id;
         if (stream_id > std.math.maxInt(u31) - 2) return error.InvalidStreamId;
         if (self.peer_goaway_last_stream_id) |last| {
@@ -6971,6 +7056,13 @@ pub const Connection = struct {
         );
     }
 
+    fn failTimedOutResponse(self: *Connection, stream_id: u31) void {
+        self.response_timeout_unusable = true;
+        self.writeResetStreamFrame(stream_id, .cancel) catch {};
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+    }
+
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
         return self.readWindowUpdateUntil(null);
     }
@@ -7048,10 +7140,7 @@ pub const Connection = struct {
             // keeps partially decoded headers/body only on its stack. Preserve
             // connection integrity by canceling the stream and preventing
             // reuse after that state is discarded.
-            self.response_timeout_unusable = true;
-            self.writeResetStreamFrame(stream_id, .cancel) catch {};
-            self.releasePeerStream(stream_id);
-            self.forgetStreamWindows(stream_id);
+            self.failTimedOutResponse(stream_id);
         };
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
@@ -7202,8 +7291,36 @@ pub const Connection = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithHeadUntil(
+            pending,
+            informational,
+            null,
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    fn readResponseStreamingWithHeadUntil(
+        self: *Connection,
+        pending: PendingResponse,
+        informational: ?InformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         const stream_id = pending.stream_id;
         defer self.releaseLocalStream(stream_id);
+        var completed = false;
+        // The generic callback may contribute an inferred error set, which
+        // prevents reliably inspecting only Timeout in an errdefer. For a
+        // deadline-bounded call, conservatively fail closed on every error:
+        // callback failure already cancels the stream, and parser/I/O failure
+        // likewise cannot preserve the discarded streaming state.
+        defer if (!completed and deadline != null) {
+            self.failTimedOutResponse(stream_id);
+        };
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |value| {
             freeHeaders(self.allocator, value);
@@ -7221,9 +7338,9 @@ pub const Connection = struct {
                 owned.deinit(self.allocator);
             };
             const frame = if (self.pendingApplicationFrameCount() != 0) blk: {
-                pending_owned = try self.readOwnedFrame();
+                pending_owned = try self.readOwnedFrameWithDeadline(deadline);
                 break :blk pending_owned.?.frame;
-            } else try self.readFrameScratch();
+            } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
@@ -7241,14 +7358,17 @@ pub const Connection = struct {
                         );
                         return error.InvalidFrame;
                     }
-                    try self.receivePushPromise(frame);
+                    try self.receivePushPromiseUntil(frame, deadline);
                 },
                 .headers => {
                     if (headers != null) {
                         if ((frame.header.flags & flag_end_stream) == 0) {
                             return error.UnexpectedFrame;
                         }
-                        trailers = try self.readHeaderBlock(frame);
+                        trailers = try self.readHeaderBlockUntil(
+                            frame,
+                            deadline,
+                        );
                         try validateHeaderBlock(
                             trailers,
                             .response_trailers,
@@ -7260,7 +7380,10 @@ pub const Connection = struct {
                         break;
                     }
 
-                    const decoded = try self.readHeaderBlock(frame);
+                    const decoded = try self.readHeaderBlockUntil(
+                        frame,
+                        deadline,
+                    );
                     var decoded_owned = true;
                     errdefer if (decoded_owned) {
                         freeHeaders(self.allocator, decoded);
@@ -7330,7 +7453,10 @@ pub const Connection = struct {
                         if (!traditional_connect and
                             (frame.header.flags & flag_end_stream) == 0)
                         {
-                            try self.consumeForbiddenResponseBody(stream_id);
+                            try self.consumeForbiddenResponseBodyUntil(
+                                stream_id,
+                                deadline,
+                            );
                         }
                         break;
                     }
@@ -7400,6 +7526,7 @@ pub const Connection = struct {
             }
         }
 
+        completed = true;
         return .{
             .headers = headers orelse return error.MissingPseudoHeader,
             .status = status_value orelse return error.MissingPseudoHeader,
@@ -9236,6 +9363,55 @@ pub const RequestWriter = struct {
             ignoreStreamingResponseHead,
             consume,
         );
+    }
+
+    pub fn readResponseStreamingWithTimeout(
+        self: *RequestWriter,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithDeadline(
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithDeadline(
+        self: *RequestWriter,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (deadline.durationFromNow(self.connection.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        if (!self.body_finished or self.completed) {
+            return error.UnexpectedFrame;
+        }
+        const connection = self.connection;
+        const response = connection.readResponseStreamingWithHeadUntil(
+            .{
+                .stream_id = self.stream_id,
+                .request_method = if (self.head_request) "HEAD" else "POST",
+                .extended_connect = false,
+            },
+            null,
+            deadline,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        ) catch |err| {
+            self.completed = true;
+            return err;
+        };
+        self.completed = true;
+        return response;
     }
 
     pub fn readResponseStreamingWithInformational(
