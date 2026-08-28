@@ -688,6 +688,13 @@ encoders: the fixed 13-byte RST_STREAM always stays on the stack, and common
 GOAWAY debug strings use a bounded 256-byte stack path with an exact heap
 fallback only for larger diagnostics. The public helpers retain ArrayList
 compatibility while wire-parity and short-buffer tests cover the direct form.
+Late DATA, HEADERS, and duplicate RST_STREAM frames for locally reset streams
+are ignored through a bounded, configurable `Limits.max_reset_stream_history`
+ring. The default retains 64 stream IDs, while zero disables tolerance; unlike
+Rust h2's time-based reset retention this stays deterministic under a blocking
+runtime without an always-running timer task. Capacity is reserved before a
+RST_STREAM becomes visible, including batch cancellation, so allocation failure
+cannot leave wire and local reset state inconsistent.
 The remaining fixed control helpers expose the same allocation-free boundary:
 PING encodes its complete 17-byte frame and WINDOW_UPDATE its complete 13-byte
 frame into exact caller-owned arrays. Their compatibility writers still grow

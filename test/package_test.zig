@@ -714,6 +714,10 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.http2.runtime.Limits{}).max_body_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024), (netz.http2.runtime.Limits{}).max_header_list_size);
+    try std.testing.expectEqual(
+        @as(usize, 64),
+        (netz.http2.runtime.Limits{}).max_reset_stream_history,
+    );
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "UnixServer"));

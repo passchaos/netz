@@ -54,7 +54,6 @@ const default_max_header_list_size: usize = 16 * 1024;
 // occupies the first pair and leaves room for three DATA frames.
 const max_data_frames_per_write: usize = 4;
 const max_data_frames_with_headers: usize = 3;
-const local_reset_history_capacity: usize = 64;
 
 const DataSliceCursor = struct {
     slices: []const []const u8,
@@ -283,6 +282,10 @@ pub const Limits = struct {
     /// bounded by the inbound frame-size limits. Reaching this cap fails the
     /// probe without discarding any frame already removed from the transport.
     max_pending_ping_frames: usize = 256,
+    /// Maximum recently locally-reset stream IDs retained so late DATA,
+    /// HEADERS, and duplicate RST_STREAM frames can be discarded without
+    /// terminating the connection. Zero disables this tolerance.
+    max_reset_stream_history: usize = 64,
     /// Optional absolute budget for the HTTP/2 connection preface and initial
     /// SETTINGS exchange after TCP/TLS setup. Interleaved permitted control
     /// frames do not renew this deadline. For h2c Upgrade, the same duration
@@ -1823,9 +1826,7 @@ pub const Connection = struct {
     /// Peers may have stream frames in flight when RST_STREAM reaches them. A
     /// bounded recent-ID ring lets another response reader discard those late
     /// frames without adding attacker-controlled, connection-lifetime memory.
-    locally_reset_streams: [local_reset_history_capacity]u31 =
-        @splat(0),
-    locally_reset_stream_count: usize = 0,
+    locally_reset_streams: std.ArrayList(u31) = .empty,
     locally_reset_stream_next: usize = 0,
     /// Most recently consumed peer reset. Readers still return
     /// `error.StreamReset`; protocol adapters can take this payload
@@ -1864,6 +1865,7 @@ pub const Connection = struct {
         }
         self.alternative_services.deinit(self.allocator);
         self.alternative_service_index.deinit(self.allocator);
+        self.locally_reset_streams.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.header_block_scratch.deinit(self.allocator);
@@ -3565,6 +3567,7 @@ pub const Connection = struct {
         self: *Connection,
         states: []const BatchResponseState,
     ) Error!void {
+        try self.prepareLocallyResetStreams(states.len);
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         for (states) |state| {
@@ -3581,7 +3584,9 @@ pub const Connection = struct {
         }
         for (states) |state| {
             if (!state.done) {
-                self.rememberLocallyResetStream(state.stream_id);
+                self.rememberLocallyResetStreamAssumeCapacity(
+                    state.stream_id,
+                );
                 self.forgetStreamWindows(state.stream_id);
             }
         }
@@ -6265,6 +6270,7 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) Error!void {
+        try self.prepareLocallyResetStreams(1);
         var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
         const encoded = try http2.ResetStreamPayload.writeInto(
             &storage,
@@ -6272,30 +6278,44 @@ pub const Connection = struct {
             error_code,
         );
         try self.transportForIo().writeAll(encoded);
-        self.rememberLocallyResetStream(stream_id);
+        self.rememberLocallyResetStreamAssumeCapacity(stream_id);
     }
 
-    fn rememberLocallyResetStream(self: *Connection, stream_id: u31) void {
-        const retained =
-            self.locally_reset_streams[0..self.locally_reset_stream_count];
+    fn prepareLocallyResetStreams(
+        self: *Connection,
+        additional: usize,
+    ) std.mem.Allocator.Error!void {
+        const limit = self.limits.max_reset_stream_history;
+        if (limit == 0 or self.locally_reset_streams.items.len >= limit) return;
+        try self.locally_reset_streams.ensureTotalCapacity(
+            self.allocator,
+            @min(limit, self.locally_reset_streams.items.len +| additional),
+        );
+    }
+
+    fn rememberLocallyResetStreamAssumeCapacity(
+        self: *Connection,
+        stream_id: u31,
+    ) void {
+        const retained = self.locally_reset_streams.items;
         if (std.mem.indexOfScalar(u31, retained, stream_id) != null) return;
-        if (self.locally_reset_stream_count < local_reset_history_capacity) {
-            self.locally_reset_streams[self.locally_reset_stream_count] =
-                stream_id;
-            self.locally_reset_stream_count += 1;
+        const limit = self.limits.max_reset_stream_history;
+        if (limit == 0) return;
+        if (retained.len < limit) {
+            self.locally_reset_streams.appendAssumeCapacity(stream_id);
             return;
         }
-        self.locally_reset_streams[self.locally_reset_stream_next] =
+        self.locally_reset_streams.items[self.locally_reset_stream_next] =
             stream_id;
         self.locally_reset_stream_next =
             (self.locally_reset_stream_next + 1) %
-            local_reset_history_capacity;
+            limit;
     }
 
     fn wasLocallyReset(self: *const Connection, stream_id: u31) bool {
         return std.mem.indexOfScalar(
             u31,
-            self.locally_reset_streams[0..self.locally_reset_stream_count],
+            self.locally_reset_streams.items,
             stream_id,
         ) != null;
     }
@@ -17241,10 +17261,12 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
     defer {
         connection.recv_stream_windows.deinit(allocator);
         connection.recv_stream_window_index.deinit(allocator);
+        connection.locally_reset_streams.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.frame_reader.deinit(allocator);
     }
-    connection.rememberLocallyResetStream(1);
+    try connection.prepareLocallyResetStreams(1);
+    connection.rememberLocallyResetStreamAssumeCapacity(1);
 
     var response = try connection.readResponse(3, "GET", false, null);
     defer response.deinit(allocator);
@@ -17390,6 +17412,153 @@ test "HTTP/2 reset retirement clears both stream windows" {
     );
     try std.testing.expect(!connection.send_stream_window_index.contains(1));
     try std.testing.expect(!connection.recv_stream_window_index.contains(1));
+}
+
+test "HTTP/2 local reset history honors its configured bound" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_reset_stream_history = 2 },
+    };
+    defer connection.locally_reset_streams.deinit(allocator);
+
+    try connection.prepareLocallyResetStreams(3);
+    try std.testing.expect(connection.locally_reset_streams.capacity >= 2);
+    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    connection.rememberLocallyResetStreamAssumeCapacity(3);
+    // Duplicate resets neither consume another slot nor advance eviction.
+    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.locally_reset_streams.items.len,
+    );
+    connection.rememberLocallyResetStreamAssumeCapacity(5);
+    try std.testing.expect(!connection.wasLocallyReset(1));
+    try std.testing.expect(connection.wasLocallyReset(3));
+    try std.testing.expect(connection.wasLocallyReset(5));
+    connection.rememberLocallyResetStreamAssumeCapacity(7);
+    try std.testing.expect(!connection.wasLocallyReset(3));
+    try std.testing.expect(connection.wasLocallyReset(5));
+    try std.testing.expect(connection.wasLocallyReset(7));
+}
+
+test "HTTP/2 local reset history may be disabled" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_reset_stream_history = 0 },
+    };
+    defer connection.locally_reset_streams.deinit(allocator);
+
+    try connection.prepareLocallyResetStreams(1);
+    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.locally_reset_streams.capacity,
+    );
+    try std.testing.expect(!connection.wasLocallyReset(1));
+}
+
+test "HTTP/2 configured reset history controls late-frame tolerance" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_reset_stream_history = 1 },
+    };
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+    }
+
+    try connection.prepareLocallyResetStreams(2);
+    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    connection.rememberLocallyResetStreamAssumeCapacity(3);
+    try std.testing.expect(!try connection
+        .discardLateFrameForLocallyResetStream(.{
+        .header = .{
+            .length = 0,
+            .frame_type = .rst_stream,
+            .flags = 0,
+            .stream_id = 1,
+        },
+        .payload = &.{},
+    }));
+    const reset_payload = [_]u8{ 0, 0, 0, 8 };
+    try std.testing.expect(try connection
+        .discardLateFrameForLocallyResetStream(.{
+        .header = .{
+            .length = reset_payload.len,
+            .frame_type = .rst_stream,
+            .flags = 0,
+            .stream_id = 3,
+        },
+        .payload = &reset_payload,
+    }));
+}
+
+test "HTTP/2 reset history allocation failure precedes wire write" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            return error.SocketUnconnected;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    var recording_vtable = threaded.io().vtable.*;
+    recording_vtable.netWrite = RecordingWriter.write;
+    const recording_io = std.Io{
+        .userdata = &writer,
+        .vtable = &recording_vtable,
+    };
+    var connection = Connection{
+        .io = recording_io,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_reset_stream_history = 1 },
+    };
+    defer {
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.locally_reset_streams.deinit(allocator);
+    }
+    try connection.addActiveLocalStream(1);
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.sendResetStream(1, .cancel),
+    );
+    connection.allocator = allocator;
+    try std.testing.expectEqual(@as(usize, 0), writer.writes);
+    try std.testing.expect(connection.outboundStreamIsActive(1));
+    try std.testing.expect(!connection.wasLocallyReset(1));
 }
 
 test "HTTP/2 sendWindowUpdate rejects idle streams" {
