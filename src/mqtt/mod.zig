@@ -4262,6 +4262,7 @@ test {
     _ = @import("runtime/tcp_endpoint_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/reconnect_tests.zig");
+    _ = @import("runtime/reconnect_endpoint_tests.zig");
     _ = @import("reconnect/command_queue.zig");
     _ = @import("reconnect/event_queue.zig");
     _ = @import("reconnect/delivery_queue.zig");

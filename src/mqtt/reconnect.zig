@@ -15,6 +15,7 @@ const command_queue = @import("reconnect/command_queue.zig");
 const event_queue = @import("reconnect/event_queue.zig");
 const delivery_queue = @import("reconnect/delivery_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
+const reconnect_target = @import("reconnect/target.zig");
 
 const net = std.Io.net;
 
@@ -829,10 +830,7 @@ const OwnedSubscription = owned_subscription.Owned;
 /// as well when an application needs to interrupt an already-established
 /// blocking read.
 pub const Client = struct {
-    const Target = union(enum) {
-        tcp: net.IpAddress,
-        connector: runtime.ClientConnector,
-    };
+    const Target = reconnect_target.Target;
 
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -881,6 +879,94 @@ pub const Client = struct {
             allocator,
             io,
             .{ .tcp = address },
+            options,
+            policy,
+            shutdown,
+            client_options,
+        );
+    }
+
+    /// Initialize a reconnecting raw MQTT client from a DNS hostname. The
+    /// hostname is copied so retry policy never depends on caller storage.
+    pub fn initHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: runtime.ConnectOptions,
+        policy: ReconnectPolicy,
+        shutdown: *std.Io.Event,
+    ) Error!Client {
+        return initHostWithOptions(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            policy,
+            shutdown,
+            .{},
+        );
+    }
+
+    pub fn initHostWithOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: runtime.ConnectOptions,
+        policy: ReconnectPolicy,
+        shutdown: *std.Io.Event,
+        client_options: ClientOptions,
+    ) Error!Client {
+        const target = try Target.initHost(allocator, host, port);
+        return initTarget(
+            allocator,
+            io,
+            target,
+            options,
+            policy,
+            shutdown,
+            client_options,
+        );
+    }
+
+    /// Initialize from a validated cleartext MQTT URI. The canonical URI is
+    /// copied into the client and reparsed for every attempt, so retries can
+    /// re-resolve DNS while remaining independent of caller-owned storage.
+    pub fn initUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: runtime.ConnectOptions,
+        policy: ReconnectPolicy,
+        shutdown: *std.Io.Event,
+    ) Error!Client {
+        return initUriWithOptions(
+            allocator,
+            io,
+            uri_text,
+            options,
+            policy,
+            shutdown,
+            .{},
+        );
+    }
+
+    pub fn initUriWithOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: runtime.ConnectOptions,
+        policy: ReconnectPolicy,
+        shutdown: *std.Io.Event,
+        client_options: ClientOptions,
+    ) Error!Client {
+        const target = try Target.initUri(allocator, uri_text);
+        return initTarget(
+            allocator,
+            io,
+            target,
             options,
             policy,
             shutdown,
@@ -939,6 +1025,8 @@ pub const Client = struct {
         shutdown: *std.Io.Event,
         client_options: ClientOptions,
     ) Error!Client {
+        var owned_target = target;
+        errdefer owned_target.deinit(allocator);
         try policy.validate();
         if (options.client_id.len == 0) return error.InvalidClientId;
         var owned_options = try OwnedConnectOptions.init(allocator, options);
@@ -958,7 +1046,7 @@ pub const Client = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .target = target,
+            .target = owned_target,
             .options = owned_options,
             .policy = policy,
             .shutdown = shutdown,
@@ -976,6 +1064,7 @@ pub const Client = struct {
         self.subscriptions.deinit(self.allocator);
         self.outgoing.deinit();
         self.options.deinit(self.allocator);
+        self.target.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -1072,19 +1161,11 @@ pub const Client = struct {
     }
 
     fn connectAttempt(self: *Client) runtime.Error!runtime.ConnectAttempt {
-        return switch (self.target) {
-            .tcp => |address| runtime.Client.connectAttempt(
-                self.allocator,
-                self.io,
-                address,
-                self.options.value,
-            ),
-            .connector => |connector| connector.connectAttempt(
-                self.allocator,
-                self.io,
-                self.options.value,
-            ),
-        };
+        return self.target.connectAttempt(
+            self.allocator,
+            self.io,
+            self.options.value,
+        );
     }
 
     /// Close only the current transport. Durable outgoing QoS state remains

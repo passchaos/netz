@@ -237,13 +237,13 @@ pub fn parse(
         try std.fmt.allocPrint(
             allocator,
             "{s}://{s}:{d}{s}",
-            .{ transport.scheme(), host, port, owned_path },
+            .{ transport.scheme(), owned_host, port, owned_path },
         )
     else
         try std.fmt.allocPrint(
             allocator,
             "{s}://{s}:{d}",
-            .{ transport.scheme(), host, port },
+            .{ transport.scheme(), owned_host, port },
         );
     allocator.free(uri_text);
     return .{
@@ -334,6 +334,10 @@ test "MQTT Server Reference parses URI and authority forms" {
     defer host.deinit();
     try std.testing.expectEqual(Transport.tcp, host.transport);
     try std.testing.expectEqualStrings("other.example", host.host);
+    try std.testing.expectEqualStrings(
+        "mqtt://other.example:2883",
+        host.uri,
+    );
     try std.testing.expectEqual(@as(u16, 2883), host.port);
 
     var secure = try parse(
@@ -355,6 +359,12 @@ test "MQTT Server Reference parses URI and authority forms" {
     try std.testing.expectEqualStrings(
         "wss://browser.example:443/custom",
         websocket.uri,
+    );
+    var mixed_case = try parse(allocator, "MQTT://Broker.Example", .tcp);
+    defer mixed_case.deinit();
+    try std.testing.expectEqualStrings(
+        "mqtt://broker.example:1883",
+        mixed_case.uri,
     );
     var encoded_path = try parse(
         allocator,
