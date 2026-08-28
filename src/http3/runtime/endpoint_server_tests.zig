@@ -5,6 +5,13 @@ const quic = @import("../../quic/mod.zig");
 
 const net = std.Io.net;
 
+test "HTTP/3 endpoint server exposes bounded callback loop API" {
+    try std.testing.expect(@hasDecl(runtime.EndpointServer, "receiveOnce"));
+    try std.testing.expect(@hasDecl(runtime.EndpointServer, "serveUntil"));
+    try std.testing.expect(@hasDecl(runtime, "EndpointServeEvent"));
+    try std.testing.expect(@hasDecl(runtime, "EndpointServeOptions"));
+}
+
 test "HTTP/3 endpoint server rotates ready request sessions fairly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -354,6 +361,288 @@ test "HTTP/3 endpoint transport loop observes shutdown while idle" {
         started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
             std.time.ns_per_s,
     );
+}
+
+test "HTTP/3 endpoint request loop observes shutdown while idle" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "endpoint-serve-idle" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            _: *runtime.EndpointServer,
+            _: runtime.EndpointServeEvent,
+        ) !void {
+            self.calls += 1;
+        }
+    };
+    const Shared = struct {
+        endpoint: *runtime.EndpointServer,
+        shutdown: *std.Io.Event,
+        context: Context = .{},
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.endpoint.serveUntil(
+                Context,
+                &self.context,
+                Context.handle,
+                .{
+                    .shutdown = self.shutdown,
+                    .supported_versions = &.{
+                        quic.Version.version_1.wireValue(),
+                        quic.Version.version_2.wireValue(),
+                    },
+                    .poll_interval = .{
+                        .clock = .awake,
+                        .raw = .fromMilliseconds(2),
+                    },
+                },
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shutdown: std.Io.Event = .unset;
+    var shared = Shared{ .endpoint = &endpoint, .shutdown = &shutdown };
+    const started = std.Io.Clock.awake.now(io);
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+    shutdown.set(io);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), shared.context.calls);
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            std.time.ns_per_s,
+    );
+}
+
+test "HTTP/3 endpoint callback loop serves concurrent connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = "endpoint-callback",
+            .random = [_]u8{0xb1} ** 32,
+            .x25519_secret_key = [_]u8{0xb2} ** 32,
+            .handshake_recovery = .{
+                .initial_pto_ms = 20,
+                .max_pto_ms = 40,
+                .max_duration_ms = 2_000,
+            },
+        } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{
+        .max_pending_handshakes = 2,
+        .inbox_capacity = 8,
+        .handshake_timeout_ms = 2_000,
+    });
+    var endpoint_owned = true;
+    defer if (endpoint_owned) endpoint.deinit();
+
+    const ClientTask = struct {
+        io: std.Io,
+        address: net.IpAddress,
+        original_dcid: []const u8,
+        local_cid: []const u8,
+        path: []const u8,
+        expected_body: []const u8,
+        random: [32]u8,
+        secret: [32]u8,
+        completed: *std.atomic.Value(usize),
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.shutdown.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var client = try runtime.HandshakeClient.connect(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.address,
+                .{ .quic = .{
+                    .max_datagram_size = 4096,
+                    .max_frames_per_datagram = 16,
+                } },
+                .{ .handshake = .{
+                    .original_destination_connection_id = self.original_dcid,
+                    .local_connection_id = self.local_cid,
+                    .server_name = "localhost",
+                    .random = self.random,
+                    .x25519_secret_key = self.secret,
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
+                } },
+            );
+            defer client.deinit();
+            var response = try client.request(.{
+                .method = "GET",
+                .path = self.path,
+                .authority = "localhost",
+            });
+            defer response.deinit(allocator);
+            try std.testing.expectEqual(@as(u16, 200), response.response.status);
+            try std.testing.expectEqualStrings(
+                self.expected_body,
+                response.response.body,
+            );
+            if (self.completed.fetchAdd(1, .acq_rel) + 1 == 2) {
+                self.shutdown.set(self.io);
+            }
+        }
+    };
+    var completed: std.atomic.Value(usize) = .init(0);
+    var shutdown: std.Io.Event = .unset;
+    var clients = [_]ClientTask{
+        .{
+            .io = io,
+            .address = server.address(),
+            .original_dcid = "endpoint-callback-1",
+            .local_cid = "callback-client-one",
+            .path = "/one",
+            .expected_body = "response-one",
+            .random = [_]u8{0xb3} ** 32,
+            .secret = [_]u8{0xb4} ** 32,
+            .completed = &completed,
+            .shutdown = &shutdown,
+        },
+        .{
+            .io = io,
+            .address = server.address(),
+            .original_dcid = "endpoint-callback-2",
+            .local_cid = "callback-client-two",
+            .path = "/two",
+            .expected_body = "response-two",
+            .random = [_]u8{0xb5} ** 32,
+            .secret = [_]u8{0xb6} ** 32,
+            .completed = &completed,
+            .shutdown = &shutdown,
+        },
+    };
+    const thread_a = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const thread_b = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+    var joined = false;
+    defer if (!joined) {
+        if (endpoint_owned) {
+            endpoint.deinit();
+            endpoint_owned = false;
+        }
+        thread_a.join();
+        thread_b.join();
+    };
+
+    const Context = struct {
+        heads: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            _: *runtime.EndpointServer,
+            event: runtime.EndpointServeEvent,
+        ) !void {
+            switch (event) {
+                .connected => {},
+                .closed => return error.TestUnexpectedResult,
+                .request => |value| switch (value.request.*) {
+                    .reset => return error.TestUnexpectedResult,
+                    .message => |message| switch (message.value) {
+                        .head => |head_value| switch (head_value) {
+                            .response => return error.TestUnexpectedResult,
+                            .request => |head| {
+                                try std.testing.expectEqualStrings(
+                                    "GET",
+                                    head.method,
+                                );
+                                const body = if (std.mem.eql(
+                                    u8,
+                                    head.path,
+                                    "/one",
+                                ))
+                                    "response-one"
+                                else if (std.mem.eql(u8, head.path, "/two"))
+                                    "response-two"
+                                else
+                                    return error.TestUnexpectedResult;
+                                try value.session.sendResponsePaced(
+                                    message.stream_id,
+                                    .{
+                                        .status = 200,
+                                        .body = body,
+                                        .request_method = head.method,
+                                    },
+                                );
+                                self.heads += 1;
+                            },
+                        },
+                        .finished => {},
+                        .data_available, .trailers, .push_promise => return error.TestUnexpectedResult,
+                    },
+                },
+            }
+        }
+    };
+    var context: Context = .{};
+    try endpoint.serveUntil(
+        Context,
+        &context,
+        Context.handle,
+        .{
+            .shutdown = &shutdown,
+            .supported_versions = &.{
+                quic.Version.version_1.wireValue(),
+                quic.Version.version_2.wireValue(),
+            },
+            .poll_interval = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(2),
+            },
+        },
+    );
+
+    thread_a.join();
+    thread_b.join();
+    joined = true;
+    for (&clients) |*client| if (client.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), context.heads);
+    try std.testing.expectEqual(@as(usize, 2), completed.load(.acquire));
 }
 
 test "HTTP/3 endpoint removes a connection when its close timer expires" {

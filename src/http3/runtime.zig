@@ -3553,6 +3553,30 @@ pub const EndpointServerEvent = union(enum) {
     }
 };
 
+pub const EndpointServeEvent = union(enum) {
+    connected: quic.endpoint_dispatcher.ConnectionHandle,
+    closed: struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        timer: quic.one_rtt.TimerDeadline,
+    },
+    /// Both pointers borrow endpoint-owned storage and are valid only for the
+    /// synchronous callback. The request payload remains owned by the outer
+    /// receive loop and must not be retained or deinitialized by the handler.
+    request: struct {
+        session: *HandshakeServerSession,
+        request: *StreamingRequestEvent,
+    },
+};
+
+pub const EndpointServeOptions = struct {
+    shutdown: *std.Io.Event,
+    supported_versions: []const u32,
+    poll_interval: std.Io.Clock.Duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(5),
+    },
+};
+
 /// Event-driven, multi-connection HTTP/3 server over one UDP receive owner.
 ///
 /// The supervisor admits Initials into bounded handshake workers, promotes
@@ -3655,36 +3679,111 @@ pub const EndpointServer = struct {
         poll_interval: std.Io.Clock.Duration,
     ) HandshakeAdmissionError!EndpointServerEvent {
         while (true) {
-            if (try self.pollRequestAcrossSessions()) |request| return request;
-
-            var event = try self.receiveTransport(
+            if (try self.receiveOnce(
                 supported_versions,
                 poll_interval,
-            );
+            )) |event| return event;
+        }
+    }
+
+    /// Perform one bounded endpoint iteration. A null result lets a caller
+    /// inspect shutdown or maintenance state without introducing another UDP
+    /// receive owner. Buffered request events are returned before socket work.
+    pub fn receiveOnce(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!?EndpointServerEvent {
+        if (try self.pollRequestAcrossSessions()) |request| return request;
+
+        const event_value = (try self.receiveTransportOnce(
+            supported_versions,
+            poll_interval,
+        )) orelse return null;
+        var event = event_value;
+        defer event.deinit(self.allocator);
+        switch (event) {
+            .connected => |handle| return .{ .connected = handle },
+            .closed => |closed| return .{ .closed = .{
+                .handle = closed.handle,
+                .timer = closed.timer,
+            } },
+            .handshake_failed => |failure| return .{
+                .handshake_failed = .{
+                    .handle = failure.handle,
+                    .err = failure.err,
+                },
+            },
+            .packet => |*packet| {
+                const target = self.sessions.getPtr(
+                    packet.connection_handle,
+                ) orelse return error.UnknownConnectionHandle;
+                try target.session.processRequestPacket(&packet.packet);
+            },
+            .unrouted => {
+                const unrouted = event.unrouted;
+                event = .{ .connected = 0 };
+                return .{ .unrouted = unrouted };
+            },
+        }
+        return self.pollRequestAcrossSessions();
+    }
+
+    /// Run the single-owner endpoint loop until `shutdown` is set. Request
+    /// callbacks execute serially with borrowed event storage, which keeps all
+    /// QUIC and QPACK mutation on this task while allowing applications to
+    /// inspect a stable session and emit streaming or aggregate responses.
+    pub fn serveUntil(
+        self: *EndpointServer,
+        comptime Context: type,
+        context: *Context,
+        comptime handler: *const fn (
+            *Context,
+            *EndpointServer,
+            EndpointServeEvent,
+        ) anyerror!void,
+        options: EndpointServeOptions,
+    ) anyerror!void {
+        if (options.supported_versions.len == 0 or
+            options.poll_interval.raw.nanoseconds <= 0)
+        {
+            return error.InvalidHandshakeRecovery;
+        }
+        while (!options.shutdown.isSet()) {
+            const event_value = self.receiveOnce(
+                options.supported_versions,
+                options.poll_interval,
+            ) catch |err| switch (err) {
+                error.Canceled => if (options.shutdown.isSet()) return else return err,
+                else => |other| return other,
+            } orelse continue;
+            var event = event_value;
             defer event.deinit(self.allocator);
             switch (event) {
-                .connected => |handle| return .{ .connected = handle },
-                .closed => |closed| return .{ .closed = .{
-                    .handle = closed.handle,
-                    .timer = closed.timer,
-                } },
-                .handshake_failed => |failure| return .{
-                    .handshake_failed = .{
-                        .handle = failure.handle,
-                        .err = failure.err,
-                    },
-                },
-                .packet => |*packet| {
-                    const target = self.sessions.getPtr(
-                        packet.connection_handle,
+                .connected => |handle| try handler(
+                    context,
+                    self,
+                    .{ .connected = handle },
+                ),
+                .closed => |closed| try handler(
+                    context,
+                    self,
+                    .{ .closed = .{
+                        .handle = closed.handle,
+                        .timer = closed.timer,
+                    } },
+                ),
+                .request => |*request| {
+                    const session_value = self.session(
+                        request.connection_handle,
                     ) orelse return error.UnknownConnectionHandle;
-                    try target.session.processRequestPacket(&packet.packet);
+                    try handler(context, self, .{ .request = .{
+                        .session = session_value,
+                        .request = &request.request,
+                    } });
                 },
-                .unrouted => {
-                    const unrouted = event.unrouted;
-                    event = .{ .connected = 0 };
-                    return .{ .unrouted = unrouted };
-                },
+                .handshake_failed => |failure| return failure.err,
+                .unrouted => {},
             }
         }
     }

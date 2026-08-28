@@ -407,7 +407,10 @@ adapters retain that single receive owner without busy waiting. Expired idle
 or draining connections now emit a typed `closed` event only after their CID
 routes and stable session storage have been reclaimed. A two-client
 real TLS/QUIC test exercises the full admission and promotion path on one UDP
-socket.
+socket. The owning HTTP/3 endpoint also exposes a bounded `receiveOnce` and a
+cancellable `serveUntil` callback loop for connected, closed, and request
+events; callbacks borrow the stable session and request only for their
+synchronous invocation, preserving the single-owner transport invariant.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and
