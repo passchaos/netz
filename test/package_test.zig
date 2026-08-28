@@ -150,6 +150,14 @@ test "public modules are reachable" {
         "pruneExpired",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
+        "acquireUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
+        "acquireUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "isReusable",
     ));

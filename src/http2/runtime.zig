@@ -1894,6 +1894,10 @@ pub const Connection = struct {
             self.pending_application_overflow == null and
             self.borrowed_pending_frame == null and
             self.response_semantics.items.len == 0 and
+            self.push_state.pending.items.len ==
+                self.push_state.pending_head and
+            self.push_state.local.items.len == 0 and
+            self.push_state.remote.items.len == 0 and
             !self.limits.enable_push;
     }
 

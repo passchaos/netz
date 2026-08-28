@@ -13,6 +13,7 @@ pub const Error = runtime.Error || error{
     ConnectionLimitReached,
     InvalidPoolOptions,
 };
+pub const AcquireTimeoutError = Error || std.Io.Timeout.Error;
 
 pub const Options = struct {
     /// Maximum idle, leased, and connecting HTTP/2 sockets. Zero disables the
@@ -51,6 +52,7 @@ pub const Pool = struct {
     idle: std.ArrayList(Slot) = .empty,
     sequence: u64 = 0,
     connections: usize = 0,
+    capacity_generation: std.atomic.Value(u32) = .init(1),
     closed: bool = false,
 
     pub fn init(
@@ -84,6 +86,7 @@ pub const Pool = struct {
         self.connections -= self.idle.items.len;
         self.idle.clearRetainingCapacity();
         self.mutex.unlock(self.io);
+        self.notifyCapacityWaiters();
     }
 
     /// Acquire an exclusive persistent HTTP/2 connection for one URI origin.
@@ -97,6 +100,67 @@ pub const Pool = struct {
         );
         defer endpoint.deinit();
         return self.acquire(transport, endpoint);
+    }
+
+    /// Wait for an idle connection or total-pool capacity within one relative
+    /// timeout. The budget covers queueing only; dialing and HTTP/2 handshake
+    /// deadlines remain controlled by `Options.limits` and `Options.tls`.
+    pub fn acquireUriWithTimeout(
+        self: *Pool,
+        uri_text: []const u8,
+        timeout: std.Io.Duration,
+    ) AcquireTimeoutError!Lease {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acquireUriUntil(
+            uri_text,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn acquireUriWithDeadline(
+        self: *Pool,
+        uri_text: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!Lease {
+        return self.acquireUriUntil(uri_text, deadline);
+    }
+
+    fn acquireUriUntil(
+        self: *Pool,
+        uri_text: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!Lease {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const transport = try transportForScheme(uri.scheme);
+        var endpoint = try http1_runtime.uriEndpoint(
+            self.allocator,
+            uri,
+            if (transport == .tls) 443 else 80,
+        );
+        defer endpoint.deinit();
+        while (true) {
+            const generation = self.capacity_generation.load(.acquire);
+            return self.acquire(transport, endpoint) catch |err| switch (err) {
+                error.ConnectionLimitReached => {
+                    if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                        return error.Timeout;
+                    }
+                    self.io.futexWaitTimeout(
+                        u32,
+                        &self.capacity_generation.raw,
+                        generation,
+                        .{ .deadline = deadline },
+                    ) catch |wait_err| switch (wait_err) {
+                        error.Canceled => return error.Canceled,
+                    };
+                    if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                        return error.Timeout;
+                    }
+                    continue;
+                },
+                else => |other| return other,
+            };
+        }
     }
 
     /// Send a complete request through an exclusive lease and return the
@@ -259,6 +323,7 @@ pub const Pool = struct {
         if (self.closed) {
             slot.deinit(self.allocator);
             self.connections -= 1;
+            self.notifyCapacityWaiters();
             return;
         }
         var same_authority: usize = 0;
@@ -272,6 +337,7 @@ pub const Pool = struct {
         if (same_authority >= self.options.max_idle_per_authority) {
             slot.deinit(self.allocator);
             self.connections -= 1;
+            self.notifyCapacityWaiters();
             return;
         }
         self.sequence +%= 1;
@@ -287,11 +353,15 @@ pub const Pool = struct {
             var oldest = self.idle.swapRemove(oldest_index);
             oldest.deinit(self.allocator);
             self.connections -= 1;
+            self.notifyCapacityWaiters();
         }
         self.idle.append(self.allocator, slot) catch {
             slot.deinit(self.allocator);
             self.connections -= 1;
+            self.notifyCapacityWaiters();
+            return;
         };
+        self.notifyCapacityWaiters();
     }
 
     fn releaseConnectionSlot(self: *Pool) void {
@@ -299,6 +369,16 @@ pub const Pool = struct {
         std.debug.assert(self.connections != 0);
         self.connections -= 1;
         self.mutex.unlock(self.io);
+        self.notifyCapacityWaiters();
+    }
+
+    fn notifyCapacityWaiters(self: *Pool) void {
+        _ = self.capacity_generation.fetchAdd(1, .release);
+        self.io.futexWake(
+            u32,
+            &self.capacity_generation.raw,
+            std.math.maxInt(u32),
+        );
     }
 
     fn pruneExpiredLocked(self: *Pool, now_ns: i96) void {
@@ -311,6 +391,7 @@ pub const Pool = struct {
             var expired = self.idle.swapRemove(index);
             expired.deinit(self.allocator);
             self.connections -= 1;
+            self.notifyCapacityWaiters();
         }
     }
 };
