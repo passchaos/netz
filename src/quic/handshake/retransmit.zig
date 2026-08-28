@@ -25,6 +25,10 @@ pub const Config = struct {
     /// the older strictly retry-count-bounded behavior for tests and embedded
     /// callers that need deterministic fail-fast handshakes.
     max_duration_ms: u32 = 0,
+    /// Optional caller-owned deadline shared across several handshake
+    /// transitions. It caps retry-derived budgets instead of being recomputed
+    /// whenever a later transition begins.
+    deadline: ?std.Io.Clock.Timestamp = null,
     /// Optional fault-injection callback. Production callers leave this null;
     /// tests can deterministically drop selected complete flights without
     /// teaching the transport about test-only counters.
@@ -35,6 +39,9 @@ pub const Config = struct {
             self.max_pto_ms < self.initial_pto_ms)
         {
             return error.InvalidHandshakeRecovery;
+        }
+        if (self.deadline) |deadline| {
+            if (deadline.clock != .awake) return error.InvalidHandshakeRecovery;
         }
     }
 
@@ -354,11 +361,16 @@ pub fn sendWithoutResponse(
 }
 
 fn activeDeadline(config: Config, io: std.Io) ?std.Io.Clock.Timestamp {
-    if (config.max_duration_ms == 0) return null;
-    return std.Io.Clock.Timestamp.fromNow(
+    const configured = if (config.max_duration_ms == 0) null else std.Io.Clock.Timestamp.fromNow(
         io,
         Config.clockDurationFromMillis(config.max_duration_ms),
     );
+    const caller = config.deadline orelse return configured;
+    const local = configured orelse return caller;
+    return if (std.Io.Clock.Timestamp.compare(caller, .lt, local))
+        caller
+    else
+        local;
 }
 
 fn attemptDeadline(

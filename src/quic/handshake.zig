@@ -724,6 +724,22 @@ fn timeoutExpired(io: std.Io, timeout: std.Io.Timeout) bool {
     }
 }
 
+fn passiveHandshakeTimeout(
+    io: std.Io,
+    recovery: retransmit.Config,
+) std.Io.Timeout {
+    const local = recovery.passiveTimeout().toDeadline(io);
+    const caller = recovery.deadline orelse return local;
+    return switch (local) {
+        .deadline => |value| if (std.Io.Clock.Timestamp.compare(
+            caller,
+            .lt,
+            value,
+        )) .{ .deadline = caller } else local,
+        .none, .duration => unreachable,
+    };
+}
+
 fn peekExpectedServerInitial(
     bytes: []const u8,
     version: quic.Version,
@@ -1193,8 +1209,10 @@ fn connectAttempt(
         return connectAttempt(endpoint, source, peer, next, true);
     }
 
-    const server_initial_deadline =
-        options.handshake_recovery.passiveTimeout().toDeadline(endpoint.io);
+    const server_initial_deadline = passiveHandshakeTimeout(
+        endpoint.io,
+        options.handshake_recovery,
+    );
     var server_initial_info: quic.protection.ProtectedLongPacketInfo = undefined;
     var server_initial_flight = while (true) {
         server_initial_info = peekExpectedServerInitial(
@@ -2788,7 +2806,7 @@ fn receiveServerHandshakeCrypto(
     var response_from = from;
     var response_ecn = coalesced_ecn;
     var next_expected = expected_packet_number;
-    const passive_deadline = recovery.passiveTimeout().toDeadline(endpoint.io);
+    const passive_deadline = passiveHandshakeTimeout(endpoint.io, recovery);
     var pending_tail = coalesced_tail;
     var pending_tail_storage: ?[]u8 = null;
     defer if (pending_tail_storage) |storage| endpoint.allocator.free(storage);

@@ -366,7 +366,12 @@ is closed and its slot transferred before B is dialed; a second B request
 reuses that replacement while the pool remains at exactly one connection. Each
 Another real TLS/QUIC regression holds the only slot, queues two waiters in a
 known order, and verifies ordered admission as each predecessor is discarded.
-Each
+URI clients additionally accept one absolute connect budget spanning hostname
+resolution and every address-specific QUIC/TLS attempt. That same deadline is
+carried through Initial, Retry, Version Negotiation and passive Handshake
+flight reads rather than restarting for each stage or fallback address. Direct-
+address clients use the same total timeout directly in addition to the lower-
+level bounded PTO/retry policy. Each
 pooled connection currently owns its UDP endpoint. Sharing one endpoint across
 several pooled origins remains a separate dispatcher integration task rather
 than allowing competing socket readers.

@@ -223,3 +223,45 @@ test "passive handshake wait can use explicit max duration" {
         else => return error.InvalidHandshakeRecovery,
     }
 }
+
+test "handshake caller deadline bounds active retransmission budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        std.testing.allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+    const Context = struct {
+        calls: usize = 0,
+        fn send(context: *anyopaque, _: u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+        }
+    };
+    var context = Context{};
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        target.sendAndReceive(
+            &endpoint,
+            .{
+                .initial_pto_ms = 1_000,
+                .max_pto_ms = 4_000,
+                .max_retries = 3,
+                .deadline = .fromNow(io, .{
+                    .raw = .fromMilliseconds(10),
+                    .clock = .awake,
+                }),
+            },
+            &context,
+            Context.send,
+        ),
+    );
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).raw;
+    try std.testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
+    try std.testing.expect(context.calls >= 1);
+}

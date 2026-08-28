@@ -335,6 +335,115 @@ fn resolveHostPortAddresses(
     return try resolveHostAddresses(allocator, io, host_name, port);
 }
 
+fn connectDeadline(
+    io: std.Io,
+    timeout: ?std.Io.Duration,
+) Error!?std.Io.Clock.Timestamp {
+    const duration = timeout orelse return null;
+    if (duration.nanoseconds <= 0) return error.HandshakeTimeout;
+    return .fromNow(io, .{ .raw = duration, .clock = .awake });
+}
+
+fn resolveEndpointBefore(
+    endpoint: UriEndpoint,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]net.IpAddress {
+    return switch (endpoint.target) {
+        .ip => |address| try ownedSingleAddress(allocator, address),
+        .host => |host| try resolveHostAddressesBefore(
+            allocator,
+            io,
+            host,
+            endpoint.port,
+            deadline,
+        ),
+    };
+}
+
+fn resolveHostPortAddressesBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]net.IpAddress {
+    if (net.IpAddress.parse(host, port)) |address| {
+        return try ownedSingleAddress(allocator, address);
+    } else |_| {}
+    return resolveHostAddressesBefore(
+        allocator,
+        io,
+        try net.HostName.init(host),
+        port,
+        deadline,
+    );
+}
+
+fn resolveHostAddressesBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: net.HostName,
+    port: u16,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]net.IpAddress {
+    const absolute = deadline orelse
+        return resolveHostAddresses(allocator, io, host, port);
+    if (absolute.durationFromNow(io).raw.nanoseconds <= 0) {
+        return error.HandshakeTimeout;
+    }
+    const ResolveResult = Error![]net.IpAddress;
+    const Wake = union(enum) {
+        resolved: ResolveResult,
+        timeout: std.Io.Cancelable!void,
+    };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer while (select.cancel()) |wake| switch (wake) {
+        .resolved => |result| if (result) |addresses| {
+            allocator.free(addresses);
+        } else |_| {},
+        .timeout => {},
+    };
+    select.async(
+        .resolved,
+        resolveHostAddresses,
+        .{ allocator, io, host, port },
+    );
+    select.async(.timeout, waitForConnectDeadline, .{ io, absolute });
+    return switch (select.await() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+    }) {
+        .resolved => |result| try result,
+        .timeout => |result| {
+            result catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            };
+            return error.HandshakeTimeout;
+        },
+    };
+}
+
+fn waitForConnectDeadline(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+) std.Io.Cancelable!void {
+    try deadline.wait(io);
+}
+
+fn handshakeRecoveryBefore(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+    configured: @FieldType(quic.handshake.ClientOptions, "handshake_recovery"),
+) Error!@FieldType(quic.handshake.ClientOptions, "handshake_recovery") {
+    const remaining = deadline.durationFromNow(io).raw.nanoseconds;
+    if (remaining <= 0) return error.HandshakeTimeout;
+    var result = configured;
+    result.deadline = deadline;
+    return result;
+}
+
 fn ownedSingleAddress(
     allocator: std.mem.Allocator,
     address: net.IpAddress,
@@ -3013,6 +3122,20 @@ pub const testing = struct {
     ) void {
         freeStackFirstSlice(T, allocator, stack, storage);
     }
+
+    pub fn handshakeRecoveryBeforeForTest(
+        io: std.Io,
+        deadline: std.Io.Clock.Timestamp,
+        configured: @FieldType(
+            quic.handshake.ClientOptions,
+            "handshake_recovery",
+        ),
+    ) Error!@FieldType(
+        quic.handshake.ClientOptions,
+        "handshake_recovery",
+    ) {
+        return handshakeRecoveryBefore(io, deadline, configured);
+    }
 };
 
 pub const HandshakeServerOptions = struct {
@@ -4024,6 +4147,10 @@ pub const EndpointServer = struct {
 pub const HandshakeClientOptions = struct {
     handshake: quic.handshake.ClientOptions,
     session: HandshakeSessionOptions = .{},
+    /// Absolute budget for URI hostname resolution plus every address-specific
+    /// QUIC/TLS handshake attempt. Direct-address `connect` continues to use
+    /// `handshake.handshake_recovery`; this field bounds only URI fallback.
+    connect_timeout: ?std.Io.Duration = null,
 };
 
 pub const HandshakeServer = struct {
@@ -5753,7 +5880,20 @@ pub const HandshakeClient = struct {
         endpoint.* = try quic.runtime.Endpoint.bind(allocator, io, local_address, limits.quic);
         errdefer endpoint.deinit();
 
-        var established = try quic.handshake.connect(endpoint, server, options.handshake);
+        const deadline = try connectDeadline(io, options.connect_timeout);
+        var handshake_options = options.handshake;
+        if (deadline) |absolute| {
+            handshake_options.handshake_recovery = try handshakeRecoveryBefore(
+                io,
+                absolute,
+                handshake_options.handshake_recovery,
+            );
+        }
+        var established = try quic.handshake.connect(
+            endpoint,
+            server,
+            handshake_options,
+        );
         errdefer established.deinit();
         return initOwnedEstablished(
             allocator,
@@ -5779,11 +5919,23 @@ pub const HandshakeClient = struct {
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
         );
+        const deadline = try connectDeadline(
+            endpoint.io,
+            options.connect_timeout,
+        );
+        var handshake_options = options.handshake;
+        if (deadline) |absolute| {
+            handshake_options.handshake_recovery = try handshakeRecoveryBefore(
+                endpoint.io,
+                absolute,
+                handshake_options.handshake_recovery,
+            );
+        }
         var established = try quic.handshake.connectFrom(
             endpoint,
             source,
             server,
-            options.handshake,
+            handshake_options,
         );
         errdefer established.deinit();
         return initEstablishedWithEndpointOwnership(
@@ -5958,6 +6110,7 @@ pub const HandshakeClient = struct {
         servers: []const net.IpAddress,
         limits: Limits,
         options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!HandshakeClient {
         if (servers.len == 0) return error.NoAddressReturned;
 
@@ -5966,13 +6119,22 @@ pub const HandshakeClient = struct {
         for (servers) |server| {
             if (!sameIpAddressFamily(local_address, server)) continue;
             attempted = true;
+            var attempt_options = options;
+            if (deadline) |absolute| {
+                attempt_options.handshake.handshake_recovery =
+                    try handshakeRecoveryBefore(
+                        io,
+                        absolute,
+                        options.handshake.handshake_recovery,
+                    );
+            }
             return connect(
                 allocator,
                 io,
                 local_address,
                 server,
                 limits,
-                options,
+                attempt_options,
             ) catch |err| {
                 last_err = err;
                 if (shouldTryNextResolvedAddress(err)) continue;
@@ -6021,11 +6183,20 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!HandshakeClient {
+        const deadline = try connectDeadline(io, options.connect_timeout);
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
-        const servers = try endpoint.resolveAll(allocator, io);
+        const servers = try resolveEndpointBefore(
+            endpoint,
+            allocator,
+            io,
+            deadline,
+        );
         defer allocator.free(servers);
         var connect_options = options;
+        // `connect` applies its own direct-address budget. The URI path has
+        // already converted that duration into the shared absolute deadline.
+        connect_options.connect_timeout = null;
         if (connect_options.handshake.server_name == null) {
             connect_options.handshake.server_name = endpoint.tls_host;
         }
@@ -6036,6 +6207,7 @@ pub const HandshakeClient = struct {
             servers,
             limits,
             connect_options,
+            deadline,
         );
     }
 
@@ -6048,14 +6220,21 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!OwnedHandshakeResponse {
+        const deadline = try connectDeadline(io, options.connect_timeout);
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
         const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
-        const servers = try endpoint.resolveAll(allocator, io);
+        const servers = try resolveEndpointBefore(
+            endpoint,
+            allocator,
+            io,
+            deadline,
+        );
         defer allocator.free(servers);
 
         var connect_options = options;
+        connect_options.connect_timeout = null;
         if (connect_options.handshake.server_name == null) {
             connect_options.handshake.server_name = endpoint.tls_host;
         }
@@ -6066,6 +6245,7 @@ pub const HandshakeClient = struct {
             servers,
             limits,
             connect_options,
+            deadline,
         );
         defer client.deinit();
 
@@ -6090,20 +6270,23 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!OwnedHandshakeResponse {
+        const deadline = try connectDeadline(io, options.connect_timeout);
         if (!http3.isHttp3Alpn(target.alpn)) return error.InvalidHeader;
         var origin = try uriEndpoint(allocator, uri);
         defer origin.deinit();
         const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
-        const servers = try resolveHostPortAddresses(
+        const servers = try resolveHostPortAddressesBefore(
             allocator,
             io,
             target.connect_host,
             target.port,
+            deadline,
         );
         defer allocator.free(servers);
 
         var connect_options = options;
+        connect_options.connect_timeout = null;
         connect_options.handshake.server_name = origin.tls_host;
         connect_options.handshake.alpn_protocols = &.{target.alpn};
         var client = try connectAnyResolvedAddress(
@@ -6113,6 +6296,7 @@ pub const HandshakeClient = struct {
             servers,
             limits,
             connect_options,
+            deadline,
         );
         defer client.deinit();
 

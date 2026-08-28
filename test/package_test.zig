@@ -924,6 +924,10 @@ test "public modules are reachable" {
         netz.http3.runtime,
         "HandshakeClientPoolDefaultConnector",
     ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.HandshakeClientOptions,
+        "connect_timeout",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClientPool,
         "requestUri",
