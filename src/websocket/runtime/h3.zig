@@ -293,12 +293,13 @@ pub fn Connection(comptime role: common.Role) type {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
                         if (assembled.compressed) {
-                            defer self.allocator.free(assembled.payload);
+                            errdefer self.allocator.free(assembled.payload);
                             const payload = try websocket.decompressMessage(
                                 self.allocator,
                                 assembled.payload,
                                 self.limits.max_message_bytes,
                             );
+                            self.allocator.free(assembled.payload);
                             errdefer self.allocator.free(payload);
                             if (assembled.opcode == .text and
                                 !std.unicode.utf8ValidateSlice(payload))
