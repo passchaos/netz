@@ -13,7 +13,7 @@ const listener_namespace = @import("listener_namespace.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
-const tcp_endpoint = @import("runtime/tcp_endpoint.zig");
+const network_endpoint = @import("runtime/network_endpoint.zig");
 
 const net = std.Io.net;
 
@@ -1128,7 +1128,7 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
-        const stream = try tcp_endpoint.connectHost(
+        const stream = try network_endpoint.connectHost(
             io,
             host,
             port,
@@ -1276,9 +1276,10 @@ fn connectTargetAttempt(
     target: redirect.Target,
     options: ConnectOptions,
 ) Error!ConnectAttempt {
-    const stream = try tcp_endpoint.connectTarget(
+    const stream = try network_endpoint.connectTarget(
         io,
         &target,
+        .tcp,
         options.network_connect_timeout,
     );
     return connectStreamAttempt(allocator, io, stream, options, true);

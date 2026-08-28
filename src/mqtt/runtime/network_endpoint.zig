@@ -1,4 +1,4 @@
-//! Cleartext MQTT TCP endpoint connection helpers.
+//! MQTT TCP endpoint connection helpers shared by cleartext and TLS clients.
 //!
 //! URI parsing owns MQTT-specific policy in `redirect.zig`; this module turns
 //! an already-validated target into a socket while preserving one DNS/TCP
@@ -30,9 +30,12 @@ pub fn connectHost(
 pub fn connectTarget(
     io: std.Io,
     target: *const redirect.Target,
+    expected_transport: redirect.Transport,
     timeout: ?std.Io.Duration,
 ) Error!net.Stream {
-    if (target.transport != .tcp) return error.UnsupportedRedirectScheme;
+    if (target.transport != expected_transport) {
+        return error.UnsupportedRedirectScheme;
+    }
     if (target.port == 0 or target.host.len == 0) {
         return error.InvalidServerReference;
     }
@@ -60,4 +63,15 @@ pub fn connectTarget(
     const host_name = net.HostName.init(target.host) catch
         return error.InvalidServerReference;
     return tcp_connect.host(io, host_name, target.port, timeout);
+}
+
+/// Return host text suitable for TLS SNI and certificate verification. URI
+/// brackets delimit an IPv6 literal but are not part of its TLS identity.
+pub fn tlsHost(target: *const redirect.Target) Error![]const u8 {
+    if (target.host.len == 0) return error.InvalidServerReference;
+    if (target.host[0] != '[') return target.host;
+    if (target.host.len < 3 or target.host[target.host.len - 1] != ']') {
+        return error.InvalidServerReference;
+    }
+    return target.host[1 .. target.host.len - 1];
 }

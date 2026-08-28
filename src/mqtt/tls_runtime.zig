@@ -4,6 +4,7 @@ const redirect = @import("redirect.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const network_endpoint = @import("runtime/network_endpoint.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
@@ -413,37 +414,33 @@ pub const Client = struct {
         uri_text: []const u8,
         options: ConnectOptions,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
-        const uri = std.Uri.parse(uri_text) catch
-            return error.InvalidUri;
-        const is_mqtts =
-            std.ascii.eqlIgnoreCase(uri.scheme, "mqtts") or
-            std.ascii.eqlIgnoreCase(uri.scheme, "ssl");
-        if (!is_mqtts) return error.UnsupportedScheme;
-        var endpoint = try http1_runtime.uriEndpoint(
+        var target = redirect.parse(
             allocator,
-            uri,
-            8883,
-        );
-        defer endpoint.deinit();
-
-        const stream = switch (endpoint.target) {
-            .host => |host| try tcp_connect.host(
-                io,
-                host,
-                endpoint.port,
-                options.mqtt.network_connect_timeout,
-            ),
-            .ip => |address| try tcp_connect.ip(
-                io,
-                address,
-                options.mqtt.network_connect_timeout,
-            ),
+            uri_text,
+            .tls,
+        ) catch |err| return switch (err) {
+            error.UnsupportedRedirectScheme => error.UnsupportedScheme,
+            error.InvalidServerReference => error.InvalidUri,
+            else => err,
+        };
+        defer target.deinit();
+        const tls_host = network_endpoint.tlsHost(&target) catch
+            return error.InvalidUri;
+        const stream = network_endpoint.connectTarget(
+            io,
+            &target,
+            .tls,
+            options.mqtt.network_connect_timeout,
+        ) catch |err| return switch (err) {
+            error.UnsupportedRedirectScheme => error.UnsupportedScheme,
+            error.InvalidServerReference => error.InvalidUri,
+            else => err,
         };
         return connectStreamAttempt(
             allocator,
             io,
             stream,
-            endpoint.tls_host,
+            tls_host,
             options,
         );
     }
