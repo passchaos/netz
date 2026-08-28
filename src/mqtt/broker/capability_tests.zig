@@ -664,6 +664,11 @@ test "broker enforces Application Message payload limit by QoS" {
     // PINGRESP must be next; any accidentally routed oversized PUBLISH would
     // make this typed read fail before it could hide behind later traffic.
     try subscriber.ping();
+    const stats = broker.stats();
+    try std.testing.expectEqual(@as(usize, 4), stats.publish_messages_received);
+    try std.testing.expectEqual(@as(usize, 7), stats.publish_payload_bytes_received);
+    try std.testing.expectEqual(@as(usize, 1), stats.publish_messages_sent);
+    try std.testing.expectEqual(@as(usize, 0), stats.publish_messages_dropped);
     try context.disconnectAllFn(&.{ &subscriber, &publisher });
     try joinServer(thread, &joined, &serve);
 }

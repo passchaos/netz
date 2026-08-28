@@ -785,6 +785,7 @@ test "broker statistics form one coherent live and offline snapshot" {
     try std.testing.expectEqual(@as(usize, 0), empty.expired_sessions);
     try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_received);
     try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_sent);
+    try std.testing.expectEqual(@as(usize, 0), empty.publish_messages_dropped);
     try std.testing.expectEqual(
         @as(usize, 0),
         empty.publish_payload_bytes_received,
@@ -858,6 +859,7 @@ test "broker statistics form one coherent live and offline snapshot" {
     try std.testing.expectEqual(@as(usize, 0), live.expired_sessions);
     try std.testing.expectEqual(@as(usize, 1), live.publish_messages_received);
     try std.testing.expectEqual(@as(usize, 1), live.publish_messages_sent);
+    try std.testing.expectEqual(@as(usize, 0), live.publish_messages_dropped);
     try std.testing.expectEqual(
         "retained-metric".len,
         live.publish_payload_bytes_received,
@@ -1087,6 +1089,7 @@ test "broker publishes coherent retained system statistics" {
 
     const publish_metrics = [_]broker_mod.SystemMetric{
         .publish_messages_received,
+        .publish_messages_dropped,
         .publish_messages_sent,
         .publish_bytes_received,
         .publish_bytes_sent,
@@ -1099,7 +1102,10 @@ test "broker publishes coherent retained system statistics" {
         );
         try std.testing.expectEqual(@as(usize, 1), matched.len);
         const expected = switch (metric) {
-            .publish_messages_received, .publish_bytes_received => "0",
+            .publish_messages_received,
+            .publish_messages_dropped,
+            .publish_bytes_received,
+            => "0",
             // The first snapshot delivered five selected client metrics to
             // this subscriber. Those real wire PUBLISH packets contribute to
             // the following sent count/byte snapshot, as they do in Mosquitto.

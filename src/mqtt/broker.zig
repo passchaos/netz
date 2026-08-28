@@ -501,6 +501,9 @@ pub const Stats = struct {
     /// `$SYS/broker/publish/messages/received` counter.
     publish_messages_received: usize,
     publish_payload_bytes_received: usize,
+    /// Outbound Application Messages discarded because a destination queue or
+    /// negotiated packet-size bound could not admit them.
+    publish_messages_dropped: usize,
     /// PUBLISH packets successfully written to subscribers. Retransmissions
     /// and retained/session replays count again because they consume wire work.
     publish_messages_sent: usize,
@@ -533,6 +536,7 @@ pub const SystemMetric = enum {
     clients_expired,
     clients_total,
     publish_messages_received,
+    publish_messages_dropped,
     publish_messages_sent,
     publish_bytes_received,
     publish_bytes_sent,
@@ -558,6 +562,7 @@ pub const SystemMetric = enum {
             .clients_expired => "$SYS/broker/clients/expired",
             .clients_total => "$SYS/broker/clients/total",
             .publish_messages_received => "$SYS/broker/publish/messages/received",
+            .publish_messages_dropped => "$SYS/broker/publish/messages/dropped",
             .publish_messages_sent => "$SYS/broker/publish/messages/sent",
             .publish_bytes_received => "$SYS/broker/publish/bytes/received",
             .publish_bytes_sent => "$SYS/broker/publish/bytes/sent",
@@ -651,6 +656,7 @@ pub const system_metrics = [_]SystemMetric{
     .clients_expired,
     .clients_total,
     .publish_messages_received,
+    .publish_messages_dropped,
     .publish_messages_sent,
     .publish_bytes_received,
     .publish_bytes_sent,
@@ -702,6 +708,7 @@ pub const Broker = struct {
     expired_sessions: usize = 0,
     publish_messages_received: usize = 0,
     publish_payload_bytes_received: usize = 0,
+    publish_messages_dropped: usize = 0,
     publish_messages_sent: usize = 0,
     publish_payload_bytes_sent: usize = 0,
     next_system_stats_ns: ?i96 = null,
@@ -935,6 +942,7 @@ pub const Broker = struct {
             .expired_sessions = self.expired_sessions,
             .publish_messages_received = self.publish_messages_received,
             .publish_payload_bytes_received = self.publish_payload_bytes_received,
+            .publish_messages_dropped = self.publish_messages_dropped,
             .publish_messages_sent = self.publish_messages_sent,
             .publish_payload_bytes_sent = self.publish_payload_bytes_sent,
             .sessions = sessions.session_count,
@@ -2615,6 +2623,7 @@ pub const Broker = struct {
                 // policy as live fanout. A successful SUBSCRIBE is not turned
                 // into a connection failure merely because this client is
                 // already saturated.
+                self.publish_messages_dropped +|= 1;
                 continue;
             }
             const publication = try Publication.createFromRetained(
@@ -2795,6 +2804,12 @@ pub const Broker = struct {
         defer self.state_mutex.unlock(self.io);
         self.publish_messages_sent +|= 1;
         self.publish_payload_bytes_sent +|= payload_len;
+    }
+
+    fn recordPublishDropped(self: *Broker) void {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        self.publish_messages_dropped +|= 1;
     }
 
     fn rejectPublish(
@@ -3199,6 +3214,7 @@ pub const Broker = struct {
                 // subscriber drops this delivery, but it was still a matching
                 // subscription and therefore does not turn the publisher's
                 // PUBACK into "No matching subscribers".
+                self.publish_messages_dropped +|= 1;
                 continue;
             }
             destination.route_reservations += 1;
@@ -3413,7 +3429,10 @@ pub const Broker = struct {
                 .now = now,
             },
         ) catch |err| switch (err) {
-            error.QueueFull => return,
+            error.QueueFull => {
+                self.publish_messages_dropped +|= 1;
+                return;
+            },
             else => return err,
         };
     }
@@ -3673,6 +3692,7 @@ pub const Broker = struct {
                             packet.encoded.packet_id,
                         ) catch {};
                         self.state_mutex.unlock(self.io);
+                        self.recordPublishDropped();
                         continue;
                     },
                     else => {
@@ -3790,6 +3810,7 @@ pub const Broker = struct {
                     // packet state, but MQTT 5 Maximum Packet Size has the
                     // same semantics: discard this Application Message and
                     // keep draining/using the Network Connection.
+                    self.recordPublishDropped();
                     delivery.deinit();
                     continue;
                 },
@@ -4606,6 +4627,7 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) usize {
         .clients_expired => stats_value.expired_sessions,
         .clients_total => stats_value.sessions,
         .publish_messages_received => stats_value.publish_messages_received,
+        .publish_messages_dropped => stats_value.publish_messages_dropped,
         .publish_messages_sent => stats_value.publish_messages_sent,
         .publish_bytes_received => stats_value.publish_payload_bytes_received,
         .publish_bytes_sent => stats_value.publish_payload_bytes_sent,
