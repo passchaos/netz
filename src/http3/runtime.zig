@@ -1,4 +1,5 @@
 const std = @import("std");
+const round_robin = @import("../internal/round_robin.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
@@ -3566,6 +3567,10 @@ pub const EndpointServer = struct {
         quic.endpoint_dispatcher.ConnectionHandle,
         PromotedHandshakeSession,
     ) = .empty,
+    /// Last connection that yielded an application request. This stable-key
+    /// cursor prevents a continuously ready connection from monopolizing the
+    /// endpoint while remaining valid across hash-map rehashes.
+    last_request_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null,
 
     pub fn init(
         server: *HandshakeServer,
@@ -3628,6 +3633,7 @@ pub const EndpointServer = struct {
     ) bool {
         var removed = self.sessions.fetchRemove(handle) orelse return false;
         removed.value.deinit();
+        if (self.last_request_handle == handle) self.last_request_handle = null;
         return true;
     }
 
@@ -3638,7 +3644,9 @@ pub const EndpointServer = struct {
         self: *EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) ?PromotedHandshakeSession {
-        return (self.sessions.fetchRemove(handle) orelse return null).value;
+        const removed = (self.sessions.fetchRemove(handle) orelse return null).value;
+        if (self.last_request_handle == handle) self.last_request_handle = null;
+        return removed;
     }
 
     pub fn receive(
@@ -3647,15 +3655,7 @@ pub const EndpointServer = struct {
         poll_interval: std.Io.Clock.Duration,
     ) HandshakeAdmissionError!EndpointServerEvent {
         while (true) {
-            var iterator = self.sessions.iterator();
-            while (iterator.next()) |entry| {
-                if (try entry.value_ptr.session.pollRequestEvent()) |request| {
-                    return .{ .request = .{
-                        .connection_handle = entry.key_ptr.*,
-                        .request = request,
-                    } };
-                }
-            }
+            if (try self.pollRequestAcrossSessions()) |request| return request;
 
             var event = try self.receiveTransport(
                 supported_versions,
@@ -3688,6 +3688,89 @@ pub const EndpointServer = struct {
             }
         }
     }
+
+    fn pollRequestAcrossSessions(
+        self: *EndpointServer,
+    ) HandshakeAdmissionError!?EndpointServerEvent {
+        return self.pollRequestAcrossSessionsWith({}, pollSessionRequestEntry);
+    }
+
+    fn pollRequestAcrossSessionsWith(
+        self: *EndpointServer,
+        context: anytype,
+        comptime poll_request: anytype,
+    ) HandshakeAdmissionError!?EndpointServerEvent {
+        return round_robin.poll(
+            quic.endpoint_dispatcher.ConnectionHandle,
+            @TypeOf(self.sessions),
+            EndpointServerEvent,
+            &self.sessions,
+            &self.last_request_handle,
+            context,
+            struct {
+                fn run(
+                    poll_context: anytype,
+                    handle: quic.endpoint_dispatcher.ConnectionHandle,
+                    promoted: *PromotedHandshakeSession,
+                ) HandshakeAdmissionError!?EndpointServerEvent {
+                    const request = (try poll_request(
+                        poll_context,
+                        handle,
+                        promoted,
+                    )) orelse return null;
+                    return .{ .request = .{
+                        .connection_handle = handle,
+                        .request = request,
+                    } };
+                }
+            }.run,
+        );
+    }
+
+    fn pollSessionRequestEntry(
+        _: void,
+        _: quic.endpoint_dispatcher.ConnectionHandle,
+        promoted: *PromotedHandshakeSession,
+    ) HandshakeAdmissionError!?StreamingRequestEvent {
+        return promoted.session.pollRequestEvent();
+    }
+
+    pub const testing = struct {
+        const ReadyProbe = struct {
+            ready: []const quic.endpoint_dispatcher.ConnectionHandle,
+
+            fn poll(
+                self: *const ReadyProbe,
+                handle: quic.endpoint_dispatcher.ConnectionHandle,
+                _: *PromotedHandshakeSession,
+            ) HandshakeAdmissionError!?StreamingRequestEvent {
+                if (std.mem.indexOfScalar(
+                    quic.endpoint_dispatcher.ConnectionHandle,
+                    self.ready,
+                    handle,
+                ) == null) return null;
+                return .{ .reset = .{
+                    .from = .{ .ip4 = .loopback(1) },
+                    .stream_id = 0,
+                    .application_error_code = 0,
+                } };
+            }
+        };
+
+        /// Apply production request scheduling to synthetic readiness without
+        /// constructing HTTP/3 request bodies solely to test ordering.
+        pub fn pollReadyRequestHandle(
+            server: *EndpointServer,
+            ready: []const quic.endpoint_dispatcher.ConnectionHandle,
+        ) HandshakeAdmissionError!?quic.endpoint_dispatcher.ConnectionHandle {
+            var probe = ReadyProbe{ .ready = ready };
+            const event = (try server.pollRequestAcrossSessionsWith(
+                &probe,
+                ReadyProbe.poll,
+            )) orelse return null;
+            return event.request.connection_handle;
+        }
+    };
 
     /// Drive handshakes, timers, and the single UDP receive owner without
     /// interpreting established STREAM frames. Protocol adapters must process

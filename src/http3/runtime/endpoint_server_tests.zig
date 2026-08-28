@@ -5,6 +5,95 @@ const quic = @import("../../quic/mod.zig");
 
 const net = std.Io.net;
 
+test "HTTP/3 endpoint server rotates ready request sessions fairly" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "h3-fair-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    // Only the map keys and stable value addresses are observed by the test
+    // callback. Remove them before teardown so undefined protocol state is
+    // never passed to PromotedHandshakeSession.deinit.
+    var dummy_session: runtime.HandshakeServerSession = undefined;
+    var promoted_storage: [3]runtime.PromotedHandshakeSession = undefined;
+    defer endpoint.sessions.clearRetainingCapacity();
+    const handles = [_]quic.endpoint_dispatcher.ConnectionHandle{ 41, 52, 63 };
+    for (handles, 0..) |handle, index| {
+        promoted_storage[index] = .{
+            .dispatcher = endpoint.dispatcher,
+            .allocator = allocator,
+            .handle = handle,
+            .session = &dummy_session,
+            .registered = false,
+        };
+        try endpoint.sessions.put(
+            allocator,
+            handle,
+            promoted_storage[index],
+        );
+    }
+
+    var order: [handles.len]quic.endpoint_dispatcher.ConnectionHandle =
+        undefined;
+    for (&order) |*handle| {
+        handle.* = (try runtime.EndpointServer.testing.pollReadyRequestHandle(
+            &endpoint,
+            &handles,
+        )) orelse return error.TestUnexpectedResult;
+    }
+    for (order, 0..) |handle, index| {
+        for (order[0..index]) |earlier| {
+            try std.testing.expect(handle != earlier);
+        }
+    }
+    try std.testing.expectEqual(
+        order[0],
+        (try runtime.EndpointServer.testing.pollReadyRequestHandle(
+            &endpoint,
+            &handles,
+        )).?,
+    );
+
+    const only_middle = [_]quic.endpoint_dispatcher.ConnectionHandle{
+        order[1],
+    };
+    try std.testing.expectEqual(
+        order[1],
+        (try runtime.EndpointServer.testing.pollReadyRequestHandle(
+            &endpoint,
+            &only_middle,
+        )).?,
+    );
+    try std.testing.expectEqual(
+        order[2],
+        (try runtime.EndpointServer.testing.pollReadyRequestHandle(
+            &endpoint,
+            &handles,
+        )).?,
+    );
+
+    const stale = order[2];
+    try std.testing.expect(endpoint.sessions.remove(stale));
+    endpoint.last_request_handle = stale;
+    const after_removal =
+        (try runtime.EndpointServer.testing.pollReadyRequestHandle(
+            &endpoint,
+            &handles,
+        )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(after_removal != stale);
+}
+
 test "HTTP/3 endpoint server owns concurrent handshakes and requests" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

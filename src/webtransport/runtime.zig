@@ -2,6 +2,7 @@ const std = @import("std");
 const webtransport = @import("mod.zig");
 const http3 = @import("../http3/mod.zig");
 const quic = @import("../quic/mod.zig");
+const round_robin = @import("../internal/round_robin.zig");
 
 const net = std.Io.net;
 const datagram_stack_capacity: usize = 4096;
@@ -1485,83 +1486,32 @@ pub const EndpointServer = struct {
         context: anytype,
         comptime poll: anytype,
     ) Error!?EndpointServerEvent {
-        if (self.sessions.count() == 0) {
-            self.last_session_event_handle = null;
-            return null;
-        }
-        const cursor = self.last_session_event_handle orelse {
-            var all = self.sessions.iterator();
-            while (all.next()) |entry| {
-                if (try self.pollAcceptedEntryWith(
-                    entry.key_ptr.*,
-                    entry.value_ptr.*,
-                    stream_buffer,
-                    context,
-                    poll,
-                )) |event| {
-                    return event;
+        return round_robin.poll(
+            quic.endpoint_dispatcher.ConnectionHandle,
+            @TypeOf(self.sessions),
+            EndpointServerEvent,
+            &self.sessions,
+            &self.last_session_event_handle,
+            .{ .stream_buffer = stream_buffer, .context = context },
+            struct {
+                fn run(
+                    poll_context: anytype,
+                    handle: quic.endpoint_dispatcher.ConnectionHandle,
+                    accepted_ptr: **EndpointAcceptedSession,
+                ) Error!?EndpointServerEvent {
+                    const event = (try poll(
+                        poll_context.context,
+                        handle,
+                        accepted_ptr.*,
+                        poll_context.stream_buffer,
+                    )) orelse return null;
+                    return .{ .session_event = .{
+                        .handle = handle,
+                        .event = event,
+                    } };
                 }
-            }
-            return null;
-        };
-
-        // First inspect entries after the last producer. Hash-map rehashing is
-        // harmless because the cursor is a stable connection handle rather
-        // than a bucket index. If it disappeared, the wrap pass below scans
-        // every current entry.
-        var found_cursor = false;
-        var after = self.sessions.iterator();
-        while (after.next()) |entry| {
-            if (!found_cursor) {
-                found_cursor = entry.key_ptr.* == cursor;
-                continue;
-            }
-            if (try self.pollAcceptedEntryWith(
-                entry.key_ptr.*,
-                entry.value_ptr.*,
-                stream_buffer,
-                context,
-                poll,
-            )) |event| {
-                return event;
-            }
-        }
-
-        var wrapped = self.sessions.iterator();
-        while (wrapped.next()) |entry| {
-            if (try self.pollAcceptedEntryWith(
-                entry.key_ptr.*,
-                entry.value_ptr.*,
-                stream_buffer,
-                context,
-                poll,
-            )) |event| {
-                return event;
-            }
-            if (found_cursor and entry.key_ptr.* == cursor) break;
-        }
-        return null;
-    }
-
-    fn pollAcceptedEntryWith(
-        self: *EndpointServer,
-        handle: quic.endpoint_dispatcher.ConnectionHandle,
-        accepted: *EndpointAcceptedSession,
-        stream_buffer: []u8,
-        context: anytype,
-        comptime poll: anytype,
-    ) Error!?EndpointServerEvent {
-        const event = (try poll(
-            context,
-            handle,
-            accepted,
-            stream_buffer,
-        )) orelse return null;
-        self.last_session_event_handle = handle;
-        return .{ .session_event = .{
-            .handle = handle,
-            .event = event,
-        } };
+            }.run,
+        );
     }
 
     fn pollEndpointSessionEntry(

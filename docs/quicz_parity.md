@@ -397,7 +397,11 @@ handshake expiry policy. The remaining convenience work is a callback/task
 supervisor above this typed event loop. HTTP/3 now
 has an endpoint server that stores stable promoted sessions, routes packets and
 timers, polls requests without per-connection socket reads, and explicitly
-removes connection routes before destroying session state. Its bounded
+removes connection routes before destroying session state. Request polling now
+resumes after the last productive connection via a stable-handle cursor, so a
+busy connection cannot starve another ready request even if the session map
+rehashes. This brings the HTTP/3 application-event boundary up to the fair
+cross-record polling behavior in the audited quicz endpoint registry. Its bounded
 `receiveTransportOnce` and cancellable `serveTransportUntil` APIs let protocol
 adapters retain that single receive owner without busy waiting. Expired idle
 or draining connections now emit a typed `closed` event only after their CID
