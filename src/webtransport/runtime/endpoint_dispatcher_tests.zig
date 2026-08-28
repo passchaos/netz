@@ -6,6 +6,248 @@ const runtime = @import("../runtime.zig");
 const handshake_stream = @import("stream.zig");
 const session_control = @import("session_control.zig");
 
+test "WebTransport client handshake and CONNECT share one socket owner" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const settings = webtransport.defaultSettings(.{});
+    const limits = runtime.Limits{ .http3 = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 16,
+    } } };
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{
+            .handshake = .{
+                .local_connection_id = "wt-source-server",
+                .random = [_]u8{0xa1} ** 32,
+                .x25519_secret_key = [_]u8{0xa2} ** 32,
+                .handshake_recovery = .{
+                    .initial_pto_ms = 20,
+                    .max_pto_ms = 40,
+                    .max_duration_ms = 2_000,
+                },
+            },
+            .session = .{ .local_settings = settings },
+        },
+    );
+    defer server.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits.http3.quic,
+    );
+    defer client_endpoint.deinit();
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{"wt-source-client"},
+        server.address(),
+        64,
+    );
+    defer inbox.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &client_endpoint,
+    );
+    defer dispatcher.deinit();
+    try dispatcher.registerPendingHandshake(1, &inbox);
+
+    const ServerTask = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var pending = self.server.receiveSessionRequest() catch |err| {
+                self.err = err;
+                return;
+            };
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            if (!std.mem.eql(u8, pending.path(), "/source")) {
+                self.err = error.TestUnexpectedResult;
+                return;
+            }
+            var accepted = pending.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            pending_owned = false;
+            defer accepted.deinit();
+            accepted.close(73, "source-close") catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    const ClientTask = struct {
+        endpoint: *quic.runtime.Endpoint,
+        inbox: *quic.handshake_inbox.Inbox,
+        server: std.Io.net.IpAddress,
+        settings: http3.Settings,
+        done: std.atomic.Value(bool) = .init(false),
+        pending: ?runtime.PendingHandshakeConnect = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.pending = runtime.HandshakeClientSession.beginConnectFrom(
+                self.endpoint,
+                self.inbox.datagramSource(),
+                self.server,
+                .{
+                    .authority = "localhost",
+                    .path = "/source",
+                    .limits = limits,
+                    .h3 = .{
+                        .handshake = .{
+                            .original_destination_connection_id = "wt-source-dispatch",
+                            .local_connection_id = "wt-source-client",
+                            .server_name = "localhost",
+                            .random = [_]u8{0xa3} ** 32,
+                            .x25519_secret_key = [_]u8{0xa4} ** 32,
+                            .handshake_recovery = .{
+                                .initial_pto_ms = 20,
+                                .max_pto_ms = 40,
+                                .max_duration_ms = 2_000,
+                            },
+                        },
+                        .session = .{ .local_settings = self.settings },
+                    },
+                },
+            ) catch |err| {
+                self.err = err;
+                self.done.store(true, .release);
+                return;
+            };
+            self.done.store(true, .release);
+        }
+    };
+
+    var server_task = ServerTask{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerTask.run,
+        .{&server_task},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var client_task = ClientTask{
+        .endpoint = &client_endpoint,
+        .inbox = &inbox,
+        .server = server.address(),
+        .settings = settings,
+    };
+    const client_thread = try std.Thread.spawn(
+        .{},
+        ClientTask.run,
+        .{&client_task},
+    );
+
+    var owner_err: ?anyerror = null;
+    owner: while (!client_task.done.load(.acquire)) {
+        const datagram = client_endpoint.receiveBytesTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(20),
+            },
+        }) catch |err| switch (err) {
+            error.Timeout => continue,
+            else => {
+                owner_err = err;
+                break :owner;
+            },
+        };
+        var event = dispatcher.dispatch(datagram) catch |err| {
+            owner_err = err;
+            break :owner;
+        };
+        defer event.deinit(allocator);
+        switch (event) {
+            .pending_handshake, .consumed => {},
+            else => {
+                owner_err = error.TestUnexpectedResult;
+                break :owner;
+            },
+        }
+    }
+    if (!client_task.done.load(.acquire)) inbox.close();
+    client_thread.join();
+    if (owner_err) |err| return err;
+    if (client_task.err) |err| return err;
+    var pending = client_task.pending orelse return error.TestUnexpectedResult;
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
+
+    // Promotion closes the handshake inbox and transfers any short-header
+    // CONNECT response that raced with the worker's completion into the
+    // dispatcher's established-packet queue. No packet can fall into an
+    // unregister/register gap.
+    try dispatcher.promotePendingHandshake(1, 1, pending.connection());
+    try std.testing.expect((try pending.pollConnect()) == null);
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    var completed: ?runtime.HandshakeConnectAttempt = null;
+    while (completed == null) {
+        var event = try dispatcher.receive(&versions);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*routed| {
+                try std.testing.expectEqual(
+                    @as(usize, 1),
+                    routed.connection_handle,
+                );
+                try pending.processPacket(&routed.packet);
+                try dispatcher.refreshConnectionTimer(1);
+                if (try pending.pollConnect()) |attempt| {
+                    pending_owned = false;
+                    completed = attempt;
+                }
+            },
+            .consumed, .timer => {},
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    var attempt = completed.?;
+    var session = try attempt.requireAccepted();
+    defer session.deinit();
+    try dispatcher.replaceConnection(1, &session.h3.established.connection);
+    var closed = false;
+    while (!closed) {
+        var event = try dispatcher.receive(&versions);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*routed| {
+                try session.processPacket(&routed.packet);
+                try dispatcher.refreshConnectionTimer(1);
+                if (try session.pollSessionEvent()) |session_event| {
+                    if (session_event != .closed) {
+                        return error.TestUnexpectedResult;
+                    }
+                    try std.testing.expectEqual(
+                        @as(u32, 73),
+                        session_event.closed.code,
+                    );
+                    try std.testing.expectEqualStrings(
+                        "source-close",
+                        session_event.closed.reason,
+                    );
+                    closed = true;
+                }
+            },
+            .consumed, .timer => {},
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expect(try dispatcher.unregisterConnection(1));
+    server_thread.join();
+    server_joined = true;
+    if (server_task.err) |err| return err;
+}
+
 test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

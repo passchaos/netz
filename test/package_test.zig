@@ -2973,6 +2973,10 @@ test "public modules are reachable" {
         "beginEstablishedConnect",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "beginConnectFrom",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.PendingHandshakeConnect,
         "processPacket",
     ));

@@ -220,6 +220,10 @@ explicitly replaced because moving the owning state changes its connection
 address. The atomic `replaceConnection` operation preserves all CID routes and
 timer identity while swapping that pointer, avoiding an unregister/register
 gap.
+`beginConnectFrom` now composes the preceding phase as well: a sole endpoint
+owner can feed a CID-bound handshake inbox, receive a pending WebTransport
+CONNECT on the caller-owned endpoint, then register and drive it through the
+same dispatcher without an intermediate socket owner or endpoint transfer.
 The handshake server can additionally begin HTTP/3/WebTransport admission from
 the dispatcher's owned Initial event, so the first packet is not reread from the
 shared socket. At the QUIC layer, subsequent Initial/Retry/0-RTT/Handshake

@@ -2650,6 +2650,38 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Complete QUIC/TLS through a caller-supplied datagram source, then send
+    /// the Extended CONNECT without ever taking ownership of the endpoint.
+    /// The returned pending object is intended to be registered with the same
+    /// endpoint dispatcher before CONNECT response packets are processed.
+    pub fn beginConnectFrom(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+    ) Error!PendingHandshakeConnect {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        var h3_client = try http3.runtime.HandshakeClient.connectFrom(
+            endpoint,
+            source,
+            server,
+            webTransportHandshakeClientOptions(options.h3),
+        );
+        errdefer h3_client.deinit();
+        const session_id = try startStatefulConnect(
+            &h3_client,
+            options.authority,
+            options.path,
+            options.origin,
+            options.headers,
+        );
+        return .{
+            .h3 = h3_client,
+            .session_id = session_id,
+            .limits = options.limits,
+        };
+    }
+
     /// Connect to a complete HTTPS WebTransport URL. This derives SNI,
     /// authority, and path/query from one parsed value and inherits HTTP/3's
     /// all-address DNS fallback rather than exposing those pieces separately.
