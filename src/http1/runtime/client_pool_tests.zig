@@ -434,6 +434,104 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 client pool caps checked-out connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        accepted: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                return;
+            };
+            defer connection.close();
+            self.accepted.set(self.server.io);
+            self.release.wait(self.server.io) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/limited");
+    defer allocator.free(uri);
+    var first = try pool.acquireUri(uri);
+    try shared.accepted.wait(io);
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectError(
+        error.ConnectionLimitReached,
+        pool.acquireUri(uri),
+    );
+
+    first.release();
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    var reused = try pool.acquireUri(uri);
+    try std.testing.expect(reused.was_reused);
+    reused.discard();
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    shared.release.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 client pool releases failed connection reservation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    const address = server.address();
+    server.deinit();
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, address, "/unreachable");
+    defer allocator.free(uri);
+    try std.testing.expectError(error.ConnectionRefused, pool.acquireUri(uri));
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectError(error.ConnectionRefused, pool.acquireUri(uri));
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "HTTP/1 client pool enforces per-authority idle limit" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

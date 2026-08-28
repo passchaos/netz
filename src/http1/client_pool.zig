@@ -10,10 +10,15 @@ const runtime = @import("runtime.zig");
 
 pub const Error = runtime.Error || error{
     PoolClosed,
+    ConnectionLimitReached,
     InvalidPoolOptions,
 };
 
 pub const Options = struct {
+    /// Maximum sockets owned by the pool, including idle entries, checked-out
+    /// leases, and connection attempts in progress. Zero keeps the historical
+    /// unbounded behavior.
+    max_connections: usize = 64,
     max_idle_connections: usize = 32,
     max_idle_per_authority: usize = 8,
     /// Retire connections idle for at least this monotonic duration. Null
@@ -47,6 +52,7 @@ pub const Pool = struct {
     mutex: std.Io.Mutex = .init,
     idle: std.ArrayList(Slot) = .empty,
     sequence: u64 = 0,
+    connections: usize = 0,
     closed: bool = false,
 
     pub fn init(
@@ -67,6 +73,7 @@ pub const Pool = struct {
         // All leases must be returned first; a Lease retains a pointer to this
         // object so destroying it concurrently would violate ownership.
         self.close();
+        std.debug.assert(self.connections == 0);
         self.idle.deinit(self.allocator);
         self.* = undefined;
     }
@@ -77,6 +84,8 @@ pub const Pool = struct {
         self.mutex.lockUncancelable(self.io);
         self.closed = true;
         for (self.idle.items) |*slot| slot.deinit(self.allocator);
+        std.debug.assert(self.connections >= self.idle.items.len);
+        self.connections -= self.idle.items.len;
         self.idle.clearRetainingCapacity();
         self.mutex.unlock(self.io);
     }
@@ -147,6 +156,14 @@ pub const Pool = struct {
         return self.idle.items.len;
     }
 
+    /// Return all live sockets and reserved connection attempts owned by this
+    /// pool. The count includes idle and checked-out connections.
+    pub fn connectionCount(self: *Pool) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.connections;
+    }
+
     pub fn idleCountForUri(
         self: *Pool,
         uri_text: []const u8,
@@ -207,11 +224,21 @@ pub const Pool = struct {
                 };
             }
         }
-        self.mutex.unlock(self.io);
-
         // Connection setup intentionally happens outside the pool lock. Two
         // producers targeting the same authority may connect concurrently;
-        // idle limits are enforced only when their exclusive leases return.
+        // reserve their slots under the lock first so simultaneous cache
+        // misses cannot exceed the total socket budget.
+        if (self.options.max_connections != 0 and
+            self.connections >= self.options.max_connections)
+        {
+            self.mutex.unlock(self.io);
+            return error.ConnectionLimitReached;
+        }
+        self.connections += 1;
+        self.mutex.unlock(self.io);
+        var connection_reserved = true;
+        errdefer if (connection_reserved) self.releaseConnectionSlot();
+
         var client = switch (transport) {
             .cleartext => switch (endpoint.target) {
                 .host => try runtime.Client.connectHost(
@@ -257,6 +284,7 @@ pub const Pool = struct {
         };
         errdefer client.close();
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
+        connection_reserved = false;
         return .{ .pool = self, .slot = .{
             .client = client,
             .transport = transport,
@@ -273,12 +301,14 @@ pub const Pool = struct {
             self.options.max_idle_per_authority == 0)
         {
             slot.deinit(self.allocator);
+            self.releaseConnectionSlot();
             return;
         }
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) {
             slot.deinit(self.allocator);
+            self.connections -= 1;
             return;
         }
         var same_authority: usize = 0;
@@ -289,6 +319,7 @@ pub const Pool = struct {
         }
         if (same_authority >= self.options.max_idle_per_authority) {
             slot.deinit(self.allocator);
+            self.connections -= 1;
             return;
         }
         self.sequence +%= 1;
@@ -303,10 +334,19 @@ pub const Pool = struct {
             }
             var oldest = self.idle.swapRemove(oldest_index);
             oldest.deinit(self.allocator);
+            self.connections -= 1;
         }
         self.idle.append(self.allocator, slot) catch {
             slot.deinit(self.allocator);
+            self.connections -= 1;
         };
+    }
+
+    fn releaseConnectionSlot(self: *Pool) void {
+        self.mutex.lockUncancelable(self.io);
+        std.debug.assert(self.connections != 0);
+        self.connections -= 1;
+        self.mutex.unlock(self.io);
     }
 
     fn pruneExpiredLocked(self: *Pool, now_ns: i96) void {
@@ -321,6 +361,7 @@ pub const Pool = struct {
             }
             var expired = self.idle.swapRemove(index);
             expired.deinit(self.allocator);
+            self.connections -= 1;
         }
     }
 };
@@ -342,6 +383,7 @@ pub const Lease = struct {
 
     pub fn discard(self: *Lease) void {
         self.slot.deinit(self.pool.allocator);
+        self.pool.releaseConnectionSlot();
         self.active = false;
     }
 };
@@ -401,6 +443,10 @@ test "HTTP/1 client pool validates idle limits" {
         threaded.io(),
         .{ .max_idle_connections = 1, .max_idle_per_authority = 2 },
     ));
+    try std.testing.expectEqual(
+        @as(usize, 64),
+        (Options{}).max_connections,
+    );
 }
 
 test "HTTP/1 pool host keys normalize DNS case" {

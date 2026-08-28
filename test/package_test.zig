@@ -125,6 +125,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http1, "client_pool"));
     try std.testing.expect(@hasDecl(netz.http1.client_pool, "Pool"));
+    try std.testing.expect(@hasDecl(
+        netz.http1.client_pool.Pool,
+        "connectionCount",
+    ));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "UnixServer"));
     try std.testing.expect(@hasDecl(
