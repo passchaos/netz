@@ -173,14 +173,28 @@ pub const Pool = struct {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         const target = try uriTargetAlloc(self.allocator, uri);
         defer self.allocator.free(target);
-        var lease = try self.acquireUri(uri_text);
-        defer if (lease.active) lease.discard();
-        var options = request_options;
-        options.path = target;
-        var response = try lease.connection().request(options);
-        errdefer response.deinit(self.allocator);
-        lease.release();
-        return response;
+        var retry_stale = true;
+        while (true) {
+            var lease = try self.acquireUri(uri_text);
+            defer if (lease.active) lease.discard();
+            var options = request_options;
+            options.path = target;
+            var response = lease.connection().request(options) catch |err| {
+                const was_reused = lease.was_reused;
+                lease.discard();
+                if (retry_stale and was_reused and
+                    methodIsIdempotent(request_options.method) and
+                    retryableStaleConnectionError(err))
+                {
+                    retry_stale = false;
+                    continue;
+                }
+                return err;
+            };
+            errdefer response.deinit(self.allocator);
+            lease.release();
+            return response;
+        }
     }
 
     pub fn idleCount(self: *Pool) usize {
@@ -424,6 +438,27 @@ fn transportForScheme(scheme: []const u8) Error!Transport {
     return error.UnsupportedScheme;
 }
 
+fn methodIsIdempotent(method: []const u8) bool {
+    return std.mem.eql(u8, method, "GET") or
+        std.mem.eql(u8, method, "HEAD") or
+        std.mem.eql(u8, method, "PUT") or
+        std.mem.eql(u8, method, "DELETE") or
+        std.mem.eql(u8, method, "OPTIONS") or
+        std.mem.eql(u8, method, "TRACE");
+}
+
+fn retryableStaleConnectionError(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionAborted,
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.EndOfStream,
+        error.SocketUnconnected,
+        => true,
+        else => false,
+    };
+}
+
 fn uriTargetAlloc(
     allocator: std.mem.Allocator,
     uri: std.Uri,
@@ -453,4 +488,16 @@ test "HTTP/2 client pool validates idle limits" {
         threaded.io(),
         .{ .max_idle_connections = 1, .max_idle_per_authority = 2 },
     ));
+}
+
+test "HTTP/2 stale retry policy accepts only idempotent methods" {
+    try std.testing.expect(methodIsIdempotent("GET"));
+    try std.testing.expect(methodIsIdempotent("HEAD"));
+    try std.testing.expect(methodIsIdempotent("PUT"));
+    try std.testing.expect(methodIsIdempotent("DELETE"));
+    try std.testing.expect(methodIsIdempotent("OPTIONS"));
+    try std.testing.expect(methodIsIdempotent("TRACE"));
+    try std.testing.expect(!methodIsIdempotent("POST"));
+    try std.testing.expect(!methodIsIdempotent("CONNECT"));
+    try std.testing.expect(!methodIsIdempotent("PATCH"));
 }

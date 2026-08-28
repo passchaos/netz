@@ -91,6 +91,88 @@ test "HTTP/2 client pool reuses one persistent connection" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "HTTP/2 client pool retries stale reused idempotent connection once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var first = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            self.accepts += 1;
+            var seed = first.readRequest() catch |err| {
+                first.close();
+                self.err = err;
+                return;
+            };
+            const seed_stream_id = seed.stream_id;
+            seed.deinit(self.server.allocator);
+            first.writeResponse(seed_stream_id, .{ .body = "seed" }) catch |err| {
+                first.close();
+                self.err = err;
+                return;
+            };
+            first.close();
+
+            var second = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            self.accepts += 1;
+            defer second.close();
+            var retried = second.readRequest() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer retried.deinit(self.server.allocator);
+            if (!std.mem.eql(u8, retried.path, "/retry")) {
+                self.err = error.InvalidRequest;
+                return;
+            }
+            second.writeResponse(retried.stream_id, .{
+                .body = "retried",
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    const seed_uri = try uriFor(allocator, "http", server.address(), "/seed");
+    defer allocator.free(seed_uri);
+    const retry_uri = try uriFor(allocator, "http", server.address(), "/retry");
+    defer allocator.free(retry_uri);
+    var seed = try pool.requestUri(seed_uri, .{});
+    seed.deinit(allocator);
+    var retried = try pool.requestUri(retry_uri, .{});
+    defer retried.deinit(allocator);
+    try std.testing.expectEqualStrings("retried", retried.body);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
 test "HTTP/2 client pool caps leases and discards active streams" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
