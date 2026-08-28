@@ -102,8 +102,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-
-   verification policy; both h2c and TLS tests exchange multiple unary calls
-   on one connection. External upstream gRPC client/server interop is still
+   verification policy; h2c and TLS tests exchange multiple unary calls on one
+   connection, and the owning h2c wrappers also compose multi-message request
+   and response streams. External upstream gRPC client/server interop is still
    needed beyond netz's HTTP/2 Hyper gate.
 3. Build generated service/client bindings on `pbz`, including unary and all
    streaming method shapes.

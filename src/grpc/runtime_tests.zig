@@ -85,6 +85,123 @@ test "gRPC h2c runtime reuses one channel" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "gRPC h2c runtime composes sequential message streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        received: usize = 0,
+        err: ?anyerror = null,
+
+        fn consume(
+            self: *@This(),
+            message: grpc.StreamingMessage,
+        ) !void {
+            const expected = switch (self.received) {
+                0 => "one",
+                1 => "two",
+                else => return error.UnexpectedMessage,
+            };
+            if (!std.mem.eql(u8, message.payload, expected)) {
+                return error.InvalidGrpcRequest;
+            }
+            self.received += 1;
+        }
+
+        fn run(self: *@This()) void {
+            runFallible(self) catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var request = try connection.readStreaming(self, consume);
+            defer request.deinit();
+            if (!std.mem.eql(u8, request.service, "demo.Echo") or
+                !std.mem.eql(u8, request.method, "Stream") or
+                request.message_count != 2)
+            {
+                return error.InvalidGrpcRequest;
+            }
+            var response = try connection.startStreamingResponse(
+                request.transport.stream_id,
+                .{
+                    .request_accepted_encodings = request.accepted_encodings,
+                },
+            );
+            defer response.deinit();
+            try response.writeMessage("first");
+            try response.writeMessage("second");
+            try response.finishOk();
+        }
+    };
+
+    const Collector = struct {
+        count: usize = 0,
+
+        fn consume(
+            self: *@This(),
+            message: grpc.StreamingMessage,
+        ) !void {
+            const expected = switch (self.count) {
+                0 => "first",
+                1 => "second",
+                else => return error.UnexpectedMessage,
+            };
+            if (!std.mem.eql(u8, message.payload, expected)) {
+                return error.UnexpectedMessage;
+            }
+            self.count += 1;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var stream = try client.startStreaming(.{
+        .path = "/demo.Echo/Stream",
+        .authority = "localhost",
+    });
+    defer stream.deinit();
+    try stream.writeMessage("one");
+    try stream.writeMessage("two");
+    var collector: Collector = .{};
+    var response = try stream.finishAndRead(
+        &collector,
+        Collector.consume,
+    );
+    defer response.deinit();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.received);
+    try std.testing.expectEqual(@as(usize, 2), collector.count);
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+}
+
 test "gRPC TLS runtime verifies ALPN and reuses one channel" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

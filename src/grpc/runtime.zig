@@ -7,6 +7,7 @@
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
+const streaming = @import("stream/runtime.zig");
 
 const net = std.Io.net;
 
@@ -19,9 +20,9 @@ pub const ClientOptions = struct {
 
 /// One persistent gRPC client channel backed by HTTP/2.
 ///
-/// The channel intentionally exposes its HTTP/2 connection for advanced
-/// streaming calls while keeping unary setup, URI authority, and teardown in
-/// one owner. A single channel must not have concurrent frame readers.
+/// The channel keeps unary and sequential-stream setup plus teardown in one
+/// owner while leaving the HTTP/2 connection public for advanced operations.
+/// A single channel must not have concurrent frame readers.
 pub const Client = struct {
     connection: http2.runtime.Connection,
 
@@ -66,6 +67,22 @@ pub const Client = struct {
         options: call.UnaryCallOptions,
     ) Error!call.UnaryResponse {
         return call.unaryCall(
+            &self.connection,
+            self.connection.allocator,
+            options,
+        );
+    }
+
+    /// Start a sequential gRPC message stream on this persistent channel.
+    ///
+    /// The returned writer borrows the channel connection and must be
+    /// finished or deinitialized before the client is deinitialized or used
+    /// to read another stream.
+    pub fn startStreaming(
+        self: *Client,
+        options: streaming.RequestOptions,
+    ) streaming.Error!streaming.ClientWriter {
+        return streaming.startClient(
             &self.connection,
             self.connection.allocator,
             options,
@@ -196,6 +213,38 @@ pub const ServerConnection = struct {
         options: call.UnaryResponseOptions,
     ) Error!void {
         return call.writeUnaryResponse(
+            &self.connection,
+            self.connection.allocator,
+            stream_id,
+            options,
+        );
+    }
+
+    /// Read one complete request message stream, delivering messages as their
+    /// DATA arrives. The returned request owns its decoded HTTP/2 metadata.
+    pub fn readStreaming(
+        self: *ServerConnection,
+        context: anytype,
+        comptime consume: anytype,
+    ) !streaming.Request {
+        return streaming.readRequest(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            context,
+            consume,
+        );
+    }
+
+    /// Start a message-stream response for a request returned by
+    /// `readStreaming`. The writer borrows this connection until it is
+    /// finished or deinitialized.
+    pub fn startStreamingResponse(
+        self: *ServerConnection,
+        stream_id: u31,
+        options: streaming.ResponseOptions,
+    ) streaming.Error!streaming.ServerWriter {
+        return streaming.startResponse(
             &self.connection,
             self.connection.allocator,
             stream_id,

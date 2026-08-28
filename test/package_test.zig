@@ -50,6 +50,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "unary"));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Client,
+        "startStreaming",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Client,
         "negotiatedAlpn",
     ));
     try std.testing.expect(@hasDecl(
@@ -65,6 +69,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.ServerConnection,
         "writeUnary",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "readStreaming",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "startStreamingResponse",
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
