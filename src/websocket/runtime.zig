@@ -1060,45 +1060,15 @@ pub const Client = struct {
             port,
             options.connect_timeout,
         );
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-        defer allocator.free(default_host);
-        var connect_options = options;
-        if (connect_options.host.len == 0) connect_options.host = default_host;
-        if (connect_options.vail_tls orelse
-            connect_options.tls_identity) |identity|
-        {
-            // The standard Zig 0.16 client cannot answer
-            // CertificateRequest, so identities select the shared vail path.
-            const tls_conn = try tls_client_identity.init(
-                allocator,
-                io,
-                stream,
-                host,
-                tls_options,
-                identity,
-            );
-            stream_owned = false;
-            errdefer tls_conn.deinit();
-            return connectVailStream(
-                allocator,
-                io,
-                stream,
-                tls_conn,
-                connect_options,
-            );
-        }
-        const tls_conn = try http1_runtime.TlsClientConnection.init(
+        return connectTlsStream(
             allocator,
             io,
             stream,
             host,
+            port,
+            options,
             tls_options,
         );
-        stream_owned = false;
-        errdefer tls_conn.deinit();
-        return connectStream(allocator, io, stream, tls_conn, connect_options);
     }
 
     /// Connect to a resolved address while verifying TLS against a separate
@@ -1119,12 +1089,35 @@ pub const Client = struct {
             address,
             options.connect_timeout,
         );
+        return connectTlsStream(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            address.getPort(),
+            options,
+            tls_options,
+        );
+    }
+
+    /// Own `stream` from entry and close it on every pre-connection failure.
+    /// Both hostname and pre-resolved-address APIs use this path so standard
+    /// TLS, vail TLS, Host synthesis, and socket policy cannot drift apart.
+    fn connectTlsStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         const default_host = try std.fmt.allocPrint(
             allocator,
             "{s}:{d}",
-            .{ tls_host, address.getPort() },
+            .{ tls_host, port },
         );
         defer allocator.free(default_host);
         var connect_options = options;

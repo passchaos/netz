@@ -1276,49 +1276,26 @@ pub const Client = struct {
         const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
-        if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
-        const tls_connection = try tls_stream.ClientConnection.initVerified(
-            allocator,
-            io,
-            stream,
-            .{
-                .server_name = host,
-                .verify_host = tls_options.verify_host,
-                .ca_bundle = tls_options.ca_bundle,
-                .server_verifier = tls_options.server_verifier,
-                .client_identity = tls_options.client_identity,
-                .alpn_protocols = &.{"h2"},
-                .cipher_suites = tls_options.cipher_suites,
-                .max_server_handshake_size = tls_options.max_server_handshake_size,
-                .handshake_timeout = tls_options.tls_handshake_timeout,
-            },
-        );
-        stream_owned = false;
-        var tls_owned = true;
-        errdefer if (tls_owned) tls_connection.deinit();
-        if (tls_connection.selected_alpn == null or
-            !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
-        {
-            return error.InvalidAlpn;
-        }
         const owned_host = try std.fmt.allocPrint(
             allocator,
             "{s}:{d}",
             .{ host, port },
         );
-        errdefer allocator.free(owned_host);
-        // connectTransport owns the TLS connection on every return path.
-        tls_owned = false;
-        var connection = try connectTransport(
+        var authority_owned = true;
+        errdefer if (authority_owned) allocator.free(owned_host);
+        // connectTlsStream assumes both resources at entry and provides the
+        // only cleanup path after this transfer.
+        stream_owned = false;
+        authority_owned = false;
+        return connectTlsStream(
             allocator,
             io,
             stream,
-            .{ .tls_client = tls_connection },
+            host,
+            owned_host,
             limits,
+            tls_options,
         );
-        connection.default_authority = owned_host;
-        connection.default_scheme = "https";
-        return connection;
     }
 
     /// Connect to an already resolved address while verifying TLS against a
@@ -1339,6 +1316,37 @@ pub const Client = struct {
         const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        const owned_authority = try allocator.dupe(u8, authority);
+        var authority_owned = true;
+        errdefer if (authority_owned) allocator.free(owned_authority);
+        stream_owned = false;
+        authority_owned = false;
+        return connectTlsStream(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            owned_authority,
+            limits,
+            tls_options,
+        );
+    }
+
+    /// Own the TCP stream and authority from entry. Centralizing this state
+    /// transition keeps address- and hostname-based TLS connections aligned
+    /// on NODELAY, ALPN validation, HTTP/2 preface, and error cleanup.
+    fn connectTlsStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        owned_authority: []u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+    ) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        errdefer allocator.free(owned_authority);
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
         const tls_connection = try tls_stream.ClientConnection.initVerified(
             allocator,
@@ -1364,8 +1372,7 @@ pub const Client = struct {
         {
             return error.InvalidAlpn;
         }
-        const owned_authority = try allocator.dupe(u8, authority);
-        errdefer allocator.free(owned_authority);
+        // connectTransport owns the TLS connection on every return path.
         tls_owned = false;
         var connection = try connectTransport(
             allocator,
