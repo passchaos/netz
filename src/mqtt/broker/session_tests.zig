@@ -676,6 +676,21 @@ test "broker caps persistent Session lifetime across MQTT versions" {
         try std.testing.expect(
             broker.stats().expired_sessions > expired_before,
         );
+        try broker.publishSystemStats();
+        var metric_storage: [1]mqtt.retained.Match = undefined;
+        const expired_metric = try broker.retained.matchInto(
+            "$SYS/broker/clients/expired",
+            std.Io.Clock.awake.now(io),
+            &metric_storage,
+        );
+        try std.testing.expectEqual(@as(usize, 1), expired_metric.len);
+        var expected_metric: [32]u8 = undefined;
+        const expected = try std.fmt.bufPrint(
+            &expected_metric,
+            "{d}",
+            .{broker.stats().expired_sessions},
+        );
+        try std.testing.expectEqualStrings(expected, expired_metric[0].payload);
         try resumed.disconnect(0);
         try waitForPeerClose(&resumed);
     }
