@@ -5553,6 +5553,38 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Complete QUIC/TLS on a caller-owned endpoint while consuming only the
+    /// supplied datagram source. This is the handshake counterpart to
+    /// `initEstablished`: an endpoint-wide receive owner can route the
+    /// client's long-header packets into a bounded inbox, then register the
+    /// returned 1-RTT connection without transferring endpoint ownership.
+    pub fn connectFrom(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+    ) Error!HandshakeClient {
+        try validateBlockedStreamLimit(
+            options.session.local_settings,
+            options.session.max_concurrent_request_streams,
+        );
+        var established = try quic.handshake.connectFrom(
+            endpoint,
+            source,
+            server,
+            options.handshake,
+        );
+        errdefer established.deinit();
+        return initEstablishedWithEndpointOwnership(
+            endpoint.allocator,
+            endpoint,
+            false,
+            server,
+            established,
+            options.session,
+        );
+    }
+
     /// Build an HTTP/3 client around an established connection on a
     /// caller-owned endpoint. This is the client-side composition point for
     /// endpoint-wide dispatchers that multiplex several connections over one

@@ -3,6 +3,229 @@ const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const quic = @import("../../quic/mod.zig");
 
+test "HTTP/3 client handshakes through one endpoint socket owner" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits = runtime.Limits{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 16,
+    } };
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = "h3-source-server",
+            .random = [_]u8{0xc1} ** 32,
+            .x25519_secret_key = [_]u8{0xc2} ** 32,
+            .handshake_recovery = .{
+                .initial_pto_ms = 20,
+                .max_pto_ms = 40,
+                .max_duration_ms = 2_000,
+            },
+        } },
+    );
+    defer server.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits.quic,
+    );
+    defer client_endpoint.deinit();
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{"h3-source-client"},
+        server.address(),
+        64,
+    );
+    defer inbox.deinit();
+
+    const ServerTask = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var session = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer session.deinit();
+            var request = session.receiveRequestWithTimeout(
+                .fromSeconds(2),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit(allocator);
+            if (!std.mem.eql(u8, request.request.path, "/source")) {
+                self.err = error.TestUnexpectedResult;
+                return;
+            }
+            session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "source-response",
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    const ClientTask = struct {
+        endpoint: *quic.runtime.Endpoint,
+        inbox: *quic.handshake_inbox.Inbox,
+        server: std.Io.net.IpAddress,
+        done: std.atomic.Value(bool) = .init(false),
+        client: ?runtime.HandshakeClient = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.client = runtime.HandshakeClient.connectFrom(
+                self.endpoint,
+                self.inbox.datagramSource(),
+                self.server,
+                .{
+                    .handshake = .{
+                        .original_destination_connection_id = "h3-source-dispatch",
+                        .local_connection_id = "h3-source-client",
+                        .server_name = "localhost",
+                        .random = [_]u8{0xc3} ** 32,
+                        .x25519_secret_key = [_]u8{0xc4} ** 32,
+                        .handshake_recovery = .{
+                            .initial_pto_ms = 20,
+                            .max_pto_ms = 40,
+                            .max_duration_ms = 2_000,
+                        },
+                    },
+                    .session = .{ .max_stream_frame_data = 1024 },
+                },
+            ) catch |err| {
+                self.err = err;
+                self.done.store(true, .release);
+                return;
+            };
+            self.done.store(true, .release);
+        }
+    };
+
+    var server_task = ServerTask{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerTask.run,
+        .{&server_task},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var client_task = ClientTask{
+        .endpoint = &client_endpoint,
+        .inbox = &inbox,
+        .server = server.address(),
+    };
+    const client_thread = try std.Thread.spawn(
+        .{},
+        ClientTask.run,
+        .{&client_task},
+    );
+
+    var owner_err: ?anyerror = null;
+    owner: while (!client_task.done.load(.acquire)) {
+        var datagram = client_endpoint.receiveBytesTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(20),
+            },
+        }) catch |err| switch (err) {
+            error.Timeout => continue,
+            else => {
+                owner_err = err;
+                break :owner;
+            },
+        };
+        inbox.push(datagram) catch |err| {
+            switch (err) {
+                // An already-complete handshake can leave retransmitted
+                // long-header packets queued until this owner observes the
+                // worker's completion flag. The dispatcher drops overflow in
+                // this state too; QUIC recovery covers any packet still needed.
+                error.Full => datagram.deinit(allocator),
+                else => {
+                    datagram.deinit(allocator);
+                    owner_err = err;
+                    break :owner;
+                },
+            }
+        };
+    }
+    if (!client_task.done.load(.acquire)) inbox.close();
+    client_thread.join();
+    if (owner_err) |err| return err;
+    if (client_task.err) |err| return err;
+    var client = client_task.client orelse return error.TestUnexpectedResult;
+    defer client.deinit();
+    try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &client_endpoint,
+    );
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &client.established.connection);
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/source",
+        .authority = "localhost",
+    });
+    var status: ?u16 = null;
+    var body: ["source-response".len]u8 = undefined;
+    var body_len: usize = 0;
+    var finished = false;
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    while (!finished) {
+        var event = try dispatcher.receive(&versions);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*routed| {
+                try std.testing.expectEqual(@as(usize, 1), routed.connection_handle);
+                try client.processResponsePacket(&routed.packet);
+                try dispatcher.refreshConnectionTimer(1);
+                while (!finished) {
+                    const value = (try client.pollResponseEvent(
+                        stream_id,
+                    )) orelse break;
+                    var response = value;
+                    defer response.deinit(allocator);
+                    switch (response) {
+                        .head => |head| switch (head) {
+                            .response => |final| status = final.status,
+                            .request => return error.TestUnexpectedResult,
+                        },
+                        .data_available => {
+                            body_len += try client.readResponseData(
+                                stream_id,
+                                body[body_len..],
+                            );
+                        },
+                        .finished => finished = true,
+                        .push_promise, .trailers => return error.TestUnexpectedResult,
+                    }
+                }
+            },
+            .consumed, .timer => {},
+            .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqual(@as(?u16, 200), status);
+    try std.testing.expectEqualStrings("source-response", body[0..body_len]);
+    try std.testing.expect(try dispatcher.unregisterConnection(1));
+    server_thread.join();
+    server_joined = true;
+    if (server_task.err) |err| return err;
+}
+
 test "HTTP/3 sessions consume dispatcher packets without socket races" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
