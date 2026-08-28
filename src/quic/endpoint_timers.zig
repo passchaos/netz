@@ -114,6 +114,25 @@ pub const EndpointTimers = struct {
         return self.entries.items[index];
     }
 
+    /// Snapshot due connection IDs into caller storage. Each connection is
+    /// returned at most once even if servicing its timer immediately rearms
+    /// another already-due deadline. The dispatcher uses this stable snapshot
+    /// to bound one event-loop turn without starving socket receive.
+    pub fn dueConnectionIdsInto(
+        self: *const EndpointTimers,
+        now_ns: u64,
+        output: []u64,
+    ) usize {
+        var due_count: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.timer.deadline_ns > now_ns) continue;
+            if (due_count == output.len) break;
+            output[due_count] = entry.connection_id;
+            due_count += 1;
+        }
+        return due_count;
+    }
+
     /// Service the selected connection's due timer and refresh this endpoint
     /// schedule entry from the connection's new aggregate deadline.
     pub fn serviceConnection(
@@ -365,4 +384,18 @@ test "QUIC endpoint timers service connection and refresh deadline" {
     connection.replacement = null;
     _ = try timers.serviceConnection(7, &connection, 300);
     try std.testing.expect(timers.deadlineForConnection(7) == null);
+}
+
+test "QUIC endpoint timers snapshot bounded due connections once" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    try timers.update(10, .{ .kind = .pto, .deadline_ns = 50 });
+    try timers.update(20, .{ .kind = .ack_delay, .deadline_ns = 30 });
+    try timers.update(30, .{ .kind = .idle_timeout, .deadline_ns = 40 });
+    var storage: [2]u64 = undefined;
+    const due = timers.dueConnectionIdsInto(60, &storage);
+    try std.testing.expectEqual(@as(usize, 2), due);
+    try std.testing.expect(storage[0] != storage[1]);
 }

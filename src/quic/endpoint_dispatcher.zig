@@ -701,6 +701,48 @@ pub const Dispatcher = struct {
         };
     }
 
+    /// Service a bounded snapshot of connections due at `now_ns`. A
+    /// connection that rearms another immediately-due timer is not revisited
+    /// in this batch, preserving a fair opportunity for UDP receive and other
+    /// connections on the next event-loop turn.
+    pub fn serviceDueTimersAt(
+        self: *Dispatcher,
+        now_ns: u64,
+        output: []TimerEvent,
+    ) Error!usize {
+        if (output.len == 0 or self.timers.count() == 0) return 0;
+        var stack_handles: [32]ConnectionHandle = undefined;
+        const handles = if (output.len <= stack_handles.len)
+            stack_handles[0..output.len]
+        else
+            try self.allocator.alloc(ConnectionHandle, output.len);
+        defer if (handles.ptr != stack_handles[0..].ptr) {
+            self.allocator.free(handles);
+        };
+        const due_count = self.timers.dueConnectionIdsInto(
+            now_ns,
+            handles,
+        );
+        var count: usize = 0;
+        for (handles[0..due_count]) |handle| {
+            const entry = self.connections.getPtr(handle) orelse {
+                _ = self.timers.disarmConnection(handle);
+                return error.StaleConnectionRoute;
+            };
+            const serviced = (try self.timers.serviceConnection(
+                handle,
+                entry.connection,
+                now_ns,
+            )) orelse continue;
+            output[count] = .{
+                .connection_handle = handle,
+                .timer = serviced.timer,
+            };
+            count += 1;
+        }
+        return count;
+    }
+
     /// Own the next UDP receive, answer unsupported versions, and either route
     /// an established packet or transfer an unknown-CID datagram to admission.
     /// The caller owns the returned event and must call `Event.deinit`.

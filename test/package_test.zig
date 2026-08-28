@@ -2965,6 +2965,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
+        "serviceDueTimersAt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
         "syncConnectionIds",
     ));
     try std.testing.expect(@hasDecl(

@@ -460,6 +460,10 @@ Its bounded
 adapters retain that single receive owner without busy waiting. Expired idle
 or draining connections now emit a typed `closed` event only after their CID
 routes and stable session storage have been reclaimed. A two-client
+Callers may also service a bounded snapshot of all currently due timers in one
+turn. Every connection appears at most once even if PTO processing rearms an
+already-due deadline, preventing one lossy connection from monopolizing the
+shared endpoint before UDP receive or sibling timer work. A two-client
 real TLS/QUIC test exercises the full admission and promotion path on one UDP
 socket. The owning HTTP/3 endpoint also exposes a bounded `receiveOnce` and a
 cancellable `serveUntil` callback loop for connected, closed, and request

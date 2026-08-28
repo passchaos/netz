@@ -649,6 +649,73 @@ test "QUIC endpoint dispatcher wakes socket receive for transport timers" {
     );
 }
 
+test "QUIC endpoint dispatcher batches each due connection once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd3} ** quic.protection.secret_len,
+    );
+    var first = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-a",
+        .peer_connection_id = "peer-a",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer first.deinit();
+    var second = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-b",
+        .peer_connection_id = "peer-b",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer second.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &first);
+    try dispatcher.registerConnection(2, &second);
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try first.send(&ping);
+    try second.send(&ping);
+    try dispatcher.refreshConnectionTimer(1);
+    try dispatcher.refreshConnectionTimer(2);
+
+    const first_deadline = dispatcher.nextTimerDeadline().?.timer.deadline_ns;
+    var events: [2]dispatcher_mod.TimerEvent = undefined;
+    const count = try dispatcher.serviceDueTimersAt(
+        first_deadline + 10 * std.time.ns_per_s,
+        &events,
+    );
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expect(events[0].connection_handle !=
+        events[1].connection_handle);
+    // PTO servicing rearms recovery, but the snapshot visits each connection
+    // once; immediate retransmission cannot monopolize this batch.
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.pto, events[0].timer.kind);
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.pto, events[1].timer.kind);
+}
+
 test "QUIC endpoint dispatcher negotiates versions before Initial admission" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
