@@ -668,9 +668,7 @@ pub const Client = struct {
         h3: *http3.runtime.HandshakeClient,
         options: ConnectOptions,
     ) Error!ClientConnection {
-        if (!h3.options.local_settings.enable_connect_protocol) {
-            return error.ExtendedConnectDisabled;
-        }
+        h3.options.local_settings.enable_connect_protocol = true;
         return connectEstablished(allocator, h3, options);
     }
 
