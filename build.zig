@@ -106,6 +106,26 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_live_autosave_step.dependOn(&mqtt_live_autosave.step);
 
+    const mqtt_broker_bench = b.addExecutable(.{
+        .name = "netz-bench-mqtt-broker-compare",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/bench_mqtt_broker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_broker_compare = b.addSystemCommand(&.{
+        "tools/compare_mqtt_mosquitto.sh",
+    });
+    mqtt_broker_compare.addArtifactArg(mqtt_vectors_broker);
+    mqtt_broker_compare.addArtifactArg(mqtt_broker_bench);
+    const mqtt_broker_compare_step = b.step(
+        "compare-mqtt-mosquitto",
+        "Run an equal-wire MQTT QoS1 comparison against local Mosquitto",
+    );
+    mqtt_broker_compare_step.dependOn(&mqtt_broker_compare.step);
+
     const mqtt_commit_log = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_commit_log.py",

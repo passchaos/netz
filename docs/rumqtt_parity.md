@@ -207,6 +207,26 @@ zig build bench-mqtt-broker -Doptimize=ReleaseFast -- \
   --warmup-messages=1000 --messages=20000 --payload-bytes=256
 ```
 
+The repository now also packages the complete local Mosquitto comparison as a
+single build step. It builds the audited checkout with non-broker components
+disabled, allocates independent loopback ports, waits for each broker's ready
+marker, runs the same already-built netz client against both processes, checks
+non-zero throughput/delivery/checksum output, and tears down every child:
+
+```sh
+zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
+```
+
+`MOSQUITTO_BIN` may select an existing executable, while `MOSQUITTO_ROOT`
+overrides the default `~/Work/mosquitto` checkout used for an isolated build.
+Source builds require the audited `5cd25465` revision unless
+`MOSQUITTO_COMMIT` explicitly selects another revision;
+`PUBLISHERS`, `SUBSCRIBERS`, `WARMUP_MESSAGES`, `MESSAGES`, `PAYLOAD_BYTES`,
+and `PUBLISHER_WINDOW` select a bounded smoke or longer measurement. Building
+Mosquitto requires its normal development dependencies, including cJSON
+headers; the gate reports that requirement rather than silently using an
+unrelated system broker.
+
 2026-08-18 same-host `ReleaseFast` window-one validation:
 
 ```text
