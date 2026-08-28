@@ -110,6 +110,71 @@ test "WebSocket client bounds an idle HTTP upgrade response" {
     thread.join();
 }
 
+test "WebSocket client connect timeout is independent from upgrade timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A ready listener proves enabling the connect budget does not consume or
+    // replace the separate HTTP Upgrade response budget. The peer accepts the
+    // TCP connection, then deliberately remains silent through that budget.
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connect(
+            allocator,
+            io,
+            listener.socket.address,
+            .{
+                .host = "localhost",
+                .connect_timeout = .fromSeconds(1),
+                .limits = .{
+                    .http1_handshake_timeout = .fromMilliseconds(20),
+                },
+            },
+        ),
+    );
+    thread.join();
+}
+
+test "WebSocket client rejects non-positive connect timeout before dialing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            .{
+                .host = "localhost",
+                .connect_timeout = .zero,
+            },
+        ),
+    );
+}
+
 test "WSS server bounds the decrypted HTTP upgrade request" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

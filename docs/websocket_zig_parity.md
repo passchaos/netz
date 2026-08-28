@@ -9,7 +9,7 @@ superiority.
 
 | Area | netz | `websocket.zig` reference |
 | --- | --- | --- |
-| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, strict duplicate critical-header checks, upgrade-body rejection, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, handler callbacks, a Unix listener, a server-side handshake timeout, worker pools and coordinated shutdown |
+| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, strict duplicate critical-header checks, upgrade-body rejection, optional client DNS/TCP connect budgets, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, handler callbacks, a Unix listener, client TCP/TLS connect timeouts, a server-side handshake timeout, worker pools and coordinated shutdown |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 and HTTP/3 WebSocket (RFC 8441/RFC 9220) | Covered through extended CONNECT client/server adapters. The authenticated HTTP/3 path negotiates CONNECT over QUIC/TLS, preserves masking direction, subprotocol, Origin and permessage-deflate validation, and exchanges data/control/Close frames across split HTTP/3 DATA framing | Neither transport is present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
@@ -90,6 +90,16 @@ does not apply the TCP-only NODELAY option. Both HTTP/1 and WebSocket Unix
 listeners expose the same bounded `serveConcurrent` shape as TCP. An end-to-end test negotiates a
 subprotocol and compression, exchanges text in both directions, and closes over
 a real filesystem Unix socket.
+
+Client `ConnectOptions.connect_timeout` now bounds hostname resolution and all
+TCP address attempts with one awake-clock deadline for WS, WSS, literal-IP,
+hostname, URI and Unix-socket helpers. The connect task is cancellation-aware,
+and a connection that wins concurrently with the timer is explicitly closed if
+it was not selected. This is separate from the TLS and HTTP Upgrade handshake
+budgets, so enabling it cannot silently shorten a configured response-head
+deadline. The audited websocket.zig client also exposes connect timeouts; netz
+now covers the same liveness boundary without its POSIX-only nonblocking/poll
+implementation.
 
 ## Direct frame hot-path evidence
 

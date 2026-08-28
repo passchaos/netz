@@ -14,6 +14,7 @@ const compression_scratch =
     @import("runtime/compression_scratch.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
@@ -985,7 +986,7 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| return err;
+        const stream = try tcp_connect.ip(io, address, options.connect_timeout);
         errdefer stream.close(io);
         return connectStream(allocator, io, stream, null, options);
     }
@@ -1003,7 +1004,7 @@ pub const Client = struct {
             return error.UnsupportedScheme;
         }
         if (options.host.len == 0) return error.InvalidUri;
-        const stream = try address.connect(io);
+        const stream = try tcp_connect.unix(io, address, options.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         var connect_options = options;
@@ -1030,7 +1031,12 @@ pub const Client = struct {
             return error.UnsupportedScheme;
         }
         const host_name = try net.HostName.init(host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(
+            io,
+            host_name,
+            port,
+            options.connect_timeout,
+        );
         errdefer stream.close(io);
         const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         defer allocator.free(default_host);
@@ -1048,7 +1054,12 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!Connection {
         const host_name = try net.HostName.init(host);
-        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        const stream = try tcp_connect.host(
+            io,
+            host_name,
+            port,
+            options.connect_timeout,
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
@@ -1126,7 +1137,19 @@ pub const Client = struct {
         connect_options.target = target;
         if (connect_options.host.len == 0) connect_options.host = endpoint.authority;
 
-        const stream = try endpoint.connect(io);
+        const stream = switch (endpoint.target) {
+            .host => |host| try tcp_connect.host(
+                io,
+                host,
+                endpoint.port,
+                options.connect_timeout,
+            ),
+            .ip => |address| try tcp_connect.ip(
+                io,
+                address,
+                options.connect_timeout,
+            ),
+        };
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (is_wss) {
@@ -1372,6 +1395,9 @@ pub const ConnectOptions = struct {
     /// Set to zero to attempt every data message or maxInt to receive-only.
     compression_threshold: usize = default_compression_threshold,
     tcp_nodelay: bool = true,
+    /// Absolute budget for DNS resolution plus all TCP connection attempts.
+    /// TLS and HTTP Upgrade retain their separate handshake policies.
+    connect_timeout: ?std.Io.Duration = null,
     limits: Limits = .{},
     /// Backward-compatible mTLS shorthand. `vail_tls` takes precedence when
     /// both are supplied.
