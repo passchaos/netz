@@ -4,6 +4,7 @@ const priority_field = @import("../internal/priority.zig");
 const huffman_codec = @import("../internal/hpack_huffman.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const client_pool = @import("client_pool.zig");
 pub const connection_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 pub const Error = wire.Error || error{
@@ -3738,5 +3739,6 @@ test "HTTP/2 HPACK accepts legal size updates and rejects bad dynamic use" {
 }
 
 test {
+    _ = @import("runtime/client_pool_tests.zig");
     _ = runtime;
 }

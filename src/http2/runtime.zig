@@ -1878,6 +1878,25 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Whether an exclusive client lease can safely return this connection to
+    /// an idle pool. GOAWAY, live streams, queued application frames, or push
+    /// mode make reuse ambiguous, so the pool closes those connections rather
+    /// than exposing state from one borrower to the next.
+    pub fn isReusable(self: *const Connection) bool {
+        return self.role == .client and
+            self.peer_goaway_last_stream_id == null and
+            self.local_goaway_last_stream_id == null and
+            self.active_local_streams.items.len == 0 and
+            self.active_peer_streams.items.len == 0 and
+            self.pending_requests.items.len == self.pending_request_head and
+            self.pending_application_frames.items.len ==
+                self.pending_application_frame_head and
+            self.pending_application_overflow == null and
+            self.borrowed_pending_frame == null and
+            self.response_semantics.items.len == 0 and
+            !self.limits.enable_push;
+    }
+
     fn transportForIo(self: *Connection) RuntimeTransport {
         return self.transport orelse tcpTransport(self.io, self.stream);
     }
