@@ -12,6 +12,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const original_dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
     const client_cid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
     const server_cid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const request_text = "hello over h3 hello over h3 hello over h3 hello over h3";
     const limits: http3.runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
@@ -46,6 +47,8 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             var connection = try self.server.accept(.{
                 .protocols = &.{"chat"},
                 .allowed_origins = &.{"https://example.test"},
+                .enable_permessage_deflate = true,
+                .compression_threshold = 1,
             });
             defer connection.deinit();
             try std.testing.expectEqualStrings(
@@ -56,11 +59,15 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 "h3",
                 connection.negotiatedAlpn(),
             );
+            try std.testing.expect(connection.permessage_deflate);
 
-            var text = try connection.receiveMessage();
+            var text = try connection.receiveMessageWithTimeout(
+                .fromSeconds(5),
+            );
             defer text.deinit(allocator);
             try std.testing.expectEqual(websocket.Opcode.text, text.opcode);
-            try std.testing.expectEqualStrings("hello over h3", text.payload);
+            try std.testing.expectEqualStrings(request_text, text.payload);
+            try std.testing.expect(text.was_compressed);
             try connection.sendText("hello client");
 
             var ping = try connection.receiveFrameWithTimeout(
@@ -107,13 +114,19 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             .path = "/chat",
             .origin = "https://example.test",
             .protocols = &.{"chat"},
+            .enable_permessage_deflate = true,
+            .compression_threshold = 1,
         },
     );
     defer client.deinit();
     try std.testing.expectEqualStrings("chat", client.selectedProtocol().?);
     try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
+    try std.testing.expect(client.permessage_deflate);
 
-    try client.sendFragmented(.text, &.{ "hello ", "over h3" });
+    try client.sendFragmented(.text, &.{
+        request_text[0..20],
+        request_text[20..],
+    });
     var reply = try client.receiveFrameWithTimeout(.fromSeconds(5));
     defer reply.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);

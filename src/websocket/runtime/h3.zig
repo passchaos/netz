@@ -1,13 +1,14 @@
 //! RFC 9220 WebSocket over an authenticated HTTP/3 Extended CONNECT stream.
 //!
 //! WebSocket bytes are carried in HTTP/3 DATA frames while QUIC continues to
-//! provide loss recovery and flow control. Complete frames and fragmented
-//! uncompressed messages share the RFC 6455 codec; permessage-deflate remains
-//! a follow-up for this transport.
+//! provide loss recovery and flow control. Complete and fragmented messages
+//! share the RFC 6455 codec and no-context-takeover permessage-deflate engine.
 
 const std = @import("std");
 const websocket = @import("../mod.zig");
 const common = @import("common.zig");
+const compression_scratch = @import("compression_scratch.zig");
+const origin_policy = @import("origin_policy.zig");
 const http3 = @import("../../http3/mod.zig");
 
 pub const Error = websocket.Error || http3.runtime.Error || error{
@@ -26,6 +27,8 @@ pub const ConnectOptions = struct {
     protocols: []const []const u8 = &.{},
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
+    enable_permessage_deflate: bool = false,
+    compression_threshold: usize = 32,
     limits: common.Limits = .{},
 };
 
@@ -33,6 +36,8 @@ pub const AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http3.Qpack.HeaderField = &.{},
+    enable_permessage_deflate: bool = false,
+    compression_threshold: usize = 32,
     limits: common.Limits = .{},
 };
 
@@ -52,6 +57,11 @@ pub fn Connection(comptime role: common.Role) type {
         limits: common.Limits,
         selected_protocol: ?[]u8 = null,
         inbuf: std.ArrayList(u8) = .empty,
+        message_assembler: ?websocket.MessageAssembler = null,
+        permessage_deflate: bool = false,
+        compression_threshold: usize = 32,
+        compression_send_max_window_bits: u8 = 15,
+        compression_send: compression_scratch.SendScratch = .{},
         close_sent: bool = false,
         close_received: bool = false,
         receive_finished: bool = false,
@@ -62,6 +72,8 @@ pub fn Connection(comptime role: common.Role) type {
             h3: @FieldType(Self, "h3"),
             limits: common.Limits,
             selected_protocol: ?[]u8,
+            negotiated_extension: websocket.ExtensionNegotiation,
+            compression_threshold: usize,
         ) Self {
             return .{
                 .allocator = allocator,
@@ -69,6 +81,12 @@ pub fn Connection(comptime role: common.Role) type {
                 .h3 = h3,
                 .limits = limits,
                 .selected_protocol = selected_protocol,
+                .permessage_deflate = negotiated_extension.permessage_deflate,
+                .compression_threshold = compression_threshold,
+                .compression_send_max_window_bits = switch (role) {
+                    .client => negotiated_extension.client_max_window_bits orelse 15,
+                    .server => negotiated_extension.server_max_window_bits orelse 15,
+                },
             };
         }
 
@@ -76,7 +94,9 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.selected_protocol) |protocol| {
                 self.allocator.free(protocol);
             }
+            if (self.message_assembler) |*assembler| assembler.deinit();
             self.inbuf.deinit(self.allocator);
+            self.compression_send.deinit(self.allocator);
             self.h3.deinit();
             self.* = undefined;
         }
@@ -118,6 +138,18 @@ pub fn Connection(comptime role: common.Role) type {
             try self.h3.initiateKeyUpdate();
         }
 
+        pub fn localKeyUpdateCount(self: *const Self) u64 {
+            return self.h3.localKeyUpdateCount();
+        }
+
+        pub fn peerKeyUpdateCount(self: *const Self) u64 {
+            return self.h3.peerKeyUpdateCount();
+        }
+
+        pub fn keyUpdateAwaitingAck(self: *const Self) bool {
+            return self.h3.keyUpdateAwaitingAck();
+        }
+
         pub fn sendText(self: *Self, text: []const u8) Error!void {
             if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
             try self.sendDataFrame(.text, text);
@@ -127,8 +159,10 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendDataFrame(.binary, payload);
         }
 
-        /// Send one uncompressed WebSocket message as caller-selected RFC
-        /// 6455 fragments while keeping the HTTP/3 request stream open.
+        /// Send one WebSocket message as caller-selected RFC 6455 fragments
+        /// while keeping the HTTP/3 request stream open. When compression is
+        /// negotiated, the complete logical message is compressed before its
+        /// wire framing is selected.
         pub fn sendFragmented(
             self: *Self,
             opcode: websocket.Opcode,
@@ -152,15 +186,33 @@ pub fn Connection(comptime role: common.Role) type {
             if (total > self.limits.max_message_bytes) {
                 return error.MessageTooLarge;
             }
-            if (opcode == .text) {
-                var joined: std.ArrayList(u8) = .empty;
-                defer joined.deinit(self.allocator);
+            var joined: std.ArrayList(u8) = .empty;
+            defer joined.deinit(self.allocator);
+            const needs_join = opcode == .text or
+                (self.permessage_deflate and
+                    total >= self.compression_threshold);
+            if (needs_join) {
                 try joined.ensureTotalCapacity(self.allocator, total);
                 for (fragments) |fragment| {
                     joined.appendSliceAssumeCapacity(fragment);
                 }
-                if (!std.unicode.utf8ValidateSlice(joined.items)) {
-                    return error.InvalidUtf8;
+            }
+            if (opcode == .text and !std.unicode.utf8ValidateSlice(joined.items)) {
+                return error.InvalidUtf8;
+            }
+            if (self.permessage_deflate and
+                total >= self.compression_threshold)
+            {
+                const compressed = try self.compressMessage(joined.items);
+                if (compressed.len < total) {
+                    try self.writeFrameExtended(
+                        opcode,
+                        compressed,
+                        true,
+                        false,
+                        true,
+                    );
+                    return;
                 }
             }
             for (fragments, 0..) |fragment, index| {
@@ -194,27 +246,70 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendControlFrame(.close, payload);
         }
 
-        /// Receive one complete uncompressed message, automatically replying
-        /// to Ping and Close control frames. Fragmented messages are assembled
-        /// with the connection's configured aggregate bound.
+        /// Receive one complete message, automatically replying to Ping and
+        /// Close control frames. Fragmented messages are assembled with the
+        /// configured aggregate bound and negotiated compression is decoded.
         pub fn receiveMessage(self: *Self) Error!common.OwnedMessage {
-            var assembler = websocket.MessageAssembler.initLimited(
-                self.allocator,
-                self.limits.max_message_bytes,
-            );
-            defer assembler.deinit();
+            return self.receiveMessageInternal(null);
+        }
+
+        pub fn receiveMessageWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) Error!common.OwnedMessage {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveMessageInternal(.fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        pub fn receiveMessageWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!common.OwnedMessage {
+            return self.receiveMessageInternal(deadline);
+        }
+
+        fn receiveMessageInternal(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!common.OwnedMessage {
+            if (self.message_assembler == null) {
+                self.message_assembler = websocket.MessageAssembler.initLimited(
+                    self.allocator,
+                    self.limits.max_message_bytes,
+                );
+            }
             while (true) {
-                var frame = try self.receiveFrame();
+                var frame = try self.receiveFrameInternal(deadline);
                 defer frame.deinit(self.allocator);
                 switch (frame.header.opcode) {
                     .ping, .pong => continue,
                     .close => return error.ConnectionClosed,
                     else => {
-                        const assembled = (try assembler.feed(frame)) orelse
+                        const assembled = (try self.message_assembler.?.feed(frame)) orelse
                             continue;
+                        self.message_assembler.?.deinit();
+                        self.message_assembler = null;
                         if (assembled.compressed) {
-                            self.allocator.free(assembled.payload);
-                            return error.UnexpectedRsv;
+                            defer self.allocator.free(assembled.payload);
+                            const payload = try websocket.decompressMessage(
+                                self.allocator,
+                                assembled.payload,
+                                self.limits.max_message_bytes,
+                            );
+                            errdefer self.allocator.free(payload);
+                            if (assembled.opcode == .text and
+                                !std.unicode.utf8ValidateSlice(payload))
+                            {
+                                return error.InvalidUtf8;
+                            }
+                            return .{
+                                .opcode = assembled.opcode,
+                                .payload = payload,
+                                .was_compressed = true,
+                            };
                         }
                         return .{
                             .opcode = assembled.opcode,
@@ -281,8 +376,16 @@ pub fn Connection(comptime role: common.Role) type {
             ) catch return error.PayloadTooLarge;
             try self.ensureBuffered(total_len, deadline);
             const options: websocket.ParseFrameOptions = switch (role) {
-                .client => .{ .expect_mask = .unmasked },
-                .server => .{ .expect_mask = .masked },
+                .client => .{
+                    .expect_mask = .unmasked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+                .server => .{
+                    .expect_mask = .masked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
             };
             const frame = try websocket.parseFrameOptions(
                 self.allocator,
@@ -318,6 +421,21 @@ pub fn Connection(comptime role: common.Role) type {
             {
                 return error.MessageTooLarge;
             }
+            if (self.permessage_deflate and
+                payload.len >= self.compression_threshold)
+            {
+                const compressed = try self.compressMessage(payload);
+                if (compressed.len < payload.len) {
+                    try self.writeFrameExtended(
+                        opcode,
+                        compressed,
+                        true,
+                        false,
+                        true,
+                    );
+                    return;
+                }
+            }
             try self.writeFrame(opcode, payload, true, false);
         }
 
@@ -338,6 +456,23 @@ pub fn Connection(comptime role: common.Role) type {
             frame_fin: bool,
             fin_stream: bool,
         ) Error!void {
+            return self.writeFrameExtended(
+                opcode,
+                payload,
+                frame_fin,
+                fin_stream,
+                false,
+            );
+        }
+
+        fn writeFrameExtended(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            frame_fin: bool,
+            fin_stream: bool,
+            rsv1: bool,
+        ) Error!void {
             var mask_key: ?[4]u8 = null;
             if (role == .client) {
                 var key: [4]u8 = undefined;
@@ -349,7 +484,7 @@ pub fn Connection(comptime role: common.Role) type {
                 &header_storage,
                 opcode,
                 payload,
-                .{ .fin = frame_fin, .mask_key = mask_key },
+                .{ .fin = frame_fin, .mask_key = mask_key, .rsv1 = rsv1 },
             );
             if (mask_key) |mask| {
                 var scratch: [16 * 1024]u8 = undefined;
@@ -381,6 +516,16 @@ pub fn Connection(comptime role: common.Role) type {
             } else {
                 try self.writeParts(&.{ header, payload }, fin_stream);
             }
+        }
+
+        fn compressMessage(self: *Self, payload: []const u8) Error![]const u8 {
+            try self.compression_send.prepare(self.allocator, payload.len);
+            return websocket.compressMessageVortIntoWindowWithEncoder(
+                &self.compression_send.encoder.?,
+                &self.compression_send.payload,
+                payload,
+                self.compression_send_max_window_bits,
+            );
         }
 
         fn writeBytes(
@@ -588,6 +733,12 @@ fn connectEstablished(
     if (options.origin) |origin| {
         try fields.append(allocator, .{ .name = "origin", .value = origin });
     }
+    if (options.enable_permessage_deflate) {
+        try fields.append(allocator, .{
+            .name = "sec-websocket-extensions",
+            .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+        });
+    }
     try fields.appendSlice(allocator, options.extra_headers);
     const stream_id = try h3.startRequest(.{
         .method = "CONNECT",
@@ -610,6 +761,16 @@ fn connectEstablished(
         options.protocols,
     );
     errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+    const negotiated_extension = try websocket.ExtensionNegotiation
+        .validateResponse(try optionalHeader(
+        response.headers,
+        "sec-websocket-extensions",
+    ));
+    if (negotiated_extension.permessage_deflate and
+        !options.enable_permessage_deflate)
+    {
+        return error.InvalidExtension;
+    }
     const owned_h3 = h3.*;
     h3.* = undefined;
     return .init(
@@ -618,6 +779,8 @@ fn connectEstablished(
         owned_h3,
         options.limits,
         selected_protocol,
+        negotiated_extension,
+        options.compression_threshold,
     );
 }
 
@@ -687,6 +850,16 @@ fn acceptServerSession(
         options.protocols,
     );
     errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+    const selected_extension = try acceptExtensions(
+        allocator,
+        request.head.headers,
+        options.enable_permessage_deflate,
+    );
+    defer if (selected_extension) |extension| allocator.free(extension);
+    const negotiated_extension = if (selected_extension) |extension|
+        try websocket.ExtensionNegotiation.validateResponse(extension)
+    else
+        websocket.ExtensionNegotiation{};
     try validateServerExtraHeaders(options.extra_headers);
     var headers: std.ArrayList(http3.Qpack.HeaderField) = .empty;
     defer headers.deinit(allocator);
@@ -694,6 +867,12 @@ fn acceptServerSession(
         try headers.append(allocator, .{
             .name = "sec-websocket-protocol",
             .value = protocol,
+        });
+    }
+    if (selected_extension) |extension| {
+        try headers.append(allocator, .{
+            .name = "sec-websocket-extensions",
+            .value = extension,
         });
     }
     try headers.appendSlice(allocator, options.extra_headers);
@@ -715,6 +894,8 @@ fn acceptServerSession(
         owned_h3,
         options.limits,
         selected_protocol,
+        negotiated_extension,
+        options.compression_threshold,
     );
 }
 
@@ -796,9 +977,6 @@ fn validateServerHandshake(
     if (try optionalHeader(headers, "sec-websocket-version")) |_| {
         return error.InvalidHandshake;
     }
-    if (try optionalHeader(headers, "sec-websocket-extensions")) |_| {
-        return error.InvalidExtension;
-    }
     if (try optionalHeader(headers, "sec-websocket-protocol")) |selected| {
         const protocol = std.mem.trim(u8, selected, " \t");
         if (!websocket.validSubprotocolToken(protocol)) {
@@ -858,17 +1036,32 @@ fn selectSubprotocol(
     return null;
 }
 
+fn acceptExtensions(
+    allocator: std.mem.Allocator,
+    headers: []const http3.Qpack.HeaderField,
+    enabled: bool,
+) Error!?[]u8 {
+    if (!enabled) return null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(
+            header.name,
+            "sec-websocket-extensions",
+        )) continue;
+        if (try websocket.ExtensionNegotiation.accept(
+            allocator,
+            header.value,
+            true,
+        )) |accepted| return accepted;
+    }
+    return null;
+}
+
 fn validateOrigin(
     headers: []const http3.Qpack.HeaderField,
     allowed: []const []const u8,
 ) Error!void {
     const origin = try optionalHeader(headers, "origin");
-    if (allowed.len == 0) return;
-    const value = origin orelse return error.InvalidOrigin;
-    for (allowed) |candidate| {
-        if (std.mem.eql(u8, candidate, value)) return;
-    }
-    return error.InvalidOrigin;
+    return origin_policy.validateValue(origin, allowed);
 }
 
 fn validateClientExtraHeaders(

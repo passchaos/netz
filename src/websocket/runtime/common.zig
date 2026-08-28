@@ -22,6 +22,7 @@ pub const Role = enum {
 pub const OwnedMessage = struct {
     opcode: @import("../mod.zig").Opcode,
     payload: []u8,
+    was_compressed: bool = false,
 
     pub fn deinit(self: *OwnedMessage, allocator: std.mem.Allocator) void {
         allocator.free(self.payload);
