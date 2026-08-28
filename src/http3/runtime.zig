@@ -26672,6 +26672,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 
 test {
     _ = handshake_client_pool;
+    _ = @import("runtime/handshake_client_pool_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");

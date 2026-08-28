@@ -356,7 +356,11 @@ default connector securely
 generates fresh CIDs while retaining caller TLS/resumption policy. A
 real TLS/QUIC regression issues two differently cased URI requests through one
 accepted connection and verifies the second lease is reused; a companion case
-marks GOAWAY before release and proves the connection is not cached. Each
+marks GOAWAY before release and proves the connection is not cached. A
+two-server TLS/QUIC regression also constrains the total to one connection,
+leaves origin A idle, then requests origin B and proves that the idle A client
+is closed and its slot transferred before B is dialed; a second B request
+reuses that replacement while the pool remains at exactly one connection. Each
 pooled connection currently owns its UDP endpoint. Sharing one endpoint across
 several pooled origins remains a separate dispatcher integration task rather
 than allowing competing socket readers.
