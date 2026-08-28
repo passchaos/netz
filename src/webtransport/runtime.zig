@@ -1081,6 +1081,13 @@ pub const EndpointServer = struct {
         quic.endpoint_dispatcher.ConnectionHandle,
         *EndpointAcceptedSession,
     ) = .empty,
+    /// Handle that most recently produced an application event. The next
+    /// poll starts after it in the hash table's current iteration order, so a
+    /// continuously ready stream or DATAGRAM cannot starve another accepted
+    /// session. Handles remain stable across rehashes; if this one is removed,
+    /// the poller simply falls back to a complete scan.
+    last_session_event_handle: ?quic.endpoint_dispatcher.ConnectionHandle =
+        null,
     rejected: std.AutoHashMapUnmanaged(
         quic.endpoint_dispatcher.ConnectionHandle,
         void,
@@ -1257,6 +1264,9 @@ pub const EndpointServer = struct {
             self.allocator.destroy(removed);
         }
         _ = self.rejected.remove(handle);
+        if (self.last_session_event_handle == handle) {
+            self.last_session_event_handle = null;
+        }
         return self.h3.removeConnection(handle);
     }
 
@@ -1361,15 +1371,7 @@ pub const EndpointServer = struct {
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointServerEvent {
         if (stream_buffer.len == 0) return error.BufferTooShort;
-        var sessions = self.sessions.iterator();
-        while (sessions.next()) |entry| {
-            if (try pollEndpointSession(entry.value_ptr.*, stream_buffer)) |event| {
-                return .{ .session_event = .{
-                    .handle = entry.key_ptr.*,
-                    .event = event,
-                } };
-            }
-        }
+        if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
 
         const event_value = (try self.h3.receiveTransportOnce(
             supported_versions,
@@ -1391,6 +1393,9 @@ pub const EndpointServer = struct {
                     self.allocator.destroy(removed);
                 }
                 _ = self.rejected.remove(handle);
+                if (self.last_session_event_handle == handle) {
+                    self.last_session_event_handle = null;
+                }
                 return .{ .closed = .{
                     .handle = handle,
                     .timer = closed.timer,
@@ -1462,6 +1467,148 @@ pub const EndpointServer = struct {
             },
         }
     }
+
+    fn pollAcceptedSessions(
+        self: *EndpointServer,
+        stream_buffer: []u8,
+    ) Error!?EndpointServerEvent {
+        return self.pollAcceptedSessionsWith(
+            stream_buffer,
+            {},
+            pollEndpointSessionEntry,
+        );
+    }
+
+    fn pollAcceptedSessionsWith(
+        self: *EndpointServer,
+        stream_buffer: []u8,
+        context: anytype,
+        comptime poll: anytype,
+    ) Error!?EndpointServerEvent {
+        if (self.sessions.count() == 0) {
+            self.last_session_event_handle = null;
+            return null;
+        }
+        const cursor = self.last_session_event_handle orelse {
+            var all = self.sessions.iterator();
+            while (all.next()) |entry| {
+                if (try self.pollAcceptedEntryWith(
+                    entry.key_ptr.*,
+                    entry.value_ptr.*,
+                    stream_buffer,
+                    context,
+                    poll,
+                )) |event| {
+                    return event;
+                }
+            }
+            return null;
+        };
+
+        // First inspect entries after the last producer. Hash-map rehashing is
+        // harmless because the cursor is a stable connection handle rather
+        // than a bucket index. If it disappeared, the wrap pass below scans
+        // every current entry.
+        var found_cursor = false;
+        var after = self.sessions.iterator();
+        while (after.next()) |entry| {
+            if (!found_cursor) {
+                found_cursor = entry.key_ptr.* == cursor;
+                continue;
+            }
+            if (try self.pollAcceptedEntryWith(
+                entry.key_ptr.*,
+                entry.value_ptr.*,
+                stream_buffer,
+                context,
+                poll,
+            )) |event| {
+                return event;
+            }
+        }
+
+        var wrapped = self.sessions.iterator();
+        while (wrapped.next()) |entry| {
+            if (try self.pollAcceptedEntryWith(
+                entry.key_ptr.*,
+                entry.value_ptr.*,
+                stream_buffer,
+                context,
+                poll,
+            )) |event| {
+                return event;
+            }
+            if (found_cursor and entry.key_ptr.* == cursor) break;
+        }
+        return null;
+    }
+
+    fn pollAcceptedEntryWith(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        accepted: *EndpointAcceptedSession,
+        stream_buffer: []u8,
+        context: anytype,
+        comptime poll: anytype,
+    ) Error!?EndpointServerEvent {
+        const event = (try poll(
+            context,
+            handle,
+            accepted,
+            stream_buffer,
+        )) orelse return null;
+        self.last_session_event_handle = handle;
+        return .{ .session_event = .{
+            .handle = handle,
+            .event = event,
+        } };
+    }
+
+    fn pollEndpointSessionEntry(
+        _: void,
+        _: quic.endpoint_dispatcher.ConnectionHandle,
+        accepted: *EndpointAcceptedSession,
+        stream_buffer: []u8,
+    ) Error!?EndpointSessionEvent {
+        return pollEndpointSession(accepted, stream_buffer);
+    }
+
+    pub const testing = struct {
+        const ReadyProbe = struct {
+            ready: []const quic.endpoint_dispatcher.ConnectionHandle,
+
+            fn poll(
+                self: *const ReadyProbe,
+                handle: quic.endpoint_dispatcher.ConnectionHandle,
+                _: *EndpointAcceptedSession,
+                _: []u8,
+            ) Error!?EndpointSessionEvent {
+                if (std.mem.indexOfScalar(
+                    quic.endpoint_dispatcher.ConnectionHandle,
+                    self.ready,
+                    handle,
+                ) == null) return null;
+                return .{ .session = .draining };
+            }
+        };
+
+        /// Apply the production scheduler to synthetic readiness. This keeps
+        /// starvation tests deterministic without constructing QUIC traffic
+        /// merely to seed already-accepted session queues.
+        pub fn pollReadySessionHandle(
+            server: *EndpointServer,
+            ready: []const quic.endpoint_dispatcher.ConnectionHandle,
+        ) Error!?quic.endpoint_dispatcher.ConnectionHandle {
+            var probe = ReadyProbe{ .ready = ready };
+            var scratch: [1]u8 = undefined;
+            const event = (try server.pollAcceptedSessionsWith(
+                &scratch,
+                &probe,
+                ReadyProbe.poll,
+            )) orelse return null;
+            return event.session_event.handle;
+        }
+    };
 
     fn pollEndpointSession(
         target: *EndpointAcceptedSession,

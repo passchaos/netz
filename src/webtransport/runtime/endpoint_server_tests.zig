@@ -18,6 +18,91 @@ test "WebTransport endpoint server exposes stable session API" {
     ));
 }
 
+test "WebTransport endpoint server rotates ready sessions fairly" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "wt-fair-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    // The scheduler only passes these stable addresses to the synthetic
+    // readiness callback. Clearing the map before EndpointServer.deinit keeps
+    // the intentionally uninitialized protocol objects out of ownership code.
+    var accepted_storage: [3]runtime.EndpointAcceptedSession = undefined;
+    defer endpoint.sessions.clearRetainingCapacity();
+    const handles = [_]quic.endpoint_dispatcher.ConnectionHandle{ 11, 22, 33 };
+    for (handles, 0..) |handle, index| {
+        try endpoint.sessions.put(
+            allocator,
+            handle,
+            &accepted_storage[index],
+        );
+    }
+
+    var order: [handles.len]quic.endpoint_dispatcher.ConnectionHandle =
+        undefined;
+    for (&order) |*handle| {
+        handle.* = (try runtime.EndpointServer.testing.pollReadySessionHandle(
+            &endpoint,
+            &handles,
+        )) orelse return error.TestUnexpectedResult;
+    }
+    for (order, 0..) |handle, index| {
+        for (order[0..index]) |earlier| {
+            try std.testing.expect(handle != earlier);
+        }
+    }
+    try std.testing.expectEqual(
+        order[0],
+        (try runtime.EndpointServer.testing.pollReadySessionHandle(
+            &endpoint,
+            &handles,
+        )).?,
+    );
+
+    // Skipping idle entries must still advance from the actual producer.
+    const only_middle = [_]quic.endpoint_dispatcher.ConnectionHandle{
+        order[1],
+    };
+    try std.testing.expectEqual(
+        order[1],
+        (try runtime.EndpointServer.testing.pollReadySessionHandle(
+            &endpoint,
+            &only_middle,
+        )).?,
+    );
+    try std.testing.expectEqual(
+        order[2],
+        (try runtime.EndpointServer.testing.pollReadySessionHandle(
+            &endpoint,
+            &handles,
+        )).?,
+    );
+
+    // A cursor invalidated by removal falls back to a complete scan rather
+    // than suppressing ready sessions until another insertion reshuffles the
+    // hash table.
+    const stale = order[2];
+    try std.testing.expect(endpoint.sessions.remove(stale));
+    endpoint.last_session_event_handle = stale;
+    const after_removal =
+        (try runtime.EndpointServer.testing.pollReadySessionHandle(
+            &endpoint,
+            &handles,
+        )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(after_removal != stale);
+}
+
 test "WebTransport endpoint server owns concurrent real sessions" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

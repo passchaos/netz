@@ -240,7 +240,16 @@ the sole UDP owner. `webtransport.runtime.EndpointServer` now composes that
 transport loop without moving a registered QUIC connection: it owns pending
 CONNECT policy state and stable accepted-session objects, supports accept/reject
 transitions, dispatches associated streams, DATAGRAMs and Capsules, and removes
-protocol state before unregistering the HTTP/3 connection. A two-client real
+protocol state before unregistering the HTTP/3 connection. Ready-session
+polling resumes after the last session that produced an event, so a continuously
+ready stream, DATAGRAM queue, or Capsule source cannot starve another accepted
+connection. The cursor is a stable connection handle rather than a hash-table
+bucket and safely falls back to a complete scan after removal or rehash; a
+deterministic three-session regression covers rotation, idle-session skipping,
+wraparound, and stale-cursor recovery. This matches the fairness property in
+the audited quicz endpoint registry while providing it at the WebTransport
+application-event boundary rather than only outbound QUIC datagram polling.
+A two-client real
 TLS/QUIC test accepts both sessions, checks stable pointers, isolated
 bidirectional DATAGRAM and stream echoes, exact CLOSE metadata, then verifies
 route cleanup. Endpoint timer expiry also propagates as a typed `closed` event
