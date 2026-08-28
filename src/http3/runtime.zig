@@ -6659,6 +6659,58 @@ pub const HandshakeClient = struct {
         try self.flushResponsePacketFeedback();
     }
 
+    /// Wait for the peer's mandatory HTTP/3 SETTINGS while preserving any
+    /// concurrently received request-stream bytes for their normal readers.
+    /// Extended CONNECT adapters use this before depending on advertised
+    /// protocol capabilities.
+    pub fn receivePeerSettings(self: *HandshakeClient) Error!http3.Settings {
+        return self.receivePeerSettingsInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receivePeerSettingsWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!http3.Settings {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePeerSettingsInternal(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receivePeerSettingsWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!http3.Settings {
+        return self.receivePeerSettingsInternal(deadline);
+    }
+
+    fn receivePeerSettingsInternal(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!http3.Settings {
+        while (!self.control.settings.received) {
+            try receiveConnectionResponsePacketUntil(
+                &self.established.connection,
+                &self.receive_packets,
+                &self.control,
+                &self.qpack_decode,
+                &self.qpack_encode,
+                &self.response_streams,
+                &self.streaming_responses,
+                &self.push_streams,
+                &self.request_lifecycle,
+                null,
+                deadline,
+            );
+            try self.flushResponsePacketFeedback();
+        }
+        return self.control.settings.peer;
+    }
+
     /// Apply one already-authenticated packet selected by an endpoint-wide
     /// dispatcher. The packet remains caller-owned and no UDP read occurs.
     /// Responses, pushes, control frames, and QPACK state remain available to

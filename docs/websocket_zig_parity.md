@@ -38,9 +38,10 @@ checking Hyper's echoed close details. The Hyper fixture parses and writes RFC
 than a second netz endpoint.
 
 RFC 9220 now has an owning authenticated HTTP/3 client/server runtime in
-`websocket.runtime.h3`. It enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`, performs
-Extended CONNECT with `:protocol = websocket`, validates version, Origin and
-subprotocol fields, then carries masked client frames and unmasked server
+`websocket.runtime.h3`. It enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`, waits
+for peer SETTINGS, and requires the server to advertise that capability before
+opening Extended CONNECT with `:protocol = websocket`. It validates version,
+Origin, and subprotocol fields, then carries masked client and unmasked server
 frames through streaming HTTP/3 DATA. A real QUIC/TLS test forces each frame
 across five-byte HTTP/3 stream contributions and verifies fragmented text,
 automatic Ping/Pong, and bidirectional Close. External browser/server

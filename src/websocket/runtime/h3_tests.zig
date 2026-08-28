@@ -181,6 +181,9 @@ test "WebSocket over HTTP3 validates reserved handshake metadata" {
                 self.err = err;
                 return;
             };
+            connection.ensureSettingsSent() catch |err| {
+                self.err = err;
+            };
             connection.deinit();
         }
     };
@@ -217,4 +220,82 @@ test "WebSocket over HTTP3 validates reserved handshake metadata" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP3 rejects peer without extended CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try http3.runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x85} ** 32,
+            .x25519_secret_key = [_]u8{0x86} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http3.runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var session = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer session.deinit();
+            session.ensureSettingsSent() catch |err| {
+                self.err = err;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.ExtendedConnectDisabled,
+        h3.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            limits,
+            .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x83} ** 32,
+                .x25519_secret_key = [_]u8{0x84} ** 32,
+            } },
+            .{ .authority = "localhost" },
+        ),
+    );
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP3 peer SETTINGS wait rejects an expired budget" {
+    var client: http3.runtime.HandshakeClient = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receivePeerSettingsWithTimeout(.zero),
+    );
 }

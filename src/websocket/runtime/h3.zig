@@ -704,6 +704,11 @@ fn connectEstablished(
     options: ConnectOptions,
 ) Error!ClientConnection {
     try validateClientExtraHeaders(options.extra_headers);
+    try validateProtocols(options.protocols);
+    const peer_settings = try h3.receivePeerSettings();
+    if (!peer_settings.enable_connect_protocol) {
+        return error.ExtendedConnectDisabled;
+    }
     var fields: std.ArrayList(http3.Qpack.HeaderField) = .empty;
     defer fields.deinit(allocator);
     try fields.append(allocator, .{
@@ -997,11 +1002,7 @@ fn selectSubprotocol(
     headers: []const http3.Qpack.HeaderField,
     supported: []const []const u8,
 ) Error!?[]u8 {
-    for (supported) |protocol| {
-        if (!websocket.validSubprotocolToken(protocol)) {
-            return error.InvalidSubprotocol;
-        }
-    }
+    try validateProtocols(supported);
     var selected: ?[]const u8 = null;
     var seen: std.ArrayList([]const u8) = .empty;
     defer seen.deinit(allocator);
@@ -1033,6 +1034,14 @@ fn selectSubprotocol(
     }
     if (selected) |protocol| return try allocator.dupe(u8, protocol);
     return null;
+}
+
+fn validateProtocols(protocols: []const []const u8) Error!void {
+    for (protocols) |protocol| {
+        if (!websocket.validSubprotocolToken(protocol)) {
+            return error.InvalidSubprotocol;
+        }
+    }
 }
 
 fn acceptExtensions(

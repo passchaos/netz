@@ -991,6 +991,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
+        "receivePeerSettingsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
         "pollResponseEvent",
     ));
     try std.testing.expect(@hasDecl(
