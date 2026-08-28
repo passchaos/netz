@@ -1922,6 +1922,30 @@ test "public modules are reachable" {
         "connectUnix",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectHost",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectHostWithConnAck",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectHostAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUri",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUriWithConnAck",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUriAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "pendingSource",
     ));

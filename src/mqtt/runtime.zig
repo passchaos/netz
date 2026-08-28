@@ -13,6 +13,7 @@ const listener_namespace = @import("listener_namespace.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const tcp_endpoint = @import("runtime/tcp_endpoint.zig");
 
 const net = std.Io.net;
 
@@ -43,6 +44,7 @@ pub const Error = packet_transport.Error || error{
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
     net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
+    net.HostName.ValidateError || net.HostName.ConnectError ||
     net.Server.AcceptError || net.Stream.Reader.Error ||
     net.Stream.Writer.Error || std.Thread.SpawnError;
 
@@ -1078,28 +1080,107 @@ pub const Client = struct {
             address,
             options.network_connect_timeout,
         );
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        if (options.limits.tcp_nodelay) {
-            socket_options.setTcpNoDelay(stream) catch
-                return error.SocketOptionFailed;
-        }
+        return connectStreamAttempt(allocator, io, stream, options, true);
+    }
 
-        var connection = Connection{
-            .allocator = allocator,
-            .transport = .initTcp(io, stream),
-            .protocol = options.protocol,
-            .limits = options.limits,
-            .max_outgoing_inflight = options.max_outgoing_inflight,
-            .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = options.topic_alias_maximum,
-            .peer_maximum_qos = options.peer_maximum_qos,
-            .peer_retain_available = options.peer_retain_available,
-        };
-        stream_owned = false;
-        errdefer connection.close();
+    /// Resolve a DNS hostname and establish a cleartext MQTT connection. DNS
+    /// lookup and every TCP address attempt share `network_connect_timeout`.
+    pub fn connectHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) Error!Connection {
+        var result = try connectHostWithConnAck(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
 
-        return connection.establishClient(options);
+    pub fn connectHostWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) Error!ConnectResult {
+        var attempt = try connectHostAttempt(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectHostAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        const stream = try tcp_endpoint.connectHost(
+            io,
+            host,
+            port,
+            options.network_connect_timeout,
+        );
+        return connectStreamAttempt(allocator, io, stream, options, true);
+    }
+
+    /// Connect to a cleartext `mqtt://` or `tcp://` URI. Credentials, query,
+    /// fragment, and non-empty paths are rejected by the shared MQTT target
+    /// parser before any network operation begins.
+    pub fn connectUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+    ) Error!Connection {
+        var result = try connectUriWithConnAck(
+            allocator,
+            io,
+            uri_text,
+            options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUriWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+    ) Error!ConnectResult {
+        var attempt = try connectUriAttempt(
+            allocator,
+            io,
+            uri_text,
+            options,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        var target = try redirect.parse(allocator, uri_text, .tcp);
+        defer target.deinit();
+        return connectTargetAttempt(allocator, io, target, options);
     }
 
     pub fn connectUnix(
@@ -1140,26 +1221,7 @@ pub const Client = struct {
             address,
             options.network_connect_timeout,
         );
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        var limits = options.limits;
-        limits.tcp_nodelay = false;
-        var connection = Connection{
-            .allocator = allocator,
-            .transport = .initTcp(io, stream),
-            .protocol = options.protocol,
-            .limits = limits,
-            .max_outgoing_inflight = options.max_outgoing_inflight,
-            .max_incoming_inflight = mqtt.receiveMaximum(
-                options.properties,
-            ) orelse options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = options.topic_alias_maximum,
-            .peer_maximum_qos = options.peer_maximum_qos,
-            .peer_retain_available = options.peer_retain_available,
-        };
-        stream_owned = false;
-        errdefer connection.close();
-        return connection.establishClient(options);
+        return connectStreamAttempt(allocator, io, stream, options, false);
     }
 
     /// Follow MQTT 5 redirect CONNACKs for cleartext TCP.
@@ -1183,48 +1245,12 @@ pub const Client = struct {
         while (true) {
             var target = try redirect.parse(allocator, current_uri, .tcp);
             defer target.deinit();
-            if (target.transport != .tcp) return error.UnsupportedRedirectScheme;
-            const uri = std.Uri.parse(target.uri) catch
-                return error.InvalidServerReference;
-            var endpoint = http1_runtime.uriEndpoint(
+            var attempt = try connectTargetAttempt(
                 allocator,
-                uri,
-                redirect.Transport.tcp.defaultPort(),
-            ) catch return error.InvalidServerReference;
-            defer endpoint.deinit();
-            const address_stream = switch (endpoint.target) {
-                .host => |host| try tcp_connect.host(
-                    io,
-                    host,
-                    endpoint.port,
-                    options.network_connect_timeout,
-                ),
-                .ip => |address| try tcp_connect.ip(
-                    io,
-                    address,
-                    options.network_connect_timeout,
-                ),
-            };
-            var stream_owned = true;
-            errdefer if (stream_owned) address_stream.close(io);
-            if (options.limits.tcp_nodelay) {
-                socket_options.setTcpNoDelay(address_stream) catch
-                    return error.SocketOptionFailed;
-            }
-            var connection = Connection{
-                .allocator = allocator,
-                .transport = .initTcp(io, address_stream),
-                .protocol = options.protocol,
-                .limits = options.limits,
-                .max_outgoing_inflight = options.max_outgoing_inflight,
-                .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
-                .incoming_topic_alias_maximum = options.topic_alias_maximum,
-                .peer_maximum_qos = options.peer_maximum_qos,
-                .peer_retain_available = options.peer_retain_available,
-            };
-            stream_owned = false;
-            errdefer connection.close();
-            var attempt = try connection.establishClient(options);
+                io,
+                target,
+                options,
+            );
             errdefer attempt.deinit(allocator);
             if (attempt.accepted()) return attempt.requireAccepted();
             const reference = (try redirect.referenceForConnAck(
@@ -1243,6 +1269,54 @@ pub const Client = struct {
         }
     }
 };
+
+fn connectTargetAttempt(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target: redirect.Target,
+    options: ConnectOptions,
+) Error!ConnectAttempt {
+    const stream = try tcp_endpoint.connectTarget(
+        io,
+        &target,
+        options.network_connect_timeout,
+    );
+    return connectStreamAttempt(allocator, io, stream, options, true);
+}
+
+fn connectStreamAttempt(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: ConnectOptions,
+    tcp_nodelay_available: bool,
+) Error!ConnectAttempt {
+    var stream_owned = true;
+    errdefer if (stream_owned) stream.close(io);
+    var limits = options.limits;
+    limits.tcp_nodelay = tcp_nodelay_available and limits.tcp_nodelay;
+    if (limits.tcp_nodelay) {
+        socket_options.setTcpNoDelay(stream) catch
+            return error.SocketOptionFailed;
+    }
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, stream),
+        .protocol = options.protocol,
+        .limits = limits,
+        .max_outgoing_inflight = options.max_outgoing_inflight,
+        .max_incoming_inflight = mqtt.receiveMaximum(
+            options.properties,
+        ) orelse options.max_outgoing_inflight,
+        .incoming_topic_alias_maximum = options.topic_alias_maximum,
+        .peer_maximum_qos = options.peer_maximum_qos,
+        .peer_retain_available = options.peer_retain_available,
+    };
+    stream_owned = false;
+    errdefer connection.close();
+    return connection.establishClient(options);
+}
 
 pub const ConnectAttempt = struct {
     connection: ?Connection,
