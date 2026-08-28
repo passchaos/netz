@@ -1221,3 +1221,103 @@ test "QUIC short packet key update opens next and retained previous generations"
         protection.openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), old_packet, dcid.len, 0),
     );
 }
+
+test "QUIC v2 key update profile is explicit and symmetric" {
+    const allocator = std.testing.allocator;
+    const version = version_2_wire_for_test;
+    const current = try protection.deriveAes128KeysForVersion(
+        version,
+        [_]u8{0xa8} ** protection.secret_len,
+    );
+    var standard = try protection.KeyPhaseState.initForVersion(
+        version,
+        current,
+        false,
+    );
+    var compatible = try protection.KeyPhaseState.initForVersionAndProfile(
+        version,
+        current,
+        false,
+        .quic_go_v0_59,
+    );
+    standard.initiateKeyUpdate();
+    compatible.initiateKeyUpdate();
+    const legacy_next_secret = protection.nextTrafficSecret(current.secret);
+    try std.testing.expectEqualSlices(
+        u8,
+        &legacy_next_secret,
+        compatible.currentKeys().traffic_secret.bytes(),
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        standard.currentKeys().traffic_secret.bytes(),
+        compatible.currentKeys().traffic_secret.bytes(),
+    ));
+
+    const v1_standard = protection.deriveAes128Keys(
+        [_]u8{0xa9} ** protection.secret_len,
+    );
+    var v1_compatible = try protection.KeyPhaseState.initForVersionAndProfile(
+        version_1_wire_for_test,
+        v1_standard,
+        false,
+        .quic_go_v0_59,
+    );
+    v1_compatible.initiateKeyUpdate();
+    const v1_expected = protection.nextPacketProtectionKeys(v1_standard);
+    try std.testing.expectEqualSlices(
+        u8,
+        v1_expected.traffic_secret.bytes(),
+        v1_compatible.currentKeys().traffic_secret.bytes(),
+    );
+
+    const dcid = [_]u8{ 0x20, 0x21, 0x22, 0x23 };
+    const packet = try protection.sealShortPacket(
+        allocator,
+        compatible.currentKeys(),
+        .{
+            .destination_connection_id = &dcid,
+            .packet_number = 8,
+            .packet_number_len = 4,
+            .key_phase = true,
+            .payload = "quic-go-v2-update",
+        },
+    );
+    defer allocator.free(packet);
+
+    var rfc_receiver = try protection.KeyPhaseState.initForVersion(
+        version,
+        current,
+        false,
+    );
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        protection.openShortPacketWithKeyUpdate(
+            allocator,
+            rfc_receiver.keyUpdateKeys(),
+            packet,
+            dcid.len,
+            0,
+        ),
+    );
+
+    var receiver = try protection.KeyPhaseState.initForVersionAndProfile(
+        version,
+        current,
+        false,
+        .quic_go_v0_59,
+    );
+    var opened = try protection.openShortPacketWithKeyUpdate(
+        allocator,
+        receiver.keyUpdateKeys(),
+        packet,
+        dcid.len,
+        0,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expect(opened.peer_initiated_key_update);
+    try std.testing.expectEqualStrings(
+        "quic-go-v2-update",
+        opened.packet.payload,
+    );
+}

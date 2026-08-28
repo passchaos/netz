@@ -233,6 +233,48 @@ grep -Fq \
   "$work/key-update-server.log"
 echo 'netz client -> quic-go server key-update interop passed'
 
+port=$(free_udp_port)
+"$work/quic-go-server" \
+  -addr "127.0.0.1:$port" \
+  -ca-out "$work/v2-key-update-ca.pem" \
+  -v2-only -key-updates 2 \
+  >"$work/v2-key-update-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/v2-key-update-ca.pem" ]] && \
+      grep -q 'listening=' "$work/v2-key-update-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/v2-key-update-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "$work/v2-key-update-ca.pem" ]] || ! \
+    grep -q 'listening=' "$work/v2-key-update-server.log"; then
+  echo 'timed out waiting for QUIC v2 key-update quic-go server' >&2
+  cat "$work/v2-key-update-server.log" >&2
+  exit 1
+fi
+if ! timeout 20s "$client" "$port" \
+    "$work/v2-key-update-ca.pem" --version=2 --expect-key-update \
+    >"$work/v2-key-update-client.log" 2>&1; then
+  cat "$work/v2-key-update-client.log" >&2
+  cat "$work/v2-key-update-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+cat "$work/v2-key-update-client.log"
+grep -Fq \
+  'netz QUIC client interoperated with quic-go: verified=true version=2 key_updates=2 peer_key_updates=2 final_phase=0 ack_gates_cleared=true streams=3 bytes=31 peer_close=57' \
+  "$work/v2-key-update-client.log"
+grep -Fq \
+  'handshake_done=true version=2 retry=false key_updates=2 echo_streams=3 echo_bytes=31' \
+  "$work/v2-key-update-server.log"
+echo 'netz QUIC v2 client -> quic-go server key-update interop passed'
+
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
 MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=

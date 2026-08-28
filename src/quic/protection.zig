@@ -110,6 +110,13 @@ const hkdf_labels_v2 = HkdfLabels{
     .ku = "quicv2 ku",
 };
 
+const hkdf_labels_v2_quic_go_v0_59 = HkdfLabels{
+    .key = "quicv2 key",
+    .iv = "quicv2 iv",
+    .hp = "quicv2 hp",
+    .ku = "quic ku",
+};
+
 const ProtectionProfile = struct {
     salt: *const [initial_salt_v1.len]u8,
     labels: HkdfLabels,
@@ -278,7 +285,16 @@ pub const ShortPacketKeyUpdateKeys = struct {
 /// generation for reordered packets, and the key phase bit that is visible in
 /// short headers after header protection is removed.
 pub const KeyPhaseState = struct {
+    pub const UpdateProfile = enum {
+        rfc,
+        /// quic-go v0.59 applies RFC 9001's update label to QUIC v2. This
+        /// explicit profile is for pinned interoperability gates; RFC 9369
+        /// remains the default for both sending and receiving.
+        quic_go_v0_59,
+    };
+
     version: u32,
+    update_profile: UpdateProfile,
     current: PacketProtectionKeys,
     next: PacketProtectionKeys,
     current_key_phase: bool,
@@ -302,10 +318,29 @@ pub const KeyPhaseState = struct {
         current: PacketProtectionKeys,
         current_key_phase: bool,
     ) VersionError!KeyPhaseState {
+        return initForVersionAndProfile(
+            version,
+            current,
+            current_key_phase,
+            .rfc,
+        );
+    }
+
+    pub fn initForVersionAndProfile(
+        version: u32,
+        current: PacketProtectionKeys,
+        current_key_phase: bool,
+        update_profile: UpdateProfile,
+    ) VersionError!KeyPhaseState {
         return .{
             .version = version,
+            .update_profile = update_profile,
             .current = current,
-            .next = try nextPacketProtectionKeysForVersion(version, current),
+            .next = try nextPacketProtectionKeysForProfile(
+                version,
+                current,
+                update_profile,
+            ),
             .current_key_phase = current_key_phase,
         };
     }
@@ -381,9 +416,10 @@ pub const KeyPhaseState = struct {
         self.previous_key_phase = self.current_key_phase;
         self.previous_discard_deadline_nanos = null;
         self.current = self.next;
-        self.next = nextPacketProtectionKeysForVersion(
+        self.next = nextPacketProtectionKeysForProfile(
             self.version,
             self.current,
+            self.update_profile,
         ) catch unreachable;
         self.current_key_phase = !self.current_key_phase;
         self.key_update_count +|= 1;
@@ -535,6 +571,26 @@ pub fn nextPacketProtectionKeys(current: PacketProtectionKeys) PacketProtectionK
 
 pub fn nextPacketProtectionKeysForVersion(version: u32, current: PacketProtectionKeys) VersionError!PacketProtectionKeys {
     const labels = (try protectionProfile(version)).labels;
+    return nextPacketProtectionKeysWithLabels(current, labels);
+}
+
+pub fn nextPacketProtectionKeysForProfile(
+    version: u32,
+    current: PacketProtectionKeys,
+    profile: KeyPhaseState.UpdateProfile,
+) VersionError!PacketProtectionKeys {
+    const labels = if (version == version_2_wire and
+        profile == .quic_go_v0_59)
+        hkdf_labels_v2_quic_go_v0_59
+    else
+        (try protectionProfile(version)).labels;
+    return nextPacketProtectionKeysWithLabels(current, labels);
+}
+
+fn nextPacketProtectionKeysWithLabels(
+    current: PacketProtectionKeys,
+    labels: HkdfLabels,
+) PacketProtectionKeys {
     const next_secret = nextTrafficSecretValue(
         current.traffic_secret,
         labels.ku,

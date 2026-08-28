@@ -89,6 +89,10 @@ server_pid=
 grep -Fq \
   "netz RFC 9220 client interoperated with quic-go: version=$version extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/netz-client.log"
+if [[ "$version" == 2 ]]; then
+  grep -Eq 'local_key_updates=[1-9][0-9]* peer_key_updates=[1-9][0-9]*$' \
+    "$work/netz-client.log"
+fi
 grep -Fq \
   "quic-go RFC 9220 server interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/quic-go-server.log"
@@ -137,6 +141,10 @@ grep -Fq \
 grep -Fq \
   "netz RFC 9220 server interoperated with quic-go: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/netz-server.log"
+if [[ "$version" == 2 ]]; then
+  grep -Eq 'local_key_updates=[1-9][0-9]* peer_key_updates=[1-9][0-9]*$' \
+    "$work/netz-server.log"
+fi
 cat "$work/quic-go-client.log"
 cat "$work/netz-server.log"
 

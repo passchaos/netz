@@ -55,7 +55,11 @@ requires peer SETTINGS support, TLS certificate verification on the client,
 Origin and subprotocol negotiation, masked fragmented client text, an unmasked
 server response, two independently reset no-context-takeover
 permessage-deflate messages in both directions,
-Ping/Pong, and an echoed Close 1000/`done`. The Go fixture
+Ping/Pong, and an echoed Close 1000/`done`. Netz limits each HTTP/3 stream
+contribution to five bytes, which drives quic-go beyond its automatic
+100-packet first key-update threshold; the QUIC v2 cases explicitly select the
+pinned v0.59 compatibility profile while the library default remains RFC 9369.
+The Go fixture
 implements its own bounded RFC 6455 frame reader/writer, so this is external
 wire evidence rather than two netz adapters sharing a codec. Browser
 interoperability remains follow-up work.

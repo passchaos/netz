@@ -197,6 +197,10 @@ pub const OneRttConfig = struct {
     stream_receive_window: u64 = 64 * 1024,
     max_stream_receive_window: ?u64 = null,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
+    /// Select the 1-RTT key-update derivation for this connection. The default
+    /// is RFC 9001/RFC 9369; the compatibility value exists only for pinned
+    /// peers known to apply RFC 9001's update label to QUIC v2.
+    key_update_profile: quic.protection.KeyPhaseState.UpdateProfile = .rfc,
     congestion_algorithm: quic.congestion.Algorithm = .cubic,
     enable_hystart: bool = true,
     enable_pacing: bool = true,
@@ -217,6 +221,7 @@ pub const OneRttConfig = struct {
     ) quic.one_rtt.ConnectionConfig {
         return .{
             .version = version,
+            .key_update_profile = self.key_update_profile,
             .peer = peer,
             .receive_keys = receive_keys,
             .send_keys = send_keys,

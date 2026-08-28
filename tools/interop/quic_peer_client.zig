@@ -126,6 +126,11 @@ pub fn main(init: std.process.Init) !void {
             },
             .initial_one_rtt_config = .{
                 .max_datagram_size = 8192,
+                .key_update_profile = if (version == .version_2 and
+                    expect_key_update)
+                    .quic_go_v0_59
+                else
+                    .rfc,
             },
         },
     );

@@ -173,6 +173,7 @@ pub const ConnectionConfig = struct {
 
     /// Negotiated version used by version-specific 1-RTT key updates.
     version: quic.Version = .version_1,
+    key_update_profile: quic.protection.KeyPhaseState.UpdateProfile = .rfc,
     peer: net.IpAddress,
     receive_keys: quic.protection.PacketProtectionKeys,
     send_keys: quic.protection.PacketProtectionKeys,
@@ -789,15 +790,17 @@ pub const Connection = struct {
                 config.receive_window,
                 config.max_receive_window orelse config.receive_window,
             ),
-            .send_key_phase = try .initForVersion(
+            .send_key_phase = try .initForVersionAndProfile(
                 config.version.wireValue(),
                 config.send_keys,
                 false,
+                config.key_update_profile,
             ),
-            .receive_key_phase = try .initForVersion(
+            .receive_key_phase = try .initForVersionAndProfile(
                 config.version.wireValue(),
                 config.receive_keys,
                 false,
+                config.key_update_profile,
             ),
             .peer_max_streams_bidi = config.initial_send_max_streams_bidi,
             .peer_max_streams_uni = config.initial_send_max_streams_uni,

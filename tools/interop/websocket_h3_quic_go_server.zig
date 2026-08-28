@@ -44,8 +44,16 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 },
                 .max_crypto_buffer = 64 * 1024,
+                .initial_one_rtt_config = .{
+                    .key_update_profile = if (version == .version_2)
+                        .quic_go_v0_59
+                    else
+                        .rfc,
+                },
             },
-            .session = .{ .max_stream_frame_data = 16 },
+            // Five-byte DATA contributions push the pinned quic-go peer past
+            // its first automatic key update while RFC 9220 frames are split.
+            .session = .{ .max_stream_frame_data = 5 },
         },
     );
     defer server.deinit();
@@ -150,13 +158,20 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.UnexpectedClose;
     }
+    const local_key_updates = connection.localKeyUpdateCount();
+    const peer_key_updates = connection.peerKeyUpdateCount();
+    if (version == .version_2 and
+        (local_key_updates == 0 or peer_key_updates == 0))
+    {
+        return error.MissingKeyUpdate;
+    }
 
     // Let the standalone client process consume and acknowledge the close
     // response before this one-shot server destroys the QUIC connection.
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz RFC 9220 server interoperated with quic-go: version={d} extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done\n",
-        .{versionNumber(version)},
+        "netz RFC 9220 server interoperated with quic-go: version={d} extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d}\n",
+        .{ versionNumber(version), local_key_updates, peer_key_updates },
     );
 }
 
