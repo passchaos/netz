@@ -439,20 +439,25 @@ test "QUIC client handshake receives through one socket owner" {
 
     const Server = struct {
         endpoint: *quic.runtime.Endpoint,
+        initial: quic.runtime.OwnedBytes,
         established: ?handshake.EstablishedConnection = null,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.established = handshake.accept(self.endpoint, .{
-                .local_connection_id = server_cid,
-                .random = [_]u8{0xb0} ** 32,
-                .x25519_secret_key = [_]u8{0xb1} ** 32,
-                .handshake_recovery = .{
-                    .initial_pto_ms = 20,
-                    .max_pto_ms = 40,
-                    .max_duration_ms = 2_000,
+            self.established = handshake.acceptFromInitial(
+                self.endpoint,
+                self.initial,
+                .{
+                    .local_connection_id = server_cid,
+                    .random = [_]u8{0xb0} ** 32,
+                    .x25519_secret_key = [_]u8{0xb1} ** 32,
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
                 },
-            }) catch |err| {
+            ) catch |err| {
                 self.err = err;
                 return;
             };
@@ -492,14 +497,49 @@ test "QUIC client handshake receives through one socket owner" {
         }
     };
 
-    var server = Server{ .endpoint = &server_endpoint };
-    const server_thread = try std.Thread.spawn(.{}, Server.run, .{&server});
     var client = Client{
         .endpoint = &client_endpoint,
         .inbox = &inbox,
         .server = server_endpoint.address(),
     };
     const client_thread = try std.Thread.spawn(.{}, Client.run, .{&client});
+    // The client handshake can emit several Initial datagrams when the test
+    // suite is heavily loaded. Pick the first valid Initial explicitly so the
+    // server worker never starts from an unrelated/retransmitted datagram and
+    // never owns an unbounded first socket read.
+    var initial: quic.runtime.OwnedBytes = undefined;
+    while (true) {
+        var candidate = server_endpoint.receiveBytesTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromSeconds(2),
+            },
+        }) catch |err| {
+            inbox.close();
+            client_thread.join();
+            return err;
+        };
+        const header = quic.LongHeader.parse(candidate.bytes) catch {
+            candidate.deinit(allocator);
+            continue;
+        };
+        if (header.packet_type == .initial and
+            std.mem.eql(
+                u8,
+                header.destination_connection_id,
+                original_dcid,
+            ))
+        {
+            initial = candidate;
+            break;
+        }
+        candidate.deinit(allocator);
+    }
+    var server = Server{
+        .endpoint = &server_endpoint,
+        .initial = initial,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Server.run, .{&server});
 
     var owner_err: ?anyerror = null;
     owner: while (!client.done.load(.acquire)) {
