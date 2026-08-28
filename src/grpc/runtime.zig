@@ -86,6 +86,48 @@ pub const ServerOptions = struct {
     max_message_size: usize = 16 * 1024 * 1024,
 };
 
+/// Cleartext prior-knowledge gRPC listener. The accepted connection has the
+/// same unary and streaming surface as `TlsServer`; only transport setup
+/// differs.
+pub const Server = struct {
+    transport: http2.runtime.Server,
+    max_message_size: usize,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        limits: http2.runtime.Limits,
+        max_message_size: usize,
+    ) Error!Server {
+        return .{
+            .transport = try http2.runtime.Server.listen(
+                allocator,
+                io,
+                bind_address,
+                limits,
+            ),
+            .max_message_size = max_message_size,
+        };
+    }
+
+    pub fn deinit(self: *Server) void {
+        self.transport.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: Server) net.IpAddress {
+        return self.transport.address();
+    }
+
+    pub fn accept(self: *Server) Error!ServerConnection {
+        return .{
+            .connection = try self.transport.accept(),
+            .max_message_size = self.max_message_size,
+        };
+    }
+};
+
 /// TLS 1.3 gRPC listener with mandatory HTTP/2 ALPN.
 ///
 /// `accept` yields an owning connection wrapper so servers can serve several

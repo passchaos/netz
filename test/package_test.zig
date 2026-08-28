@@ -44,6 +44,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
     try std.testing.expect(@hasDecl(netz.grpc, "runtime"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime, "Server"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.Server, "accept"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "connectTlsHost"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "unary"));
     try std.testing.expect(@hasDecl(

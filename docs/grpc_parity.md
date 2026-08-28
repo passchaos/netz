@@ -99,11 +99,12 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    reading the response half. Early server status during a flow-control-blocked
    upload is now exposed as typed gRPC response; the remaining gap is
    simultaneous bidi message progress rather than early-return correctness.
-2. TLS/ALPN transport composition is now covered: `grpc.runtime.Client` and
-   `grpc.runtime.TlsServer` own persistent HTTP/2 channels, enforce `h2` ALPN,
-   retain certificate-verification policy, and exchange multiple unary calls
-   over one TLS 1.3 connection. External upstream gRPC client/server interop is
-   still needed beyond netz's HTTP/2 Hyper gate.
+2. Transport composition is now covered: `grpc.runtime.Client`,
+   `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
+   channels. The TLS path enforces `h2` ALPN and retains certificate-
+   verification policy; both h2c and TLS tests exchange multiple unary calls
+   on one connection. External upstream gRPC client/server interop is still
+   needed beyond netz's HTTP/2 Hyper gate.
 3. Build generated service/client bindings on `pbz`, including unary and all
    streaming method shapes.
 4. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
