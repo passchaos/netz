@@ -346,7 +346,10 @@ resumption, CID generation, and endpoint ownership policy stay explicit. A
 total connection limit includes idle, leased, and in-progress handshakes; a new
 origin may replace the global least-recently-used idle client without exceeding
 that cap, while a pool containing only leases/handshakes rejects new admission
-and failed connects release their reservation. A default connector securely
+and failed connects release their reservation. Relative-timeout and absolute-
+deadline acquisition wait for capacity under one awake-clock budget, while
+pool close wakes every waiter and causes outstanding leases to be discarded on
+return. A default connector securely
 generates fresh CIDs while retaining caller TLS/resumption policy. A
 real TLS/QUIC regression issues two differently cased URI requests through one
 accepted connection and verifies the second lease is reused; a companion case
