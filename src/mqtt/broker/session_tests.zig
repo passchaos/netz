@@ -1208,6 +1208,118 @@ test "broker queues offline QoS 1 and drains on resume" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker counts outbound publish dropped by durable queue limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.TestContext.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 3,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .session = .{ .max_queued_per_session = 1 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 3 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "drop-counter-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "drop/counter",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try subscriber.disconnect(0);
+    try waitForPeerClose(&subscriber);
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "drop-counter-publisher",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "drop/counter",
+        "first",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "drop/counter",
+        "second",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.ping();
+
+    const stats = broker.stats();
+    try std.testing.expectEqual(@as(usize, 2), stats.publish_messages_received);
+    try std.testing.expectEqual(@as(usize, 0), stats.publish_messages_sent);
+    try std.testing.expectEqual(@as(usize, 1), stats.publish_messages_dropped);
+
+    var resumed_result = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "drop-counter-session",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+    );
+    var resumed = resumed_result.connection;
+    defer resumed.close();
+    defer resumed_result.connack.deinit(allocator);
+    var delivered = try resumed.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings("first", delivered.publish.payload);
+    try resumed.writePubAck(delivered.publish.packet_id.?, 0);
+    try resumed.ping();
+
+    const drained = broker.stats();
+    try std.testing.expectEqual(@as(usize, 1), drained.publish_messages_sent);
+    try std.testing.expectEqual(@as(usize, 1), drained.publish_messages_dropped);
+    try broker.publishSystemStats();
+    var storage: [1]mqtt.retained.Match = undefined;
+    const retained = try broker.retained.matchInto(
+        "$SYS/broker/publish/messages/dropped",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retained.len);
+    try std.testing.expectEqualStrings("1", retained[0].payload);
+
+    try disconnectAll(&.{ &publisher, &resumed });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker merges overlapping subscriptions in an offline Session" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
