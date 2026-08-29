@@ -596,6 +596,9 @@ hostname, URI, Unix-socket and pooled connection paths. Host resolution and all
 address attempts share one awake-clock deadline; a concurrently completed but
 unselected socket is closed. HTTP/1 direct-address, hostname, Unix, standard TLS
 and vail TLS constructors additionally accept a caller-owned absolute deadline.
+HTTP/1 TLS servers expose matching post-accept timeout/deadline forms for the
+complete TLS handshake, including already accepted streams; configured TLS
+handshake limits remain stricter.
 HTTP/2 direct-address, hostname, Unix and TLS constructors expose the same
 contract through the complete SETTINGS bootstrap. TLS paths preserve the outer
 deadline across DNS/TCP and TLS while all paths retain stricter phase limits.

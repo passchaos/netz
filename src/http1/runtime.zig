@@ -1585,15 +1585,66 @@ pub const TlsServer = struct {
 
     pub fn accept(self: *TlsServer) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStreamMaybeBefore(stream, null);
+    }
+
+    /// Accept TCP, then complete TLS under a caller-owned awake-clock deadline.
+    /// The listener accept itself remains unbounded.
+    pub fn acceptWithDeadline(
+        self: *TlsServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamMaybeBefore(stream, deadline);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *TlsServer,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamMaybeBefore(
+            stream,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Perform the TLS handshake on an already accepted stream under one
+    /// caller-owned deadline. Ownership transfers at entry.
+    pub fn acceptStreamWithDeadline(
+        self: *TlsServer,
+        stream: net.Stream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptStreamMaybeBefore(stream, deadline);
+    }
+
+    fn acceptStreamMaybeBefore(
+        self: *TlsServer,
+        stream: net.Stream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.tcp_nodelay) try setTcpNoDelay(stream);
-        const tls_connection = try tls_stream.ServerConnection.init(
-            self.allocator,
-            self.io,
-            stream,
-            self.tls,
-        );
+        const tls_connection = if (deadline) |absolute|
+            try tls_stream.ServerConnection.initWithDeadline(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+                absolute,
+            )
+        else
+            try tls_stream.ServerConnection.init(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+            );
         stream_owned = false;
         errdefer tls_connection.deinit();
         return .{
