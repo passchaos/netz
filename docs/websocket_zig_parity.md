@@ -16,7 +16,7 @@ superiority.
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; HTTP/1, RFC 8441, and HTTP/3 clients expose `sendBinaryInPlace` for the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for both HTTP/1 Upgrade and RFC 8441. Partial Close frames remain resumable after timeout | Handler callbacks and automatic default control replies |
-| Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and runtime tests cover concurrent data sends plus the post-lock Close guard | Documented thread-safe connection writes |
+| Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and HTTP/1, RFC 8441, plus RFC 9220 runtime tests exercise concurrent sends (the H2/H3 cases share one compressed encoder) | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | Linux io_uring experiment | Cleartext client helper | Custom epoll/kqueue/Windows server backends |
 
@@ -572,6 +572,9 @@ data or control frame after the closing handshake has begun. Ping and Close
 deadline APIs revalidate their absolute budget after lock contention. Close
 flags use acquire/release atomics because a sole receive owner and concurrent
 application writers may observe those transitions on different threads.
+Allocating receives on every transport preserve `was_compressed` provenance
+after decompression, so callers and concurrency regressions can distinguish an
+RSV1 message from an uncompressed fallback without inspecting wire storage.
 HTTP/3 receive paths now use the same RFC 6455 failure mapping as HTTP/1 and
 RFC 8441, sending 1002 for malformed framing, 1007 for invalid text, and 1009
 for configured frame/message limits while preserving the original local error.

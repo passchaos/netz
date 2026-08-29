@@ -5277,7 +5277,11 @@ fn finishIncomingMessage(
     }
     errdefer allocator.free(payload);
     if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
-    return .{ .opcode = message.opcode, .payload = payload };
+    return .{
+        .opcode = message.opcode,
+        .payload = payload,
+        .was_compressed = message.compressed,
+    };
 }
 
 fn validateOutgoingFragmentedText(
@@ -6694,6 +6698,62 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
                 "world over h2 websocket",
             });
 
+            const ConcurrentSender = struct {
+                connection: *H2Connection,
+                io: std.Io,
+                start: *std.Io.Event,
+                payload: []const u8,
+                err: ?anyerror = null,
+
+                fn run(sender: *@This()) void {
+                    sender.start.wait(sender.io) catch |err| {
+                        sender.err = err;
+                        return;
+                    };
+                    sender.connection.sendText(sender.payload) catch |err| {
+                        sender.err = err;
+                    };
+                }
+            };
+            const concurrent_a = "h2-concurrent-a-h2-concurrent-a-" ++
+                ("a" ** 480);
+            const concurrent_b = "h2-concurrent-b-h2-concurrent-b-" ++
+                ("b" ** 480);
+            var start: std.Io.Event = .unset;
+            var senders = [_]ConcurrentSender{
+                .{
+                    .connection = &ws,
+                    .io = server_ptr.io,
+                    .start = &start,
+                    .payload = concurrent_a,
+                },
+                .{
+                    .connection = &ws,
+                    .io = server_ptr.io,
+                    .start = &start,
+                    .payload = concurrent_b,
+                },
+            };
+            const sender_a = try std.Thread.spawn(
+                .{},
+                ConcurrentSender.run,
+                .{&senders[0]},
+            );
+            const sender_b = std.Thread.spawn(
+                .{},
+                ConcurrentSender.run,
+                .{&senders[1]},
+            ) catch |err| {
+                start.set(server_ptr.io);
+                sender_a.join();
+                return err;
+            };
+            start.set(server_ptr.io);
+            sender_a.join();
+            sender_b.join();
+            if (senders[0].err) |err| return err;
+            if (senders[1].err) |err| return err;
+
             // The h2 WebSocket adapter still runs the normal RFC 6455 close
             // handshake inside DATA frames and maps the final Close write to
             // END_STREAM on the underlying HTTP/2 tunnel.
@@ -6741,6 +6801,26 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
         "world over h2 websocket world over h2 websocket",
         response.payload,
     );
+    const concurrent_a = "h2-concurrent-a-h2-concurrent-a-" ++
+        ("a" ** 480);
+    const concurrent_b = "h2-concurrent-b-h2-concurrent-b-" ++
+        ("b" ** 480);
+    var concurrent_first = try ws_client.receiveMessageWithTimeout(
+        .fromSeconds(5),
+    );
+    defer concurrent_first.deinit(allocator);
+    var concurrent_second = try ws_client.receiveMessageWithTimeout(
+        .fromSeconds(5),
+    );
+    defer concurrent_second.deinit(allocator);
+    try std.testing.expect(concurrent_first.was_compressed);
+    try std.testing.expect(concurrent_second.was_compressed);
+    const saw_a = std.mem.eql(u8, concurrent_first.payload, concurrent_a) or
+        std.mem.eql(u8, concurrent_second.payload, concurrent_a);
+    const saw_b = std.mem.eql(u8, concurrent_first.payload, concurrent_b) or
+        std.mem.eql(u8, concurrent_second.payload, concurrent_b);
+    try std.testing.expect(saw_a);
+    try std.testing.expect(saw_b);
 
     try ws_client.sendClose(.normal_closure, "bye");
     try std.testing.expectError(error.ConnectionClosed, ws_client.receiveMessage());
@@ -8499,6 +8579,26 @@ test "WebSocket runtimes validate outgoing text and close frames" {
 
 test "WebSocket incoming message finalization frees failed payloads" {
     const allocator = std.testing.allocator;
+    const compressed_text = "compressed provenance compressed provenance";
+    const compressed_wire = try websocket.compressMessage(
+        allocator,
+        compressed_text,
+    );
+    var compressed_message = try finishIncomingMessage(
+        allocator,
+        .{
+            .opcode = .text,
+            .payload = compressed_wire,
+            .compressed = true,
+        },
+        1024,
+    );
+    defer compressed_message.deinit(allocator);
+    try std.testing.expect(compressed_message.was_compressed);
+    try std.testing.expectEqualStrings(
+        compressed_text,
+        compressed_message.payload,
+    );
 
     const bad_deflate = try allocator.dupe(u8, &.{ 0xff, 0xff, 0xff });
     try std.testing.expectError(error.InvalidFrame, finishIncomingMessage(allocator, .{
