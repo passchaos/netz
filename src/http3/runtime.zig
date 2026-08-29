@@ -6378,6 +6378,59 @@ pub const HandshakeClient = struct {
         });
     }
 
+    /// Perform a complete one-shot HTTP/3 request under one caller-owned
+    /// deadline spanning resolution, all QUIC/TLS address attempts, request
+    /// transmission, and response aggregation.
+    pub fn requestUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        const absolute = try usableConnectDeadline(io, deadline);
+        var endpoint = try uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        const path = try uriRequestTargetAlloc(allocator, uri);
+        defer allocator.free(path);
+        const servers = try resolveEndpointBefore(
+            endpoint,
+            allocator,
+            io,
+            absolute,
+        );
+        defer allocator.free(servers);
+
+        var connect_options = options;
+        connect_options.connect_timeout = null;
+        if (connect_options.handshake.server_name == null) {
+            connect_options.handshake.server_name = endpoint.tls_host;
+        }
+        var client = try connectAnyResolvedAddress(
+            allocator,
+            io,
+            local_address,
+            servers,
+            limits,
+            connect_options,
+            absolute,
+        );
+        defer client.deinit();
+
+        return client.requestWithDeadline(.{
+            .method = request_options.method,
+            .path = path,
+            .scheme = "https",
+            .authority = endpoint.authority,
+            .headers = request_options.headers,
+            .body = request_options.body,
+            .trailers = request_options.trailers,
+        }, absolute);
+    }
+
     pub fn requestUriAltSvc(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -6573,6 +6626,23 @@ pub const HandshakeClient = struct {
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
+    }
+
+    /// Send a complete request and wait for its response under one absolute
+    /// application deadline. Transport PTO/ACK timers may wake earlier but do
+    /// not renew this caller-owned budget.
+    pub fn requestWithDeadline(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.connectionIo()).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        const stream_id = try self.sendRequest(request_options);
+        return self.receiveResponseWithDeadline(stream_id, deadline);
     }
 
     /// Send a request and observe ordered 1xx heads before the final response.
@@ -23499,6 +23569,98 @@ test "HTTP/3 handshake client requests from URI endpoint" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(u16, 204), response.response.status);
+}
+
+test "HTTP/3 URI request deadline covers the response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8 };
+    const client_cid = [_]u8{ 0xc9, 0xca, 0xcb, 0xcc };
+    const server_cid = [_]u8{ 0xcd, 0xce, 0xcf, 0xd0 };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xd1} ** 32,
+            .x25519_secret_key = [_]u8{0xd2} ** 32,
+        },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.Io.sleep(
+                session.established.connection.endpoint.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var uri_buf: [64]u8 = undefined;
+    const uri_text = try std.fmt.bufPrint(
+        &uri_buf,
+        "https://127.0.0.1:{d}/deadline",
+        .{server.address().getPort()},
+    );
+    const uri = try std.Uri.parse(uri_text);
+    try std.testing.expectError(
+        error.Timeout,
+        HandshakeClient.requestUriWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            .{},
+            .{
+                .quic = .{
+                    .max_datagram_size = 4096,
+                    .max_frames_per_datagram = 8,
+                },
+            },
+            .{
+                .connect_timeout = .fromSeconds(1),
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .random = [_]u8{0xd3} ** 32,
+                    .x25519_secret_key = [_]u8{0xd4} ** 32,
+                },
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(50),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake client requests via Alt-Svc target" {

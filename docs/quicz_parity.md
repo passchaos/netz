@@ -373,7 +373,10 @@ flight reads rather than restarting for each stage or fallback address. Direct-
 address clients use the same total timeout directly in addition to the lower-
 level bounded PTO/retry policy. Explicit `connectWithDeadline` and
 `connectUriWithDeadline` entry points let a larger operation share its existing
-awake-clock budget instead of converting it back into a relative timeout. Each
+awake-clock budget instead of converting it back into a relative timeout. The
+one-shot `requestUriWithDeadline` path carries that same timestamp through DNS,
+all QUIC/TLS connection attempts, request transmission, and response assembly.
+Each
 pooled connection currently owns its UDP endpoint. Sharing one endpoint across
 several pooled origins remains a separate dispatcher integration task rather
 than allowing competing socket readers.
