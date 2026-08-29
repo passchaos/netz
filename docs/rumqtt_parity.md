@@ -1113,6 +1113,9 @@ admission; configured proxy, TLS, and CONNECT limits can only shorten it.
 Raw TCP server accept and already-accepted-stream APIs expose the same bounded
 CONNECT admission contract, including a shared budget with a trusted PROXY
 preface when enabled.
+Raw Unix-domain MQTT listeners expose matching post-accept timeout/deadline
+forms for pending and completed CONNECT admission, including an already
+accepted-stream deadline entry point.
 WS, Unix-WS, and WSS server accept APIs carry the same outer deadline through
 their WebSocket Upgrade and MQTT CONNECT phases; WSS additionally includes TLS
 and trusted PROXY parsing in that unchanged timestamp.

@@ -3225,6 +3225,26 @@ test "public modules are reachable" {
         "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "acceptPendingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "acceptPendingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "acceptStreamPendingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "proxyMetadata",
     ));

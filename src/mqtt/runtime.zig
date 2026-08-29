@@ -411,11 +411,78 @@ pub const UnixServer = struct {
         return pending.finish(options);
     }
 
+    /// Accept a Unix stream, then bound the complete MQTT CONNECT admission
+    /// with one caller-owned awake-clock deadline. Listener accept remains
+    /// unbounded because std.Io does not expose a timed accept operation.
+    pub fn acceptWithDeadline(
+        self: *UnixServer,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!AcceptedClient {
+        var pending = try self.acceptPendingWithDeadline(options, deadline);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *UnixServer,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        var pending = try self.acceptPendingWithTimeout(options, timeout);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
     pub fn acceptPending(
         self: *UnixServer,
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingBefore(stream, options, null);
+    }
+
+    pub fn acceptPendingWithDeadline(
+        self: *UnixServer,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingBefore(stream, options, deadline);
+    }
+
+    pub fn acceptPendingWithTimeout(
+        self: *UnixServer,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingBefore(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn acceptStreamPendingWithDeadline(
+        self: *UnixServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptStreamPendingBefore(stream, options, deadline);
+    }
+
+    fn acceptStreamPendingBefore(
+        self: *UnixServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        outer_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
         var connection = Connection{
             .allocator = self.allocator,
             .transport = .initTcp(self.io, stream),
@@ -425,7 +492,10 @@ pub const UnixServer = struct {
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
         errdefer connection.close();
-        return connection.acceptPending(options);
+        return if (outer_deadline) |deadline|
+            connection.acceptPendingWithDeadline(options, deadline)
+        else
+            connection.acceptPending(options);
     }
 
     pub fn pendingSource(self: *UnixServer) PendingSource {
