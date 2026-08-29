@@ -415,16 +415,37 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
     const Requester = struct {
         pool: *pool_mod.Pool,
         uri: []const u8,
+        acquired_count: *std.atomic.Value(usize),
+        all_acquired: *std.Io.Event,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            var response = self.pool.requestUri(self.uri, .{}) catch |err| {
+            var lease = self.pool.acquireUri(self.uri) catch |err| {
+                self.err = err;
+                // Avoid stranding peers at the barrier if setup itself fails;
+                // their result still cannot make the test pass.
+                self.all_acquired.set(self.pool.io);
+                return;
+            };
+            defer if (lease.active) lease.discard();
+            if (self.acquired_count.fetchAdd(1, .acq_rel) + 1 == request_count) {
+                self.all_acquired.set(self.pool.io);
+            }
+            self.all_acquired.wait(self.pool.io) catch |err| {
+                self.err = err;
+                return;
+            };
+            var response = lease.client().request(.{
+                .target = "/parallel",
+            }) catch |err| {
                 self.err = err;
                 return;
             };
             defer response.deinit(self.pool.allocator);
             if (!std.mem.eql(u8, response.response.body, "parallel")) {
                 self.err = error.InvalidResponse;
+                return;
             }
+            lease.release();
         }
     };
     var shared = Shared{ .server = &server };
@@ -439,10 +460,17 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
     defer pool.deinit();
     const uri = try uriFor(allocator, server.address(), "/parallel");
     defer allocator.free(uri);
+    var acquired_count: std.atomic.Value(usize) = .init(0);
+    var all_acquired: std.Io.Event = .unset;
     var requests: [request_count]Requester = undefined;
     var threads: [request_count]std.Thread = undefined;
     for (&requests, 0..) |*request, index| {
-        request.* = .{ .pool = &pool, .uri = uri };
+        request.* = .{
+            .pool = &pool,
+            .uri = uri,
+            .acquired_count = &acquired_count,
+            .all_acquired = &all_acquired,
+        };
         threads[index] = try std.Thread.spawn(.{}, Requester.run, .{request});
     }
     for (&threads) |*thread| thread.join();
