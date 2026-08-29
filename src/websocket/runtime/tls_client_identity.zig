@@ -40,23 +40,73 @@ pub fn init(
     tls_options: http1_runtime.TlsClientOptions,
     identity_options: Options,
 ) tls_stream.Error!*tls_stream.ClientConnection {
-    return tls_stream.ClientConnection.initVerified(
+    return initBefore(
         allocator,
         io,
         stream,
-        .{
-            .server_name = server_name,
-            .verify_host = tls_options.verify_host,
-            .ca_bundle = if (tls_options.ca_bundle) |bundle|
-                .{ .bundle = bundle.bundle, .lock = bundle.lock }
-            else
-                null,
-            .server_verifier = identity_options.server_verifier,
-            .client_identity = identity_options.identity,
-            .alpn_protocols = identity_options.alpn_protocols,
-            .cipher_suites = identity_options.cipher_suites,
-            .max_server_handshake_size = identity_options.max_server_handshake_size,
-            .handshake_timeout = identity_options.handshake_timeout orelse tls_options.handshake_timeout,
-        },
+        server_name,
+        tls_options,
+        identity_options,
+        null,
     );
+}
+
+pub fn initWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    server_name: []const u8,
+    tls_options: http1_runtime.TlsClientOptions,
+    identity_options: Options,
+    deadline: std.Io.Clock.Timestamp,
+) tls_stream.Error!*tls_stream.ClientConnection {
+    return initBefore(
+        allocator,
+        io,
+        stream,
+        server_name,
+        tls_options,
+        identity_options,
+        deadline,
+    );
+}
+
+fn initBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    server_name: []const u8,
+    tls_options: http1_runtime.TlsClientOptions,
+    identity_options: Options,
+    deadline: ?std.Io.Clock.Timestamp,
+) tls_stream.Error!*tls_stream.ClientConnection {
+    const options: tls_stream.ClientVerifiedOptions = .{
+        .server_name = server_name,
+        .verify_host = tls_options.verify_host,
+        .ca_bundle = if (tls_options.ca_bundle) |bundle|
+            .{ .bundle = bundle.bundle, .lock = bundle.lock }
+        else
+            null,
+        .server_verifier = identity_options.server_verifier,
+        .client_identity = identity_options.identity,
+        .alpn_protocols = identity_options.alpn_protocols,
+        .cipher_suites = identity_options.cipher_suites,
+        .max_server_handshake_size = identity_options.max_server_handshake_size,
+        .handshake_timeout = identity_options.handshake_timeout orelse tls_options.handshake_timeout,
+    };
+    return if (deadline) |absolute|
+        tls_stream.ClientConnection.initVerifiedWithDeadline(
+            allocator,
+            io,
+            stream,
+            options,
+            absolute,
+        )
+    else
+        tls_stream.ClientConnection.initVerified(
+            allocator,
+            io,
+            stream,
+            options,
+        );
 }

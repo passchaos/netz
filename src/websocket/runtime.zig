@@ -14,6 +14,7 @@ const compression_scratch =
     @import("runtime/compression_scratch.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
@@ -991,6 +992,38 @@ pub const Client = struct {
         return connectStream(allocator, io, stream, null, options);
     }
 
+    /// Establish cleartext WebSocket under one caller-owned deadline spanning
+    /// TCP setup and the complete HTTP Upgrade response.
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+        errdefer stream.close(io);
+        return connectStreamBefore(
+            allocator,
+            io,
+            stream,
+            null,
+            options,
+            deadline,
+        );
+    }
+
     /// Connect a cleartext WebSocket over a Unix-domain stream socket.
     /// `options.host` remains the HTTP Host authority and must be supplied by
     /// the caller because a filesystem path is not an HTTP authority.
@@ -1015,6 +1048,42 @@ pub const Client = struct {
             stream,
             null,
             connect_options,
+        );
+        stream_owned = false;
+        return connection;
+    }
+
+    pub fn connectUnixWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
+        if (options.host.len == 0) return error.InvalidUri;
+        const stream = try tcp_connect.unixWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var connect_options = options;
+        connect_options.tcp_nodelay = false;
+        const connection = try connectStreamBefore(
+            allocator,
+            io,
+            stream,
+            null,
+            connect_options,
+            deadline,
         );
         stream_owned = false;
         return connection;
@@ -1045,6 +1114,47 @@ pub const Client = struct {
         return connectStream(allocator, io, stream, null, connect_options);
     }
 
+    pub fn connectHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        if (options.tls_identity != null or options.vail_tls != null) {
+            return error.UnsupportedScheme;
+        }
+        const host_name = try net.HostName.init(host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+        errdefer stream.close(io);
+        const default_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
+        defer allocator.free(default_host);
+        var connect_options = options;
+        if (connect_options.host.len == 0) connect_options.host = default_host;
+        return connectStreamBefore(
+            allocator,
+            io,
+            stream,
+            null,
+            connect_options,
+            deadline,
+        );
+    }
+
     pub fn connectTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1068,6 +1178,38 @@ pub const Client = struct {
             port,
             options,
             tls_options,
+        );
+    }
+
+    pub fn connectTlsHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        const host_name = try net.HostName.init(host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+        return connectTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            host,
+            port,
+            options,
+            tls_options,
+            deadline,
         );
     }
 
@@ -1100,6 +1242,37 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectTlsAddressWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try net.HostName.init(tls_host);
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+        return connectTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            address.getPort(),
+            options,
+            tls_options,
+            deadline,
+        );
+    }
+
     /// Own `stream` from entry and close it on every pre-connection failure.
     /// Both hostname and pre-resolved-address APIs use this path so standard
     /// TLS, vail TLS, Host synthesis, and socket policy cannot drift apart.
@@ -1111,6 +1284,51 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        return connectTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            port,
+            options,
+            tls_options,
+            null,
+        );
+    }
+
+    fn connectTlsStreamBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            port,
+            options,
+            tls_options,
+            deadline,
+        );
+    }
+
+    fn connectTlsStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
@@ -1127,34 +1345,75 @@ pub const Client = struct {
         if (connect_options.vail_tls orelse
             connect_options.tls_identity) |identity|
         {
-            const tls_conn = try tls_client_identity.init(
+            const tls_conn = if (deadline) |absolute|
+                try tls_client_identity.initWithDeadline(
+                    allocator,
+                    io,
+                    stream,
+                    tls_host,
+                    tls_options,
+                    identity,
+                    absolute,
+                )
+            else
+                try tls_client_identity.init(
+                    allocator,
+                    io,
+                    stream,
+                    tls_host,
+                    tls_options,
+                    identity,
+                );
+            stream_owned = false;
+            errdefer tls_conn.deinit();
+            return if (deadline) |absolute|
+                connectVailStreamBefore(
+                    allocator,
+                    io,
+                    stream,
+                    tls_conn,
+                    connect_options,
+                    absolute,
+                )
+            else
+                connectVailStream(
+                    allocator,
+                    io,
+                    stream,
+                    tls_conn,
+                    connect_options,
+                );
+        }
+        const tls_conn = if (deadline) |absolute|
+            try http1_runtime.TlsClientConnection.initWithDeadline(
                 allocator,
                 io,
                 stream,
                 tls_host,
                 tls_options,
-                identity,
+                absolute,
+            )
+        else
+            try http1_runtime.TlsClientConnection.init(
+                allocator,
+                io,
+                stream,
+                tls_host,
+                tls_options,
             );
-            stream_owned = false;
-            errdefer tls_conn.deinit();
-            return connectVailStream(
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        return if (deadline) |absolute|
+            connectStreamBefore(
                 allocator,
                 io,
                 stream,
                 tls_conn,
                 connect_options,
-            );
-        }
-        const tls_conn = try http1_runtime.TlsClientConnection.init(
-            allocator,
-            io,
-            stream,
-            tls_host,
-            tls_options,
-        );
-        stream_owned = false;
-        errdefer tls_conn.deinit();
-        return connectStream(allocator, io, stream, tls_conn, connect_options);
+                absolute,
+            )
+        else
+            connectStream(allocator, io, stream, tls_conn, connect_options);
     }
 
     pub fn connectUri(
@@ -1172,6 +1431,59 @@ pub const Client = struct {
         uri_text: []const u8,
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        return connectUriTlsBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            null,
+        );
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        return connectUriTlsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .{},
+            deadline,
+        );
+    }
+
+    pub fn connectUriTlsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        return connectUriTlsBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    fn connectUriTlsBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
@@ -1193,7 +1505,27 @@ pub const Client = struct {
         connect_options.target = target;
         if (connect_options.host.len == 0) connect_options.host = endpoint.authority;
 
-        const stream = switch (endpoint.target) {
+        const stream = if (deadline) |absolute| switch (endpoint.target) {
+            .host => |host| try tcp_connect.hostWithDeadline(
+                io,
+                host,
+                endpoint.port,
+                try deadline_policy.capTimeout(
+                    io,
+                    absolute,
+                    options.connect_timeout,
+                ),
+            ),
+            .ip => |address| try tcp_connect.ipWithDeadline(
+                io,
+                address,
+                try deadline_policy.capTimeout(
+                    io,
+                    absolute,
+                    options.connect_timeout,
+                ),
+            ),
+        } else switch (endpoint.target) {
             .host => |host| try tcp_connect.host(
                 io,
                 host,
@@ -1210,35 +1542,104 @@ pub const Client = struct {
         errdefer if (stream_owned) stream.close(io);
         if (is_wss) {
             if (options.vail_tls orelse options.tls_identity) |identity| {
-                const tls_conn = try tls_client_identity.init(
-                    allocator,
-                    io,
-                    stream,
-                    endpoint.tls_host,
-                    tls_options,
-                    identity,
-                );
+                const tls_conn = if (deadline) |absolute|
+                    try tls_client_identity.initWithDeadline(
+                        allocator,
+                        io,
+                        stream,
+                        endpoint.tls_host,
+                        tls_options,
+                        identity,
+                        absolute,
+                    )
+                else
+                    try tls_client_identity.init(
+                        allocator,
+                        io,
+                        stream,
+                        endpoint.tls_host,
+                        tls_options,
+                        identity,
+                    );
                 stream_owned = false;
                 errdefer tls_conn.deinit();
-                return connectVailStream(
-                    allocator,
-                    io,
-                    stream,
-                    tls_conn,
-                    connect_options,
-                );
+                return if (deadline) |absolute|
+                    connectVailStreamBefore(
+                        allocator,
+                        io,
+                        stream,
+                        tls_conn,
+                        connect_options,
+                        absolute,
+                    )
+                else
+                    connectVailStream(
+                        allocator,
+                        io,
+                        stream,
+                        tls_conn,
+                        connect_options,
+                    );
             }
             var standard_tls_options = tls_options;
             if (standard_tls_options.handshake_timeout == null) {
                 standard_tls_options.handshake_timeout =
                     connect_options.tls_handshake_timeout;
             }
-            const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, standard_tls_options);
+            const tls_conn = if (deadline) |absolute|
+                try http1_runtime.TlsClientConnection.initWithDeadline(
+                    allocator,
+                    io,
+                    stream,
+                    endpoint.tls_host,
+                    standard_tls_options,
+                    absolute,
+                )
+            else
+                try http1_runtime.TlsClientConnection.init(
+                    allocator,
+                    io,
+                    stream,
+                    endpoint.tls_host,
+                    standard_tls_options,
+                );
             stream_owned = false;
             errdefer tls_conn.deinit();
-            return connectStream(allocator, io, stream, tls_conn, connect_options);
+            return if (deadline) |absolute|
+                connectStreamBefore(
+                    allocator,
+                    io,
+                    stream,
+                    tls_conn,
+                    connect_options,
+                    absolute,
+                )
+            else
+                connectStream(
+                    allocator,
+                    io,
+                    stream,
+                    tls_conn,
+                    connect_options,
+                );
         }
-        const connection = try connectStream(allocator, io, stream, null, connect_options);
+        const connection = if (deadline) |absolute|
+            try connectStreamBefore(
+                allocator,
+                io,
+                stream,
+                null,
+                connect_options,
+                absolute,
+            )
+        else
+            try connectStream(
+                allocator,
+                io,
+                stream,
+                null,
+                connect_options,
+            );
         stream_owned = false;
         return connection;
     }
@@ -1288,6 +1689,7 @@ pub const Client = struct {
             null,
             uring_stream,
             connect_options,
+            null,
         );
     }
 
@@ -1297,6 +1699,43 @@ pub const Client = struct {
         stream: net.Stream,
         tls_conn: ?*http1_runtime.TlsClientConnection,
         options: ConnectOptions,
+    ) Error!Connection {
+        return connectStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_conn,
+            options,
+            null,
+        );
+    }
+
+    fn connectStreamBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_conn: ?*http1_runtime.TlsClientConnection,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_conn,
+            options,
+            deadline,
+        );
+    }
+
+    fn connectStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_conn: ?*http1_runtime.TlsClientConnection,
+        options: ConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         if (options.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
@@ -1311,6 +1750,7 @@ pub const Client = struct {
             null,
             null,
             options,
+            deadline,
         );
     }
 
@@ -1320,6 +1760,43 @@ pub const Client = struct {
         stream: net.Stream,
         tls_conn: *tls_stream.ClientConnection,
         options: ConnectOptions,
+    ) Error!Connection {
+        return connectVailStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_conn,
+            options,
+            null,
+        );
+    }
+
+    fn connectVailStreamBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_conn: *tls_stream.ClientConnection,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectVailStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_conn,
+            options,
+            deadline,
+        );
+    }
+
+    fn connectVailStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_conn: *tls_stream.ClientConnection,
+        options: ConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         if (options.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
@@ -1333,6 +1810,7 @@ pub const Client = struct {
             tls_conn,
             null,
             options,
+            deadline,
         );
     }
 
@@ -1345,6 +1823,7 @@ pub const Client = struct {
         tls_vail_conn: ?*tls_stream.ClientConnection,
         linux_io_uring: ?http1_runtime.LinuxIoUringStream,
         options: ConnectOptions,
+        outer_deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         var nonce: [16]u8 = undefined;
         try std.Io.randomSecure(io, &nonce);
@@ -1388,10 +1867,13 @@ pub const Client = struct {
             .headers = headers.items,
         });
 
-        const deadline = if (options.limits.http1_handshake_timeout) |timeout|
-            try handshakeDeadline(transport, timeout)
-        else
-            null;
+        const deadline = deadline_policy.earlier(
+            outer_deadline,
+            if (options.limits.http1_handshake_timeout) |timeout|
+                try handshakeDeadline(transport, timeout)
+            else
+                null,
+        );
         var head = try readHttpHeadFromTransport(
             allocator,
             transport,

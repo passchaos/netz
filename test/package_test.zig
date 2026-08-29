@@ -600,6 +600,34 @@ test "public modules are reachable" {
         "connectUnix",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUnixWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsAddressWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriTlsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime.TlsServer,
         "serveConcurrent",
     ));
@@ -2664,6 +2692,34 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
         "connectUriTls",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUnixWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsAddressWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriTlsWithDeadline",
     ));
     try std.testing.expect(@hasField(
         netz.websocket.runtime.ConnectOptions,

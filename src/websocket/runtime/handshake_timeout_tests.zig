@@ -155,6 +155,78 @@ test "WebSocket client connect timeout is independent from upgrade timeout" {
     thread.join();
 }
 
+test "WebSocket caller deadline spans TCP setup and HTTP upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(150), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithDeadline(
+            allocator,
+            io,
+            listener.socket.address,
+            .{
+                .host = "localhost",
+                .connect_timeout = .fromSeconds(1),
+                .limits = .{
+                    .http1_handshake_timeout = .fromSeconds(1),
+                },
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    thread.join();
+    joined = true;
+}
+
+test "WebSocket caller deadline retains shorter connect timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            .{
+                .host = "localhost",
+                .connect_timeout = .zero,
+            },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
 test "WebSocket client rejects non-positive connect timeout before dialing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -394,6 +466,58 @@ test "WSS standard client bounds an idle TLS handshake" {
         ),
     );
     thread.join();
+}
+
+test "WSS caller deadline bounds TLS handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(150), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            listener.socket.address,
+            "localhost",
+            .{
+                .connect_timeout = .fromSeconds(1),
+                .tls_handshake_timeout = .fromSeconds(1),
+                .limits = .{
+                    .http1_handshake_timeout = .fromSeconds(1),
+                },
+            },
+            .{ .verify_host = false },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    thread.join();
+    joined = true;
 }
 
 test "WSS connect options forward TLS timeout to standard client" {
