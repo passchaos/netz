@@ -2474,6 +2474,7 @@ pub const Connection = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         try self.sendPing(payload);
         return self.readPingEvent(payload, deadline);
     }
@@ -2483,6 +2484,7 @@ pub const Connection = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readPingEvent(payload, deadline);
     }
 
@@ -2561,6 +2563,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!?websocket.OwnedCloseFrame {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         var frame = try self.receiveFrameWithDeadline(deadline);
         defer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
@@ -2589,6 +2592,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.message_assembler != null or self.message_into.active()) {
             return error.InvalidFrame;
         }
@@ -2621,6 +2625,7 @@ pub const Connection = struct {
         close_frame: ?websocket.CloseFrame,
         deadline: std.Io.Clock.Timestamp,
     ) Error!CloseHandshakeEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         if (!self.close_sent) try self.sendCloseFrame(close_frame);
         return self.readCloseHandshakeEvent(deadline);
     }
@@ -2631,6 +2636,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!CloseHandshakeEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         if (!self.close_sent) return error.InvalidFrame;
         return self.readCloseHandshakeEvent(deadline);
     }
@@ -2822,6 +2828,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.message_assembler != null or self.message_into.active()) {
             return error.InvalidFrame;
         }
@@ -2880,6 +2887,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedMessage {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.receiveMessageInternal(deadline);
     }
 
@@ -2958,6 +2966,7 @@ pub const Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Message {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return receiveMessageIntoConnection(self, out, deadline);
     }
 
@@ -3439,6 +3448,10 @@ pub const H2Connection = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         try self.sendPing(payload);
         return self.readPingEvent(payload, deadline);
     }
@@ -3448,6 +3461,10 @@ pub const H2Connection = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         return self.readPingEvent(payload, deadline);
     }
 
@@ -3525,6 +3542,10 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!?websocket.OwnedCloseFrame {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         var frame = try self.receiveFrameWithDeadline(deadline);
         defer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
@@ -3552,6 +3573,10 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         if (self.message_assembler != null or self.message_into.active()) {
             return error.InvalidFrame;
         }
@@ -3579,6 +3604,10 @@ pub const H2Connection = struct {
         close_frame: ?websocket.CloseFrame,
         deadline: std.Io.Clock.Timestamp,
     ) Error!CloseHandshakeEvent {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         if (!self.close_sent) try self.sendCloseFrame(close_frame);
         return self.readCloseHandshakeEvent(deadline);
     }
@@ -3588,6 +3617,10 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!CloseHandshakeEvent {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         if (!self.close_sent) return error.InvalidFrame;
         return self.readCloseHandshakeEvent(deadline);
     }
@@ -3765,6 +3798,10 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         if (self.message_assembler != null or self.message_into.active()) {
             return error.InvalidFrame;
         }
@@ -3815,6 +3852,10 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedMessage {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         return self.receiveMessageInternal(deadline);
     }
 
@@ -3892,6 +3933,10 @@ pub const H2Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Message {
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
         return receiveMessageIntoConnection(self, out, deadline);
     }
 

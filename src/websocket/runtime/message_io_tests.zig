@@ -174,6 +174,45 @@ test "WebSocket receiveMessageInto deadline spans control frames" {
     try std.testing.expect(shared.timed_out);
 }
 
+test "WebSocket deadlines reject a non-awake clock before state changes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var connection = Connection{
+        .io = io,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.inbuf.deinit(allocator);
+        connection.compression_send.deinit(allocator);
+        connection.compression_receive.deinit(allocator);
+    }
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .real },
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.pingWithDeadline("probe", deadline),
+    );
+    try std.testing.expect(!connection.close_sent);
+    try std.testing.expectError(
+        error.Timeout,
+        connection.closeWithDeadline(null, deadline),
+    );
+    try std.testing.expect(!connection.close_sent);
+    try std.testing.expectError(
+        error.Timeout,
+        connection.receiveMessageWithDeadline(deadline),
+    );
+    try std.testing.expect(connection.message_assembler == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.inbuf.items.len);
+}
+
 test "WebSocket receive timeout resumes a fragmented message" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

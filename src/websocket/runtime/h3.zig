@@ -9,6 +9,7 @@ const websocket = @import("../mod.zig");
 const common = @import("common.zig");
 const compression_scratch = @import("compression_scratch.zig");
 const origin_policy = @import("origin_policy.zig");
+const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 
 pub const Error = websocket.Error || http3.runtime.Error || error{
@@ -268,6 +269,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: std.Io.Clock.Timestamp,
         ) Error!common.OwnedMessage {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
             return self.receiveMessageInternal(deadline);
         }
 
@@ -340,6 +342,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: std.Io.Clock.Timestamp,
         ) Error!websocket.Frame {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
             return self.receiveFrameInternal(deadline);
         }
 

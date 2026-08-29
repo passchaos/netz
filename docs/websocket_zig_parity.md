@@ -511,6 +511,11 @@ bytes cannot be silently lost.
 
 ## Remaining evidence before a broad completion claim
 
+All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
+entry, while their absolute-deadline counterparts now reject other clock
+domains before sending Ping/Close or mutating incremental receive state. The
+HTTP/3 adapter applies the same validation before pumping QUIC.
+
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark
    now reports per-class p50/p99/p99.9 and retains matching checksum/sample
    counts. The maximum 256-connection setting also completes with matching
