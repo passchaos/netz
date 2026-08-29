@@ -227,6 +227,21 @@ test "WebSocket caller deadline retains shorter connect timeout" {
     );
 }
 
+test "WebSocket caller timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1) },
+            .{ .host = "localhost" },
+            .zero,
+        ),
+    );
+}
+
 test "WebSocket client rejects non-positive connect timeout before dialing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

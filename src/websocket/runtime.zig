@@ -1024,6 +1024,23 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect a cleartext WebSocket over a Unix-domain stream socket.
     /// `options.host` remains the HTTP Host authority and must be supplied by
     /// the caller because a filesystem path is not an HTTP authority.
@@ -1087,6 +1104,23 @@ pub const Client = struct {
         );
         stream_owned = false;
         return connection;
+    }
+
+    pub fn connectUnixWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectHost(
@@ -1155,6 +1189,25 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1210,6 +1263,27 @@ pub const Client = struct {
             options,
             tls_options,
             deadline,
+        );
+    }
+
+    pub fn connectTlsHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -1270,6 +1344,27 @@ pub const Client = struct {
             options,
             tls_options,
             deadline,
+        );
+    }
+
+    pub fn connectTlsAddressWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -1459,6 +1554,23 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriTlsWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1474,6 +1586,25 @@ pub const Client = struct {
             options,
             tls_options,
             try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn connectUriTlsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriTlsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

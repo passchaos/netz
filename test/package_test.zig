@@ -709,7 +709,15 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
         "connectHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectHostWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
@@ -717,7 +725,15 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
+        "connectUnixWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
         "connectTlsHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectTlsHostWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
@@ -725,11 +741,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
+        "connectTlsAddressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
         "connectUriWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
+        "connectUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
         "connectUriTlsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriTlsWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.TlsServer,
