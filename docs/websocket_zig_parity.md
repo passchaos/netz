@@ -512,6 +512,10 @@ frames. Partial wire frames, the owning message assembler, caller-buffer offsets
 compression mode, and incremental UTF-8 validation remain resumable after a
 timeout; caller-buffer retries must present the same storage so already written
 bytes cannot be silently lost.
+Ping and Close progress also expose timeout and absolute-deadline continuation
+forms on both transports. A caller can handle an interleaved application frame
+and resume with either its original total deadline or a new bounded wait
+without retransmitting the Ping or Close control frame.
 RFC 8441 setup now has matching `openWithDeadline`/`openWithTimeout` and
 `acceptWithDeadline`/`acceptWithTimeout` entry points. They delegate to the
 HTTP/2 Extended CONNECT deadline primitives, so interleaved control frames and

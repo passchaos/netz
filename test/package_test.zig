@@ -1016,6 +1016,14 @@ test "public modules are reachable" {
         "continuePingWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "continuePingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "continueCloseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "receiveMessageInto",
     ));
@@ -1185,6 +1193,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
         "pingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "continuePingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "continueCloseWithTimeout",
     ));
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());

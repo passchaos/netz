@@ -337,7 +337,7 @@ test "WebSocket close handshake returns in-flight data before peer close" {
         "already-in-flight",
         application.application.payload,
     );
-    var closed = try client.continueCloseWithDeadline(deadline);
+    var closed = try client.continueCloseWithTimeout(.fromSeconds(1));
     defer closed.deinit(allocator);
     try std.testing.expectEqual(
         websocket.CloseCode.normal_closure,

@@ -199,12 +199,20 @@ test "WebSocket deadlines reject a non-awake clock before state changes" {
         error.Timeout,
         connection.pingWithDeadline("probe", deadline),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.continuePingWithTimeout("probe", .zero),
+    );
     try std.testing.expect(!connection.close_sent);
     try std.testing.expectError(
         error.Timeout,
         connection.closeWithDeadline(null, deadline),
     );
     try std.testing.expect(!connection.close_sent);
+    try std.testing.expectError(
+        error.Timeout,
+        connection.continueCloseWithTimeout(.zero),
+    );
     try std.testing.expectError(
         error.Timeout,
         connection.receiveMessageWithDeadline(deadline),

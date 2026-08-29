@@ -2655,6 +2655,23 @@ pub const Connection = struct {
         return self.readPingEvent(payload, deadline);
     }
 
+    /// Resume a Ping after the caller handles an interleaved application
+    /// frame, deriving a fresh bounded wait without retransmitting Ping.
+    pub fn continuePingWithTimeout(
+        self: *Connection,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) Error!PingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.continuePingWithDeadline(
+            payload,
+            .fromNow(
+                self.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     fn readPingEvent(
         self: *Connection,
         payload: []const u8,
@@ -2806,6 +2823,19 @@ pub const Connection = struct {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (!self.close_sent) return error.InvalidFrame;
         return self.readCloseHandshakeEvent(deadline);
+    }
+
+    /// Resume an already-started Close handshake under a new relative wait.
+    /// This never emits a second Close frame.
+    pub fn continueCloseWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!CloseHandshakeEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.continueCloseWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     fn readCloseHandshakeEvent(
@@ -3635,6 +3665,21 @@ pub const H2Connection = struct {
         return self.readPingEvent(payload, deadline);
     }
 
+    pub fn continuePingWithTimeout(
+        self: *H2Connection,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) Error!PingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.continuePingWithDeadline(
+            payload,
+            .fromNow(
+                self.tunnel.connection.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     fn readPingEvent(
         self: *H2Connection,
         payload: []const u8,
@@ -3790,6 +3835,17 @@ pub const H2Connection = struct {
         );
         if (!self.close_sent) return error.InvalidFrame;
         return self.readCloseHandshakeEvent(deadline);
+    }
+
+    pub fn continueCloseWithTimeout(
+        self: *H2Connection,
+        timeout: std.Io.Duration,
+    ) Error!CloseHandshakeEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.continueCloseWithDeadline(.fromNow(
+            self.tunnel.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     fn readCloseHandshakeEvent(
@@ -7699,7 +7755,10 @@ test "WebSocket pingWithDeadline preserves an interleaved message" {
         },
         else => return error.TestUnexpectedResult,
     }
-    var pong = try client.continuePingWithDeadline("probe", deadline);
+    var pong = try client.continuePingWithTimeout(
+        "probe",
+        .fromSeconds(1),
+    );
     defer pong.deinit(allocator);
     try std.testing.expect(pong == .pong);
 
