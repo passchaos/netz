@@ -271,6 +271,22 @@ pub const Server = struct {
         );
     }
 
+    pub fn acceptStreamPendingWithTimeout(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingAcceptedClient {
+        // Match the deadline form: validation failure leaves the caller-owned
+        // accepted stream untouched because ownership has not transferred.
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptStreamPendingWithDeadline(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn acceptStreamPendingMaybeBefore(
         self: *Server,
         stream: net.Stream,
@@ -475,6 +491,20 @@ pub const UnixServer = struct {
     ) Error!PendingAcceptedClient {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.acceptStreamPendingBefore(stream, options, deadline);
+    }
+
+    pub fn acceptStreamPendingWithTimeout(
+        self: *UnixServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptStreamPendingWithDeadline(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     fn acceptStreamPendingBefore(
@@ -2638,6 +2668,21 @@ pub const Connection = struct {
         return self.establishClientBefore(
             options,
             earliestClockDeadline(deadline, phase_deadline),
+        );
+    }
+
+    pub fn establishClientWithTimeout(
+        self: *Connection,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.establishClientWithDeadline(
+            options,
+            .fromNow(
+                self.transport.ioHandle(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
         );
     }
 

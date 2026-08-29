@@ -1115,7 +1115,9 @@ CONNECT admission contract, including a shared budget with a trusted PROXY
 preface when enabled.
 Raw Unix-domain MQTT listeners expose matching post-accept timeout/deadline
 forms for pending and completed CONNECT admission, including an already
-accepted-stream deadline entry point.
+accepted-stream timeout/deadline pair. Raw TCP exposes the same pair, and an
+already-open client transport can negotiate CONNECT/CONNACK under either a
+relative timeout or a caller-owned absolute deadline without reopening it.
 WS, Unix-WS, and WSS server accept APIs carry the same outer deadline through
 their WebSocket Upgrade and MQTT CONNECT phases; WSS additionally includes TLS
 and trusted PROXY parsing in that unchanged timestamp.

@@ -2730,6 +2730,10 @@ test "public modules are reachable" {
         "establishClientWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "establishClientWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Client,
         "connectHost",
     ));
@@ -2933,6 +2937,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "acceptStreamPendingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "acceptStreamPendingWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
@@ -3295,6 +3303,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.UnixServer,
         "acceptStreamPendingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.UnixServer,
+        "acceptStreamPendingWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

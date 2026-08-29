@@ -199,3 +199,60 @@ test "MQTT Unix server caller timeout bounds CONNECT admission" {
         server.acceptPendingWithTimeout(.{}, .zero),
     );
 }
+
+test "MQTT accepted Unix stream exposes a CONNECT timeout" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(io, &path_storage);
+    const suffix = try std.fmt.bufPrint(
+        path_storage[directory_len..],
+        "/mqtt-stream-timeout.sock",
+        .{},
+    );
+    const full_path = path_storage[0 .. directory_len + suffix.len];
+    const address = try std.Io.net.UnixAddress.init(full_path);
+    var server = try runtime.UnixServer.listen(allocator, io, address, .{});
+    defer {
+        server.deinit();
+        std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
+    }
+
+    const Shared = struct {
+        server: *runtime.UnixServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.server.listener.accept(self.server.io) catch
+                |err| {
+                    self.err = err;
+                    return;
+                };
+            var pending = self.server.acceptStreamPendingWithTimeout(
+                stream,
+                .{},
+                .fromMilliseconds(30),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            pending.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try address.connect(io);
+    defer client.close(io);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
