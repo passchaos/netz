@@ -666,6 +666,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             );
             try std.testing.expectEqual(websocket.Opcode.binary, in_place.opcode);
             try std.testing.expectEqualStrings("mutable-h3", in_place.payload);
+            try connection.sendText("in-place-received");
 
             for (0..2) |_| {
                 const compressed = try connection.receiveMessageIntoWithTimeout(
@@ -830,6 +831,9 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         &mutable_payload,
     ));
     client.permessage_deflate = true;
+    var in_place_ack = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer in_place_ack.deinit(allocator);
+    try std.testing.expectEqualStrings("in-place-received", in_place_ack.payload);
     try client.sendBinaryParts(compressed_first, compressed_second);
     const compressed_ptr = client.compression_send.payload.allocatedSlice().ptr;
     var failing = std.testing.FailingAllocator.init(allocator, .{});
