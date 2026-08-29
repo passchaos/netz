@@ -4947,28 +4947,11 @@ fn receiveFrameIntoConnection(
 }
 
 fn closeAfterReceiveError(connection: anytype, err: anyerror) void {
-    const code = closeCodeForReceiveError(err) orelse return;
+    const code = common.closeCodeForReceiveError(err) orelse return;
     // Nested receive helpers may observe the same failure. Only the first
     // layer sends a Close frame; later errdefers preserve the original error.
     if (connection.close_sent) return;
     connection.sendClose(code, "") catch {};
-}
-
-fn closeCodeForReceiveError(err: anyerror) ?websocket.CloseCode {
-    return switch (err) {
-        error.InvalidUtf8 => .invalid_payload_data,
-        error.MessageTooLarge, error.PayloadTooLarge => .message_too_big,
-        error.InvalidOpcode,
-        error.InvalidFrame,
-        error.InvalidControlFrame,
-        error.UnmaskedClientFrame,
-        error.MaskedServerFrame,
-        error.UnexpectedRsv,
-        error.NonMinimalLength,
-        error.InvalidCloseCode,
-        => .protocol_error,
-        else => null,
-    };
 }
 
 /// Read the current frame body while validating uncompressed text bytes as

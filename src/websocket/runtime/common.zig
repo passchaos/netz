@@ -81,6 +81,26 @@ pub const MessageIntoReceiveState = struct {
     }
 };
 
+/// Map RFC 6455 receive failures to the status code that should be sent before
+/// terminating the connection. Transport/time/allocation failures have no
+/// WebSocket Close mapping and return null.
+pub fn closeCodeForReceiveError(err: anyerror) ?websocket.CloseCode {
+    return switch (err) {
+        error.InvalidUtf8 => .invalid_payload_data,
+        error.MessageTooLarge, error.PayloadTooLarge => .message_too_big,
+        error.InvalidOpcode,
+        error.InvalidFrame,
+        error.InvalidControlFrame,
+        error.UnmaskedClientFrame,
+        error.MaskedServerFrame,
+        error.UnexpectedRsv,
+        error.NonMinimalLength,
+        error.InvalidCloseCode,
+        => .protocol_error,
+        else => null,
+    };
+}
+
 /// One observable step while awaiting the Pong for a locally sent Ping.
 /// Payload-bearing variants transfer ownership to the caller so no transport
 /// has to discard application data or peer Close metadata while making
@@ -146,4 +166,21 @@ test "WebSocket caller-buffer state retains output identity" {
     try std.testing.expectEqual(@as(usize, 7), state.written);
     state.reset();
     try std.testing.expect(!state.active());
+}
+
+test "WebSocket receive failures map to RFC 6455 Close codes" {
+    try std.testing.expectEqual(
+        websocket.CloseCode.invalid_payload_data,
+        closeCodeForReceiveError(error.InvalidUtf8).?,
+    );
+    try std.testing.expectEqual(
+        websocket.CloseCode.message_too_big,
+        closeCodeForReceiveError(error.MessageTooLarge).?,
+    );
+    try std.testing.expectEqual(
+        websocket.CloseCode.protocol_error,
+        closeCodeForReceiveError(error.UnmaskedClientFrame).?,
+    );
+    try std.testing.expect(closeCodeForReceiveError(error.Timeout) == null);
+    try std.testing.expect(closeCodeForReceiveError(error.OutOfMemory) == null);
 }

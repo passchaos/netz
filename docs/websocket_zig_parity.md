@@ -561,6 +561,9 @@ timeout retries while requiring the same output buffer for resumed messages.
 H3 clients additionally expose `sendBinaryInPlace`: callers opting into mutable
 post-send storage avoid the immutable client's masking copy, matching the
 reference API while keeping the safe `[]const u8` alternatives.
+HTTP/3 receive paths now use the same RFC 6455 failure mapping as HTTP/1 and
+RFC 8441, sending 1002 for malformed framing, 1007 for invalid text, and 1009
+for configured frame/message limits while preserving the original local error.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

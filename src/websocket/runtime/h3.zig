@@ -616,6 +616,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!common.OwnedMessage {
+            errdefer |err| self.closeAfterReceiveError(err);
             if (self.message_into.active()) return error.InvalidFrame;
             if (self.message_assembler == null) {
                 self.message_assembler = websocket.MessageAssembler.initLimited(
@@ -717,6 +718,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             try self.message_into.validateOutput(out);
             errdefer |err| self.resetMessageIntoAfterError(err);
+            errdefer |err| self.closeAfterReceiveError(err);
 
             var control_storage: [125]u8 = undefined;
             while (true) {
@@ -985,6 +987,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!websocket.Frame {
+            errdefer |err| self.closeAfterReceiveError(err);
             if (self.close_sent and self.close_received) {
                 return error.ConnectionClosed;
             }
@@ -1045,6 +1048,14 @@ pub fn Connection(comptime role: common.Role) type {
                 else => {},
             }
             return frame;
+        }
+
+        fn closeAfterReceiveError(self: *Self, err: anyerror) void {
+            const code = common.closeCodeForReceiveError(err) orelse return;
+            // Nested receive helpers can observe the same error. Emit at most
+            // one failure Close while preserving the original receive error.
+            if (self.close_sent) return;
+            self.sendClose(code, "") catch {};
         }
 
         fn sendDataFrame(
