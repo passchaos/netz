@@ -2746,6 +2746,25 @@ pub const HandshakeClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClientSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Establish authenticated QUIC and preserve a non-success Extended
     /// CONNECT response for application inspection.
     pub fn connectAttempt(
@@ -2799,6 +2818,25 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             deadline,
+        );
+    }
+
+    pub fn connectAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -2875,6 +2913,25 @@ pub const HandshakeClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: HandshakeUriConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClientSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2929,7 +2986,6 @@ pub const HandshakeClientSession = struct {
         defer allocator.free(path);
 
         var h3_options = options.h3;
-        h3_options.connect_timeout = null;
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
@@ -2951,6 +3007,25 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             deadline,
+        );
+    }
+
+    pub fn connectUriAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: HandshakeUriConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

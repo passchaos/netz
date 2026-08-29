@@ -130,7 +130,8 @@ accepts an existing absolute awake-clock budget from an application workflow
 and preserves it through the final Extended CONNECT response rather than
 ending the budget after QUIC/TLS establishment. Direct-address handshake
 clients expose the same complete-session deadline, and explicit deadline APIs
-retain a shorter configured HTTP/3 connect timeout when present.
+retain a shorter configured HTTP/3 connect timeout when present. Matching
+relative-timeout helpers convert their end-to-end budget once at API entry.
 
 ## Important interoperability correction
 

@@ -115,6 +115,49 @@ test "WebTransport direct connect composes caller and phase deadlines" {
     );
 }
 
+test "WebTransport URI deadline retains shorter HTTP3 phase timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClientSession.connectUriWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            "https://localhost/",
+            .{ .h3 = .{
+                .connect_timeout = .zero,
+                .handshake = .{
+                    .original_destination_connection_id = "wt-uri-phase-origin",
+                    .local_connection_id = "wt-uri-phase-client",
+                },
+            } },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
+test "WebTransport connect timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClientSession.connectUriWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://localhost/",
+            .{ .h3 = .{ .handshake = .{
+                .original_destination_connection_id = "wt-timeout-origin",
+                .local_connection_id = "wt-timeout-client",
+            } } },
+            .zero,
+        ),
+    );
+}
+
 test "WebTransport URI deadline includes Extended CONNECT response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
