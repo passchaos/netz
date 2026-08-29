@@ -518,7 +518,9 @@ HTTP/3 adapter applies the same validation before pumping QUIC.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can
-be upgraded under the same caller-owned deadline.
+be upgraded under the same caller-owned deadline. WSS server acceptance carries
+that budget through both TLS 1.3 and HTTP Upgrade, with each configured phase
+timeout able to shorten but never renew it.
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark
    now reports per-class p50/p99/p99.9 and retains matching checksum/sample

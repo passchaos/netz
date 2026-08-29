@@ -426,6 +426,81 @@ test "WSS listener bounds an idle TLS handshake" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "WSS server caller timeout bounds TLS and HTTP upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .tls_handshake_timeout = .fromSeconds(1),
+            .limits = .{
+                .http1_handshake_timeout = .fromSeconds(1),
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.acceptWithTimeout(
+                .{},
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const client = try tls_stream.ClientConnection.init(
+        allocator,
+        io,
+        stream,
+        .{
+            .server_name = "localhost",
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = key_pair.public_key.toUncompressedSec1(),
+            },
+        },
+    );
+    stream_owned = false;
+    defer client.deinit();
+    // Leave the HTTP Upgrade incomplete after TLS has consumed part of the
+    // same caller-owned budget. The HTTP phase must not receive a fresh one.
+    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    try client.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n");
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "WSS vail client bounds an idle TLS handshake" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -244,6 +244,70 @@ test "TLS client absolute deadline bounds the complete handshake" {
     joined = true;
 }
 
+test "TLS server absolute deadline bounds the complete handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var identity = try Identity.init();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        identity: *const Identity,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.close(self.io);
+            const certificate_chain = [_][]const u8{
+                &self.identity.certificate,
+            };
+            var options = self.identity.options(.fromSeconds(1));
+            // `Identity.options` is a convenience for immediate calls. Keep
+            // this backing slice in the worker frame because the deadline
+            // path adds another synchronous helper layer before validation.
+            options.identity.certificate_chain = &certificate_chain;
+            const connection = server.Connection.initWithDeadline(
+                allocator,
+                self.io,
+                stream,
+                options,
+                .fromNow(self.io, .{
+                    .raw = .fromMilliseconds(20),
+                    .clock = .awake,
+                }),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.deinit();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{
+        .io = io,
+        .listener = &listener,
+        .identity = &identity,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const peer = try connect(io, &listener);
+    defer peer.close(io);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "TLS client absolute deadline retains shorter handshake timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

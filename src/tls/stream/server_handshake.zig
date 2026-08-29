@@ -95,11 +95,45 @@ pub fn perform(
     stream: net.Stream,
     options: Options,
 ) Error!TrafficKeys {
-    try options.identity.validate();
-    const deadline = try handshake_deadline.fromTimeout(
+    return performBefore(
+        allocator,
         io,
-        options.handshake_timeout,
+        stream,
+        options,
+        try handshake_deadline.fromTimeout(io, options.handshake_timeout),
     );
+}
+
+/// Server-side counterpart to the client handshake deadline API. The caller's
+/// outer budget is retained while `options.handshake_timeout` may shorten it.
+pub fn performWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: Options,
+    deadline: std.Io.Clock.Timestamp,
+) Error!TrafficKeys {
+    return performBefore(
+        allocator,
+        io,
+        stream,
+        options,
+        try handshake_deadline.capTimeout(
+            io,
+            deadline,
+            options.handshake_timeout,
+        ),
+    );
+}
+
+fn performBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: Options,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!TrafficKeys {
+    try options.identity.validate();
 
     var client_hello_storage: std.ArrayList(u8) = .empty;
     defer client_hello_storage.deinit(allocator);

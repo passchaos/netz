@@ -38,12 +38,43 @@ pub const Connection = struct {
         stream: net.Stream,
         options: Options,
     ) Error!*Connection {
-        var keys = try server_handshake.perform(
-            allocator,
-            io,
-            stream,
-            options,
-        );
+        return initBefore(allocator, io, stream, options, null);
+    }
+
+    /// Complete the server TLS handshake under the earlier of the caller's
+    /// absolute deadline and `options.handshake_timeout`.
+    pub fn initWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        return initBefore(allocator, io, stream, options, deadline);
+    }
+
+    fn initBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        var keys = if (deadline) |absolute|
+            try server_handshake.performWithDeadline(
+                allocator,
+                io,
+                stream,
+                options,
+                absolute,
+            )
+        else
+            try server_handshake.perform(
+                allocator,
+                io,
+                stream,
+                options,
+            );
         errdefer keys.deinit();
         const selected_alpn = if (keys.selected_alpn) |protocol|
             try allocator.dupe(u8, protocol)

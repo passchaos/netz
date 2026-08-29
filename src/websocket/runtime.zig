@@ -486,21 +486,75 @@ pub const TlsServer = struct {
         return self.acceptStream(stream, options);
     }
 
+    /// Accept TCP, then carry one caller-owned deadline through TLS and the
+    /// HTTP Upgrade. The listener accept itself remains unbounded.
+    pub fn acceptWithDeadline(
+        self: *TlsServer,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamWithDeadline(stream, options, deadline);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *TlsServer,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamWithDeadline(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Perform TLS and WebSocket handshakes on an already accepted stream.
     pub fn acceptStream(
         self: *TlsServer,
         stream: net.Stream,
         options: AcceptOptions,
     ) Error!Connection {
+        return self.acceptStreamMaybeBefore(stream, options, null);
+    }
+
+    pub fn acceptStreamWithDeadline(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptStreamMaybeBefore(stream, options, deadline);
+    }
+
+    fn acceptStreamMaybeBefore(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
-        const tls_connection = try tls_stream.ServerConnection.init(
-            self.allocator,
-            self.io,
-            stream,
-            self.tls,
-        );
+        const tls_connection = if (deadline) |absolute|
+            try tls_stream.ServerConnection.initWithDeadline(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+                absolute,
+            )
+        else
+            try tls_stream.ServerConnection.init(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+            );
         stream_owned = false;
         errdefer tls_connection.deinit();
         return acceptTransport(
@@ -509,7 +563,7 @@ pub const TlsServer = struct {
             .{ .tls_server = tls_connection },
             self.limits,
             options,
-            null,
+            deadline,
         );
     }
 
