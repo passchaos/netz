@@ -121,6 +121,12 @@ absolute application deadline spans unrelated QUIC packets while earlier PTO,
 delayed-ACK, keep-alive, path-validation, idle and close timers continue to
 run; neither transport maintenance nor control traffic renews the caller's
 budget.
+The multi-connection endpoint preserves HTTP/3 handshake-worker failures as a
+finite typed payload rather than widening them to `anyerror`. In particular,
+an expired shared-endpoint admission is observable as `error.Timeout` with its
+pending handle after completion handling has released its Initial and
+registration, so applications can distinguish admission pressure from TLS or
+QUIC rejection.
 URI clients inherit HTTP/3's total `connect_timeout`: DNS resolution and each
 address-specific QUIC/TLS attempt share one absolute deadline across Initial,
 Retry, Version Negotiation, and passive Handshake flights. A real silent-UDP

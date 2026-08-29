@@ -12,6 +12,64 @@ test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime, "EndpointServeOptions"));
 }
 
+test "HTTP/3 endpoint reports an admission timeout as a typed failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "timeout-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    const bytes = try allocator.dupe(u8, "expired-initial");
+    var initial = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(9010) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer initial.deinit(allocator);
+    const admission = try allocator.create(runtime.HandshakeAdmission);
+    admission.* = try server.beginHandshakeAdmission(
+        endpoint.dispatcher,
+        73,
+        &initial,
+        .{ .max_pending_handshakes = 1, .inbox_capacity = 1 },
+    );
+    // Model the worker result after the deadline expires. The completion owns
+    // the admission and must unregister/free it while preserving Timeout in
+    // the endpoint event rather than returning it as a receive-loop failure.
+    var completion = runtime.HandshakeCompletion{
+        .handle = 73,
+        .admission = admission,
+        .result = .{ .failure = error.Timeout },
+    };
+    var event = try runtime.EndpointServer.testing.finishTransportCompletion(
+        &endpoint,
+        &completion,
+    );
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .handshake_failed);
+    try std.testing.expectEqual(@as(usize, 73), event.handshake_failed.handle);
+    try std.testing.expectEqual(error.Timeout, event.handshake_failed.err);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        endpoint.dispatcher.pendingHandshakeCount(),
+    );
+}
+
 test "HTTP/3 endpoint server rotates ready request sessions fairly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

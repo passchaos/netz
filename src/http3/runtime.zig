@@ -3668,16 +3668,18 @@ pub const EndpointRequestEvent = struct {
 /// a routed packet. HTTP/3 and WebTransport share handshake ownership and CID
 /// routing, but must apply established packets through different stream
 /// parsers once an Extended CONNECT has been detached.
+pub const HandshakeFailure = struct {
+    handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
+    err: HandshakeWorkerError,
+};
+
 pub const EndpointTransportEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
     closed: struct {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
         timer: quic.one_rtt.TimerDeadline,
     },
-    handshake_failed: struct {
-        handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
-        err: HandshakeWorkerError,
-    },
+    handshake_failed: HandshakeFailure,
     packet: quic.endpoint_dispatcher.RoutedPacket,
     unrouted: quic.endpoint_dispatcher.Event,
 
@@ -3700,10 +3702,7 @@ pub const EndpointServerEvent = union(enum) {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
         timer: quic.one_rtt.TimerDeadline,
     },
-    handshake_failed: struct {
-        handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
-        err: HandshakeWorkerError,
-    },
+    handshake_failed: HandshakeFailure,
     request: EndpointRequestEvent,
     unrouted: quic.endpoint_dispatcher.Event,
 
@@ -4032,6 +4031,16 @@ pub const EndpointServer = struct {
                 ReadyProbe.poll,
             )) orelse return null;
             return event.request.connection_handle;
+        }
+
+        /// Expose completion adaptation without constructing a full QUIC/TLS
+        /// exchange. Ownership follows the production path: this call always
+        /// consumes `completion`, including when it contains a failure.
+        pub fn finishTransportCompletion(
+            server: *EndpointServer,
+            completion: *HandshakeCompletion,
+        ) HandshakeAdmissionError!EndpointTransportEvent {
+            return server.finishTransportCompletion(completion);
         }
     };
 

@@ -4179,6 +4179,14 @@ test "public modules are reachable" {
         "HandshakeWorkerError",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeFailure",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "HandshakeFailure",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeAdmission,
         "deadline",
     ));

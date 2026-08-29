@@ -28,6 +28,7 @@ pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 pub const EndpointServerError = Error ||
     http3.runtime.HandshakeAdmissionError;
+pub const HandshakeFailure = http3.runtime.HandshakeFailure;
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
@@ -1154,10 +1155,10 @@ pub const EndpointServerEvent = union(enum) {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
         timer: quic.one_rtt.TimerDeadline,
     },
-    handshake_failed: struct {
-        handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
-        err: anyerror,
-    },
+    /// The HTTP/3 handshake supervisor is the producer of this event. Reuse
+    /// its finite error payload so applications can exhaustively distinguish
+    /// an admission deadline from a protocol/TLS failure.
+    handshake_failed: HandshakeFailure,
     session_request: quic.endpoint_dispatcher.ConnectionHandle,
     session_event: struct {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
