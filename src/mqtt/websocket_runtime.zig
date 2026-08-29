@@ -627,6 +627,65 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (options.client_identity != null) return error.UnsupportedScheme;
+        const ws = try websocket_runtime.Client.connectWithDeadline(
+            allocator,
+            io,
+            address,
+            websocketConnectOptions(options),
+            deadline,
+        );
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            deadline,
+        );
+    }
+
     /// Resolve a hostname and establish cleartext MQTT-over-WebSocket. The
     /// HTTP Host authority is synthesized by the underlying WebSocket client
     /// when `options.host` is empty, while an explicit override is preserved.
@@ -686,6 +745,73 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    pub fn connectHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectHostWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectHostAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (options.client_identity != null or options.use_vail_tls) {
+            return error.UnsupportedScheme;
+        }
+        const ws = try websocket_runtime.Client.connectHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            websocketConnectOptions(options),
+            deadline,
+        );
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            deadline,
+        );
+    }
+
     /// Resolve a hostname and establish MQTT-over-WebSocket over TLS. The
     /// hostname supplies both DNS resolution and certificate identity; TLS
     /// credentials and verification remain in `ConnectOptions`.
@@ -741,6 +867,71 @@ pub const Client = struct {
             options.tls,
         );
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
+    }
+
+    pub fn connectTlsHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectTlsHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectTlsHostWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectTlsHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsHostAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const ws = try websocket_runtime.Client.connectTlsHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            websocketConnectOptions(options),
+            options.tls,
+            deadline,
+        );
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            deadline,
+        );
     }
 
     /// Connect to a resolved address while keeping an independent hostname
@@ -799,6 +990,71 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    pub fn connectTlsAddressWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectTlsAddressWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectTlsAddressWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectTlsAddressAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsAddressAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const ws = try websocket_runtime.Client.connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            websocketConnectOptions(options),
+            options.tls,
+            deadline,
+        );
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            deadline,
+        );
+    }
+
     pub fn connectUnix(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -846,6 +1102,69 @@ pub const Client = struct {
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
     }
 
+    pub fn connectUnixWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectUnixWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUnixWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectUnixAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUnixAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (options.client_identity != null or options.use_vail_tls) {
+            return error.UnsupportedScheme;
+        }
+        var ws_options = websocketConnectOptions(options);
+        ws_options.tcp_nodelay = false;
+        const ws = try websocket_runtime.Client.connectUnixWithDeadline(
+            allocator,
+            io,
+            address,
+            ws_options,
+            deadline,
+        );
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            deadline,
+        );
+    }
+
     pub fn connectUri(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -887,6 +1206,68 @@ pub const Client = struct {
             options.tls,
         );
         return connectWebSocketAttempt(allocator, ws, options.mqtt);
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectUriWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUriWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    /// Apply one absolute deadline to DNS/TCP, optional TLS, HTTP Upgrade,
+    /// MQTT CONNECT, enhanced authentication, and final CONNACK. Each existing
+    /// phase timeout can only shorten that outer budget.
+    pub fn connectUriAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const ws = try websocket_runtime.Client.connectUriTlsWithDeadline(
+            allocator,
+            io,
+            uri,
+            websocketConnectOptions(options),
+            options.tls,
+            deadline,
+        );
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            deadline,
+        );
     }
 
     /// Follow MQTT 5 redirect CONNACKs across WS/WSS authorities.
@@ -1170,6 +1551,34 @@ fn connectWebSocketAttempt(
     ws: websocket_runtime.Connection,
     options: runtime.ConnectOptions,
 ) runtime.Error!runtime.ConnectAttempt {
+    return connectWebSocketAttemptMaybeBefore(
+        allocator,
+        ws,
+        options,
+        null,
+    );
+}
+
+fn connectWebSocketAttemptBefore(
+    allocator: std.mem.Allocator,
+    ws: websocket_runtime.Connection,
+    options: runtime.ConnectOptions,
+    deadline: std.Io.Clock.Timestamp,
+) runtime.Error!runtime.ConnectAttempt {
+    return connectWebSocketAttemptMaybeBefore(
+        allocator,
+        ws,
+        options,
+        deadline,
+    );
+}
+
+fn connectWebSocketAttemptMaybeBefore(
+    allocator: std.mem.Allocator,
+    ws: websocket_runtime.Connection,
+    options: runtime.ConnectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime.Error!runtime.ConnectAttempt {
     if (ws.selected_protocol == null or
         !std.mem.eql(u8, ws.selected_protocol.?, mqtt_subprotocol))
     {
@@ -1192,5 +1601,8 @@ fn connectWebSocketAttempt(
     connection.peer_maximum_qos = options.peer_maximum_qos;
     connection.peer_retain_available = options.peer_retain_available;
     errdefer connection.close();
-    return connection.establishClient(options);
+    return if (deadline) |absolute|
+        connection.establishClientWithDeadline(options, absolute)
+    else
+        connection.establishClient(options);
 }

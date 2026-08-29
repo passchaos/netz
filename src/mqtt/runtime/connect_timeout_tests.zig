@@ -568,6 +568,72 @@ test "MQTT WebSocket CONNECT timeout starts after HTTP Upgrade" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "MQTT WebSocket caller deadline spans Upgrade and CONNACK" {
+    const allocator = std.testing.allocator;
+    const mqtt_ws = @import("../websocket_runtime.zig");
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{ .max_packet_size = 4096 } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *mqtt_ws.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var pending = self.server.acceptPending(.{
+                .connect_timeout = .fromSeconds(1),
+            }) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer pending.deinit(self.server.allocator);
+            std.Io.sleep(
+                self.server.websocket_server.http.io,
+                .fromMilliseconds(150),
+                .awake,
+            ) catch {};
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_ws.Client.connectAttemptWithDeadline(
+            allocator,
+            io,
+            server.address(),
+            .{
+                .mqtt = .{
+                    .client_id = "total-ws-connect-deadline",
+                    .network_connect_timeout = .fromSeconds(1),
+                    .connect_timeout = .fromSeconds(1),
+                },
+                .host = "localhost",
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(40),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT WSS CONNECT timeout starts after TLS and HTTP handshakes" {
     const allocator = std.testing.allocator;
     const mqtt_ws = @import("../websocket_runtime.zig");
