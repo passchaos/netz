@@ -775,14 +775,39 @@ fn acceptConnectionTransport(
     transport: RuntimeTransport,
     limits: Limits,
 ) Error!Connection {
+    return acceptConnectionTransportMaybeBefore(
+        allocator,
+        io,
+        stream,
+        transport,
+        limits,
+        null,
+    );
+}
+
+fn acceptConnectionTransportMaybeBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    transport: RuntimeTransport,
+    limits: Limits,
+    outer_deadline: ?std.Io.Clock.Timestamp,
+) Error!Connection {
     // Ownership enters with the transport so failures before Connection is
     // constructed (notably a preface timeout) still close TCP or TLS state.
     var transport_owned = true;
     errdefer if (transport_owned) transport.close();
-    const deadline = try connectionHandshakeDeadline(
-        transport,
-        limits.handshake_timeout,
-    );
+    const deadline = if (outer_deadline) |absolute|
+        try connectionHandshakeDeadlineBefore(
+            transport,
+            absolute,
+            limits.handshake_timeout,
+        )
+    else
+        try connectionHandshakeDeadline(
+            transport,
+            limits.handshake_timeout,
+        );
     var preface_buf: [http2.connection_preface.len]u8 = undefined;
     try readExactTransportWithDeadline(
         transport,
@@ -912,21 +937,70 @@ pub const TlsServer = struct {
         return self.acceptStream(stream);
     }
 
+    /// Accept TCP, then carry one caller-owned deadline through TLS and the
+    /// HTTP/2 preface/SETTINGS bootstrap. The listener accept is unbounded.
+    pub fn acceptWithDeadline(
+        self: *TlsServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamWithDeadline(stream, deadline);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *TlsServer,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamWithDeadline(
+            stream,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Complete TLS and HTTP/2 handshakes on an already accepted socket.
     /// Ownership transfers to the returned connection on success.
     pub fn acceptStream(
         self: *TlsServer,
         stream: net.Stream,
     ) Error!Connection {
+        return self.acceptStreamMaybeBefore(stream, null);
+    }
+
+    pub fn acceptStreamWithDeadline(
+        self: *TlsServer,
+        stream: net.Stream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptStreamMaybeBefore(stream, deadline);
+    }
+
+    fn acceptStreamMaybeBefore(
+        self: *TlsServer,
+        stream: net.Stream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
-        const tls_connection = try tls_stream.ServerConnection.init(
-            self.allocator,
-            self.io,
-            stream,
-            self.tls,
-        );
+        const tls_connection = if (deadline) |absolute|
+            try tls_stream.ServerConnection.initWithDeadline(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+                absolute,
+            )
+        else
+            try tls_stream.ServerConnection.init(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+            );
         stream_owned = false;
         var tls_owned = true;
         errdefer if (tls_owned) tls_connection.deinit();
@@ -938,12 +1012,13 @@ pub const TlsServer = struct {
         // acceptConnectionTransport owns transport cleanup from this point,
         // including failures before the HTTP/2 Connection exists.
         tls_owned = false;
-        return acceptConnectionTransport(
+        return acceptConnectionTransportMaybeBefore(
             self.allocator,
             self.io,
             stream,
             .{ .tls_server = tls_connection },
             self.limits,
+            deadline,
         );
     }
 

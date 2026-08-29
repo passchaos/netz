@@ -1142,6 +1142,18 @@ test "public modules are reachable" {
         "serveUntil",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.TlsServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.TlsServer,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.TlsServer,
+        "acceptStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime,
         "ServeUntilOptions",
     ));

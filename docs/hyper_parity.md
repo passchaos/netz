@@ -602,6 +602,8 @@ handshake limits remain stricter.
 HTTP/2 direct-address, hostname, Unix and TLS constructors expose the same
 contract through the complete SETTINGS bootstrap. TLS paths preserve the outer
 deadline across DNS/TCP and TLS while all paths retain stricter phase limits.
+HTTP/2 TLS servers expose matching post-accept timeout/deadline forms spanning
+TLS 1.3, ALPN validation, and the HTTP/2 preface/SETTINGS bootstrap.
 Both protocol constructors also provide relative-timeout wrappers that convert
 the end-to-end budget once at entry.
 Ordinary timeout-based APIs remain separate from HTTP

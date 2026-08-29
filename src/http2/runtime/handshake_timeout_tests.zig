@@ -1091,6 +1091,79 @@ test "HTTP/2 TLS server bounds bootstrap after transport handshake" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "HTTP/2 TLS server caller timeout spans TLS and bootstrap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{ .handshake_timeout = .fromSeconds(1) },
+            .tls_handshake_timeout = .fromSeconds(1),
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.acceptWithTimeout(
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const client = try tls_stream.ClientConnection.init(
+        allocator,
+        io,
+        stream,
+        .{
+            .server_name = "localhost",
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"h2"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    stream_owned = false;
+    defer client.deinit();
+    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "HTTP/2 TLS client bounds bootstrap after transport handshake" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
