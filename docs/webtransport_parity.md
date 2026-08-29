@@ -13,6 +13,7 @@ Run:
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
+zig build interop-webtransport-stream-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 ```
@@ -390,3 +391,8 @@ lightweight protected transport does not own a stateful recovery connection.
    remaining gap is
    external wtransport/browser interop rather than basic cancellation recovery
    at the benchmark's maximum stream count.
+   A bounded repeatability gate runs a mixed FIN/reset shape three times under
+   deterministic 5% loss, then runs sustained client-direction FIN traffic
+   three times under reordering. It requires exact delivered-byte/reset
+   accounting and at least one injected fault per run. This is
+   lifecycle/recovery evidence rather than a cross-stack throughput comparison.

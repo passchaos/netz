@@ -563,6 +563,27 @@ pub fn build(b: *std.Build) void {
         &webtransport_wtransport.step,
     );
 
+    const webtransport_churn_bench = b.addExecutable(.{
+        .name = "netz-webtransport-stream-churn",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "examples/bench_webtransport_stream.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const webtransport_churn = b.addSystemCommand(&.{
+        "tools/interop/webtransport_stream_churn.sh",
+    });
+    webtransport_churn.addArtifactArg(webtransport_churn_bench);
+    const webtransport_churn_step = b.step(
+        "interop-webtransport-stream-churn",
+        "Repeat mixed WebTransport FIN/reset traffic under loss/reordering",
+    );
+    webtransport_churn_step.dependOn(&webtransport_churn.step);
+
     const webtransport_chrome = b.addSystemCommand(&.{
         "tools/interop/webtransport_chrome.sh",
     });
