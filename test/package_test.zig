@@ -1111,7 +1111,23 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Server"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Connection"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Client, "open"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Client,
+        "openWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Client,
+        "openWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Server, "accept"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Server,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Server,
+        "acceptWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Connection, "receiveMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Connection, "sendClose"));
     try std.testing.expect(@hasDecl(
@@ -1186,6 +1202,26 @@ test "public modules are reachable" {
         "acceptStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Server,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Server,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Server,
+        "acceptStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.UnixServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.UnixServer,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime,
         "ServeUntilOptions",
     ));
@@ -1204,8 +1240,24 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime, "ExtendedConnectRequest"));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "ExtendedConnectResponse"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "openExtendedConnect"));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "openExtendedConnectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "openExtendedConnectWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "openConnectTunnel"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readExtendedConnectRequest"));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readExtendedConnectRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readExtendedConnectRequestWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "acceptExtendedConnect"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "acceptConnectTunnel"));
     try std.testing.expect(@hasDecl(netz.http2, "PingPayload"));

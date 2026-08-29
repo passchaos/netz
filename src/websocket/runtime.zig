@@ -4508,6 +4508,48 @@ pub const H2Client = struct {
         connection: *http2_runtime.Connection,
         options: H2ConnectOptions,
     ) Error!H2Connection {
+        return openUntil(allocator, connection, options, null);
+    }
+
+    /// Complete RFC 8441 negotiation before one absolute awake-clock
+    /// deadline. The HTTP/2 connection remains caller-owned on failure.
+    pub fn openWithDeadline(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!H2Connection {
+        const absolute = try deadline_policy.usableAwake(
+            connection.io,
+            deadline,
+        );
+        return openUntil(allocator, connection, options, absolute);
+    }
+
+    pub fn openWithTimeout(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!H2Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return openWithDeadline(
+            allocator,
+            connection,
+            options,
+            .fromNow(
+                connection.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    fn openUntil(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!H2Connection {
         var request_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer request_headers.deinit(allocator);
         try request_headers.append(allocator, .{ .name = "sec-websocket-version", .value = "13" });
@@ -4536,14 +4578,21 @@ pub const H2Client = struct {
         try validateH2ClientExtraHeaders(options.extra_headers);
         try request_headers.appendSlice(allocator, options.extra_headers);
 
-        var response = try connection.openExtendedConnect(.{
+        const request_options: http2_runtime.RequestOptions = .{
             .method = "CONNECT",
             .path = options.path,
             .scheme = options.scheme,
             .authority = options.authority,
             .protocol = "websocket",
             .headers = request_headers.items,
-        });
+        };
+        var response = if (deadline) |absolute|
+            try connection.openExtendedConnectWithDeadline(
+                request_options,
+                absolute,
+            )
+        else
+            try connection.openExtendedConnect(request_options);
         errdefer response.deinit(allocator);
 
         const selected_protocol = try validateH2ServerHandshake(allocator, response.headers, options.protocols);
@@ -4572,7 +4621,53 @@ pub const H2Server = struct {
         connection: *http2_runtime.Connection,
         options: H2AcceptOptions,
     ) Error!H2Connection {
-        var request = try connection.readExtendedConnectRequest("websocket");
+        return acceptUntil(allocator, connection, options, null);
+    }
+
+    pub fn acceptWithDeadline(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!H2Connection {
+        const absolute = try deadline_policy.usableAwake(
+            connection.io,
+            deadline,
+        );
+        return acceptUntil(allocator, connection, options, absolute);
+    }
+
+    pub fn acceptWithTimeout(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!H2Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return acceptWithDeadline(
+            allocator,
+            connection,
+            options,
+            .fromNow(
+                connection.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    fn acceptUntil(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!H2Connection {
+        var request = if (deadline) |absolute|
+            try connection.readExtendedConnectRequestWithDeadline(
+                "websocket",
+                absolute,
+            )
+        else
+            try connection.readExtendedConnectRequest("websocket");
         errdefer request.deinit(allocator);
         const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
         if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
@@ -4594,6 +4689,11 @@ pub const H2Server = struct {
         if (selected_extension) |extension| try response_headers.append(allocator, .{ .name = "sec-websocket-extensions", .value = extension });
         try validateH2ServerExtraHeaders(options.extra_headers);
         try response_headers.appendSlice(allocator, options.extra_headers);
+        if (deadline) |absolute| {
+            // Header validation and extension selection remain inside the same
+            // admission budget; never send 200 after the deadline has expired.
+            _ = try deadline_policy.usableAwake(connection.io, absolute);
+        }
 
         const tunnel = try connection.acceptExtendedConnect(request, response_headers.items);
         request.deinit(allocator);
@@ -6481,6 +6581,184 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP2 handshake timeout bounds CONNECT response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            var request = try h2.readExtendedConnectRequestWithTimeout(
+                "websocket",
+                .fromSeconds(1),
+            );
+            defer request.deinit(self.server.allocator);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer h2_client.close();
+    try std.testing.expectError(
+        error.Timeout,
+        H2Client.openWithTimeout(
+            allocator,
+            &h2_client,
+            .{
+                .authority = "localhost",
+                .path = "/slow-response",
+            },
+            .fromMilliseconds(30),
+        ),
+    );
+    try std.testing.expect(!h2_client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP2 server handshake resumes after idle timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        io: std.Io,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.timed_out.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            try std.testing.expectError(
+                error.Timeout,
+                H2Server.acceptWithTimeout(
+                    self.server.allocator,
+                    &h2,
+                    .{},
+                    .fromMilliseconds(30),
+                ),
+            );
+            self.timed_out.set(self.io);
+
+            var ws = try H2Server.acceptWithTimeout(
+                self.server.allocator,
+                &h2,
+                .{},
+                .fromSeconds(1),
+            );
+            defer ws.close();
+            try ws.sendText("accepted-after-timeout");
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer h2_client.close();
+    try shared.timed_out.wait(io);
+    if (shared.err) |err| return err;
+    var ws_client = try H2Client.openWithTimeout(
+        allocator,
+        &h2_client,
+        .{ .authority = "localhost", .path = "/after-timeout" },
+        .fromSeconds(1),
+    );
+    defer ws_client.close();
+    var message = try ws_client.receiveMessageWithTimeout(.fromSeconds(1));
+    defer message.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "accepted-after-timeout",
+        message.payload,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP2 timeout APIs reject non-positive budgets" {
+    var connection: http2_runtime.Connection = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        H2Client.openWithTimeout(
+            std.testing.allocator,
+            &connection,
+            .{},
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        H2Server.acceptWithTimeout(
+            std.testing.allocator,
+            &connection,
+            .{},
+            .zero,
+        ),
+    );
 }
 
 test "WebSocket client rejects unoffered subprotocol" {

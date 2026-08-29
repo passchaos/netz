@@ -142,6 +142,45 @@ test "HTTP/2 server handshake times out before the client preface" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "HTTP/2 cleartext server caller timeout bounds bootstrap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .handshake_timeout = .fromSeconds(1) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.acceptWithTimeout(
+                .fromMilliseconds(30),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "HTTP/2 server handshake deadline is absolute across a trickled preface" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

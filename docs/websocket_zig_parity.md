@@ -508,6 +508,11 @@ frames. Partial wire frames, the owning message assembler, caller-buffer offsets
 compression mode, and incremental UTF-8 validation remain resumable after a
 timeout; caller-buffer retries must present the same storage so already written
 bytes cannot be silently lost.
+RFC 8441 setup now has matching `openWithDeadline`/`openWithTimeout` and
+`acceptWithDeadline`/`acceptWithTimeout` entry points. They delegate to the
+HTTP/2 Extended CONNECT deadline primitives, so interleaved control frames and
+fragmented HPACK cannot renew the handshake budget; client timeout cancels the
+uncompleted stream and prevents reuse of ambiguous aggregate decoder state.
 
 ## Remaining evidence before a broad completion claim
 

@@ -604,6 +604,9 @@ contract through the complete SETTINGS bootstrap. TLS paths preserve the outer
 deadline across DNS/TCP and TLS while all paths retain stricter phase limits.
 HTTP/2 TLS servers expose matching post-accept timeout/deadline forms spanning
 TLS 1.3, ALPN validation, and the HTTP/2 preface/SETTINGS bootstrap.
+Cleartext TCP and Unix-domain HTTP/2 servers expose the same post-accept
+timeout/deadline contract for their complete preface/SETTINGS bootstrap; TCP
+also accepts an already-dispatched stream under a caller timestamp.
 Both protocol constructors also provide relative-timeout wrappers that convert
 the end-to-end budget once at entry.
 Ordinary timeout-based APIs remain separate from HTTP
@@ -664,6 +667,13 @@ half-closed HTTP/2 stream 1 request, matching RFC 7540 section 3.2 semantics.
 Server-side `acceptUpgradeWithTimeout` and `acceptUpgradeWithDeadline` apply
 one outer budget after TCP accept through the complete Upgrade request and the
 HTTP/2 SETTINGS exchange rather than granting a fresh timeout after 101.
+HTTP/2 Extended CONNECT now exposes matching request/response timeout and
+absolute-deadline forms. The client checks the deadline before request emission,
+then preserves it across informational or connection-control frames, fragmented
+HPACK, and the final successful response head; timeout cancels the stream and
+makes discarded aggregate state ineligible for pooled reuse. The server reader
+carries one deadline through the complete request header block and preserves a
+partially received frame for retry when no stream has yet been admitted.
 All public HTTP/1 and HTTP/2 request/response and pool deadline entry points
 reject timestamps outside the awake-clock domain before parsing, writing, or
 reserving pool capacity, matching the constructor deadline contract.

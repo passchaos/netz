@@ -402,6 +402,29 @@ pub const Server = struct {
         return self.acceptStream(stream);
     }
 
+    /// Accept TCP, then apply one caller-owned deadline to the HTTP/2 preface
+    /// and SETTINGS bootstrap. The listener accept itself remains unbounded.
+    pub fn acceptWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamWithDeadline(stream, deadline);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamWithDeadline(
+            stream,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Complete the HTTP/2 server handshake on an already-accepted stream.
     ///
     /// Separating transport acceptance from the handshake lets event loops
@@ -412,6 +435,23 @@ pub const Server = struct {
         self: *Server,
         stream: net.Stream,
     ) Error!Connection {
+        return self.acceptStreamMaybeBefore(stream, null);
+    }
+
+    pub fn acceptStreamWithDeadline(
+        self: *Server,
+        stream: net.Stream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptStreamMaybeBefore(stream, deadline);
+    }
+
+    fn acceptStreamMaybeBefore(
+        self: *Server,
+        stream: net.Stream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.limits.tcp_nodelay) {
@@ -420,12 +460,13 @@ pub const Server = struct {
         // The transport handshake owns cleanup from this point, including
         // failures before it can return a Connection.
         stream_owned = false;
-        return acceptConnectionTransport(
+        return acceptConnectionTransportMaybeBefore(
             self.allocator,
             self.io,
             stream,
             tcpTransport(self.io, stream),
             self.limits,
+            deadline,
         );
     }
 
@@ -697,6 +738,40 @@ pub const UnixServer = struct {
             stream,
             tcpTransport(self.io, stream),
             self.limits,
+        );
+    }
+
+    /// Accept a Unix stream, then apply one deadline to the complete HTTP/2
+    /// preface/SETTINGS bootstrap. The listener accept remains unbounded.
+    pub fn acceptWithDeadline(
+        self: *UnixServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return acceptConnectionTransportMaybeBefore(
+            self.allocator,
+            self.io,
+            stream,
+            tcpTransport(self.io, stream),
+            self.limits,
+            deadline,
+        );
+    }
+
+    pub fn acceptWithTimeout(
+        self: *UnixServer,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return acceptConnectionTransportMaybeBefore(
+            self.allocator,
+            self.io,
+            stream,
+            tcpTransport(self.io, stream),
+            self.limits,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -2896,11 +2971,11 @@ pub const Connection = struct {
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
-    /// A response timeout may leave a partially decoded HPACK block or DATA
-    /// sequence whose ownership cannot be reconstructed by a later aggregate
-    /// call. Fail closed instead of allowing a pooled or direct caller to send
-    /// another request on an ambiguous connection.
-    response_timeout_unusable: bool = false,
+    /// An aggregate request/response timeout may leave a partially decoded
+    /// HPACK block or DATA sequence whose ownership cannot be reconstructed by
+    /// a later call. Fail closed instead of allowing subsequent operations or
+    /// pooled reuse against ambiguous connection state.
+    aggregate_timeout_unusable: bool = false,
     pending_requests: std.ArrayList(OwnedRequest) = .empty,
     pending_request_head: usize = 0,
     peer_origins: std.ArrayList([]u8) = .empty,
@@ -2977,7 +3052,7 @@ pub const Connection = struct {
     /// than exposing state from one borrower to the next.
     pub fn isReusable(self: *const Connection) bool {
         return self.role == .client and
-            !self.response_timeout_unusable and
+            !self.aggregate_timeout_unusable and
             self.peer_goaway_last_stream_id == null and
             self.local_goaway_last_stream_id == null and
             self.active_local_streams.items.len == 0 and
@@ -3364,7 +3439,7 @@ pub const Connection = struct {
         self: *Connection,
         options: RequestOptions,
     ) Error!PendingResponse {
-        if (self.response_timeout_unusable) return error.ConnectionClosed;
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client) return error.UnexpectedFrame;
         // A previous reset reason is useful only to the operation that
         // returned StreamReset. Starting a new request invalidates any value
@@ -3488,7 +3563,7 @@ pub const Connection = struct {
         self: *Connection,
         options: StreamingRequestOptions,
     ) Error!RequestWriter {
-        if (self.response_timeout_unusable) return error.ConnectionClosed;
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client) return error.UnexpectedFrame;
         self.last_peer_reset = null;
         if (methodIsConnect(options.method)) {
@@ -5065,6 +5140,38 @@ pub const Connection = struct {
     }
 
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
+        return self.openExtendedConnectUntil(options, null);
+    }
+
+    /// Open an RFC 8441-style Extended CONNECT stream and wait for its final
+    /// response under one absolute awake-clock deadline. Informational and
+    /// connection-control frames do not renew the caller's budget.
+    pub fn openExtendedConnectWithDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.openExtendedConnectUntil(options, deadline);
+    }
+
+    pub fn openExtendedConnectWithTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ExtendedConnectResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openExtendedConnectWithDeadline(
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn openExtendedConnectUntil(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectResponse {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
@@ -5113,8 +5220,11 @@ pub const Connection = struct {
         // Extended CONNECT establishes a bidirectional byte tunnel.  The
         // opening HEADERS therefore deliberately keeps the stream open instead
         // of using END_STREAM like a request with no body would.
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.io, absolute);
+        }
         try self.writeHeaders(stream_id, fields.items, false);
-        return self.readExtendedConnectResponse(stream_id);
+        return self.readExtendedConnectResponseUntil(stream_id, deadline);
     }
 
     pub fn openConnectTunnel(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
@@ -5166,10 +5276,62 @@ pub const Connection = struct {
     }
 
     pub fn readExtendedConnectRequest(self: *Connection, expected_protocol: []const u8) Error!ExtendedConnectRequest {
+        return self.readExtendedConnectRequestUntil(
+            expected_protocol,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn readExtendedConnectRequestWithDeadline(
+        self: *Connection,
+        expected_protocol: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readExtendedConnectRequestUntil(
+            expected_protocol,
+            deadline,
+        );
+    }
+
+    pub fn readExtendedConnectRequestWithTimeout(
+        self: *Connection,
+        expected_protocol: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readExtendedConnectRequestWithDeadline(
+            expected_protocol,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn readExtendedConnectRequestUntil(
+        self: *Connection,
+        expected_protocol: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
+        var active_stream_id: ?u31 = null;
+        errdefer |err| if (err == error.Timeout) {
+            // A timeout before a complete HEADERS frame is resumable because
+            // frame_reader retains its byte progress. Once an Extended
+            // CONNECT header block has started, stack-local HPACK assembly is
+            // no longer recoverable, so reset that stream and fail closed.
+            if (active_stream_id) |stream_id| {
+                self.aggregate_timeout_unusable = true;
+                self.writeResetStreamFrame(stream_id, .cancel) catch {};
+                self.releasePeerStream(stream_id);
+                self.forgetStreamWindows(stream_id);
+            }
+        };
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             switch (frame.frame.header.frame_type) {
@@ -5180,9 +5342,13 @@ pub const Connection = struct {
                     try self.reservePeerStream(stream_id);
                     errdefer self.releasePeerStream(stream_id);
                     self.last_peer_client_stream_id = stream_id;
+                    active_stream_id = stream_id;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
 
-                    const headers = try self.readHeaderBlock(frame.frame);
+                    const headers = try self.readHeaderBlockUntil(
+                        frame.frame,
+                        deadline,
+                    );
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
                     const lookup = try requestHeaderLookup(headers);
@@ -5201,6 +5367,12 @@ pub const Connection = struct {
                         protocol,
                         request_priority,
                     );
+                    if (deadline) |absolute| {
+                        _ = try deadline_policy.usableAwake(
+                            self.io,
+                            absolute,
+                        );
+                    }
 
                     return .{
                         .stream_id = stream_id,
@@ -7822,7 +7994,7 @@ pub const Connection = struct {
     }
 
     fn reserveNextClientStreamId(self: *Connection) Error!u31 {
-        if (self.response_timeout_unusable) return error.ConnectionClosed;
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         const stream_id = self.next_client_stream_id;
         if (stream_id > std.math.maxInt(u31) - 2) return error.InvalidStreamId;
         if (self.peer_goaway_last_stream_id) |last| {
@@ -8029,7 +8201,7 @@ pub const Connection = struct {
     }
 
     fn failTimedOutResponse(self: *Connection, stream_id: u31) void {
-        self.response_timeout_unusable = true;
+        self.aggregate_timeout_unusable = true;
         self.writeResetStreamFrame(stream_id, .cancel) catch {};
         self.releasePeerStream(stream_id);
         self.forgetStreamWindows(stream_id);
@@ -8615,9 +8787,27 @@ pub const Connection = struct {
     }
 
     fn readExtendedConnectResponse(self: *Connection, stream_id: u31) Error!ExtendedConnectResponse {
+        return self.readExtendedConnectResponseUntil(stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    fn readExtendedConnectResponseUntil(
+        self: *Connection,
+        stream_id: u31,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectResponse {
+        errdefer |err| if (err == error.Timeout) {
+            // An aggregate CONNECT wait cannot resume after discarding decoded
+            // informational heads or a partial HPACK block. Cancel the stream
+            // and prevent a pooled caller from reusing ambiguous state.
+            self.failTimedOutResponse(stream_id);
+        };
         var informational_count: usize = 0;
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
@@ -8628,7 +8818,10 @@ pub const Connection = struct {
             if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
                 .headers => {
-                    const headers = try self.readHeaderBlock(frame.frame);
+                    const headers = try self.readHeaderBlockUntil(
+                        frame.frame,
+                        deadline,
+                    );
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .response);
                     const lookup = try responseHeaderLookup(headers);
@@ -8649,6 +8842,12 @@ pub const Connection = struct {
                     if (status < 200 or status > 299) return error.InvalidStatus;
                     if ((lookup.content_length orelse 0) != 0) return error.InvalidContentLength;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
+                    if (deadline) |absolute| {
+                        _ = try deadline_policy.usableAwake(
+                            self.io,
+                            absolute,
+                        );
+                    }
                     return .{
                         .status = status,
                         .headers = headers,
@@ -17238,6 +17437,179 @@ test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 extended CONNECT deadline preserves one response budget" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        io: std.Io,
+        request_received: std.Io.Event = .unset,
+        send_response: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.request_received.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readExtendedConnectRequest(
+                "websocket",
+            );
+            defer request.deinit(self.server.allocator);
+            self.request_received.set(self.io);
+            try self.send_response.wait(self.io);
+            try connection.rejectExtendedConnect(
+                request.stream_id,
+                408,
+                &.{},
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.send_response.set(io);
+        server_thread.join();
+    };
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromMilliseconds(120), .clock = .awake },
+    );
+    const Result = ResponseTimeoutError!ExtendedConnectResponse;
+    const Wake = union(enum) {
+        client: Result,
+        request: std.Io.Cancelable!void,
+    };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer while (select.cancel()) |wake| switch (wake) {
+        .client => |result| if (result) |response_value| {
+            var response = response_value;
+            response.deinit(allocator);
+        } else |_| {},
+        .request => {},
+    };
+    select.async(
+        .client,
+        Connection.openExtendedConnectWithDeadline,
+        .{ &client, RequestOptions{
+            .method = "CONNECT",
+            .path = "/deadline",
+            .authority = "localhost",
+            .protocol = "websocket",
+        }, deadline },
+    );
+    select.async(
+        .request,
+        std.Io.Event.wait,
+        .{ &shared.request_received, io },
+    );
+    switch (try select.await()) {
+        .client => |result| {
+            if (result) |response_value| {
+                var response = response_value;
+                response.deinit(allocator);
+                return error.TestUnexpectedResult;
+            } else |err| return err;
+        },
+        .request => |result| try result,
+    }
+
+    const remaining = deadline.durationFromNow(io).raw.nanoseconds;
+    if (remaining > 0) {
+        try std.Io.sleep(
+            io,
+            .{ .nanoseconds = remaining + 10 * std.time.ns_per_ms },
+            .awake,
+        );
+    }
+    shared.send_response.set(io);
+    try std.testing.expectError(
+        error.Timeout,
+        switch (try select.await()) {
+            .client => |result| result,
+            .request => return error.TestUnexpectedResult,
+        },
+    );
+    try std.testing.expect(!client.isReusable());
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 extended CONNECT deadline validates before stream mutation" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+        .peer_enable_connect_protocol = true,
+    };
+    defer {
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.priority_state.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    connection.io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.openExtendedConnectWithDeadline(
+            .{
+                .method = "CONNECT",
+                .path = "/",
+                .authority = "localhost",
+                .protocol = "websocket",
+            },
+            .fromNow(
+                connection.io,
+                .{ .raw = .fromSeconds(1), .clock = .real },
+            ),
+        ),
+    );
+    try std.testing.expectEqual(@as(u31, 1), connection.next_client_stream_id);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.active_local_streams.items.len,
+    );
 }
 
 test "HTTP/2 extended CONNECT requires peer opt-in" {
