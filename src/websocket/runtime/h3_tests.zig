@@ -744,12 +744,15 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     try std.testing.expectEqual(websocket.Opcode.ping, server_ping.header.opcode);
     try std.testing.expectEqualStrings("server-probe", server_ping.payload);
     try client.sendText("before close");
-    var server_close = try client.receiveFrameWithTimeout(.fromSeconds(5));
+    var server_close = (try client.receiveCloseFrameWithTimeout(
+        .fromSeconds(5),
+    )).?;
     defer server_close.deinit(allocator);
-    try std.testing.expectEqual(websocket.Opcode.close, server_close.header.opcode);
-    const parsed = (try websocket.parseClosePayload(server_close.payload)).?;
-    try std.testing.expectEqual(websocket.CloseCode.normal_closure, parsed.code);
-    try std.testing.expectEqualStrings("server-done", parsed.reason);
+    try std.testing.expectEqual(
+        websocket.CloseCode.normal_closure,
+        server_close.code,
+    );
+    try std.testing.expectEqualStrings("server-done", server_close.reason);
     // Receiving Close automatically echoes its exact payload. The server's
     // typed progress event therefore owns the same code and reason inspected
     // above rather than requiring an otherwise-invalid second Close frame.
@@ -929,7 +932,21 @@ test "WebSocket HTTP3 control progress APIs reject expired budgets" {
     );
     try std.testing.expectError(
         error.Timeout,
+        client.receiveCloseFrameWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
         client.continueCloseWithTimeout(.zero),
+    );
+
+    // Empty Close is represented by an absent typed payload. This checks the
+    // API contract independently of transport framing; the end-to-end test
+    // above covers owned non-empty metadata and automatic echo.
+    try std.testing.expect(
+        (try websocket.parseClosePayloadOwned(
+            std.testing.allocator,
+            &.{},
+        )) == null,
     );
 }
 

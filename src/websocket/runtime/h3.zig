@@ -371,23 +371,66 @@ pub fn Connection(comptime role: common.Role) type {
             code: websocket.CloseCode,
             reason: []const u8,
         ) Error!void {
-            var payload_storage: [125]u8 = undefined;
+            try self.sendCloseFrame(.{ .code = code, .reason = reason });
+        }
+
+        /// Send a Close frame with optional status metadata. Passing null emits
+        /// the RFC 6455 empty Close payload rather than the reserved 1005 code.
+        pub fn sendCloseFrame(
+            self: *Self,
+            close_frame: ?websocket.CloseFrame,
+        ) Error!void {
+            var storage: [125]u8 = undefined;
             const payload = try websocket.writeClosePayloadInto(
-                &payload_storage,
-                .{ .code = code, .reason = reason },
+                &storage,
+                close_frame,
             );
             try self.sendControlFrame(.close, payload);
         }
 
-        fn sendCloseFrame(
+        /// Receive and own metadata from the next frame when it is Close.
+        /// Like the HTTP/1 and RFC 8441 strict helpers, an intervening data or
+        /// control frame is consumed and reported as `InvalidFrame`, not
+        /// silently skipped while searching for a later Close.
+        pub fn receiveCloseFrame(
             self: *Self,
-            close_frame: ?websocket.CloseFrame,
-        ) Error!void {
-            if (close_frame) |value| {
-                try self.sendClose(value.code, value.reason);
-            } else {
-                try self.sendControlFrame(.close, &.{});
-            }
+        ) Error!?websocket.OwnedCloseFrame {
+            var frame = try self.receiveFrame();
+            defer frame.deinit(self.allocator);
+            if (frame.header.opcode != .close) return error.InvalidFrame;
+            return websocket.parseClosePayloadOwned(
+                self.allocator,
+                frame.payload,
+            );
+        }
+
+        /// Relative-budget counterpart to `receiveCloseFrameWithDeadline`.
+        /// Partial HTTP/3 DATA and WebSocket frame bytes remain resumable.
+        pub fn receiveCloseFrameWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) Error!?websocket.OwnedCloseFrame {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveCloseFrameWithDeadline(.fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        /// Receive and parse one peer Close under a caller-owned deadline.
+        /// Deadline validation occurs before any receive state is changed.
+        pub fn receiveCloseFrameWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!?websocket.OwnedCloseFrame {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            var frame = try self.receiveFrameWithDeadline(deadline);
+            defer frame.deinit(self.allocator);
+            if (frame.header.opcode != .close) return error.InvalidFrame;
+            return websocket.parseClosePayloadOwned(
+                self.allocator,
+                frame.payload,
+            );
         }
 
         /// Send Close once and wait for peer-close progress under one relative
@@ -741,6 +784,25 @@ pub fn Connection(comptime role: common.Role) type {
                 var key: [4]u8 = undefined;
                 try std.Io.randomSecure(self.io(), &key);
                 mask_key = key;
+            }
+            if (opcode.isControl()) {
+                // Control frames are at most 125 bytes, so encode them into
+                // one stable stack slice. Besides avoiding vectored overhead,
+                // this keeps zero-length Close frames on the same DATA path as
+                // non-empty controls instead of relying on empty-part handling.
+                var encoded_storage: [websocket.max_frame_header_len + 125]u8 = undefined;
+                const frame = try websocket.writeFrameInto(
+                    &encoded_storage,
+                    opcode,
+                    payload,
+                    .{
+                        .fin = frame_fin,
+                        .mask_key = mask_key,
+                        .rsv1 = rsv1,
+                    },
+                );
+                try self.writeBytes(frame, fin_stream);
+                return;
             }
             var header_storage: [websocket.max_frame_header_len]u8 = undefined;
             const header = try websocket.writeFrameHeaderInto(
