@@ -127,6 +127,10 @@ an expired shared-endpoint admission is observable as `error.Timeout` with its
 pending handle after completion handling has released its Initial and
 registration, so applications can distinguish admission pressure from TLS or
 QUIC rejection.
+Client-side shared-endpoint setup has matching timeout and absolute-deadline
+forms for the QUIC/TLS handshake plus initial Extended CONNECT write. This
+also gives dispatcher owners a finite point at which they may stop routing and
+tear down a failed handshake instead of relying on an unbounded worker join.
 URI clients inherit HTTP/3's total `connect_timeout`: DNS resolution and each
 address-specific QUIC/TLS attempt share one absolute deadline across Initial,
 Retry, Version Negotiation, and passive Handshake flights. A real silent-UDP

@@ -248,6 +248,83 @@ test "WebTransport client handshake and CONNECT share one socket owner" {
     if (server_task.err) |err| return err;
 }
 
+test "WebTransport shared-endpoint client handshake has a total timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{"wt-timeout-client"},
+        silent.address(),
+        1,
+    );
+    defer inbox.deinit();
+
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClientSession.beginConnectFromWithTimeout(
+            &endpoint,
+            inbox.datagramSource(),
+            silent.address(),
+            .{
+                .authority = "localhost",
+                .path = "/timeout",
+                .h3 = .{ .handshake = .{
+                    .original_destination_connection_id =
+                        "wt-timeout-origin",
+                    .local_connection_id = "wt-timeout-client",
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 1_000,
+                        .max_pto_ms = 4_000,
+                        .max_retries = 3,
+                    },
+                } },
+            },
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            500 * std.time.ns_per_ms,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClientSession.beginConnectFromWithTimeout(
+            &endpoint,
+            inbox.datagramSource(),
+            silent.address(),
+            .{
+                .authority = "localhost",
+                .path = "/timeout",
+                .h3 = .{ .handshake = .{
+                    .original_destination_connection_id =
+                        "wt-timeout-origin",
+                    .local_connection_id = "wt-timeout-client",
+                } },
+            },
+            .zero,
+        ),
+    );
+}
+
 test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

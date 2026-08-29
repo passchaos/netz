@@ -3010,6 +3010,67 @@ pub const HandshakeClientSession = struct {
         };
     }
 
+    /// Bounded form of `beginConnectFrom` for shared-endpoint clients. The
+    /// endpoint owner may stop routing or close the handshake inbox when this
+    /// returns, so the same absolute deadline must cover both QUIC/TLS and the
+    /// initial Extended CONNECT write.
+    pub fn beginConnectFromWithDeadline(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingHandshakeConnect {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        const absolute = try deadline_policy.capTimeout(
+            endpoint.io,
+            deadline,
+            options.h3.connect_timeout,
+        );
+        var h3_client = try http3.runtime.HandshakeClient
+            .connectFromWithDeadline(
+            endpoint,
+            source,
+            server,
+            webTransportHandshakeClientOptions(options.h3),
+            absolute,
+        );
+        errdefer h3_client.deinit();
+        _ = try deadline_policy.usableAwake(endpoint.io, absolute);
+        const session_id = try startStatefulConnect(
+            &h3_client,
+            options.authority,
+            options.path,
+            options.origin,
+            options.headers,
+        );
+        return .{
+            .h3 = h3_client,
+            .session_id = session_id,
+            .limits = options.limits,
+        };
+    }
+
+    pub fn beginConnectFromWithTimeout(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingHandshakeConnect {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return beginConnectFromWithDeadline(
+            endpoint,
+            source,
+            server,
+            options,
+            .fromNow(
+                endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     /// Connect to a complete HTTPS WebTransport URL. This derives SNI,
     /// authority, and path/query from one parsed value and inherits HTTP/3's
     /// all-address DNS fallback rather than exposing those pieces separately.
@@ -3948,6 +4009,11 @@ pub const PendingHandshakeConnect = struct {
     pub fn pollConnect(
         self: *PendingHandshakeConnect,
     ) Error!?HandshakeConnectAttempt {
+        // The response stream can arrive before the peer control stream under
+        // QUIC packet reordering. Do not consume it until SETTINGS is ready,
+        // because `requireAccepted` must validate negotiated WebTransport and
+        // DATAGRAM capabilities against that same connection state.
+        if (!self.h3.?.control.settings.received) return null;
         var response = (try pollHandshakeConnectAttemptResponse(
             &self.h3.?,
             self.session_id.value,
@@ -4954,6 +5020,13 @@ fn connectStatefulAttempt(
         origin,
         additional_headers,
     );
+    // A response stream can race ahead of the server control stream. Retain
+    // it in HTTP/3 state while completing SETTINGS, instead of exposing a
+    // successful CONNECT that cannot yet be validated as WebTransport.
+    _ = if (deadline) |absolute|
+        try h3_client.receivePeerSettingsWithDeadline(absolute)
+    else
+        try h3_client.receivePeerSettings();
     const allocator = h3_client.allocator;
     var response_head = if (deadline) |absolute|
         try receiveHandshakeConnectAttemptResponseBefore(

@@ -4374,6 +4374,14 @@ test "public modules are reachable" {
         "beginConnectFrom",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "beginConnectFromWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "beginConnectFromWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.PendingHandshakeConnect,
         "processPacket",
     ));
