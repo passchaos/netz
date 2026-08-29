@@ -3569,6 +3569,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.tls.auth, "ServerIdentity"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connect"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "accept"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.quic, "TransportParameters"));
     try std.testing.expect(@hasDecl(netz.quic, "VersionInformation"));
     try std.testing.expect(@hasDecl(netz.quic, "parseTransportParametersTyped"));
@@ -4015,10 +4023,26 @@ test "public modules are reachable" {
         "UnroutedKind",
     ));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "acceptFromInitial"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptFromInitialWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptFromInitialWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connectFrom"));
     try std.testing.expect(@hasDecl(
         netz.quic.handshake,
         "acceptFromInitialSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptFromInitialSourceWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "acceptFromInitialSourceWithTimeout",
     ));
     try std.testing.expect(@hasDecl(netz.quic, "handshake_inbox"));
     try std.testing.expect(@hasDecl(netz.quic.handshake_inbox, "Inbox"));

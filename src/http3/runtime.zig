@@ -4267,21 +4267,17 @@ pub const HandshakeServer = struct {
         self: *HandshakeServer,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!HandshakeServerSession {
-        var options = self.handshake_options;
-        if (deadline) |absolute| {
-            // Keep a stricter recovery deadline supplied at bind time. The
-            // caller timestamp is never converted back to a duration, so time
-            // spent waiting for Initial/Retry is not regained in later TLS
-            // handshake transitions.
-            options.handshake_recovery.deadline = deadline_policy.earlier(
-                options.handshake_recovery.deadline,
+        var established = if (deadline) |absolute|
+            try quic.handshake.acceptWithDeadline(
+                &self.quic_server.endpoint,
+                self.handshake_options,
                 absolute,
+            )
+        else
+            try quic.handshake.accept(
+                &self.quic_server.endpoint,
+                self.handshake_options,
             );
-        }
-        var established = try quic.handshake.accept(
-            &self.quic_server.endpoint,
-            options,
-        );
         errdefer established.deinit();
         return HandshakeServerSession.initEstablished(
             established,

@@ -80,6 +80,105 @@ fn clampSecret(value: [32]u8) [32]u8 {
     return secret;
 }
 
+test "QUIC server accept timeout bounds the first Initial wait" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        handshake.acceptWithTimeout(
+            &endpoint,
+            .{ .local_connection_id = "server-deadline" },
+            .fromMilliseconds(10),
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        handshake.acceptWithTimeout(
+            &endpoint,
+            .{ .local_connection_id = "server-deadline" },
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        handshake.acceptWithDeadline(
+            &endpoint,
+            .{ .local_connection_id = "server-deadline" },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .real }),
+        ),
+    );
+}
+
+test "QUIC Initial deadline validation consumes owned datagram" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+
+    const first = quic.runtime.OwnedBytes{
+        .from = .{ .ip4 = .loopback(4433) },
+        .bytes = try allocator.dupe(u8, "owned-initial"),
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        handshake.acceptFromInitialWithTimeout(
+            &endpoint,
+            first,
+            .{ .local_connection_id = "server-deadline" },
+            .zero,
+        ),
+    );
+}
+
+test "QUIC server deadline retains stricter recovery bound" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+
+    const configured = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromMilliseconds(10), .clock = .awake },
+    );
+    const caller = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    );
+    const bounded = try handshake.testing.serverOptionsBeforeForTest(
+        io,
+        .{
+            .local_connection_id = "server-deadline",
+            .handshake_recovery = .{ .deadline = configured },
+        },
+        caller,
+    );
+    try std.testing.expectEqual(configured, bounded.handshake_recovery.deadline.?);
+}
+
 test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     const allocator = std.testing.allocator;
 

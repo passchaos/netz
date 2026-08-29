@@ -23,6 +23,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
     HandshakeReceiveFailed,
     PostHandshakeTlsUnavailable,
 };
+pub const AcceptTimeoutError = Error || std.Io.Timeout.Error;
 
 pub const ClientOptions = struct {
     /// Destination Connection ID from the client's first Initial.  It seeds the
@@ -1639,6 +1640,35 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     );
 }
 
+/// Accept a server connection before one caller-owned awake-clock deadline.
+/// The unchanged timestamp covers the first Initial, Retry, fragmented Initial
+/// CRYPTO, optional standalone 0-RTT, and every active/passive TLS flight.
+pub fn acceptWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    options: ServerOptions,
+    deadline: std.Io.Clock.Timestamp,
+) AcceptTimeoutError!EstablishedConnection {
+    return acceptInternal(
+        endpoint,
+        .fromEndpoint(endpoint),
+        null,
+        try serverOptionsBefore(endpoint.io, options, deadline),
+    );
+}
+
+pub fn acceptWithTimeout(
+    endpoint: *quic.runtime.Endpoint,
+    options: ServerOptions,
+    timeout: std.Io.Duration,
+) AcceptTimeoutError!EstablishedConnection {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return acceptWithDeadline(
+        endpoint,
+        options,
+        .fromNow(endpoint.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
 /// Continue a server handshake from an Initial already received by the sole
 /// endpoint dispatcher. Ownership of `initial_datagram` is consumed on every
 /// return path. Subsequent handshake packets still use the endpoint receive
@@ -1657,6 +1687,45 @@ pub fn acceptFromInitial(
     );
 }
 
+pub fn acceptFromInitialWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    initial_datagram: quic.runtime.OwnedBytes,
+    options: ServerOptions,
+    deadline: std.Io.Clock.Timestamp,
+) AcceptTimeoutError!EstablishedConnection {
+    var owned = initial_datagram;
+    const bounded = serverOptionsBefore(endpoint.io, options, deadline) catch |err|
+        {
+            owned.deinit(endpoint.allocator);
+            return err;
+        };
+    return acceptInternal(
+        endpoint,
+        .fromEndpoint(endpoint),
+        owned,
+        bounded,
+    );
+}
+
+pub fn acceptFromInitialWithTimeout(
+    endpoint: *quic.runtime.Endpoint,
+    initial_datagram: quic.runtime.OwnedBytes,
+    options: ServerOptions,
+    timeout: std.Io.Duration,
+) AcceptTimeoutError!EstablishedConnection {
+    if (timeout.nanoseconds <= 0) {
+        var owned = initial_datagram;
+        owned.deinit(endpoint.allocator);
+        return error.Timeout;
+    }
+    return acceptFromInitialWithDeadline(
+        endpoint,
+        initial_datagram,
+        options,
+        .fromNow(endpoint.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
 /// Dispatcher-owned variant that takes the first Initial directly and obtains
 /// all later packets from the supplied pending-handshake inbox/source.
 pub fn acceptFromInitialSource(
@@ -1667,6 +1736,81 @@ pub fn acceptFromInitialSource(
 ) Error!EstablishedConnection {
     return acceptInternal(endpoint, source, initial_datagram, options);
 }
+
+pub fn acceptFromInitialSourceWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    initial_datagram: quic.runtime.OwnedBytes,
+    options: ServerOptions,
+    deadline: std.Io.Clock.Timestamp,
+) AcceptTimeoutError!EstablishedConnection {
+    var owned = initial_datagram;
+    const bounded = serverOptionsBefore(endpoint.io, options, deadline) catch |err|
+        {
+            owned.deinit(endpoint.allocator);
+            return err;
+        };
+    return acceptInternal(
+        endpoint,
+        source,
+        owned,
+        bounded,
+    );
+}
+
+pub fn acceptFromInitialSourceWithTimeout(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    initial_datagram: quic.runtime.OwnedBytes,
+    options: ServerOptions,
+    timeout: std.Io.Duration,
+) AcceptTimeoutError!EstablishedConnection {
+    if (timeout.nanoseconds <= 0) {
+        var owned = initial_datagram;
+        owned.deinit(endpoint.allocator);
+        return error.Timeout;
+    }
+    return acceptFromInitialSourceWithDeadline(
+        endpoint,
+        source,
+        initial_datagram,
+        options,
+        .fromNow(endpoint.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
+fn serverOptionsBefore(
+    io: std.Io,
+    options: ServerOptions,
+    deadline: std.Io.Clock.Timestamp,
+) AcceptTimeoutError!ServerOptions {
+    if (deadline.clock != .awake or
+        deadline.durationFromNow(io).raw.nanoseconds <= 0)
+    {
+        return error.Timeout;
+    }
+    var bounded = options;
+    if (bounded.handshake_recovery.deadline) |configured| {
+        if (configured.clock != .awake) {
+            return error.InvalidHandshakeRecovery;
+        }
+        if (std.Io.Clock.Timestamp.compare(configured, .lt, deadline)) {
+            return bounded;
+        }
+    }
+    bounded.handshake_recovery.deadline = deadline;
+    return bounded;
+}
+
+pub const testing = struct {
+    pub fn serverOptionsBeforeForTest(
+        io: std.Io,
+        options: ServerOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcceptTimeoutError!ServerOptions {
+        return serverOptionsBefore(io, options, deadline);
+    }
+};
 
 fn acceptInternal(
     endpoint: *quic.runtime.Endpoint,
