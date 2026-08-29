@@ -354,7 +354,8 @@ unlinks its stack-owned ticket before waking the successor, while
 pool close wakes every waiter and causes outstanding leases to be discarded on
 return. Deadline-bounded acquisitions also cover arbitrary connector execution,
 closing a concurrent late success, and pooled one-shot requests carry that same
-timestamp through stale retry and complete response assembly. Returning a
+timestamp through stale retry and complete response assembly. A relative-timeout
+wrapper converts its budget once at API entry. Returning a
 successful response uses best-effort idle caching: if pool
 metadata allocation fails, the connection is closed and the completed HTTP
 result still reaches the caller rather than being replaced by an OOM error. A

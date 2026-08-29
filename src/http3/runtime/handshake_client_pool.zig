@@ -495,6 +495,21 @@ pub fn Pool(comptime Runtime: type) type {
 
         /// Carry one deadline through FIFO admission, connector execution,
         /// stale-idempotent retry, and the complete HTTP/3 response.
+        pub fn requestUriWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            timeout: std.Io.Duration,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.requestUriWithDeadline(
+                uri_text,
+                request_options,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
         pub fn requestUriWithDeadline(
             self: *Self,
             uri_text: []const u8,

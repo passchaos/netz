@@ -1165,6 +1165,10 @@ test "public modules are reachable" {
         "requestUriWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClientPool,
+        "requestUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "isReusable",
     ));

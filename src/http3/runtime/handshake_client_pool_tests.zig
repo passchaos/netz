@@ -184,6 +184,45 @@ test "HTTP/3 pool acquire deadline bounds a custom connector" {
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
 }
 
+test "HTTP/3 pool request timeout rejects a non-positive budget" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var context: u8 = 0;
+    const connector: runtime.HandshakeClientPoolConnector = .{
+        .context = &context,
+        .connect = struct {
+            fn connect(
+                _: *anyopaque,
+                _: std.mem.Allocator,
+                _: std.Io,
+                _: std.Io.net.IpAddress,
+                _: std.Uri,
+                _: runtime.Limits,
+            ) runtime.Error!runtime.HandshakeClient {
+                return error.InvalidUri;
+            }
+        }.connect,
+    };
+    var pool = try runtime.HandshakeClientPool.init(
+        allocator,
+        threaded.io(),
+        .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .connector = connector,
+        },
+    );
+    defer pool.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        pool.requestUriWithTimeout(
+            "https://localhost/",
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/3 handshake client pool replaces idle capacity across origins" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
