@@ -317,6 +317,108 @@ test "MQTT network connect timeout is independent from CONNACK timeout" {
     thread.join();
 }
 
+test "MQTT caller deadline spans TCP setup and CONNACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var first: [1]u8 = undefined;
+            var parts = [_][]u8{&first};
+            if (try self.io.vtable.netRead(
+                self.io.userdata,
+                stream.socket.handle,
+                &parts,
+            ) == 0) return error.ConnectionClosed;
+            try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "mqtt://localhost:{d}",
+        .{listener.socket.address.getPort()},
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri,
+            .{
+                .client_id = "total-connect-deadline",
+                .network_connect_timeout = .fromSeconds(1),
+                .connect_timeout = .fromSeconds(1),
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT caller deadline composes with shorter phase timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectAttemptWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            .{
+                .client_id = "phase-timeout",
+                .network_connect_timeout = .zero,
+            },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            "localhost",
+            1883,
+            .{ .client_id = "expired-total-timeout" },
+            .{ .raw = .fromNanoseconds(0), .clock = .awake },
+        ),
+    );
+}
+
 test "MQTT client rejects non-positive network connect timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

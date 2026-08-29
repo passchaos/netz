@@ -27,6 +27,16 @@ pub fn connectHost(
     return tcp_connect.host(io, host_name, port, timeout);
 }
 
+pub fn connectHostWithDeadline(
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    deadline: std.Io.Clock.Timestamp,
+) Error!net.Stream {
+    const host_name = try net.HostName.init(host);
+    return tcp_connect.hostWithDeadline(io, host_name, port, deadline);
+}
+
 pub fn connectTarget(
     io: std.Io,
     target: *const redirect.Target,
@@ -63,6 +73,38 @@ pub fn connectTarget(
     const host_name = net.HostName.init(target.host) catch
         return error.InvalidServerReference;
     return tcp_connect.host(io, host_name, target.port, timeout);
+}
+
+pub fn connectTargetWithDeadline(
+    io: std.Io,
+    target: *const redirect.Target,
+    expected_transport: redirect.Transport,
+    deadline: std.Io.Clock.Timestamp,
+) Error!net.Stream {
+    if (target.transport != expected_transport) {
+        return error.UnsupportedRedirectScheme;
+    }
+    if (target.port == 0 or target.host.len == 0) {
+        return error.InvalidServerReference;
+    }
+    if (target.host[0] == '[') {
+        if (target.host.len < 3 or
+            target.host[target.host.len - 1] != ']')
+        {
+            return error.InvalidServerReference;
+        }
+        const address = net.IpAddress.parseIp6(
+            target.host[1 .. target.host.len - 1],
+            target.port,
+        ) catch return error.InvalidServerReference;
+        return tcp_connect.ipWithDeadline(io, address, deadline);
+    }
+    if (net.IpAddress.parseIp4(target.host, target.port)) |address| {
+        return tcp_connect.ipWithDeadline(io, address, deadline);
+    } else |_| {}
+    const host_name = net.HostName.init(target.host) catch
+        return error.InvalidServerReference;
+    return tcp_connect.hostWithDeadline(io, host_name, target.port, deadline);
 }
 
 /// Return host text suitable for TLS SNI and certificate verification. URI

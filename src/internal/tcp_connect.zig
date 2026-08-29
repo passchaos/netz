@@ -21,6 +21,19 @@ pub fn ip(
     return race(io, deadline, connectIp, .{ io, address });
 }
 
+pub fn ipWithDeadline(
+    io: std.Io,
+    address: net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+) net.IpAddress.ConnectError!net.Stream {
+    return race(
+        io,
+        try usableDeadline(io, deadline),
+        connectIp,
+        .{ io, address },
+    );
+}
+
 pub fn host(
     io: std.Io,
     host_name: net.HostName,
@@ -33,6 +46,20 @@ pub fn host(
     return race(io, deadline, connectHost, .{ io, host_name, port });
 }
 
+pub fn hostWithDeadline(
+    io: std.Io,
+    host_name: net.HostName,
+    port: u16,
+    deadline: std.Io.Clock.Timestamp,
+) net.HostName.ConnectError!net.Stream {
+    return race(
+        io,
+        try usableDeadline(io, deadline),
+        connectHost,
+        .{ io, host_name, port },
+    );
+}
+
 pub fn unix(
     io: std.Io,
     address: net.UnixAddress,
@@ -43,12 +70,40 @@ pub fn unix(
     return race(io, deadline, connectUnix, .{ io, address });
 }
 
+pub fn unixWithDeadline(
+    io: std.Io,
+    address: net.UnixAddress,
+    deadline: std.Io.Clock.Timestamp,
+) (net.UnixAddress.ConnectError || std.Io.Timeout.Error)!net.Stream {
+    return race(
+        io,
+        try usableDeadline(io, deadline),
+        connectUnix,
+        .{ io, address },
+    );
+}
+
 fn deadlineFromTimeout(
     io: std.Io,
     timeout: std.Io.Duration,
 ) std.Io.Timeout.Error!std.Io.Clock.Timestamp {
     if (timeout.nanoseconds <= 0) return error.Timeout;
     return .fromNow(io, .{ .raw = timeout, .clock = .awake });
+}
+
+fn usableDeadline(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+) std.Io.Timeout.Error!std.Io.Clock.Timestamp {
+    // Connection cancellation is scheduled on the awake clock. Reject other
+    // clock domains instead of comparing unrelated epochs and accidentally
+    // turning an invalid timestamp into an effectively unbounded connect.
+    if (deadline.clock != .awake or
+        deadline.durationFromNow(io).raw.nanoseconds <= 0)
+    {
+        return error.Timeout;
+    }
+    return deadline;
 }
 
 fn race(

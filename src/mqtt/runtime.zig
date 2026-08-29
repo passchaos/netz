@@ -1074,6 +1074,46 @@ pub const Client = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var result = try connectWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    /// Like `connectWithDeadline`, but preserves the accepted CONNACK. The
+    /// caller-owned awake-clock deadline covers TCP setup and all MQTT
+    /// negotiation; `network_connect_timeout` and `connect_timeout` remain
+    /// independent upper bounds for their respective phases.
+    pub fn connectWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectResult {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
     pub fn connectAttempt(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectAttempt {
         const stream = try tcp_connect.ip(
             io,
@@ -1081,6 +1121,33 @@ pub const Client = struct {
             options.network_connect_timeout,
         );
         return connectStreamAttempt(allocator, io, stream, options, true);
+    }
+
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        const network_deadline = try cappedConnectDeadline(
+            io,
+            deadline,
+            options.network_connect_timeout,
+        );
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            true,
+            deadline,
+        );
     }
 
     /// Resolve a DNS hostname and establish a cleartext MQTT connection. DNS
@@ -1137,6 +1204,78 @@ pub const Client = struct {
         return connectStreamAttempt(allocator, io, stream, options, true);
     }
 
+    /// Resolve `host` and negotiate MQTT under one caller-owned deadline.
+    /// DNS and all address attempts also retain `network_connect_timeout` as
+    /// a stricter phase limit when it expires first.
+    pub fn connectHostAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        const network_deadline = try cappedConnectDeadline(
+            io,
+            deadline,
+            options.network_connect_timeout,
+        );
+        const stream = try network_endpoint.connectHostWithDeadline(
+            io,
+            host,
+            port,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            true,
+            deadline,
+        );
+    }
+
+    pub fn connectHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var result = try connectHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectHostWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectResult {
+        var attempt = try connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
     /// Connect to a cleartext `mqtt://` or `tcp://` URI. Credentials, query,
     /// fragment, and non-empty paths are rejected by the shared MQTT target
     /// parser before any network operation begins.
@@ -1183,6 +1322,74 @@ pub const Client = struct {
         return connectTargetAttempt(allocator, io, target, options);
     }
 
+    /// Connect and finish MQTT negotiation under one absolute deadline shared
+    /// by DNS resolution, every TCP attempt, CONNECT, AUTH, and final CONNACK.
+    pub fn connectUriAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        var target = try redirect.parse(allocator, uri_text, .tcp);
+        defer target.deinit();
+        const network_deadline = try cappedConnectDeadline(
+            io,
+            deadline,
+            options.network_connect_timeout,
+        );
+        const stream = try network_endpoint.connectTargetWithDeadline(
+            io,
+            &target,
+            .tcp,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            true,
+            deadline,
+        );
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var result = try connectUriWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUriWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectResult {
+        var attempt = try connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
     pub fn connectUnix(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1210,6 +1417,42 @@ pub const Client = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectUnixWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var result = try connectUnixWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUnixWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectResult {
+        var attempt = try connectUnixAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
     pub fn connectUnixAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1222,6 +1465,35 @@ pub const Client = struct {
             options.network_connect_timeout,
         );
         return connectStreamAttempt(allocator, io, stream, options, false);
+    }
+
+    /// Connect a Unix socket and negotiate MQTT under one caller-owned
+    /// awake-clock deadline, retaining stricter configured phase limits.
+    pub fn connectUnixAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        const network_deadline = try cappedConnectDeadline(
+            io,
+            deadline,
+            options.network_connect_timeout,
+        );
+        const stream = try tcp_connect.unixWithDeadline(
+            io,
+            address,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            false,
+            deadline,
+        );
     }
 
     /// Follow MQTT 5 redirect CONNACKs for cleartext TCP.
@@ -1292,6 +1564,24 @@ fn connectStreamAttempt(
     options: ConnectOptions,
     tcp_nodelay_available: bool,
 ) Error!ConnectAttempt {
+    return connectStreamAttemptBefore(
+        allocator,
+        io,
+        stream,
+        options,
+        tcp_nodelay_available,
+        null,
+    );
+}
+
+fn connectStreamAttemptBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: ConnectOptions,
+    tcp_nodelay_available: bool,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!ConnectAttempt {
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
     var limits = options.limits;
@@ -1316,7 +1606,10 @@ fn connectStreamAttempt(
     };
     stream_owned = false;
     errdefer connection.close();
-    return connection.establishClient(options);
+    return if (deadline) |absolute|
+        connection.establishClientWithDeadline(options, absolute)
+    else
+        connection.establishClient(options);
 }
 
 pub const ConnectAttempt = struct {
@@ -1491,6 +1784,26 @@ fn earliestClockDeadline(
         left
     else
         right;
+}
+
+fn cappedConnectDeadline(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+    timeout: ?std.Io.Duration,
+) Error!std.Io.Clock.Timestamp {
+    if (deadline.clock != .awake or
+        deadline.durationFromNow(io).raw.nanoseconds <= 0)
+    {
+        return error.Timeout;
+    }
+    const phase_deadline = if (timeout) |duration| blk: {
+        if (duration.nanoseconds <= 0) return error.Timeout;
+        break :blk std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = duration,
+            .clock = .awake,
+        });
+    } else null;
+    return earliestClockDeadline(deadline, phase_deadline).?;
 }
 
 fn appendTopicAliasMaximumSetting(
@@ -1939,6 +2252,41 @@ pub const Connection = struct {
         self: *Connection,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
+        const deadline = if (options.connect_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk self.transport.deadlineFromNow(timeout);
+        } else null;
+        return self.establishClientBefore(options, deadline);
+    }
+
+    pub fn establishClientWithDeadline(
+        self: *Connection,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.transport.ioHandle()).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        const phase_deadline = if (options.connect_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk self.transport.deadlineFromNow(timeout);
+        } else null;
+        // Reuse the caller's original timestamp rather than converting its
+        // remaining duration back into a fresh timeout. That keeps time spent
+        // in DNS/TCP setup charged to the same end-to-end budget.
+        return self.establishClientBefore(
+            options,
+            earliestClockDeadline(deadline, phase_deadline),
+        );
+    }
+
+    fn establishClientBefore(
+        self: *Connection,
+        options: ConnectOptions,
+        connect_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         // This method transfers `self` into the returned attempt. Capture the
         // allocator before that move so deferred temporary cleanup never reads
         // the deliberately undefined moved-from connection.
@@ -2011,10 +2359,6 @@ pub const Connection = struct {
         try self.writePacket(self.write_scratch.items);
         const auth_handler = options.authentication;
         var auth_rounds: usize = 0;
-        const connect_deadline = if (options.connect_timeout) |timeout| blk: {
-            if (timeout.nanoseconds <= 0) return error.Timeout;
-            break :blk self.transport.deadlineFromNow(timeout);
-        } else null;
         var connack: OwnedConnAck = while (true) {
             var packet = if (connect_deadline) |deadline|
                 try self.readPacketWithDeadline(deadline)

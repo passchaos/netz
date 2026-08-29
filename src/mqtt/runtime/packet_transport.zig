@@ -216,17 +216,20 @@ pub const Transport = union(enum) {
         self: Transport,
         duration: std.Io.Duration,
     ) std.Io.Clock.Timestamp {
-        const io = switch (self) {
+        return .fromNow(
+            self.ioHandle(),
+            .{ .raw = duration, .clock = .awake },
+        );
+    }
+
+    pub fn ioHandle(self: Transport) std.Io {
+        return switch (self) {
             .tcp => |tcp| tcp.io,
             .tls => |transport| transport.connection.io,
             .tls_vail => |transport| transport.connection.io,
             .tls_server => |transport| transport.connection.io,
             .websocket => |ws| ws.connection.io,
         };
-        return .fromNow(
-            io,
-            .{ .raw = duration, .clock = .awake },
-        );
     }
 
     pub fn close(
