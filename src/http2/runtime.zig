@@ -2098,6 +2098,102 @@ pub const Client = struct {
         if (options.scheme == null) options.scheme = uri.scheme;
         return connection.request(options);
     }
+
+    pub fn requestUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
+        return requestUriTlsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            .{},
+            deadline,
+        );
+    }
+
+    /// Apply one absolute deadline to URI parsing's network work, DNS/TCP,
+    /// optional TLS, the HTTP/2 SETTINGS bootstrap, and the complete response.
+    /// Configured connect, TLS, and bootstrap timeouts remain stricter bounds.
+    pub fn requestUriTlsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (!is_http and !is_https) return error.UnsupportedScheme;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(
+            allocator,
+            uri,
+            if (is_https) 443 else 80,
+        );
+        defer endpoint.deinit();
+
+        try validateLocalLimits(limits);
+        var connection = if (is_https) switch (endpoint.target) {
+            .host => try connectTlsHostWithDeadline(
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                tls_options,
+                deadline,
+            ),
+            .ip => |address| try connectTlsAddressWithDeadline(
+                allocator,
+                io,
+                address,
+                endpoint.tls_host,
+                endpoint.authority,
+                limits,
+                tls_options,
+                deadline,
+            ),
+        } else switch (endpoint.target) {
+            .host => try connectHostWithDeadline(
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                deadline,
+            ),
+            .ip => |address| try connectWithDeadline(
+                allocator,
+                io,
+                address,
+                limits,
+                deadline,
+            ),
+        };
+        defer connection.close();
+        if (connection.default_authority) |authority| allocator.free(authority);
+        connection.default_authority = try allocator.dupe(
+            u8,
+            endpoint.authority,
+        );
+        connection.default_scheme = uri.scheme;
+        var options = request_options;
+        options.path = target;
+        if (options.scheme == null) options.scheme = uri.scheme;
+        return connection.requestWithDeadline(options, deadline);
+    }
 };
 
 pub const TlsConnectOptions = struct {

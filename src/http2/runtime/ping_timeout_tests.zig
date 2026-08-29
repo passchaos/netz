@@ -372,6 +372,77 @@ test "HTTP/2 aggregate response deadline is not renewed by control frames" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 URI deadline spans connection bootstrap and response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}/deadline",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.requestUriWithDeadline(
+            allocator,
+            io,
+            uri,
+            .{},
+            .{
+                .connect_timeout = .fromSeconds(1),
+                .handshake_timeout = .fromSeconds(1),
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(40),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 aggregate response deadline covers header continuations" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

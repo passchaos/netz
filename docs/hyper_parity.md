@@ -638,6 +638,9 @@ permitted connection-control traffic and fragmented header blocks, without
 renewal. A timeout sends RST_STREAM(CANCEL) best-effort and marks the connection
 unusable because discarded HPACK/body state cannot safely be reconstructed;
 client pools consequently discard that lease. Netz also exposes
+one-shot HTTP/HTTPS URI deadline helpers that preserve that same absolute
+timestamp across DNS/TCP, TLS, SETTINGS bootstrap, and the complete response.
+Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
 keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, WINDOW_UPDATE, and RFC

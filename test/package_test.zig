@@ -289,6 +289,14 @@ test "public modules are reachable" {
         "connectTlsAddressWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "requestUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "requestUriTlsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime.UnixServer,
         "serveConcurrent",
     ));
