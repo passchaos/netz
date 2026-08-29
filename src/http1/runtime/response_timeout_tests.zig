@@ -164,6 +164,77 @@ test "HTTP/1 complete response deadline bounds a fixed body" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 URI deadline spans connection and complete response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request: [4096]u8 = undefined;
+            try readUntilHead(self.io, stream, &request);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nb",
+            );
+            try std.Io.sleep(self.io, .fromMilliseconds(150), .awake);
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}/deadline",
+        .{listener.socket.address.getPort()},
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.requestUriWithDeadline(
+            allocator,
+            io,
+            uri,
+            .{},
+            .{
+                .connect_timeout = .fromSeconds(1),
+                .response_head_timeout = .fromSeconds(1),
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(40),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 complete response deadline bounds chunk framing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

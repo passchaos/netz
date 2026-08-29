@@ -627,6 +627,9 @@ heads, the final head, fixed/chunked/close-delimited body, and trailers; a
 configured response-head timeout is still enforced when it expires earlier.
 Because HTTP/1 cannot cancel one exchange independently, timeout marks the
 connection unusable so pools cannot replay against ambiguous leftover bytes.
+One-shot HTTP and HTTPS URI helpers additionally accept an end-to-end absolute
+deadline spanning DNS/TCP, standard or vail TLS, request emission, and the same
+complete response boundary, while retaining every stricter phase timeout.
 
 HTTP/2 aggregate and callback-streaming client requests now expose relative-
 timeout and absolute-deadline forms on both complete requests and split

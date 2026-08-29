@@ -2913,6 +2913,102 @@ pub const Client = struct {
         return client.request(options);
     }
 
+    pub fn requestUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        return requestUriTlsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            .{},
+            deadline,
+        );
+    }
+
+    /// Perform a one-shot HTTP/HTTPS request under one absolute deadline. DNS,
+    /// TCP, TLS, response heads, body, and trailers all consume the same
+    /// budget; configured connect, TLS, and response-head limits may shorten
+    /// their own phases but never extend the caller deadline.
+    pub fn requestUriTlsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (!is_http and !is_https) return error.UnsupportedScheme;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try uriEndpoint(
+            allocator,
+            uri,
+            if (is_https) 443 else 80,
+        );
+        defer endpoint.deinit();
+
+        var client = if (is_https) switch (endpoint.target) {
+            .host => try connectTlsHostWithDeadline(
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                tls_options,
+                deadline,
+            ),
+            .ip => |address| try connectTlsAddressWithDeadline(
+                allocator,
+                io,
+                address,
+                endpoint.tls_host,
+                endpoint.authority,
+                limits,
+                tls_options,
+                deadline,
+            ),
+        } else switch (endpoint.target) {
+            .host => try connectHostWithDeadline(
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                deadline,
+            ),
+            .ip => |address| blk: {
+                var connected = try connectWithDeadline(
+                    allocator,
+                    io,
+                    address,
+                    limits,
+                    deadline,
+                );
+                connected.default_host = try allocator.dupe(
+                    u8,
+                    endpoint.authority,
+                );
+                break :blk connected;
+            },
+        };
+        defer client.close();
+        var options = request_options;
+        options.target = target;
+        return client.requestWithDeadline(options, deadline);
+    }
+
     /// One-shot HTTPS request through the vail TLS 1.3 client. Use this when
     /// the caller needs mTLS, ALPN, peer identity, exporter, or KeyUpdate; for
     /// persistent connections call `connectVailTlsHost` directly.
@@ -2955,6 +3051,51 @@ pub const Client = struct {
         options.target = target;
         if (options.host == null) options.host = endpoint.authority;
         return client.request(options);
+    }
+
+    pub fn requestUriVailTlsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
+            return error.UnsupportedScheme;
+        }
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try uriEndpoint(allocator, uri, 443);
+        defer endpoint.deinit();
+        var client = switch (endpoint.target) {
+            .host => try connectVailTlsHostWithDeadline(
+                allocator,
+                io,
+                endpoint.tls_host,
+                uri.port orelse 443,
+                limits,
+                tls_options,
+                deadline,
+            ),
+            .ip => |address| try connectVailTlsAddressWithDeadline(
+                allocator,
+                io,
+                address,
+                endpoint.tls_host,
+                limits,
+                tls_options,
+                deadline,
+            ),
+        };
+        defer client.close();
+        var options = request_options;
+        options.target = target;
+        if (options.host == null) options.host = endpoint.authority;
+        return client.requestWithDeadline(options, deadline);
     }
 
     /// Linux-only HTTP/1 client path backed directly by `std.os.linux.IoUring`.
