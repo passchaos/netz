@@ -877,6 +877,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3.ClientConnection,
+        "receiveMessageInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "receiveMessageIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "receiveMessageIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
         "sendBinaryParts",
     ));
     try std.testing.expect(@hasDecl(
@@ -934,6 +946,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3,
         "CloseHandshakeEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "Message",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,

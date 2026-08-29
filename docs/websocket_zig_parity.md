@@ -554,6 +554,10 @@ RFC 9220 also matches the HTTP/1 and RFC 8441 borrowed binary-parts send API:
 server frames retain scatter/gather input through HTTP/3 DATA framing, clients
 apply one continuous mask through bounded scratch, and negotiated compression
 consumes the slices without allocating a joined plaintext message.
+Its caller-buffer receive APIs likewise assemble uncompressed messages directly
+into application storage, reuse connection-owned compressed input/inflater
+scratch, and preserve partial-frame plus completed-fragment progress across
+timeout retries while requiring the same output buffer for resumed messages.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

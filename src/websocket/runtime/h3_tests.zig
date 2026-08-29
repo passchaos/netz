@@ -629,6 +629,10 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 .allowed_origins = &.{"https://example.test"},
                 .enable_permessage_deflate = true,
                 .compression_threshold = 1,
+                .limits = .{
+                    .max_frame_bytes = compressed_parts.len,
+                    .max_message_bytes = compressed_parts.len,
+                },
             });
             defer connection.deinit();
             try std.testing.expectEqualStrings(
@@ -641,27 +645,26 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             );
             try std.testing.expect(connection.permessage_deflate);
 
-            var text = try connection.receiveMessageWithTimeout(
+            var receive_storage: [compressed_parts.len]u8 = undefined;
+            const text = try connection.receiveMessageIntoWithTimeout(
+                &receive_storage,
                 .fromSeconds(5),
             );
-            defer text.deinit(allocator);
             try std.testing.expectEqual(websocket.Opcode.text, text.opcode);
             try std.testing.expectEqualStrings(request_text, text.payload);
-            try std.testing.expect(text.was_compressed);
 
-            var plain_parts = try connection.receiveMessageWithTimeout(
+            const plain_parts = try connection.receiveMessageIntoWithTimeout(
+                &receive_storage,
                 .fromSeconds(5),
             );
-            defer plain_parts.deinit(allocator);
             try std.testing.expectEqual(websocket.Opcode.binary, plain_parts.opcode);
             try std.testing.expectEqualStrings("ab", plain_parts.payload);
-            try std.testing.expect(!plain_parts.was_compressed);
 
             for (0..2) |_| {
-                var compressed = try connection.receiveMessageWithTimeout(
+                const compressed = try connection.receiveMessageIntoWithTimeout(
+                    &receive_storage,
                     .fromSeconds(5),
                 );
-                defer compressed.deinit(allocator);
                 try std.testing.expectEqual(
                     websocket.Opcode.binary,
                     compressed.opcode,
@@ -670,9 +673,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                     compressed_parts,
                     compressed.payload,
                 );
-                try std.testing.expect(compressed.was_compressed);
             }
-
             try connection.sendText("hello client");
             try connection.sendBinaryParts("a", "b");
             try connection.sendBinaryParts(
@@ -773,6 +774,10 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             .protocols = &.{"chat"},
             .enable_permessage_deflate = true,
             .compression_threshold = 1,
+            .limits = .{
+                .max_frame_bytes = compressed_parts.len,
+                .max_message_bytes = compressed_parts.len,
+            },
         },
     );
     defer client.deinit();
@@ -803,17 +808,20 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     defer reply.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);
     try std.testing.expectEqualStrings("hello client", reply.payload);
-    var plain_parts = try client.receiveMessageWithTimeout(.fromSeconds(5));
-    defer plain_parts.deinit(allocator);
+    var receive_storage: [compressed_parts.len]u8 = undefined;
+    const plain_parts = try client.receiveMessageIntoWithTimeout(
+        &receive_storage,
+        .fromSeconds(5),
+    );
     try std.testing.expectEqual(websocket.Opcode.binary, plain_parts.opcode);
     try std.testing.expectEqualStrings("ab", plain_parts.payload);
-    try std.testing.expect(!plain_parts.was_compressed);
     for (0..2) |_| {
-        var compressed = try client.receiveMessageWithTimeout(.fromSeconds(5));
-        defer compressed.deinit(allocator);
+        const compressed = try client.receiveMessageIntoWithTimeout(
+            &receive_storage,
+            .fromSeconds(5),
+        );
         try std.testing.expectEqual(websocket.Opcode.binary, compressed.opcode);
         try std.testing.expectEqualStrings(compressed_parts, compressed.payload);
-        try std.testing.expect(compressed.was_compressed);
     }
     try client.sendText("client in flight");
     var server_ping = try client.receiveFrameWithTimeout(.fromSeconds(5));
@@ -1010,6 +1018,11 @@ test "WebSocket HTTP3 control progress APIs reject expired budgets" {
     try std.testing.expectError(
         error.Timeout,
         client.receiveCloseFrameWithTimeout(.zero),
+    );
+    var message_storage: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveMessageIntoWithTimeout(&message_storage, .zero),
     );
     try std.testing.expectError(
         error.Timeout,

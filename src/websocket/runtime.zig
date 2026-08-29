@@ -2285,56 +2285,8 @@ pub const ConnectOptions = struct {
 pub const OwnedMessage = common.OwnedMessage;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
 pub const PingEvent = common.PingEvent;
-
-pub const Message = struct {
-    opcode: websocket.Opcode,
-    payload: []u8,
-};
-
-/// Resumable state for the caller-buffer receive path. The caller owns the
-/// bytes already written, so retries after a timeout must present the same
-/// storage until the fragmented message completes.
-const MessageIntoReceiveState = struct {
-    opcode: ?websocket.Opcode = null,
-    compressed: bool = false,
-    written: usize = 0,
-    output_address: usize = 0,
-    output_len: usize = 0,
-
-    fn active(self: MessageIntoReceiveState) bool {
-        return self.opcode != null;
-    }
-
-    fn begin(
-        self: *MessageIntoReceiveState,
-        out: []u8,
-        opcode: websocket.Opcode,
-        compressed: bool,
-    ) void {
-        self.* = .{
-            .opcode = opcode,
-            .compressed = compressed,
-            .output_address = @intFromPtr(out.ptr),
-            .output_len = out.len,
-        };
-    }
-
-    fn validateOutput(
-        self: MessageIntoReceiveState,
-        out: []u8,
-    ) Error!void {
-        if (!self.active()) return;
-        if (self.output_address != @intFromPtr(out.ptr) or
-            self.output_len != out.len)
-        {
-            return error.BufferTooShort;
-        }
-    }
-
-    fn reset(self: *MessageIntoReceiveState) void {
-        self.* = .{};
-    }
-};
+pub const Message = common.Message;
+const MessageIntoReceiveState = common.MessageIntoReceiveState;
 
 pub const Connection = struct {
     io: std.Io,

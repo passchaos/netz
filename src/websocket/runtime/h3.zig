@@ -14,6 +14,7 @@ const http3 = @import("../../http3/mod.zig");
 
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
+pub const Message = common.Message;
 
 pub const Error = websocket.Error || http3.runtime.Error || error{
     ConnectionClosed,
@@ -147,10 +148,12 @@ pub fn Connection(comptime role: common.Role) type {
         selected_protocol: ?[]u8 = null,
         inbuf: std.ArrayList(u8) = .empty,
         message_assembler: ?websocket.MessageAssembler = null,
+        message_into: common.MessageIntoReceiveState = .{},
         permessage_deflate: bool = false,
         compression_threshold: usize = 32,
         compression_send_max_window_bits: u8 = 15,
         compression_send: compression_scratch.SendScratch = .{},
+        compression_receive: compression_scratch.Scratch = .{},
         close_sent: bool = false,
         close_received: bool = false,
         receive_finished: bool = false,
@@ -186,6 +189,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.message_assembler) |*assembler| assembler.deinit();
             self.inbuf.deinit(self.allocator);
             self.compression_send.deinit(self.allocator);
+            self.compression_receive.deinit(self.allocator);
             self.h3.deinit();
             self.* = undefined;
         }
@@ -444,6 +448,9 @@ pub fn Connection(comptime role: common.Role) type {
         pub fn receiveCloseFrame(
             self: *Self,
         ) Error!?websocket.OwnedCloseFrame {
+            if (self.message_assembler != null or self.message_into.active()) {
+                return error.InvalidFrame;
+            }
             var frame = try self.receiveFrame();
             defer frame.deinit(self.allocator);
             if (frame.header.opcode != .close) return error.InvalidFrame;
@@ -473,6 +480,9 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!?websocket.OwnedCloseFrame {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.message_assembler != null or self.message_into.active()) {
+                return error.InvalidFrame;
+            }
             var frame = try self.receiveFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (frame.header.opcode != .close) return error.InvalidFrame;
@@ -562,6 +572,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!common.OwnedMessage {
+            if (self.message_into.active()) return error.InvalidFrame;
             if (self.message_assembler == null) {
                 self.message_assembler = websocket.MessageAssembler.initLimited(
                     self.allocator,
@@ -608,7 +619,230 @@ pub fn Connection(comptime role: common.Role) type {
             }
         }
 
+        fn resetMessageIntoAfterError(self: *Self, err: anyerror) void {
+            // Timeout is resumable because `inbuf`, the completed-fragment
+            // offset, and compressed bytes are connection-owned. All other
+            // failures terminate this caller-buffer operation; retaining its
+            // borrowed pointer would make a later receive spuriously require
+            // memory that the caller no longer promised to keep alive.
+            if (err != error.Timeout) self.message_into.reset();
+        }
+
+        /// Receive one complete RFC 9220 message into caller-owned storage.
+        /// The output must cover `limits.max_message_bytes`, allowing timeout
+        /// recovery to retain only offsets and compressed scratch rather than
+        /// allocating an intermediate uncompressed message.
+        pub fn receiveMessageInto(
+            self: *Self,
+            out: []u8,
+        ) Error!Message {
+            return self.receiveMessageIntoInternal(out, null);
+        }
+
+        pub fn receiveMessageIntoWithTimeout(
+            self: *Self,
+            out: []u8,
+            timeout: std.Io.Duration,
+        ) Error!Message {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveMessageIntoInternal(out, .fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        /// Use the same caller-owned absolute deadline across every HTTP/3
+        /// DATA chunk, WebSocket continuation, and interleaved control frame.
+        pub fn receiveMessageIntoWithDeadline(
+            self: *Self,
+            out: []u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!Message {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            return self.receiveMessageIntoInternal(out, deadline);
+        }
+
+        fn receiveMessageIntoInternal(
+            self: *Self,
+            out: []u8,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!Message {
+            if (self.message_assembler != null) return error.InvalidFrame;
+            if (out.len < self.limits.max_message_bytes) {
+                return error.BufferTooShort;
+            }
+            try self.message_into.validateOutput(out);
+            errdefer |err| self.resetMessageIntoAfterError(err);
+
+            var control_storage: [125]u8 = undefined;
+            while (true) {
+                const frame_out = if (self.message_into.compressed)
+                    self.compression_receive
+                        .payload.items[self.message_into.written..]
+                else
+                    out[self.message_into.written..];
+                const frame = try self.receiveFrameIntoInternal(
+                    frame_out,
+                    &control_storage,
+                    deadline,
+                );
+                switch (frame.header.opcode) {
+                    .ping, .pong => continue,
+                    .close => return error.ConnectionClosed,
+                    .text, .binary => {
+                        if (self.message_into.active()) {
+                            return error.InvalidFrame;
+                        }
+                        self.message_into.begin(
+                            out,
+                            frame.header.opcode,
+                            frame.header.rsv1,
+                        );
+                        if (self.message_into.compressed and
+                            !self.permessage_deflate)
+                        {
+                            return error.UnexpectedRsv;
+                        }
+                        if (self.message_into.compressed) {
+                            try self.ensureCompressionReceiveScratch();
+                            // The first frame was decoded before RSV1 selected
+                            // compressed scratch. Copy it once; continuation
+                            // frames decode directly into retained storage.
+                            if (frame.payload.len != 0) {
+                                @memcpy(
+                                    self.compression_receive
+                                        .payload.items[0..frame.payload.len],
+                                    frame.payload,
+                                );
+                            }
+                        }
+                    },
+                    .continuation => {
+                        if (!self.message_into.active()) {
+                            return error.InvalidFrame;
+                        }
+                        if (frame.header.rsv1) return error.UnexpectedRsv;
+                    },
+                    else => return error.InvalidFrame,
+                }
+
+                const next_written = std.math.add(
+                    usize,
+                    self.message_into.written,
+                    frame.payload.len,
+                ) catch return error.PayloadTooLarge;
+                if (next_written > self.limits.max_message_bytes) {
+                    return error.PayloadTooLarge;
+                }
+                self.message_into.written = next_written;
+                if (!frame.header.fin) continue;
+
+                const message_opcode = self.message_into.opcode orelse
+                    return error.InvalidFrame;
+                const payload = if (self.message_into.compressed)
+                    try websocket.decompressMessageInto(
+                        out[0..self.limits.max_message_bytes],
+                        self.compression_receive
+                            .payload.items[0..self.message_into.written],
+                        self.compression_receive.payload.allocatedSlice(),
+                        self.compression_receive.flate_window.?,
+                    )
+                else
+                    out[0..self.message_into.written];
+                if (message_opcode == .text and
+                    !std.unicode.utf8ValidateSlice(payload))
+                {
+                    return error.InvalidUtf8;
+                }
+                self.message_into.reset();
+                return .{ .opcode = message_opcode, .payload = payload };
+            }
+        }
+
+        fn receiveFrameIntoInternal(
+            self: *Self,
+            out: []u8,
+            control_out: *[125]u8,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!websocket.BorrowedFrame {
+            if (self.close_sent and self.close_received) {
+                return error.ConnectionClosed;
+            }
+            try self.ensureBuffered(2, deadline);
+            const second = self.inbuf.items[1];
+            var header_len: usize = 2;
+            const length_code = second & 0x7f;
+            if (length_code == 126) {
+                header_len += 2;
+            } else if (length_code == 127) {
+                header_len += 8;
+            }
+            if ((second & 0x80) != 0) header_len += 4;
+            try self.ensureBuffered(header_len, deadline);
+
+            const header = try websocket.FrameHeader.parse(self.inbuf.items);
+            const payload_len = std.math.cast(
+                usize,
+                header.payload_len,
+            ) orelse return error.PayloadTooLarge;
+            if (payload_len > self.limits.max_frame_bytes) {
+                return error.MessageTooLarge;
+            }
+            const payload_out = if (header.opcode.isControl())
+                control_out[0..]
+            else
+                out;
+            if (payload_len > payload_out.len) return error.PayloadTooLarge;
+            const total_len = std.math.add(
+                usize,
+                header.header_len,
+                payload_len,
+            ) catch return error.PayloadTooLarge;
+            try self.ensureBuffered(total_len, deadline);
+            const options: websocket.ParseFrameOptions = switch (role) {
+                .client => .{
+                    .expect_mask = .unmasked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+                .server => .{
+                    .expect_mask = .masked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+            };
+            const frame = try websocket.parseFrameInto(
+                payload_out,
+                self.inbuf.items[0..total_len],
+                options,
+            );
+            self.discardBuffered(frame.consumed);
+            switch (frame.header.opcode) {
+                .ping => {
+                    if (!self.close_sent) try self.sendPong(frame.payload);
+                },
+                .close => {
+                    self.close_received = true;
+                    if (!self.close_sent) {
+                        try self.sendControlFrame(.close, frame.payload);
+                    }
+                },
+                else => {},
+            }
+            return frame;
+        }
+
+        fn ensureCompressionReceiveScratch(self: *Self) Error!void {
+            try self.compression_receive.prepare(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        }
+
         pub fn receiveFrame(self: *Self) Error!websocket.Frame {
+            if (self.message_assembler != null or self.message_into.active()) {
+                return error.InvalidFrame;
+            }
             return self.receiveFrameInternal(null);
         }
 
@@ -617,6 +851,9 @@ pub fn Connection(comptime role: common.Role) type {
             timeout: std.Io.Duration,
         ) Error!websocket.Frame {
             if (timeout.nanoseconds <= 0) return error.Timeout;
+            if (self.message_assembler != null or self.message_into.active()) {
+                return error.InvalidFrame;
+            }
             return self.receiveFrameInternal(.fromNow(
                 self.io(),
                 .{ .raw = timeout, .clock = .awake },
@@ -628,6 +865,9 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!websocket.Frame {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.message_assembler != null or self.message_into.active()) {
+                return error.InvalidFrame;
+            }
             return self.receiveFrameInternal(deadline);
         }
 
