@@ -550,6 +550,10 @@ application frames with ownership and resume without retransmitting the control
 frame; peer Close code/reason metadata remains owned until event deinit. Strict
 passive Close receives likewise expose untimed, timeout, and absolute-deadline
 forms, while `sendCloseFrame(null)` supports a valid metadata-free Close.
+RFC 9220 also matches the HTTP/1 and RFC 8441 borrowed binary-parts send API:
+server frames retain scatter/gather input through HTTP/3 DATA framing, clients
+apply one continuous mask through bounded scratch, and negotiated compression
+consumes the slices without allocating a joined plaintext message.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

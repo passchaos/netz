@@ -590,6 +590,9 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const client_cid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
     const server_cid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
     const request_text = "hello over h3 hello over h3 hello over h3 hello over h3";
+    const compressed_first = "h3-borrowed-prefix-";
+    const compressed_second = "compressible-application-payload-" ** 32;
+    const compressed_parts = compressed_first ++ compressed_second;
     const limits: http3.runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
@@ -645,7 +648,54 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             try std.testing.expectEqual(websocket.Opcode.text, text.opcode);
             try std.testing.expectEqualStrings(request_text, text.payload);
             try std.testing.expect(text.was_compressed);
+
+            var plain_parts = try connection.receiveMessageWithTimeout(
+                .fromSeconds(5),
+            );
+            defer plain_parts.deinit(allocator);
+            try std.testing.expectEqual(websocket.Opcode.binary, plain_parts.opcode);
+            try std.testing.expectEqualStrings("ab", plain_parts.payload);
+            try std.testing.expect(!plain_parts.was_compressed);
+
+            for (0..2) |_| {
+                var compressed = try connection.receiveMessageWithTimeout(
+                    .fromSeconds(5),
+                );
+                defer compressed.deinit(allocator);
+                try std.testing.expectEqual(
+                    websocket.Opcode.binary,
+                    compressed.opcode,
+                );
+                try std.testing.expectEqualStrings(
+                    compressed_parts,
+                    compressed.payload,
+                );
+                try std.testing.expect(compressed.was_compressed);
+            }
+
             try connection.sendText("hello client");
+            try connection.sendBinaryParts("a", "b");
+            try connection.sendBinaryParts(
+                compressed_first,
+                compressed_second,
+            );
+            const compressed_ptr = connection.compression_send.payload
+                .allocatedSlice().ptr;
+            var failing = std.testing.FailingAllocator.init(allocator, .{});
+            connection.allocator = failing.allocator();
+            {
+                defer connection.allocator = allocator;
+                failing.fail_index = failing.alloc_index;
+                try connection.sendBinaryParts(
+                    compressed_first,
+                    compressed_second,
+                );
+                try std.testing.expect(!failing.has_induced_failure);
+                try std.testing.expectEqual(
+                    compressed_ptr,
+                    connection.compression_send.payload.allocatedSlice().ptr,
+                );
+            }
 
             var ping = try connection.pingWithTimeout(
                 "server-probe",
@@ -734,10 +784,37 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         request_text[0..20],
         request_text[20..],
     });
+    try client.sendBinaryParts("a", "b");
+    try client.sendBinaryParts(compressed_first, compressed_second);
+    const compressed_ptr = client.compression_send.payload.allocatedSlice().ptr;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    client.allocator = failing.allocator();
+    {
+        defer client.allocator = allocator;
+        failing.fail_index = failing.alloc_index;
+        try client.sendBinaryParts(compressed_first, compressed_second);
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(
+            compressed_ptr,
+            client.compression_send.payload.allocatedSlice().ptr,
+        );
+    }
     var reply = try client.receiveFrameWithTimeout(.fromSeconds(5));
     defer reply.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);
     try std.testing.expectEqualStrings("hello client", reply.payload);
+    var plain_parts = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer plain_parts.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, plain_parts.opcode);
+    try std.testing.expectEqualStrings("ab", plain_parts.payload);
+    try std.testing.expect(!plain_parts.was_compressed);
+    for (0..2) |_| {
+        var compressed = try client.receiveMessageWithTimeout(.fromSeconds(5));
+        defer compressed.deinit(allocator);
+        try std.testing.expectEqual(websocket.Opcode.binary, compressed.opcode);
+        try std.testing.expectEqualStrings(compressed_parts, compressed.payload);
+        try std.testing.expect(compressed.was_compressed);
+    }
     try client.sendText("client in flight");
     var server_ping = try client.receiveFrameWithTimeout(.fromSeconds(5));
     defer server_ping.deinit(allocator);

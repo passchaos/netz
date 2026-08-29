@@ -248,6 +248,55 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendDataFrame(.binary, payload);
         }
 
+        /// Send two borrowed slices as one binary WebSocket message. The H3
+        /// server path preserves both slices through HTTP/3 DATA framing; the
+        /// client masks them through bounded stack storage while maintaining
+        /// one continuous RFC 6455 mask offset. Compression consumes both
+        /// slices directly without first joining caller plaintext.
+        pub fn sendBinaryParts(
+            self: *Self,
+            first: []const u8,
+            second: []const u8,
+        ) Error!void {
+            if (self.close_sent or self.close_received) {
+                return error.ConnectionClosed;
+            }
+            const payload_len = std.math.add(
+                usize,
+                first.len,
+                second.len,
+            ) catch return error.PayloadTooLarge;
+            if (payload_len > self.limits.max_frame_bytes or
+                payload_len > self.limits.max_message_bytes)
+            {
+                return error.MessageTooLarge;
+            }
+            if (self.permessage_deflate and
+                payload_len >= self.compression_threshold)
+            {
+                const parts = [_][]const u8{ first, second };
+                const compressed = try self.compressMessageParts(
+                    &parts,
+                    payload_len,
+                );
+                if (compressed.len < payload_len) {
+                    try self.writeFrameExtended(
+                        .binary,
+                        compressed,
+                        true,
+                        false,
+                        true,
+                    );
+                    return;
+                }
+            }
+            try self.writeBinaryParts(
+                first,
+                second,
+                payload_len,
+            );
+        }
+
         /// Send one WebSocket message as caller-selected RFC 6455 fragments
         /// while keeping the HTTP/3 request stream open. When compression is
         /// negotiated, the complete logical message is compressed before its
@@ -812,35 +861,97 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .fin = frame_fin, .mask_key = mask_key, .rsv1 = rsv1 },
             );
             if (mask_key) |mask| {
-                var scratch: [16 * 1024]u8 = undefined;
-                var offset: usize = 0;
-                var header_pending = true;
-                while (offset < payload.len) {
-                    const count = @min(scratch.len, payload.len - offset);
-                    try websocket.applyMaskCopy(
-                        scratch[0..count],
-                        payload[offset..][0..count],
-                        mask,
-                        offset,
-                    );
-                    if (header_pending) {
-                        try self.writeParts(
-                            &.{ header, scratch[0..count] },
-                            fin_stream and offset + count == payload.len,
-                        );
-                        header_pending = false;
-                    } else {
-                        try self.writeBytes(
-                            scratch[0..count],
-                            fin_stream and offset + count == payload.len,
-                        );
-                    }
-                    offset += count;
-                }
-                if (header_pending) try self.writeBytes(header, fin_stream);
+                try self.writeMaskedParts(header, &.{payload}, mask, fin_stream);
             } else {
                 try self.writeParts(&.{ header, payload }, fin_stream);
             }
+        }
+
+        fn writeBinaryParts(
+            self: *Self,
+            first: []const u8,
+            second: []const u8,
+            payload_len: usize,
+        ) Error!void {
+            var mask_key: ?[4]u8 = null;
+            if (role == .client) {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                mask_key = key;
+            }
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &header_storage,
+                .binary,
+                payload_len,
+                .{ .mask_key = mask_key },
+            );
+            if (mask_key) |mask| {
+                try self.writeMaskedParts(
+                    header,
+                    &.{ first, second },
+                    mask,
+                    false,
+                );
+                return;
+            }
+
+            // The HTTP/3 body API accepts arbitrary slices and emits one
+            // continuous byte stream, so the server can retain both borrowed
+            // inputs without allocating a plaintext join.
+            try self.writeParts(&.{ header, first, second }, false);
+        }
+
+        fn writeMaskedParts(
+            self: *Self,
+            header: []const u8,
+            payload_parts: []const []const u8,
+            mask_key: [4]u8,
+            fin_stream: bool,
+        ) Error!void {
+            var scratch: [16 * 1024]u8 = undefined;
+            var part_index: usize = 0;
+            var part_offset: usize = 0;
+            var mask_offset: usize = 0;
+            var header_pending = true;
+            while (part_index < payload_parts.len) {
+                var count: usize = 0;
+                while (part_index < payload_parts.len and count < scratch.len) {
+                    const part = payload_parts[part_index];
+                    if (part_offset == part.len) {
+                        part_index += 1;
+                        part_offset = 0;
+                        continue;
+                    }
+                    const chunk_len = @min(
+                        scratch.len - count,
+                        part.len - part_offset,
+                    );
+                    try websocket.applyMaskCopy(
+                        scratch[count..][0..chunk_len],
+                        part[part_offset..][0..chunk_len],
+                        mask_key,
+                        mask_offset,
+                    );
+                    count += chunk_len;
+                    part_offset += chunk_len;
+                    mask_offset += chunk_len;
+                }
+                if (count == 0) break;
+                if (header_pending) {
+                    try self.writeParts(
+                        &.{ header, scratch[0..count] },
+                        fin_stream and part_index == payload_parts.len,
+                    );
+                    header_pending = false;
+                } else {
+                    try self.writeBytes(
+                        scratch[0..count],
+                        fin_stream and part_index == payload_parts.len,
+                    );
+                }
+            }
+            if (header_pending) try self.writeBytes(header, fin_stream);
         }
 
         fn compressMessage(self: *Self, payload: []const u8) Error![]const u8 {
@@ -849,6 +960,20 @@ pub fn Connection(comptime role: common.Role) type {
                 &self.compression_send.encoder.?,
                 &self.compression_send.payload,
                 payload,
+                self.compression_send_max_window_bits,
+            );
+        }
+
+        fn compressMessageParts(
+            self: *Self,
+            parts: []const []const u8,
+            payload_len: usize,
+        ) Error![]const u8 {
+            try self.compression_send.prepare(self.allocator, payload_len);
+            return websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
+                &self.compression_send.encoder.?,
+                &self.compression_send.payload,
+                parts,
                 self.compression_send_max_window_bits,
             );
         }
