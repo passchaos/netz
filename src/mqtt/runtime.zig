@@ -172,12 +172,63 @@ pub const Server = struct {
         return pending.finish(options);
     }
 
+    /// Accept TCP, then bound trusted PROXY parsing and the complete MQTT
+    /// CONNECT admission with one caller-owned awake-clock deadline.
+    pub fn acceptWithDeadline(
+        self: *Server,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!AcceptedClient {
+        var pending = try self.acceptPendingWithDeadline(options, deadline);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        var pending = try self.acceptPendingWithTimeout(options, timeout);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
     pub fn acceptPending(
         self: *Server,
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
         return self.acceptStreamPending(stream, options);
+    }
+
+    pub fn acceptPendingWithDeadline(
+        self: *Server,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingWithDeadline(
+            stream,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn acceptPendingWithTimeout(
+        self: *Server,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingWithDeadline(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn pendingSource(self: *Server) PendingSource {
@@ -203,15 +254,35 @@ pub const Server = struct {
         stream: net.Stream,
         options: AcceptOptions,
     ) Error!PendingAcceptedClient {
+        return self.acceptStreamPendingMaybeBefore(stream, options, null);
+    }
+
+    pub fn acceptStreamPendingWithDeadline(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptStreamPendingMaybeBefore(
+            stream,
+            options,
+            deadline,
+        );
+    }
+
+    fn acceptStreamPendingMaybeBefore(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+        outer_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
-        const connect_deadline = if (options.connect_timeout) |timeout| blk: {
-            if (timeout.nanoseconds <= 0) return error.Timeout;
-            break :blk std.Io.Clock.Timestamp.fromNow(
-                self.io,
-                .{ .raw = timeout, .clock = .awake },
-            );
-        } else null;
+        const connect_deadline = deadline_policy.earlier(
+            outer_deadline,
+            try deadline_policy.fromTimeout(self.io, options.connect_timeout),
+        );
         if (self.limits.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch
                 return error.SocketOptionFailed;

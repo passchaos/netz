@@ -74,6 +74,49 @@ test "MQTT CONNECT timeout starts before first byte" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "MQTT server caller timeout bounds the complete CONNECT" {
+    const allocator = std.testing.allocator;
+    const connect = try encodedConnect(allocator, "server-outer-deadline");
+    defer allocator.free(connect);
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var pending = self.server.acceptPendingWithTimeout(
+                .{ .connect_timeout = .fromSeconds(1) },
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            pending.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAll(io, client, connect[0..3]);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "MQTT zero CONNECT timeout fails before reading" {
     var connection = runtime.Connection{
         .allocator = std.testing.allocator,

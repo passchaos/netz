@@ -1110,6 +1110,9 @@ transport bytes, so a mismatched timestamp cannot mutate protocol state. Current
 MQTT-over-TLS server accept APIs also carry one caller-owned deadline through
 trusted PROXY parsing, the TLS 1.3 handshake, and complete MQTT CONNECT
 admission; configured proxy, TLS, and CONNECT limits can only shorten it.
+Raw TCP server accept and already-accepted-stream APIs expose the same bounded
+CONNECT admission contract, including a shared budget with a trusted PROXY
+preface when enabled.
 Current
 tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
 continuation, incoming QoS 1 delivery across a keep-alive cycle, inbound QoS 2

@@ -2723,6 +2723,26 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "PendingSource"));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "acceptPendingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "acceptPendingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Server,
+        "acceptStreamPendingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime,
         "PendingAcceptedClient",
     ));
