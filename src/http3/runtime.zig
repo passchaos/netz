@@ -1,6 +1,5 @@
 const std = @import("std");
 const round_robin = @import("../internal/round_robin.zig");
-const deadline_policy = @import("../internal/deadline.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
@@ -361,8 +360,12 @@ fn cappedConnectDeadline(
     deadline: std.Io.Clock.Timestamp,
     timeout: ?std.Io.Duration,
 ) Error!std.Io.Clock.Timestamp {
-    return deadline_policy.capTimeout(io, deadline, timeout) catch
-        return error.HandshakeTimeout;
+    const outer = try usableConnectDeadline(io, deadline);
+    const phase = (try connectDeadline(io, timeout)) orelse return outer;
+    return if (std.Io.Clock.Timestamp.compare(outer, .lt, phase))
+        outer
+    else
+        phase;
 }
 
 fn resolveEndpointBefore(
