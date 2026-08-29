@@ -4910,6 +4910,38 @@ pub fn readResponseFromStreamForRequest(
     );
 }
 
+/// Read one complete final response under a caller-owned absolute deadline.
+/// This unbuffered adapter is intended for protocol handshakes such as h2c;
+/// the same deadline covers informational heads, final head, body, and trailers.
+pub fn readResponseFromStreamForRequestWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    request_method: http1.Method,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedResponse {
+    _ = try deadline_policy.usableAwake(io, deadline);
+    const transport = RuntimeTransport{
+        .tcp = .{ .io = io, .stream = stream },
+    };
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    var informational_count: usize = 0;
+    return readResponseFromTransportBufferedForRequestObserved(
+        allocator,
+        transport,
+        limits,
+        options,
+        &inbuf,
+        request_method,
+        null,
+        &informational_count,
+        deadline,
+    );
+}
+
 pub fn readResponseFromStreamForRequestObserved(
     allocator: std.mem.Allocator,
     io: std.Io,

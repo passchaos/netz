@@ -786,6 +786,93 @@ test "HTTP/2 h2c client bounds SETTINGS after 101" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 h2c caller deadline spans 101 and binary bootstrap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request_buf: [1024]u8 = undefined;
+            var request_len: usize = 0;
+            while (std.mem.indexOf(u8, request_buf[0..request_len], "\r\n\r\n") == null) {
+                var buffers = [_][]u8{request_buf[request_len..]};
+                const count = try self.io.vtable.netRead(
+                    self.io.userdata,
+                    stream.socket.handle,
+                    &buffers,
+                );
+                if (count == 0) return error.ConnectionClosed;
+                request_len += count;
+            }
+
+            // Consume part of the caller's budget before switching protocols.
+            // The binary bootstrap must inherit the remaining time rather than
+            // starting a fresh phase-sized wait after the 101 response.
+            try std.Io.sleep(self.io, .fromMilliseconds(25), .awake);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 101 Switching Protocols\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Upgrade: h2c\r\n\r\n",
+            );
+            var preface: [http2.connection_preface.len]u8 = undefined;
+            try readExact(self.io, stream, &preface);
+            const settings = try readFrame(self.allocator, self.io, stream);
+            defer self.allocator.free(settings);
+            try expectSettingsFrame(settings, false);
+            try std.Io.sleep(self.io, .fromMilliseconds(150), .awake);
+        }
+    };
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .listener = &listener,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromMilliseconds(50), .clock = .awake },
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectStreamUpgradeWithDeadline(
+            allocator,
+            io,
+            stream,
+            .{ .handshake_timeout = .fromSeconds(1) },
+            .{ .authority = "localhost" },
+            deadline,
+        ),
+    );
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 TLS server bounds bootstrap after transport handshake" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

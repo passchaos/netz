@@ -1778,6 +1778,65 @@ pub const Client = struct {
         );
     }
 
+    /// Apply one absolute deadline to TCP establishment, the HTTP/1.1 Upgrade
+    /// response, HTTP/2 SETTINGS bootstrap, and the complete stream-1 response.
+    pub fn connectUpgradeWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        request_options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
+        try validateLocalLimits(limits);
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        stream_owned = false;
+        var upgraded = try connectStreamUpgradeWithDeadline(
+            allocator,
+            io,
+            stream,
+            limits,
+            request_options,
+            deadline,
+        );
+        defer upgraded.deinit(allocator);
+        return upgraded.connection.readResponseWithDeadline(
+            1,
+            request_options.method,
+            request_options.protocol != null,
+            deadline,
+        );
+    }
+
+    pub fn connectUpgradeWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        request_options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUpgradeWithDeadline(
+            allocator,
+            io,
+            address,
+            limits,
+            request_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn requestUriUpgrade(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1824,6 +1883,86 @@ pub const Client = struct {
         );
     }
 
+    /// URI counterpart to `connectUpgradeWithDeadline`; DNS and every address
+    /// attempt consume the same budget before h2c negotiation and response I/O.
+    pub fn requestUriUpgradeWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) {
+            return error.UnsupportedScheme;
+        }
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
+        defer endpoint.deinit();
+        try validateLocalLimits(limits);
+        const network_deadline = try deadline_policy.capTimeout(
+            io,
+            deadline,
+            limits.connect_timeout,
+        );
+        const stream = switch (endpoint.target) {
+            .host => |host| try tcp_connect.hostWithDeadline(
+                io,
+                host,
+                endpoint.port,
+                network_deadline,
+            ),
+            .ip => |address| try tcp_connect.ipWithDeadline(
+                io,
+                address,
+                network_deadline,
+            ),
+        };
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var options = request_options;
+        options.path = target;
+        if (options.authority == null) options.authority = endpoint.authority;
+        if (options.scheme == null) options.scheme = uri.scheme;
+        stream_owned = false;
+        var upgraded = try connectStreamUpgradeWithDeadline(
+            allocator,
+            io,
+            stream,
+            limits,
+            options,
+            deadline,
+        );
+        defer upgraded.deinit(allocator);
+        return upgraded.connection.readResponseWithDeadline(
+            1,
+            options.method,
+            options.protocol != null,
+            deadline,
+        );
+    }
+
+    pub fn requestUriUpgradeWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriUpgradeWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Upgrade an existing cleartext HTTP/1.1 stream to HTTP/2 and return the
     /// established connection plus the consumed 101 response metadata.  The
     /// stream transfers to this function. The caller owns both returned values
@@ -1836,9 +1975,51 @@ pub const Client = struct {
         limits: Limits,
         request_options: RequestOptions,
     ) Error!H2cUpgradeResult {
-        // Unlike connectStream, this public entry point has no wrapper that
-        // retains ownership. Constructing Connection immediately makes its
-        // errdefer the single close path for validation and handshake errors.
+        return connectStreamUpgradeMaybeBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            request_options,
+            null,
+        );
+    }
+
+    /// Transfer `stream` into an h2c connection under one caller-owned
+    /// awake-clock deadline spanning the HTTP/1.1 101 response and HTTP/2
+    /// SETTINGS bootstrap. Configured handshake limits may shorten the wait.
+    pub fn connectStreamUpgradeWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+        request_options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!H2cUpgradeResult {
+        return connectStreamUpgradeMaybeBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            request_options,
+            deadline,
+        );
+    }
+
+    fn connectStreamUpgradeMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+        request_options: RequestOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!H2cUpgradeResult {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(io, absolute);
+        }
+        // This entry point owns the stream immediately. Constructing the
+        // Connection first gives validation, allocation, and both handshake
+        // variants one authoritative failure-close path.
         var connection = Connection{
             .io = io,
             .allocator = allocator,
@@ -1853,21 +2034,33 @@ pub const Client = struct {
         };
         errdefer connection.close();
         try validateLocalLimits(limits);
-        if (limits.tcp_nodelay) {
-            try socket_options.setTcpNoDelay(stream);
-        }
+        if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
         connection.applyLocalLimits();
 
         const h2c_settings = try settingsForLimits(limits, .client);
         var settings_payload_buf: [max_settings_payload_len]u8 = undefined;
-        const settings_payload = try encodeSettingsPayloadInto(&settings_payload_buf, h2c_settings.buf[0..h2c_settings.count]);
-        const settings_value = try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(settings_payload.len));
+        const settings_payload = try encodeSettingsPayloadInto(
+            &settings_payload_buf,
+            h2c_settings.buf[0..h2c_settings.count],
+        );
+        const settings_value = try allocator.alloc(
+            u8,
+            std.base64.url_safe_no_pad.Encoder.calcSize(settings_payload.len),
+        );
         defer allocator.free(settings_value);
-        _ = std.base64.url_safe_no_pad.Encoder.encode(settings_value, settings_payload);
+        _ = std.base64.url_safe_no_pad.Encoder.encode(
+            settings_value,
+            settings_payload,
+        );
 
         var headers: std.ArrayList(http1.Header) = .empty;
         defer headers.deinit(allocator);
-        if (request_options.authority) |authority| try headers.append(allocator, .{ .name = "Host", .value = authority });
+        if (request_options.authority) |authority| {
+            try headers.append(allocator, .{
+                .name = "Host",
+                .value = authority,
+            });
+        }
         var priority_buf: [16]u8 = undefined;
         if (request_options.priority) |value| {
             try headers.append(allocator, .{
@@ -1880,33 +2073,71 @@ pub const Client = struct {
             .{ .name = "Upgrade", .value = "h2c" },
             .{ .name = "HTTP2-Settings", .value = settings_value },
         });
-        for (request_options.headers) |header| try headers.append(allocator, .{ .name = header.name, .value = header.value });
+        for (request_options.headers) |header| {
+            try headers.append(allocator, .{
+                .name = header.name,
+                .value = header.value,
+            });
+        }
         try validateHeaderBlock(request_options.trailers, .request_trailers);
-        if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
-        const method = http1.Method.parse(request_options.method) catch return error.InvalidHeader;
+        if (request_options.body.len != 0 or request_options.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        const method = http1.Method.parse(request_options.method) catch
+            return error.InvalidHeader;
         try http1_runtime.writeRequestToStream(allocator, io, stream, .{
             .method = method,
             .target = request_options.path,
             .headers = headers.items,
         });
-
-        var upgrade = try http1_runtime.readResponseFromStreamForRequest(allocator, io, stream, limitsToHttp1(limits), .{}, method);
+        var upgrade = if (deadline) |absolute|
+            try http1_runtime.readResponseFromStreamForRequestWithDeadline(
+                allocator,
+                io,
+                stream,
+                limitsToHttp1(limits),
+                .{},
+                method,
+                absolute,
+            )
+        else
+            try http1_runtime.readResponseFromStreamForRequest(
+                allocator,
+                io,
+                stream,
+                limitsToHttp1(limits),
+                .{},
+                method,
+            );
         errdefer upgrade.deinit(allocator);
         if (upgrade.response.status != 101) return error.InvalidResponse;
-        const connection_header = upgrade.response.header("connection") orelse return error.InvalidResponse;
-        const upgrade_header = upgrade.response.header("upgrade") orelse return error.InvalidResponse;
-        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_header, " \t"), "h2c")) return error.InvalidResponse;
-        if (!containsHttpToken(connection_header, "upgrade")) return error.InvalidResponse;
+        const connection_header = upgrade.response.header("connection") orelse
+            return error.InvalidResponse;
+        const upgrade_header = upgrade.response.header("upgrade") orelse
+            return error.InvalidResponse;
+        if (!std.ascii.eqlIgnoreCase(
+            std.mem.trim(u8, upgrade_header, " \t"),
+            "h2c",
+        )) return error.InvalidResponse;
+        if (!containsHttpToken(connection_header, "upgrade")) {
+            return error.InvalidResponse;
+        }
 
         const transport = connection.transportForIo();
-        // The 101 response head is bounded independently by limitsToHttp1.
-        // Start the binary-protocol budget only after the Upgrade is validated
-        // so a prompt HTTP/1 peer still receives the full HTTP/2 bootstrap
-        // allowance.
-        const deadline = try connectionHandshakeDeadline(
-            transport,
-            limits.handshake_timeout,
-        );
+        // Legacy calls deliberately start their SETTINGS phase budget after
+        // validating 101. Deadline calls instead retain the original timestamp
+        // and cap it with the possibly stricter phase limit.
+        const handshake_deadline = if (deadline) |absolute|
+            try connectionHandshakeDeadlineBefore(
+                transport,
+                absolute,
+                limits.handshake_timeout,
+            )
+        else
+            try connectionHandshakeDeadline(
+                transport,
+                limits.handshake_timeout,
+            );
         try transport.writeAll(http2.connection_preface);
         try writeFrameTransport(
             allocator,
@@ -1916,9 +2147,28 @@ pub const Client = struct {
             0,
             settings_payload,
         );
-        try finishClientSettingsHandshake(&connection, deadline);
+        try finishClientSettingsHandshake(&connection, handshake_deadline);
         try writeInitialConnectionWindowTransport(allocator, transport, limits);
         return .{ .connection = connection, .upgrade_response = upgrade };
+    }
+
+    pub fn connectStreamUpgradeWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+        request_options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) Error!H2cUpgradeResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectStreamUpgradeWithDeadline(
+            allocator,
+            io,
+            stream,
+            limits,
+            request_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {

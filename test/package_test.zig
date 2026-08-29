@@ -341,6 +341,30 @@ test "public modules are reachable" {
         "requestUriTlsWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectUpgradeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectUpgradeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "requestUriUpgradeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "requestUriUpgradeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectStreamUpgradeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectStreamUpgradeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime.UnixServer,
         "serveConcurrent",
     ));

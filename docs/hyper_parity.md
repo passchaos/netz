@@ -649,6 +649,11 @@ client pools consequently discard that lease. Netz also exposes
 one-shot HTTP/HTTPS URI deadline helpers that preserve that same absolute
 timestamp across DNS/TCP, TLS, SETTINGS bootstrap, and the complete response;
 matching relative-timeout wrappers convert once before any network work.
+h2c Upgrade one-shot and existing-stream helpers provide the same timeout and
+absolute-deadline forms: one caller budget spans TCP when applicable, the
+HTTP/1.1 101 response, HTTP/2 SETTINGS bootstrap, and the complete stream-1
+response without renewal, while stricter connect and handshake limits remain
+in force.
 Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
