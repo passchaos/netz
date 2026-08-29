@@ -6069,19 +6069,15 @@ pub const HandshakeClient = struct {
         endpoint.* = try quic.runtime.Endpoint.bind(allocator, io, local_address, limits.quic);
         errdefer endpoint.deinit();
 
-        var handshake_options = options.handshake;
-        if (deadline) |absolute| {
-            handshake_options.handshake_recovery = try handshakeRecoveryBefore(
-                io,
+        var established = if (deadline) |absolute|
+            try quic.handshake.connectWithDeadline(
+                endpoint,
+                server,
+                options.handshake,
                 absolute,
-                handshake_options.handshake_recovery,
-            );
-        }
-        var established = try quic.handshake.connect(
-            endpoint,
-            server,
-            handshake_options,
-        );
+            )
+        else
+            try quic.handshake.connect(endpoint, server, options.handshake);
         errdefer established.deinit();
         return initOwnedEstablished(
             allocator,
@@ -6143,20 +6139,21 @@ pub const HandshakeClient = struct {
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
         );
-        var handshake_options = options.handshake;
-        if (deadline) |absolute| {
-            handshake_options.handshake_recovery = try handshakeRecoveryBefore(
-                endpoint.io,
+        var established = if (deadline) |absolute|
+            try quic.handshake.connectFromWithDeadline(
+                endpoint,
+                source,
+                server,
+                options.handshake,
                 absolute,
-                handshake_options.handshake_recovery,
+            )
+        else
+            try quic.handshake.connectFrom(
+                endpoint,
+                source,
+                server,
+                options.handshake,
             );
-        }
-        var established = try quic.handshake.connectFrom(
-            endpoint,
-            source,
-            server,
-            handshake_options,
-        );
         errdefer established.deinit();
         return initEstablishedWithEndpointOwnership(
             endpoint.allocator,

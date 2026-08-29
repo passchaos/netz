@@ -863,6 +863,39 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     );
 }
 
+/// Complete a client handshake before one caller-owned awake-clock deadline.
+/// The same timestamp caps Initial PTO, Retry, Version Negotiation, passive
+/// fragmented flights, authentication, and Client Finished.
+pub fn connectWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    options: ClientOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!EstablishedConnection {
+    return connectFromWithDeadline(
+        endpoint,
+        .fromEndpoint(endpoint),
+        peer,
+        options,
+        deadline,
+    );
+}
+
+pub fn connectWithTimeout(
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    options: ClientOptions,
+    timeout: std.Io.Duration,
+) Error!EstablishedConnection {
+    if (timeout.nanoseconds <= 0) return error.HandshakeTimeout;
+    return connectWithDeadline(
+        endpoint,
+        peer,
+        options,
+        .fromNow(endpoint.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
 /// Complete a client handshake while receiving through a caller-provided
 /// source. A shared socket owner can route this attempt's long-header packets
 /// into an inbox instead of allowing several clients to race on the endpoint.
@@ -901,6 +934,60 @@ pub fn connectFrom(
         );
     }
     return connectAttempt(endpoint, source, peer, options, false);
+}
+
+pub fn connectFromWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    peer: net.IpAddress,
+    options: ClientOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!EstablishedConnection {
+    return connectFrom(
+        endpoint,
+        source,
+        peer,
+        try clientOptionsBefore(endpoint.io, options, deadline),
+    );
+}
+
+pub fn connectFromWithTimeout(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    peer: net.IpAddress,
+    options: ClientOptions,
+    timeout: std.Io.Duration,
+) Error!EstablishedConnection {
+    if (timeout.nanoseconds <= 0) return error.HandshakeTimeout;
+    return connectFromWithDeadline(
+        endpoint,
+        source,
+        peer,
+        options,
+        .fromNow(endpoint.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
+fn clientOptionsBefore(
+    io: std.Io,
+    options: ClientOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!ClientOptions {
+    if (deadline.clock != .awake) return error.InvalidHandshakeRecovery;
+    if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+        return error.HandshakeTimeout;
+    }
+    var bounded = options;
+    if (bounded.handshake_recovery.deadline) |configured| {
+        if (configured.clock != .awake) {
+            return error.InvalidHandshakeRecovery;
+        }
+        if (std.Io.Clock.Timestamp.compare(configured, .lt, deadline)) {
+            return bounded;
+        }
+    }
+    bounded.handshake_recovery.deadline = deadline;
+    return bounded;
 }
 
 fn connectAttempt(
@@ -1809,6 +1896,14 @@ pub const testing = struct {
         deadline: std.Io.Clock.Timestamp,
     ) AcceptTimeoutError!ServerOptions {
         return serverOptionsBefore(io, options, deadline);
+    }
+
+    pub fn clientOptionsBeforeForTest(
+        io: std.Io,
+        options: ClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ClientOptions {
+        return clientOptionsBefore(io, options, deadline);
     }
 };
 

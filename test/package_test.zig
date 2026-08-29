@@ -3588,6 +3588,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.tls, "client_auth"));
     try std.testing.expect(@hasDecl(netz.quic.tls.auth, "ServerIdentity"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connect"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "connectWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "accept"));
     try std.testing.expect(@hasDecl(
         netz.quic.handshake,
@@ -4052,6 +4060,14 @@ test "public modules are reachable" {
         "acceptFromInitialWithTimeout",
     ));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connectFrom"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "connectFromWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake,
+        "connectFromWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(
         netz.quic.handshake,
         "acceptFromInitialSource",

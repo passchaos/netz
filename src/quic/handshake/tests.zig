@@ -119,6 +119,57 @@ test "QUIC server accept timeout bounds the first Initial wait" {
     );
 }
 
+test "QUIC client timeout bounds an unresponsive peer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
+
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        handshake.connectWithTimeout(
+            &endpoint,
+            silent.address(),
+            .{
+                .original_destination_connection_id = "timeout0",
+                .local_connection_id = "client01",
+                .handshake_recovery = .{
+                    .initial_pto_ms = 1_000,
+                    .max_pto_ms = 4_000,
+                    .max_retries = 3,
+                },
+            },
+            .fromMilliseconds(10),
+        ),
+    );
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        handshake.connectWithTimeout(
+            &endpoint,
+            silent.address(),
+            .{
+                .original_destination_connection_id = "timeout0",
+                .local_connection_id = "client01",
+            },
+            .zero,
+        ),
+    );
+}
+
 test "QUIC Initial deadline validation consumes owned datagram" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -177,6 +228,20 @@ test "QUIC server deadline retains stricter recovery bound" {
         caller,
     );
     try std.testing.expectEqual(configured, bounded.handshake_recovery.deadline.?);
+
+    const client_bounded = try handshake.testing.clientOptionsBeforeForTest(
+        io,
+        .{
+            .original_destination_connection_id = "client-origin",
+            .local_connection_id = "client-deadline",
+            .handshake_recovery = .{ .deadline = configured },
+        },
+        caller,
+    );
+    try std.testing.expectEqual(
+        configured,
+        client_bounded.handshake_recovery.deadline.?,
+    );
 }
 
 test "QUIC integrated handshake establishes 1-RTT stream exchange" {
