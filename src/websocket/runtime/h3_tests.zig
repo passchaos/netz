@@ -660,6 +660,13 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             try std.testing.expectEqual(websocket.Opcode.binary, plain_parts.opcode);
             try std.testing.expectEqualStrings("ab", plain_parts.payload);
 
+            const in_place = try connection.receiveMessageIntoWithTimeout(
+                &receive_storage,
+                .fromSeconds(5),
+            );
+            try std.testing.expectEqual(websocket.Opcode.binary, in_place.opcode);
+            try std.testing.expectEqualStrings("mutable-h3", in_place.payload);
+
             for (0..2) |_| {
                 const compressed = try connection.receiveMessageIntoWithTimeout(
                     &receive_storage,
@@ -810,6 +817,19 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         request_text[20..],
     });
     try client.sendBinaryParts("a", "b");
+    // Compression is negotiated for later messages, but an individual frame
+    // may remain uncompressed. Temporarily select that legal path to exercise
+    // the mutable-buffer masking contract on this established H3 connection.
+    client.permessage_deflate = false;
+    var mutable_payload = [_]u8{ 'm', 'u', 't', 'a', 'b', 'l', 'e', '-', 'h', '3' };
+    const original_payload = mutable_payload;
+    try client.sendBinaryInPlace(&mutable_payload);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &original_payload,
+        &mutable_payload,
+    ));
+    client.permessage_deflate = true;
     try client.sendBinaryParts(compressed_first, compressed_second);
     const compressed_ptr = client.compression_send.payload.allocatedSlice().ptr;
     var failing = std.testing.FailingAllocator.init(allocator, .{});
@@ -1063,6 +1083,41 @@ test "WebSocket HTTP3 control progress APIs reject expired budgets" {
             std.testing.allocator,
             &.{},
         )) == null,
+    );
+}
+
+test "WebSocket HTTP3 in-place binary send rejects unsupported modes" {
+    var server: h3.ServerConnection = undefined;
+    server.permessage_deflate = false;
+    server.close_sent = false;
+    server.close_received = false;
+    server.limits = .{};
+    const payload = [_]u8{1};
+    try std.testing.expectError(
+        error.InvalidFrame,
+        h3.testing.validateBinaryInPlace(&server, payload.len),
+    );
+
+    var client: h3.ClientConnection = undefined;
+    client.permessage_deflate = true;
+    client.close_sent = false;
+    client.close_received = false;
+    client.limits = .{};
+    try std.testing.expectError(
+        error.InvalidFrame,
+        h3.testing.validateBinaryInPlace(&client, payload.len),
+    );
+    client.permessage_deflate = false;
+    client.close_sent = true;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        h3.testing.validateBinaryInPlace(&client, payload.len),
+    );
+    client.close_sent = false;
+    client.limits.max_frame_bytes = 0;
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h3.testing.validateBinaryInPlace(&client, payload.len),
     );
 }
 

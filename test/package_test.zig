@@ -893,6 +893,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3.ClientConnection,
+        "sendBinaryInPlace",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
         "pingWithTimeout",
     ));
     try std.testing.expect(@hasDecl(

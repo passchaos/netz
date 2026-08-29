@@ -558,6 +558,9 @@ Its caller-buffer receive APIs likewise assemble uncompressed messages directly
 into application storage, reuse connection-owned compressed input/inflater
 scratch, and preserve partial-frame plus completed-fragment progress across
 timeout retries while requiring the same output buffer for resumed messages.
+H3 clients additionally expose `sendBinaryInPlace`: callers opting into mutable
+post-send storage avoid the immutable client's masking copy, matching the
+reference API while keeping the safe `[]const u8` alternatives.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

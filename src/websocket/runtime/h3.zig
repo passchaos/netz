@@ -252,6 +252,50 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendDataFrame(.binary, payload);
         }
 
+        /// Mask a mutable client payload in place and send it without the
+        /// bounded copy used by immutable client sends. The payload remains
+        /// masked after return, matching websocket.zig's mutable send contract.
+        /// Server connections and negotiated compression reject this opt-in
+        /// path because neither requires an in-place client mask.
+        pub fn sendBinaryInPlace(
+            self: *Self,
+            payload: []u8,
+        ) Error!void {
+            try self.validateBinaryInPlace(payload.len);
+
+            var mask_key: [4]u8 = undefined;
+            try std.Io.randomSecure(self.io(), &mask_key);
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderInto(
+                &header_storage,
+                .binary,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            websocket.applyMask(payload, mask_key, 0);
+            // The QUIC sender encodes the borrowed STREAM view into stable
+            // recovery storage before returning, so caller ownership resumes
+            // as soon as this synchronous operation completes.
+            try self.writeParts(&.{ header, payload }, false);
+        }
+
+        /// Test the role/extension/state validation without constructing a
+        /// live QUIC session. Kept private to the implementation module's
+        /// testing facade below.
+        fn validateBinaryInPlace(self: *const Self, payload_len: usize) Error!void {
+            if (role != .client or self.permessage_deflate) {
+                return error.InvalidFrame;
+            }
+            if (self.close_sent or self.close_received) {
+                return error.ConnectionClosed;
+            }
+            if (payload_len > self.limits.max_frame_bytes or
+                payload_len > self.limits.max_message_bytes)
+            {
+                return error.MessageTooLarge;
+            }
+        }
+
         /// Send two borrowed slices as one binary WebSocket message. The H3
         /// server path preserves both slices through HTTP/3 DATA framing; the
         /// client masks them through bounded stack storage while maintaining
@@ -2365,6 +2409,13 @@ fn compressedFragmentRange(
 
 pub const testing = struct {
     pub const FragmentRangeForTest = FragmentRange;
+
+    pub fn validateBinaryInPlace(
+        connection: anytype,
+        payload_len: usize,
+    ) Error!void {
+        return connection.validateBinaryInPlace(payload_len);
+    }
 
     /// Split one message around control traffic without exposing raw frame
     /// construction as part of the production connection API.
