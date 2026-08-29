@@ -2538,6 +2538,78 @@ test "public modules are reachable" {
         "connectUriAttemptWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectHostWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectHostAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsHostWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsHostAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsAddressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsAddressWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectTlsAddressAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUnixWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUnixWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUnixAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUriWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUriAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,
         "pendingSource",
     ));

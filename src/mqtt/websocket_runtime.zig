@@ -645,6 +645,23 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -661,6 +678,23 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectAttemptWithDeadline(
@@ -683,6 +717,23 @@ pub const Client = struct {
             ws,
             options.mqtt,
             deadline,
+        );
+    }
+
+    pub fn connectAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -765,6 +816,25 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectHostWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -783,6 +853,25 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectHostWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectHostAttemptWithDeadline(
@@ -809,6 +898,25 @@ pub const Client = struct {
             ws,
             options.mqtt,
             deadline,
+        );
+    }
+
+    pub fn connectHostAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -889,6 +997,25 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectTlsHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectTlsHostWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -907,6 +1034,25 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsHostWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectTlsHostAttemptWithDeadline(
@@ -931,6 +1077,25 @@ pub const Client = struct {
             ws,
             options.mqtt,
             deadline,
+        );
+    }
+
+    pub fn connectTlsHostAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -1010,6 +1175,25 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectTlsAddressWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectTlsAddressWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1028,6 +1212,25 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsAddressWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectTlsAddressAttemptWithDeadline(
@@ -1052,6 +1255,25 @@ pub const Client = struct {
             ws,
             options.mqtt,
             deadline,
+        );
+    }
+
+    pub fn connectTlsAddressAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -1120,6 +1342,23 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectUnixWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUnixWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1136,6 +1375,23 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectUnixWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectUnixAttemptWithDeadline(
@@ -1162,6 +1418,23 @@ pub const Client = struct {
             ws,
             options.mqtt,
             deadline,
+        );
+    }
+
+    pub fn connectUnixAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -1226,6 +1499,23 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1242,6 +1532,23 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectUriWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     /// Apply one absolute deadline to DNS/TCP, optional TLS, HTTP Upgrade,
@@ -1267,6 +1574,23 @@ pub const Client = struct {
             ws,
             options.mqtt,
             deadline,
+        );
+    }
+
+    pub fn connectUriAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

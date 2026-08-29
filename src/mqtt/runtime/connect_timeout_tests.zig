@@ -649,6 +649,25 @@ test "MQTT WebSocket caller deadline spans Upgrade and CONNACK" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WebSocket caller timeout rejects a non-positive budget" {
+    const mqtt_ws = @import("../websocket_runtime.zig");
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_ws.Client.connectWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1) },
+            .{
+                .mqtt = .{ .client_id = "ws-total-timeout" },
+                .host = "localhost",
+            },
+            .zero,
+        ),
+    );
+}
+
 test "MQTT WSS CONNECT timeout starts after TLS and HTTP handshakes" {
     const allocator = std.testing.allocator;
     const mqtt_ws = @import("../websocket_runtime.zig");
