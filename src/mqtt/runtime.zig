@@ -2463,11 +2463,10 @@ pub const Connection = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        if (deadline.clock != .awake or
-            deadline.durationFromNow(self.transport.ioHandle()).raw.nanoseconds <= 0)
-        {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
         const phase_deadline = if (options.connect_timeout) |timeout| blk: {
             if (timeout.nanoseconds <= 0) return error.Timeout;
             break :blk self.transport.deadlineFromNow(timeout);
@@ -2671,6 +2670,10 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedConnect {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
         const packet = try self.readPacketWithDeadline(deadline);
         return self.finishReadConnect(packet);
     }
@@ -3421,6 +3424,10 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
         try self.ensurePingQueueAvailable();
         return self.pingInternal(deadline);
     }
@@ -3814,6 +3821,10 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!BrokerEvent {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
         var packet = try self.readPacketWithDeadline(deadline);
         errdefer packet.deinit(self.allocator);
         return self.finishBrokerEvent(packet);
@@ -3851,6 +3862,10 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ClientPacketEvent {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
         const packet = if (self.popPendingPingPacket()) |pending|
             pending
         else

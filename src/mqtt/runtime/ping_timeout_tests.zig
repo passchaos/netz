@@ -160,6 +160,65 @@ test "MQTT client PING absolute deadline preserves queued publish" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT connection deadlines reject a non-awake clock before state changes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+    var connection = runtime.Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+    };
+    defer connection.close();
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .real },
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.pingWithDeadline(deadline),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readBrokerEventWithDeadline(deadline),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readClientPacketEventWithDeadline(deadline),
+    );
+    var received: [2]u8 = undefined;
+    var buffers = [_][]u8{&received};
+    try std.testing.expectError(
+        error.Timeout,
+        io.operateTimeout(
+            .{ .file_read_streaming = .{
+                .file = .{
+                    .handle = server_stream.socket.handle,
+                    .flags = .{ .nonblocking = false },
+                },
+                .data = &buffers,
+            } },
+            .{ .duration = .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            } },
+        ),
+    );
+}
+
 test "MQTT broker event timeout and deadline resume partial publish" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

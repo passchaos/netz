@@ -1103,7 +1103,10 @@ awake-clock absolute deadline while still shortening individual waits for
 Keep Alive and shutdown checks; neither mechanism renews the application
 budget. Partial TCP/TLS/WebSocket packets and packets queued during PING remain
 resumable after timeout; TLS packet transports now retain their own fixed-header
-and payload progress instead of relying on stack-local framing state. Current
+and payload progress instead of relying on stack-local framing state. Every
+public MQTT connection-level absolute-deadline entry point validates the
+awake-clock domain before sending PINGREQ, consuming a queued event, or reading
+transport bytes, so a mismatched timestamp cannot mutate protocol state. Current
 tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
 continuation, incoming QoS 1 delivery across a keep-alive cycle, inbound QoS 2
 continuation after transport loss, manual QoS 1/2 acknowledgements with MQTT 5
