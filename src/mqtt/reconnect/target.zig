@@ -86,4 +86,27 @@ pub const Target = union(enum) {
             ),
         };
     }
+
+    pub fn connectAttemptWithDeadline(
+        self: Target,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        return switch (self) {
+            .tcp => |address| runtime.Client.connectAttemptWithDeadline(
+                allocator, io, address, options, deadline,
+            ),
+            .host => |host| runtime.Client.connectHostAttemptWithDeadline(
+                allocator, io, host.name, host.port, options, deadline,
+            ),
+            .uri => |uri| runtime.Client.connectUriAttemptWithDeadline(
+                allocator, io, uri, options, deadline,
+            ),
+            .connector => |connector| connector.connectAttemptWithDeadline(
+                allocator, io, options, deadline,
+            ),
+        };
+    }
 };

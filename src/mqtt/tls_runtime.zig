@@ -989,6 +989,7 @@ pub const ReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -1008,6 +1009,20 @@ pub const ReconnectConnector = struct {
             options,
         );
     }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt_runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const self: *ReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectAddressAttemptWithDeadline(
+            allocator, io, self.address, self.tls_host,
+            reconnectOptions(self.options, mqtt_options), deadline,
+        );
+    }
 };
 
 /// Borrowed hostname target for `mqtt.reconnect.Client`. Each attempt performs
@@ -1024,6 +1039,7 @@ pub const HostReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -1044,6 +1060,20 @@ pub const HostReconnectConnector = struct {
             reconnectOptions(self.options, mqtt_options),
         );
     }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt_runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const self: *HostReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectHostAttemptWithDeadline(
+            allocator, io, self.host, self.port,
+            reconnectOptions(self.options, mqtt_options), deadline,
+        );
+    }
 };
 
 /// Borrowed `mqtts://`/`ssl://` target for `mqtt.reconnect.Client`. URI and
@@ -1060,6 +1090,7 @@ pub const UriReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -1077,6 +1108,20 @@ pub const UriReconnectConnector = struct {
             io,
             self.uri,
             reconnectOptions(self.options, mqtt_options),
+        );
+    }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt_runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const self: *UriReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectUriAttemptWithDeadline(
+            allocator, io, self.uri,
+            reconnectOptions(self.options, mqtt_options), deadline,
         );
     }
 };

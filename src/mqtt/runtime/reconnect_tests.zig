@@ -1339,6 +1339,109 @@ test "MQTT reconnect poll accepts one caller-owned deadline" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect initial connect honors its caller deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SlowConnector = struct {
+        fn connectAttempt(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: runtime.ConnectOptions,
+        ) runtime.Error!runtime.ConnectAttempt {
+            return error.ConnectionRefused;
+        }
+
+        fn connectAttemptWithDeadline(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            io_value: std.Io,
+            _: runtime.ConnectOptions,
+            deadline: std.Io.Clock.Timestamp,
+        ) runtime.Error!runtime.ConnectAttempt {
+            const remaining = deadline.durationFromNow(io_value).raw;
+            if (remaining.nanoseconds > 0) {
+                std.Io.sleep(io_value, remaining, .awake) catch |err|
+                    switch (err) {
+                        error.Canceled => return err,
+                    };
+            }
+            return error.Timeout;
+        }
+    };
+    var connector_context: u8 = 0;
+    const connector = runtime.ClientConnector{
+        .context = &connector_context,
+        .connect_attempt = SlowConnector.connectAttempt,
+        .connect_attempt_deadline =
+            SlowConnector.connectAttemptWithDeadline,
+    };
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector,
+        .{ .protocol = .v5, .client_id = "bounded-initial-connect" },
+        .{
+            .initial_delay = .fromSeconds(1),
+            .max_delay = .fromSeconds(1),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.connectWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.connectWithTimeout(.zero),
+    );
+    try std.testing.expect((try client.pollWithTimeout(
+        .fromMilliseconds(20),
+    )) == null);
+}
+
+test "MQTT bounded reconnect rejects a connector without deadline support" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const LegacyConnector = struct {
+        fn connectAttempt(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: runtime.ConnectOptions,
+        ) runtime.Error!runtime.ConnectAttempt {
+            return error.ConnectionRefused;
+        }
+    };
+    var connector_context: u8 = 0;
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        .{
+            .context = &connector_context,
+            .connect_attempt = LegacyConnector.connectAttempt,
+        },
+        .{ .protocol = .v5, .client_id = "legacy-connector" },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    try std.testing.expectError(
+        error.ConnectorDeadlineUnsupported,
+        client.connectWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
 test "MQTT reconnect poll observes cancellation while idle" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

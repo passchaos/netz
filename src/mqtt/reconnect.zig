@@ -1077,10 +1077,45 @@ pub const Client = struct {
     /// Protocol-level CONNACK refusal is terminal; retrying credentials or an
     /// administratively rejected Client Identifier would only hide the cause.
     pub fn connect(self: *Client) (Error || std.Io.Cancelable)!ConnectEvent {
+        return self.connectUntil(null);
+    }
+
+    pub fn connectWithDeadline(
+        self: *Client,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || std.Io.Cancelable)!ConnectEvent {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        return self.connectUntil(deadline);
+    }
+
+    pub fn connectWithTimeout(
+        self: *Client,
+        timeout: std.Io.Duration,
+    ) (Error || std.Io.Cancelable)!ConnectEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.connectWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    fn connectUntil(
+        self: *Client,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || std.Io.Cancelable)!ConnectEvent {
         if (self.connection_state != null) return error.InvalidProperty;
         var failed_attempts: usize = 0;
         while (true) {
             if (self.shutdown.isSet()) return error.Canceled;
+            if (deadline) |absolute| {
+                if (absolute.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                    return error.Timeout;
+                }
+            }
             if (failed_attempts != 0) {
                 if (self.policy.max_attempts != 0 and
                     failed_attempts >= self.policy.max_attempts)
@@ -1097,10 +1132,11 @@ pub const Client = struct {
                         std.mem.readInt(u64, &random_bytes, .little),
                     );
                 };
-                try self.waitBackoff(retry_delay);
+                try self.waitBackoffUntil(retry_delay, deadline);
             }
 
-            var attempt = self.connectAttempt() catch |err| {
+            var attempt = self.connectAttemptBefore(deadline) catch |err| {
+                if (err == error.Timeout) return err;
                 if (!retryableConnectError(err)) return err;
                 failed_attempts += 1;
                 continue;
@@ -1166,6 +1202,18 @@ pub const Client = struct {
             self.io,
             self.options.value,
         );
+    }
+
+    fn connectAttemptBefore(
+        self: *Client,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        return if (deadline) |absolute|
+            self.target.connectAttemptWithDeadline(
+                self.allocator, self.io, self.options.value, absolute,
+            )
+        else
+            self.connectAttempt();
     }
 
     /// Close only the current transport. Durable outgoing QoS state remains
@@ -1464,6 +1512,8 @@ pub const Client = struct {
         deadline: std.Io.Timestamp,
         options: DeadlinePollOptions,
     ) (Error || std.Io.Cancelable)!?ClientEvent {
+        if (std.Io.Clock.awake.now(self.io).nanoseconds >=
+            deadline.nanoseconds) return error.Timeout;
         return self.pollUntil(
             deadline,
             options.ping_response_timeout,
@@ -1487,20 +1537,22 @@ pub const Client = struct {
         while (true) {
             if (self.shutdown.isSet()) return error.Canceled;
             if (self.connection_state == null) {
-                return .{ .connected = try self.connect() };
+                return try self.connectEventBefore(call_deadline);
             }
 
             const now = std.Io.Clock.awake.now(self.io);
             if (self.ping_response_deadline) |deadline| {
                 if (now.nanoseconds >= deadline.nanoseconds) {
-                    return .{ .connected = try self.reconnect() };
+                    self.disconnectTransport();
+                    return try self.connectEventBefore(call_deadline);
                 }
             } else if (self.keepAliveDeadline()) |deadline| {
                 if (now.nanoseconds >= deadline.nanoseconds) {
                     const active = self.connection().?;
                     active.writePingReq() catch |err| {
                         if (!retryableConnectError(err)) return err;
-                        return .{ .connected = try self.reconnect() };
+                        self.disconnectTransport();
+                        return try self.connectEventBefore(call_deadline);
                     };
                     const sent_at = std.Io.Clock.awake.now(self.io);
                     self.keep_alive_deadline = sent_at.addDuration(
@@ -1528,7 +1580,8 @@ pub const Client = struct {
             ) catch |err| {
                 if (err == error.Timeout) continue;
                 if (!retryableConnectError(err)) return err;
-                return .{ .connected = try self.reconnect() };
+                self.disconnectTransport();
+                return try self.connectEventBefore(call_deadline);
             };
             var packet_owned = true;
             defer if (packet_owned) packet_event.deinit(self.allocator);
@@ -1538,6 +1591,19 @@ pub const Client = struct {
                 return event;
             }
         }
+    }
+
+    fn connectEventBefore(
+        self: *Client,
+        deadline: std.Io.Timestamp,
+    ) (Error || std.Io.Cancelable)!?ClientEvent {
+        const connected = self.connectWithDeadline(
+            deadline.withClock(.awake),
+        ) catch |err| switch (err) {
+            error.Timeout => return null,
+            else => |other| return other,
+        };
+        return .{ .connected = connected };
     }
 
     pub fn pollWithTimeout(
@@ -1797,6 +1863,27 @@ pub const Client = struct {
             error.Canceled => return error.Canceled,
         };
         return error.Canceled;
+    }
+
+    fn waitBackoffUntil(
+        self: *Client,
+        delay: std.Io.Duration,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) (std.Io.Cancelable || error{Timeout})!void {
+        const bounded = if (deadline) |absolute| blk: {
+            const remaining = absolute.durationFromNow(self.io).raw;
+            if (remaining.nanoseconds <= 0) return error.Timeout;
+            break :blk std.Io.Duration.fromNanoseconds(@min(
+                delay.nanoseconds,
+                remaining.nanoseconds,
+            ));
+        } else delay;
+        try self.waitBackoff(bounded);
+        if (deadline) |absolute| {
+            if (absolute.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                return error.Timeout;
+            }
+        }
     }
 
     fn resetOutgoingState(self: *Client) Error!void {

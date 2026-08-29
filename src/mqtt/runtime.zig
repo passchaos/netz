@@ -42,6 +42,7 @@ pub const Error = packet_transport.Error || error{
     RedirectRejected,
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
+    ConnectorDeadlineUnsupported,
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
     net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
@@ -2082,6 +2083,16 @@ pub const ClientConnector = struct {
         io: std.Io,
         options: ConnectOptions,
     ) Error!ConnectAttempt,
+    /// Optional absolute-budget variant. Reconnect clients use it to ensure
+    /// `connectWithDeadline` and the initial branch of `pollWithDeadline` do
+    /// not hide an unbounded transport/TLS attempt behind a bounded API.
+    connect_attempt_deadline: ?*const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt = null,
 
     pub fn connectAttempt(
         self: ClientConnector,
@@ -2095,6 +2106,19 @@ pub const ClientConnector = struct {
             io,
             options,
         );
+    }
+
+    pub fn connectAttemptWithDeadline(
+        self: ClientConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const connect = self.connect_attempt_deadline orelse
+            return error.ConnectorDeadlineUnsupported;
+        return connect(self.context, allocator, io, options, deadline);
     }
 };
 

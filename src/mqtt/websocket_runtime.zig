@@ -1939,6 +1939,7 @@ pub const ReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -1956,6 +1957,20 @@ pub const ReconnectConnector = struct {
             reconnectOptions(self.options, mqtt_options),
         );
     }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *ReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectUriAttemptWithDeadline(
+            allocator, io, self.uri,
+            reconnectOptions(self.options, mqtt_options), deadline,
+        );
+    }
 };
 
 /// Borrowed cleartext WebSocket hostname target for the reconnect client. Each
@@ -1971,6 +1986,7 @@ pub const HostReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -1991,6 +2007,20 @@ pub const HostReconnectConnector = struct {
             reconnectOptions(self.options, mqtt_options),
         );
     }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *HostReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectHostAttemptWithDeadline(
+            allocator, io, self.host, self.port,
+            reconnectOptions(self.options, mqtt_options), deadline,
+        );
+    }
 };
 
 /// Borrowed WSS hostname target for the reconnect client. The hostname is
@@ -2006,6 +2036,7 @@ pub const TlsHostReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -2026,6 +2057,21 @@ pub const TlsHostReconnectConnector = struct {
             reconnectOptions(self.options, mqtt_options),
         );
     }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsHostReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectTlsHostAttemptWithDeadline(
+            allocator, io, self.host, self.port,
+            reconnectOptions(self.options, mqtt_options), deadline,
+        );
+    }
 };
 
 /// Borrowed fixed-address WSS target with independent certificate identity.
@@ -2042,6 +2088,7 @@ pub const TlsAddressReconnectConnector = struct {
         return .{
             .context = self,
             .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
         };
     }
 
@@ -2060,6 +2107,21 @@ pub const TlsAddressReconnectConnector = struct {
             self.address,
             self.tls_host,
             reconnectOptions(self.options, mqtt_options),
+        );
+    }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsAddressReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectTlsAddressAttemptWithDeadline(
+            allocator, io, self.address, self.tls_host,
+            reconnectOptions(self.options, mqtt_options), deadline,
         );
     }
 };

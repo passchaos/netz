@@ -2762,6 +2762,18 @@ test "public modules are reachable" {
         "establishClientWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.ClientConnector,
+        "connectAttemptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "establishClientWithTimeout",
     ));

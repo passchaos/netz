@@ -1095,6 +1095,11 @@ command queue already support explicit
 client-initiated re-authentication and drive both directions of
 multi-step MQTT 5 re-authentication, idle
 keep-alive and automatic reconnect without competing socket readers. Current
+reconnect clients expose bounded initial-connect timeout/deadline calls, and
+the existing poll deadline now covers initial/replacement connection attempts
+and retry backoff instead of only established packet reads. Raw, TLS, and
+WebSocket connectors receive that same absolute attempt budget; custom
+connectors without bounded support fail explicitly. Current
 connection APIs also accept relative timeouts and caller-owned absolute
 deadlines for CONNECT, PINGRESP, and ordered client or broker packet events.
 These budgets span the complete MQTT Control Packet and preserve partial TCP,
