@@ -4232,7 +4232,56 @@ pub const HandshakeServer = struct {
     }
 
     pub fn accept(self: *HandshakeServer) Error!HandshakeServerSession {
-        var established = try quic.handshake.accept(&self.quic_server.endpoint, self.handshake_options);
+        return self.acceptBefore(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Complete the QUIC/TLS server handshake before one absolute awake-clock
+    /// deadline. Unlike stream-listener servers, UDP accept is itself a packet
+    /// receive, so the budget includes waiting for the first client Initial.
+    pub fn acceptWithDeadline(
+        self: *HandshakeServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        const absolute = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.acceptBefore(absolute);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *HandshakeServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    fn acceptBefore(
+        self: *HandshakeServer,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        var options = self.handshake_options;
+        if (deadline) |absolute| {
+            // Keep a stricter recovery deadline supplied at bind time. The
+            // caller timestamp is never converted back to a duration, so time
+            // spent waiting for Initial/Retry is not regained in later TLS
+            // handshake transitions.
+            options.handshake_recovery.deadline = deadline_policy.earlier(
+                options.handshake_recovery.deadline,
+                absolute,
+            );
+        }
+        var established = try quic.handshake.accept(
+            &self.quic_server.endpoint,
+            options,
+        );
         errdefer established.deinit();
         return HandshakeServerSession.initEstablished(
             established,

@@ -19,6 +19,154 @@ test "WebTransport endpoint server exposes stable session API" {
     ));
 }
 
+test "WebTransport server deadline spans QUIC TLS and Extended CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xb5} ** 32,
+            .x25519_secret_key = [_]u8{0xb6} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        io: std.Io,
+        handshake_complete: std.Io.Event = .unset,
+        send_connect: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.handshake_complete.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h3_client = try http3.runtime.HandshakeClient.connect(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.server.address(),
+                .{ .quic = .{ .max_datagram_size = 4096 } },
+                .{
+                    .handshake = .{
+                        .original_destination_connection_id = &original_dcid,
+                        .local_connection_id = &client_cid,
+                        .server_name = "localhost",
+                        .random = [_]u8{0xb7} ** 32,
+                        .x25519_secret_key = [_]u8{0xb8} ** 32,
+                    },
+                    .session = .{
+                        .local_settings = webtransport.defaultSettings(.{}),
+                    },
+                },
+            );
+            defer h3_client.deinit();
+            self.handshake_complete.set(self.io);
+            try self.send_connect.wait(self.io);
+            _ = try h3_client.startRequest(.{
+                .method = "CONNECT",
+                .path = "/late-connect",
+                .scheme = "https",
+                .authority = "localhost",
+                .headers = &.{
+                    .{ .name = ":protocol", .value = "webtransport" },
+                    http3.capsule.protocol_header,
+                },
+            }, null);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const client_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.send_connect.set(io);
+        client_thread.join();
+    };
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromMilliseconds(300), .clock = .awake },
+    );
+    const ReceiveResult = runtime.ReceiveTimeoutError!runtime.PendingHandshakeSession;
+    const Wake = union(enum) {
+        server: ReceiveResult,
+        client_handshake: std.Io.Cancelable!void,
+    };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer while (select.cancel()) |wake| switch (wake) {
+        .server => |result| if (result) |pending_value| {
+            var pending = pending_value;
+            pending.deinit();
+        } else |_| {},
+        .client_handshake => {},
+    };
+    select.async(
+        .server,
+        runtime.HandshakeServer.receiveSessionRequestWithDeadline,
+        .{ &server, deadline },
+    );
+    select.async(
+        .client_handshake,
+        std.Io.Event.wait,
+        .{ &shared.handshake_complete, io },
+    );
+    const wake = try select.await();
+    switch (wake) {
+        .server => |result| {
+            if (result) |pending_value| {
+                var pending = pending_value;
+                pending.deinit();
+                return error.TestUnexpectedResult;
+            } else |err| return err;
+        },
+        .client_handshake => |result| try result,
+    }
+
+    // The QUIC/TLS phase completed under `deadline`. Deliberately spend the
+    // rest of that same absolute budget before allowing Extended CONNECT; a
+    // server that restarted a relative timeout here would incorrectly accept.
+    const remaining = deadline.durationFromNow(io).raw.nanoseconds;
+    if (remaining > 0) {
+        try std.Io.sleep(
+            io,
+            .{ .nanoseconds = remaining + 10 * std.time.ns_per_ms },
+            .awake,
+        );
+    }
+    shared.send_connect.set(io);
+    try std.testing.expectError(
+        error.Timeout,
+        switch (try select.await()) {
+            .server => |result| result,
+            .client_handshake => return error.TestUnexpectedResult,
+        },
+    );
+
+    client_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebTransport URI connect forwards HTTP3 total handshake timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -1722,6 +1722,7 @@ fn acceptInternal(
             options.retry_source_connection_id,
             options.version,
             accept_zero_fixed_bit,
+            options.handshake_recovery.deadline,
         );
         owned_first = null;
         var consumed = datagram;
@@ -1735,6 +1736,7 @@ fn acceptInternal(
         options.version,
         options.available_versions,
         accept_zero_fixed_bit,
+        options.handshake_recovery.deadline,
     );
     if (options.retry) |policy| {
         const odcid = try endpoint.allocator.dupe(
@@ -1784,6 +1786,7 @@ fn acceptInternal(
             rscid,
             options.version,
             accept_zero_fixed_bit,
+            options.handshake_recovery.deadline,
         );
         owned_retry_original_destination_connection_id = odcid;
         owned_retry_source_connection_id = rscid;
@@ -1999,6 +2002,7 @@ fn acceptInternal(
                 client_initial.packet.destination_connection_id,
                 client_initial.packet.source_connection_id,
                 options.local_transport_parameters.grease_quic_bit,
+                options.handshake_recovery.deadline,
             );
         }
     } else if (client_offered_early_data and
@@ -2016,6 +2020,7 @@ fn acceptInternal(
             endpoint,
             source,
             client_initial.coalesced_tail,
+            options.handshake_recovery.deadline,
         );
     } else if (client_initial.coalesced_tail.len != 0) {
         // RFC 9000 requires the first client datagram to be at least 1200
@@ -2630,6 +2635,7 @@ fn receiveClientInitial(
     version: quic.Version,
     available_versions: []const quic.Version,
     allow_zero_fixed_bit: bool,
+    caller_deadline: ?std.Io.Clock.Timestamp,
 ) Error!ReceivedClientInitial {
     const supported_wire_versions = try endpoint.allocator.alloc(
         u32,
@@ -2639,7 +2645,20 @@ fn receiveClientInitial(
     for (available_versions, supported_wire_versions) |available, *wire| {
         wire.* = available.wireValue();
     }
-    var datagram =
+    // The ordinary server accept remains unbounded before the first Initial.
+    // A caller-owned deadline, however, starts at the public accept entry and
+    // must include this wait rather than taking effect only after peer traffic
+    // has created retransmission state.
+    var datagram = if (caller_deadline) |deadline|
+        endpoint.receiveBytesHandlingVersionNegotiationWithDeadline(
+            supported_wire_versions,
+            deadline,
+        ) catch |err| switch (err) {
+            error.Timeout => return error.HandshakeTimeout,
+            error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+            else => |other| return @errorCast(other),
+        }
+    else
         try endpoint.receiveBytesHandlingVersionNegotiation(
             supported_wire_versions,
         );
@@ -2653,6 +2672,7 @@ fn receiveClientInitial(
         retry_destination_connection_id,
         version,
         allow_zero_fixed_bit,
+        caller_deadline,
     );
 }
 
@@ -2665,6 +2685,7 @@ fn openClientInitialDatagram(
     retry_destination_connection_id: []const u8,
     version: quic.Version,
     allow_zero_fixed_bit: bool,
+    caller_deadline: ?std.Io.Clock.Timestamp,
 ) Error!ReceivedClientInitial {
     if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
 
@@ -2702,6 +2723,7 @@ fn openClientInitialDatagram(
             .max_crypto_buffer = max_crypto_buffer,
             .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
             .allow_zero_fixed_bit = allow_zero_fixed_bit,
+            .deadline = caller_deadline,
         },
     );
     errdefer flight.deinit(endpoint.allocator);
@@ -2726,9 +2748,10 @@ fn receiveRetriedClientInitial(
     retry_destination_connection_id: []const u8,
     version: quic.Version,
     allow_zero_fixed_bit: bool,
+    caller_deadline: ?std.Io.Clock.Timestamp,
 ) Error!ReceivedClientInitial {
     while (true) {
-        var datagram = try receiveFromSource(source);
+        var datagram = try receiveFromSourceBefore(source, caller_deadline);
         defer datagram.deinit(endpoint.allocator);
         if (datagram.bytes.len <
             quic.initial_exchange.min_initial_udp_datagram_size)
@@ -3145,8 +3168,9 @@ fn receiveStandaloneClientEarlyData(
     expected_destination_connection_id: []const u8,
     expected_source_connection_id: []const u8,
     allow_zero_fixed_bit: bool,
+    caller_deadline: ?std.Io.Clock.Timestamp,
 ) Error!quic.zero_rtt.Packet {
-    var datagram = try receiveFromSource(source);
+    var datagram = try receiveFromSourceBefore(source, caller_deadline);
     defer datagram.deinit(endpoint.allocator);
     if (!datagram.from.eql(&expected_from)) {
         return error.InvalidHandshakeFlight;
@@ -3168,11 +3192,12 @@ fn discardClientEarlyData(
     endpoint: *quic.runtime.Endpoint,
     source: quic.runtime.DatagramSource,
     coalesced_tail: []const u8,
+    caller_deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     if (coalesced_tail.len != 0) {
         return validateRejectedEarlyData(coalesced_tail);
     }
-    var datagram = try receiveFromSource(source);
+    var datagram = try receiveFromSourceBefore(source, caller_deadline);
     defer datagram.deinit(endpoint.allocator);
     try validateRejectedEarlyData(datagram.bytes);
 }
@@ -3194,6 +3219,19 @@ fn receiveFromSource(
         error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
         else => |other| @errorCast(other),
     };
+}
+
+fn receiveFromSourceBefore(
+    source: quic.runtime.DatagramSource,
+    caller_deadline: ?std.Io.Clock.Timestamp,
+) Error!quic.runtime.OwnedBytes {
+    const deadline = caller_deadline orelse return receiveFromSource(source);
+    return source.receiveTimeout(.{ .deadline = deadline }) catch |err|
+        switch (err) {
+            error.Timeout => error.HandshakeTimeout,
+            error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
+            else => |other| @errorCast(other),
+        };
 }
 
 fn validateClientInitialTail(

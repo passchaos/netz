@@ -132,6 +132,14 @@ ending the budget after QUIC/TLS establishment. Direct-address handshake
 clients expose the same complete-session deadline, and explicit deadline APIs
 retain a shorter configured HTTP/3 connect timeout when present. Matching
 relative-timeout helpers convert their end-to-end budget once at API entry.
+Authenticated servers expose the symmetric contract: `acceptWithDeadline` and
+`receiveSessionRequestWithDeadline` preserve one caller-owned awake-clock
+timestamp from the first QUIC Initial through TLS 1.3 and the first Extended
+CONNECT request. Relative-timeout forms convert once at entry, while the
+existing PTO/recovery budget can still impose an earlier handshake bound. A
+cross-phase regression completes QUIC/TLS, withholds CONNECT until the original
+deadline expires, and verifies that server admission does not restart its
+budget after authentication.
 
 ## Important interoperability correction
 

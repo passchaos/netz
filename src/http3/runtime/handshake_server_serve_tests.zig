@@ -5,6 +5,38 @@ const quic = @import("../../quic/mod.zig");
 
 const net = std.Io.net;
 
+test "HTTP/3 handshake server timeout bounds the first Initial wait" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "h3-deadline-server" } },
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        server.acceptWithTimeout(.fromMilliseconds(10)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .real },
+        )),
+    );
+}
+
 test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -15,6 +15,7 @@ pub const Error = quic.runtime.Error ||
     quic.crypto_stream.Error ||
     quic.Error ||
     error{MissingCryptoFrame};
+pub const ReceiveError = Error || error{HandshakeTimeout};
 
 pub const min_initial_udp_datagram_size: usize = 1200;
 
@@ -57,6 +58,11 @@ pub const ReceiveOptions = struct {
     min_datagram_size: usize = 0,
     max_datagrams: usize = 64,
     allow_zero_fixed_bit: bool = false,
+    /// Optional absolute bound shared with the enclosing handshake. This is
+    /// needed when one TLS CRYPTO message spans several Initial datagrams: the
+    /// caller's budget must cover the continuation packets as well as the
+    /// first UDP receive.
+    deadline: ?std.Io.Clock.Timestamp = null,
 };
 
 pub const Received = struct {
@@ -216,7 +222,7 @@ pub fn receive(
     endpoint: *quic.runtime.Endpoint,
     keys: quic.protection.PacketProtectionKeys,
     options: ReceiveOptions,
-) Error!Received {
+) ReceiveError!Received {
     var first = try endpoint.receiveBytes();
     defer first.deinit(endpoint.allocator);
     if (first.bytes.len < options.min_datagram_size) {
@@ -239,7 +245,7 @@ pub fn open(
     first_bytes: []const u8,
     keys: quic.protection.PacketProtectionKeys,
     options: ReceiveOptions,
-) Error!Received {
+) ReceiveError!Received {
     return openFrom(
         endpoint,
         quic.runtime.DatagramSource.fromEndpoint(endpoint),
@@ -257,7 +263,7 @@ pub fn openFrom(
     first_bytes: []const u8,
     keys: quic.protection.PacketProtectionKeys,
     options: ReceiveOptions,
-) Error!Received {
+) ReceiveError!Received {
     if (options.max_crypto_buffer == 0 or options.max_datagrams == 0) {
         return error.InvalidCryptoRange;
     }
@@ -289,8 +295,11 @@ pub fn openFrom(
         const datagram_from, const datagram_bytes = if (packet_count == 0)
             .{ first_from, first_bytes }
         else blk: {
-            received = source.receive() catch |err| switch (err) {
-                error.Timeout => unreachable,
+            received = source.receiveTimeout(if (options.deadline) |deadline|
+                .{ .deadline = deadline }
+            else
+                .none) catch |err| switch (err) {
+                error.Timeout => return error.HandshakeTimeout,
                 error.ConcurrencyUnavailable => return error.Unexpected,
                 else => |other| return @errorCast(other),
             };

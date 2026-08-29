@@ -585,6 +585,29 @@ pub const HandshakeServer = struct {
         return pending.accept();
     }
 
+    /// Complete QUIC/TLS and receive the first Extended CONNECT under one
+    /// caller-owned awake-clock deadline. The timestamp is preserved between
+    /// phases so handshake time cannot be regained by the request receive.
+    pub fn acceptWithDeadline(
+        self: *HandshakeServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        var pending = try self.receiveSessionRequestWithDeadline(deadline);
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    pub fn acceptWithTimeout(
+        self: *HandshakeServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(.fromNow(
+            self.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// Start WebTransport admission from an Initial received by the shared
     /// QUIC endpoint dispatcher instead of reading that first datagram again.
     pub fn receiveSessionRequestFromInitial(
@@ -622,6 +645,30 @@ pub const HandshakeServer = struct {
         var session = try self.h3.accept();
         errdefer session.deinit();
         return receiveStatefulSessionRequest(&session, self.limits);
+    }
+
+    pub fn receiveSessionRequestWithDeadline(
+        self: *HandshakeServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        var session = try self.h3.acceptWithDeadline(deadline);
+        errdefer session.deinit();
+        return receiveStatefulSessionRequestWithDeadline(
+            &session,
+            self.limits,
+            deadline,
+        );
+    }
+
+    pub fn receiveSessionRequestWithTimeout(
+        self: *HandshakeServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionRequestWithDeadline(.fromNow(
+            self.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 };
 
@@ -4862,12 +4909,36 @@ fn startStatefulConnect(
     return webtransport.SessionId.init(stream_id);
 }
 
+const HandshakeConnectRequest = struct {
+    stream_id: u62,
+    head: http3.DecodedRequestHead,
+};
+
 fn receiveStatefulSessionRequest(
     session: *http3.runtime.HandshakeServerSession,
     limits: Limits,
 ) Error!PendingHandshakeSession {
+    return receiveStatefulSessionRequestBefore(session, limits, null);
+}
+
+fn receiveStatefulSessionRequestWithDeadline(
+    session: *http3.runtime.HandshakeServerSession,
+    limits: Limits,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!PendingHandshakeSession {
+    return receiveStatefulSessionRequestBefore(session, limits, deadline);
+}
+
+fn receiveStatefulSessionRequestBefore(
+    session: *http3.runtime.HandshakeServerSession,
+    limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!PendingHandshakeSession {
     try session.ensureSettingsSent();
-    var request = try receiveHandshakeConnectRequest(session);
+    var request = if (deadline) |absolute|
+        try receiveHandshakeConnectRequestWithDeadline(session, absolute)
+    else
+        try receiveHandshakeConnectRequest(session);
     errdefer request.head.deinit(
         session.established.connection.endpoint.allocator,
     );
@@ -4894,12 +4965,26 @@ fn receiveStatefulSessionRequest(
 
 fn receiveHandshakeConnectRequest(
     session: *http3.runtime.HandshakeServerSession,
-) Error!struct {
-    stream_id: u62,
-    head: http3.DecodedRequestHead,
-} {
+) Error!HandshakeConnectRequest {
+    return receiveHandshakeConnectRequestBefore(session, null);
+}
+
+fn receiveHandshakeConnectRequestWithDeadline(
+    session: *http3.runtime.HandshakeServerSession,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!HandshakeConnectRequest {
+    return receiveHandshakeConnectRequestBefore(session, deadline);
+}
+
+fn receiveHandshakeConnectRequestBefore(
+    session: *http3.runtime.HandshakeServerSession,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!HandshakeConnectRequest {
     while (true) {
-        var event = try session.receiveRequestEvent();
+        var event = if (deadline) |absolute|
+            try session.receiveRequestEventWithDeadline(absolute)
+        else
+            try session.receiveRequestEvent();
         defer event.deinit(
             session.established.connection.endpoint.allocator,
         );
