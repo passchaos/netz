@@ -147,6 +147,11 @@ pub fn Connection(comptime role: common.Role) type {
         limits: common.Limits,
         selected_protocol: ?[]u8 = null,
         inbuf: std.ArrayList(u8) = .empty,
+        /// Serializes complete WebSocket frame sequences and the reusable
+        /// compression encoder. HTTP/3 may split one message across many QUIC
+        /// packets, so locking only individual DATA writes would still permit
+        /// another sender to splice bytes into the RFC 6455 frame.
+        send_mutex: std.Io.Mutex = .init,
         message_assembler: ?websocket.MessageAssembler = null,
         message_into: common.MessageIntoReceiveState = .{},
         permessage_deflate: bool = false,
@@ -228,6 +233,8 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn initiateKeyUpdate(self: *Self) Error!void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
             try self.h3.initiateKeyUpdate();
         }
 
@@ -245,11 +252,15 @@ pub fn Connection(comptime role: common.Role) type {
 
         pub fn sendText(self: *Self, text: []const u8) Error!void {
             if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
-            try self.sendDataFrame(.text, text);
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            try self.sendDataFrameLocked(.text, text);
         }
 
         pub fn sendBinary(self: *Self, payload: []const u8) Error!void {
-            try self.sendDataFrame(.binary, payload);
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            try self.sendDataFrameLocked(.binary, payload);
         }
 
         /// Mask a mutable client payload in place and send it without the
@@ -261,6 +272,8 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             payload: []u8,
         ) Error!void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
             try self.validateBinaryInPlace(payload.len);
 
             var mask_key: [4]u8 = undefined;
@@ -306,6 +319,8 @@ pub fn Connection(comptime role: common.Role) type {
             first: []const u8,
             second: []const u8,
         ) Error!void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
             if (self.close_sent or self.close_received) {
                 return error.ConnectionClosed;
             }
@@ -357,6 +372,8 @@ pub fn Connection(comptime role: common.Role) type {
             if (opcode != .text and opcode != .binary) {
                 return error.InvalidFrame;
             }
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
             if (self.close_sent or self.close_received) {
                 return error.ConnectionClosed;
             }
@@ -428,14 +445,21 @@ pub fn Connection(comptime role: common.Role) type {
 
         /// Send Ping once and advance under the caller's absolute deadline.
         /// Reuse that deadline with `continuePingWithDeadline` when retaining
-        /// one total budget across interleaved application frames.
+        /// one total budget across interleaved application frames. The send
+        /// lock is released before receive progress so automatic Pong/Close
+        /// replies cannot recursively deadlock the connection.
         pub fn pingWithDeadline(
             self: *Self,
             payload: []const u8,
             deadline: std.Io.Clock.Timestamp,
         ) Error!PingEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            try self.sendPing(payload);
+            {
+                self.send_mutex.lockUncancelable(self.io());
+                defer self.send_mutex.unlock(self.io());
+                _ = try deadline_policy.usableAwake(self.io(), deadline);
+                try self.sendControlFrameLocked(.ping, payload);
+            }
             return self.readPingEvent(payload, deadline);
         }
 
@@ -468,7 +492,14 @@ pub fn Connection(comptime role: common.Role) type {
             code: websocket.CloseCode,
             reason: []const u8,
         ) Error!void {
-            try self.sendCloseFrame(.{ .code = code, .reason = reason });
+            var storage: [125]u8 = undefined;
+            const payload = try websocket.writeClosePayloadInto(
+                &storage,
+                .{ .code = code, .reason = reason },
+            );
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            try self.sendControlFrameLocked(.close, payload);
         }
 
         /// Send a Close frame with optional status metadata. Passing null emits
@@ -482,7 +513,17 @@ pub fn Connection(comptime role: common.Role) type {
                 &storage,
                 close_frame,
             );
-            try self.sendControlFrame(.close, payload);
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            try self.sendControlFrameLocked(.close, payload);
+        }
+
+        fn echoCloseFrame(self: *Self, payload: []const u8) Error!void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            if (!self.close_sent) {
+                try self.sendControlFrameLocked(.close, payload);
+            }
         }
 
         /// Receive and own metadata from the next frame when it is Close.
@@ -559,7 +600,19 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!CloseHandshakeEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (!self.close_sent) {
-                try self.sendCloseFrame(close_frame);
+                var storage: [125]u8 = undefined;
+                const payload = try websocket.writeClosePayloadInto(
+                    &storage,
+                    close_frame,
+                );
+                {
+                    self.send_mutex.lockUncancelable(self.io());
+                    defer self.send_mutex.unlock(self.io());
+                    _ = try deadline_policy.usableAwake(self.io(), deadline);
+                    if (!self.close_sent) {
+                        try self.sendControlFrameLocked(.close, payload);
+                    }
+                }
             }
             return self.readCloseHandshakeEvent(deadline);
         }
@@ -869,9 +922,7 @@ pub fn Connection(comptime role: common.Role) type {
                 },
                 .close => {
                     self.close_received = true;
-                    if (!self.close_sent) {
-                        try self.sendControlFrame(.close, frame.payload);
-                    }
+                    if (!self.close_sent) try self.echoCloseFrame(frame.payload);
                 },
                 else => {},
             }
@@ -1041,9 +1092,7 @@ pub fn Connection(comptime role: common.Role) type {
                 },
                 .close => {
                     self.close_received = true;
-                    if (!self.close_sent) {
-                        try self.sendControlFrame(.close, frame.payload);
-                    }
+                    if (!self.close_sent) try self.echoCloseFrame(frame.payload);
                 },
                 else => {},
             }
@@ -1058,7 +1107,7 @@ pub fn Connection(comptime role: common.Role) type {
             self.sendClose(code, "") catch {};
         }
 
-        fn sendDataFrame(
+        fn sendDataFrameLocked(
             self: *Self,
             opcode: websocket.Opcode,
             payload: []const u8,
@@ -1090,6 +1139,16 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         fn sendControlFrame(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+        ) Error!void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            try self.sendControlFrameLocked(opcode, payload);
+        }
+
+        fn sendControlFrameLocked(
             self: *Self,
             opcode: websocket.Opcode,
             payload: []const u8,

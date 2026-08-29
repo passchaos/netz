@@ -561,6 +561,9 @@ timeout retries while requiring the same output buffer for resumed messages.
 H3 clients additionally expose `sendBinaryInPlace`: callers opting into mutable
 post-send storage avoid the immutable client's masking copy, matching the
 reference API while keeping the safe `[]const u8` alternatives.
+All H3 message, fragmentation, control, Close, and key-update send entry points
+serialize complete write sequences. This protects compression scratch and stops
+concurrent callers from interleaving one RFC 6455 frame across HTTP/3 DATA.
 HTTP/3 receive paths now use the same RFC 6455 failure mapping as HTTP/1 and
 RFC 8441, sending 1002 for malformed framing, 1007 for invalid text, and 1009
 for configured frame/message limits while preserving the original local error.

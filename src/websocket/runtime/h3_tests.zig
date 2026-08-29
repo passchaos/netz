@@ -593,6 +593,8 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const compressed_first = "h3-borrowed-prefix-";
     const compressed_second = "compressible-application-payload-" ** 32;
     const compressed_parts = compressed_first ++ compressed_second;
+    const concurrent_a = "concurrent-a-" ** 32;
+    const concurrent_b = "concurrent-b-" ** 32;
     const limits: http3.runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
@@ -615,6 +617,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
 
     const Shared = struct {
         server: *h3.Server,
+        io: std.Io,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -712,6 +715,52 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 "message",
                 true,
             );
+            try connection.sendText("hello client");
+
+            const Sender = struct {
+                connection: *h3.ServerConnection,
+                io: std.Io,
+                start: *std.Io.Event,
+                payload: []const u8,
+                err: ?anyerror = null,
+
+                fn run(sender: *@This()) void {
+                    sender.start.wait(sender.io) catch |err| {
+                        sender.err = err;
+                        return;
+                    };
+                    sender.connection.sendText(sender.payload) catch |err| {
+                        sender.err = err;
+                    };
+                }
+            };
+            var start: std.Io.Event = .unset;
+            var senders = [_]Sender{
+                .{
+                    .connection = &connection,
+                    .io = self.io,
+                    .start = &start,
+                    .payload = concurrent_a,
+                },
+                .{
+                    .connection = &connection,
+                    .io = self.io,
+                    .start = &start,
+                    .payload = concurrent_b,
+                },
+            };
+            const sender_a = try std.Thread.spawn(.{}, Sender.run, .{&senders[0]});
+            const sender_b = std.Thread.spawn(.{}, Sender.run, .{&senders[1]}) catch |err| {
+                start.set(self.io);
+                sender_a.join();
+                return err;
+            };
+            start.set(self.io);
+            sender_a.join();
+            sender_b.join();
+            if (senders[0].err) |err| return err;
+            if (senders[1].err) |err| return err;
+
             var interleaved_pong = try connection.receiveFrameWithTimeout(
                 .fromSeconds(5),
             );
@@ -724,7 +773,6 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 "between-fragments",
                 interleaved_pong.payload,
             );
-            try connection.sendText("hello client");
 
             var ping = try connection.pingWithTimeout(
                 "server-probe",
@@ -774,7 +822,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{ .server = &server, .io = io };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -873,6 +921,18 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     defer reply.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);
     try std.testing.expectEqualStrings("hello client", reply.payload);
+    var concurrent_first = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer concurrent_first.deinit(allocator);
+    var concurrent_second = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer concurrent_second.deinit(allocator);
+    try std.testing.expect(concurrent_first.was_compressed);
+    try std.testing.expect(concurrent_second.was_compressed);
+    const saw_a = std.mem.eql(u8, concurrent_first.payload, concurrent_a) or
+        std.mem.eql(u8, concurrent_second.payload, concurrent_a);
+    const saw_b = std.mem.eql(u8, concurrent_first.payload, concurrent_b) or
+        std.mem.eql(u8, concurrent_second.payload, concurrent_b);
+    try std.testing.expect(saw_a);
+    try std.testing.expect(saw_b);
     try client.sendText("client in flight");
     var server_ping = try client.receiveFrameWithTimeout(.fromSeconds(5));
     defer server_ping.deinit(allocator);
