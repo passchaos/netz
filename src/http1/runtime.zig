@@ -1999,6 +1999,23 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            address,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect over a Unix-domain socket while retaining ordinary HTTP/1 Host
     /// semantics. `host` is copied because later requests may omit it and use
     /// the connection default. TCP_NODELAY is deliberately not applied.
@@ -2049,6 +2066,25 @@ pub const Client = struct {
             .limits = limits,
             .default_host = owned_host,
         };
+    }
+
+    pub fn connectUnixWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        host: []const u8,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixWithDeadline(
+            allocator,
+            io,
+            address,
+            host,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectHost(
@@ -2109,6 +2145,25 @@ pub const Client = struct {
             .limits = limits,
             .default_host = owned_host,
         };
+    }
+
+    pub fn connectHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectTlsHost(
@@ -2190,6 +2245,27 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectTlsHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectTlsAddress(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2266,6 +2342,29 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectTlsAddressWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectVailTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2316,6 +2415,27 @@ pub const Client = struct {
             limits,
             tls_options,
             deadline,
+        );
+    }
+
+    pub fn connectVailTlsHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectVailTlsHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -2370,6 +2490,27 @@ pub const Client = struct {
             limits,
             tls_options,
             deadline,
+        );
+    }
+
+    pub fn connectVailTlsAddressWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectVailTlsAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

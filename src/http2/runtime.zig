@@ -1264,6 +1264,23 @@ pub const Client = struct {
         return connection;
     }
 
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            address,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect with HTTP/2 prior knowledge over a Unix-domain stream.
     /// `authority` is copied for subsequent requests that omit it; the local
     /// transport still uses the `http` scheme and skips TCP-only NODELAY.
@@ -1323,6 +1340,25 @@ pub const Client = struct {
         return connection;
     }
 
+    pub fn connectUnixWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        authority: []const u8,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixWithDeadline(
+            allocator,
+            io,
+            address,
+            authority,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1377,6 +1413,25 @@ pub const Client = struct {
         connection.default_authority = owned_host;
         connection.default_scheme = "http";
         return connection;
+    }
+
+    pub fn connectHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectTlsHost(
@@ -1458,6 +1513,27 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectTlsHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect to an already resolved address while verifying TLS against a
     /// separate hostname. This keeps service discovery and certificate/SNI
     /// identity independent without weakening mandatory HTTP/2 ALPN checks.
@@ -1530,6 +1606,29 @@ pub const Client = struct {
             limits,
             tls_options,
             deadline,
+        );
+    }
+
+    pub fn connectTlsAddressWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

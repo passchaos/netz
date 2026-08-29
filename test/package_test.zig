@@ -306,6 +306,26 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectUnixWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectTlsHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectTlsAddressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
         "requestUriWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -371,6 +391,34 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
         "connectVailTlsAddressWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectUnixWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectTlsHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectTlsAddressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectVailTlsHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectVailTlsAddressWithTimeout",
     ));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamBuffered"));
     try std.testing.expect(@hasDecl(

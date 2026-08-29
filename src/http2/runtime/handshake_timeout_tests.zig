@@ -330,6 +330,21 @@ test "HTTP/2 caller deadline retains shorter connect timeout" {
     );
 }
 
+test "HTTP/2 connection timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1) },
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/2 server SETTINGS does not renew the client handshake deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -74,6 +74,21 @@ test "HTTP1 connection deadline retains shorter connect timeout" {
     );
 }
 
+test "HTTP1 connection timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        http1_runtime.Client.connectWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1) },
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "standard TLS client deadline preserves buffered plaintext" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

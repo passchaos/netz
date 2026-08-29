@@ -599,6 +599,8 @@ and vail TLS constructors additionally accept a caller-owned absolute deadline.
 HTTP/2 direct-address, hostname, Unix and TLS constructors expose the same
 contract through the complete SETTINGS bootstrap. TLS paths preserve the outer
 deadline across DNS/TCP and TLS while all paths retain stricter phase limits.
+Both protocol constructors also provide relative-timeout wrappers that convert
+the end-to-end budget once at entry.
 Ordinary timeout-based APIs remain separate from HTTP
 response/preface handshake budgets, and failed pool connects continue to return
 their reserved capacity slot.
