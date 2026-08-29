@@ -58,6 +58,77 @@ pub const AcceptOptions = struct {
 pub const ClientConnection = Connection(.client);
 pub const ServerConnection = Connection(.server);
 
+/// Result of an authenticated RFC 9220 attempt before the application chooses
+/// whether a non-2xx response should become a typed rejection. Response
+/// metadata remains owned and inspectable until `deinit` or `requireAccepted`.
+pub const ConnectAttempt = struct {
+    h3: ?http3.runtime.HandshakeClient,
+    stream_id: u62,
+    response: http3.DecodedResponseHead,
+    options: ConnectOptions,
+
+    pub fn accepted(self: ConnectAttempt) bool {
+        return self.response.status >= 200 and self.response.status < 300;
+    }
+
+    pub fn status(self: ConnectAttempt) u16 {
+        return self.response.status;
+    }
+
+    pub fn responseHeader(
+        self: ConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        for (self.response.headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name)) {
+                return header.value;
+            }
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *ConnectAttempt) void {
+        const allocator = self.h3.?.allocator;
+        self.response.deinit(allocator);
+        if (self.h3) |*client| client.deinit();
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(self: *ConnectAttempt) Error!ClientConnection {
+        if (!self.accepted()) return error.InvalidResponse;
+        const selected_protocol = try validateServerHandshake(
+            self.h3.?.allocator,
+            self.response.headers,
+            self.options.protocols,
+        );
+        errdefer if (selected_protocol) |protocol| {
+            self.h3.?.allocator.free(protocol);
+        };
+        const negotiated_extension = try websocket.ExtensionNegotiation
+            .validateResponse(try optionalHeader(
+            self.response.headers,
+            "sec-websocket-extensions",
+        ));
+        if (negotiated_extension.permessage_deflate and
+            !self.options.enable_permessage_deflate)
+        {
+            return error.InvalidExtension;
+        }
+        const connection = ClientConnection.init(
+            self.h3.?.allocator,
+            self.stream_id,
+            self.h3.?,
+            self.options.limits,
+            selected_protocol,
+            negotiated_extension,
+            self.options.compression_threshold,
+        );
+        self.response.deinit(connection.allocator);
+        self.* = undefined;
+        return connection;
+    }
+};
+
 pub fn Connection(comptime role: common.Role) type {
     return struct {
         const Self = @This();
@@ -752,6 +823,28 @@ pub const Client = struct {
         h3_options: http3.runtime.HandshakeClientOptions,
         options: ConnectOptions,
     ) Error!ClientConnection {
+        var attempt = try connectAttempt(
+            allocator,
+            io,
+            local_address,
+            server,
+            h3_limits,
+            h3_options,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        server: std.Io.net.IpAddress,
+        h3_limits: http3.runtime.Limits,
+        h3_options: http3.runtime.HandshakeClientOptions,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         var h3_options_with_connect = h3_options;
         h3_options_with_connect.session.local_settings
             .enable_connect_protocol = true;
@@ -764,7 +857,7 @@ pub const Client = struct {
             h3_options_with_connect,
         );
         errdefer h3.deinit();
-        return connectEstablishedBefore(allocator, &h3, options, null);
+        return connectAttemptEstablishedBefore(allocator, &h3, options, null);
     }
 
     /// Establish QUIC/TLS and finish the RFC 9220 Extended CONNECT under one
@@ -780,6 +873,30 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ClientConnection {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            h3_limits,
+            h3_options,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        server: std.Io.net.IpAddress,
+        h3_limits: http3.runtime.Limits,
+        h3_options: http3.runtime.HandshakeClientOptions,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         const absolute = try deadline_policy.usableAwake(io, deadline);
         var h3_options_with_connect = h3_options;
         h3_options_with_connect.session.local_settings
@@ -794,7 +911,12 @@ pub const Client = struct {
             absolute,
         );
         errdefer h3.deinit();
-        return connectEstablishedBefore(allocator, &h3, options, absolute);
+        return connectAttemptEstablishedBefore(
+            allocator,
+            &h3,
+            options,
+            absolute,
+        );
     }
 
     pub fn connectWithTimeout(
@@ -820,6 +942,29 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        server: std.Io.net.IpAddress,
+        h3_limits: http3.runtime.Limits,
+        h3_options: http3.runtime.HandshakeClientOptions,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            h3_limits,
+            h3_options,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect to a complete HTTPS URL, deriving authority, path/query, DNS
     /// destination, and SNI while retaining HTTP/3's all-address fallback.
     pub fn connectUri(
@@ -829,14 +974,15 @@ pub const Client = struct {
         uri_text: []const u8,
         options: UriConnectOptions,
     ) Error!ClientConnection {
-        return connectUriBefore(
+        var attempt = try connectUriAttempt(
             allocator,
             io,
             local_address,
             uri_text,
             options,
-            null,
         );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
     }
 
     pub fn connectUriWithDeadline(
@@ -847,14 +993,16 @@ pub const Client = struct {
         options: UriConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ClientConnection {
-        return connectUriBefore(
+        var attempt = try connectUriAttemptWithDeadline(
             allocator,
             io,
             local_address,
             uri_text,
             options,
-            try deadline_policy.usableAwake(io, deadline),
+            deadline,
         );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
     }
 
     pub fn connectUriWithTimeout(
@@ -876,14 +1024,68 @@ pub const Client = struct {
         );
     }
 
-    fn connectUriBefore(
+    pub fn connectUriAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+    ) Error!ConnectAttempt {
+        return connectUriAttemptBefore(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            null,
+        );
+    }
+
+    pub fn connectUriAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        return connectUriAttemptBefore(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn connectUriAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectUriAttemptBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
         local_address: std.Io.net.IpAddress,
         uri_text: []const u8,
         options: UriConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!ClientConnection {
+    ) Error!ConnectAttempt {
         try validateClientExtraHeaders(options.extra_headers);
         try validateProtocols(options.protocols);
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -917,7 +1119,7 @@ pub const Client = struct {
                 h3_options,
             );
         errdefer h3_client.deinit();
-        return connectEstablishedBefore(
+        return connectAttemptEstablishedBefore(
             allocator,
             &h3_client,
             .{
@@ -941,6 +1143,22 @@ fn connectEstablishedBefore(
     options: ConnectOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!ClientConnection {
+    var attempt = try connectAttemptEstablishedBefore(
+        allocator,
+        h3,
+        options,
+        deadline,
+    );
+    errdefer attempt.deinit();
+    return attempt.requireAccepted();
+}
+
+fn connectAttemptEstablishedBefore(
+    allocator: std.mem.Allocator,
+    h3: *http3.runtime.HandshakeClient,
+    options: ConnectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!ConnectAttempt {
     try validateClientExtraHeaders(options.extra_headers);
     try validateProtocols(options.protocols);
     const peer_settings = if (deadline) |absolute|
@@ -1004,40 +1222,18 @@ fn connectEstablishedBefore(
         try receiveResponseHeadWithDeadline(h3, stream_id, absolute)
     else
         try receiveResponseHead(h3, stream_id);
-    defer response.deinit(allocator);
-    if (response.status < 200 or response.status >= 300) {
-        return error.InvalidResponse;
-    }
+    errdefer response.deinit(allocator);
     if (!h3.control.settings.peer.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
-    const selected_protocol = try validateServerHandshake(
-        allocator,
-        response.headers,
-        options.protocols,
-    );
-    errdefer if (selected_protocol) |protocol| allocator.free(protocol);
-    const negotiated_extension = try websocket.ExtensionNegotiation
-        .validateResponse(try optionalHeader(
-        response.headers,
-        "sec-websocket-extensions",
-    ));
-    if (negotiated_extension.permessage_deflate and
-        !options.enable_permessage_deflate)
-    {
-        return error.InvalidExtension;
-    }
     const owned_h3 = h3.*;
     h3.* = undefined;
-    return .init(
-        allocator,
-        stream_id,
-        owned_h3,
-        options.limits,
-        selected_protocol,
-        negotiated_extension,
-        options.compression_threshold,
-    );
+    return .{
+        .h3 = owned_h3,
+        .stream_id = stream_id,
+        .response = response,
+        .options = options,
+    };
 }
 
 pub const Server = struct {

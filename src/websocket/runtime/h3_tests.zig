@@ -480,6 +480,106 @@ test "WebSocket HTTP3 URI rejects non-HTTPS and userinfo before I/O" {
     );
 }
 
+test "WebSocket HTTP3 connect attempt preserves rejection metadata" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xb5} ** 32,
+            .x25519_secret_key = [_]u8{0xb6} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.transport.accept();
+            defer session.deinit();
+            try session.ensureSettingsSent();
+            while (true) {
+                var event = try session.receiveRequestEvent();
+                defer event.deinit(allocator);
+                switch (event) {
+                    .reset => return error.TestUnexpectedResult,
+                    .message => |message| switch (message.value) {
+                        .head => {
+                            try session.startResponse(
+                                message.stream_id,
+                                .{
+                                    .status = 401,
+                                    .headers = &.{.{
+                                        .name = "www-authenticate",
+                                        .value = "Bearer realm=chat",
+                                    }},
+                                    .request_method = "CONNECT",
+                                    .extended_connect = true,
+                                },
+                                0,
+                            );
+                            return;
+                        },
+                        else => return error.TestUnexpectedResult,
+                    },
+                }
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var attempt = try h3.Client.connectAttemptWithTimeout(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .random = [_]u8{0xb7} ** 32,
+            .x25519_secret_key = [_]u8{0xb8} ** 32,
+        } },
+        .{ .authority = "localhost", .path = "/private" },
+        .fromSeconds(2),
+    );
+    defer attempt.deinit();
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u16, 401), attempt.status());
+    try std.testing.expectEqualStrings(
+        "Bearer realm=chat",
+        attempt.responseHeader("WWW-Authenticate").?,
+    );
+    try std.testing.expectError(error.InvalidResponse, attempt.requireAccepted());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
