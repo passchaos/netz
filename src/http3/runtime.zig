@@ -4298,6 +4298,33 @@ pub const HandshakeServer = struct {
         );
     }
 
+    pub fn acceptFromInitialWithDeadline(
+        self: *HandshakeServer,
+        initial: *quic.endpoint_dispatcher.Event,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        return self.acceptFromInitialSourceWithDeadline(
+            .fromEndpoint(&self.quic_server.endpoint),
+            initial,
+            deadline,
+        );
+    }
+
+    pub fn acceptFromInitialWithTimeout(
+        self: *HandshakeServer,
+        initial: *quic.endpoint_dispatcher.Event,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptFromInitialWithDeadline(
+            initial,
+            .fromNow(
+                self.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     /// Accept a dispatcher-owned Initial while receiving every later QUIC
     /// handshake datagram from an injected source. A shared endpoint uses a
     /// bounded pending-handshake inbox here so this worker never competes with
@@ -4319,6 +4346,50 @@ pub const HandshakeServer = struct {
         return HandshakeServerSession.initEstablished(
             established,
             self.session_options,
+        );
+    }
+
+    pub fn acceptFromInitialSourceWithDeadline(
+        self: *HandshakeServer,
+        source: quic.runtime.DatagramSource,
+        initial: *quic.endpoint_dispatcher.Event,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        const absolute = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        const datagram = initial.takeNewInitial() orelse
+            return error.InvalidHandshakeFlight;
+        var established = try quic.handshake
+            .acceptFromInitialSourceWithDeadline(
+            &self.quic_server.endpoint,
+            source,
+            datagram,
+            self.handshake_options,
+            absolute,
+        );
+        errdefer established.deinit();
+        return HandshakeServerSession.initEstablished(
+            established,
+            self.session_options,
+        );
+    }
+
+    pub fn acceptFromInitialSourceWithTimeout(
+        self: *HandshakeServer,
+        source: quic.runtime.DatagramSource,
+        initial: *quic.endpoint_dispatcher.Event,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!HandshakeServerSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptFromInitialSourceWithDeadline(
+            source,
+            initial,
+            .fromNow(
+                self.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
         );
     }
 

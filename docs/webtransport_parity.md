@@ -140,6 +140,10 @@ existing PTO/recovery budget can still impose an earlier handshake bound. A
 cross-phase regression completes QUIC/TLS, withholds CONNECT until the original
 deadline expires, and verifies that server admission does not restart its
 budget after authentication.
+Dispatcher-fed Initial and injected per-handshake datagram-source entry points
+expose the same absolute and relative forms. Thus adopting a shared-endpoint
+architecture no longer requires giving up the caller deadline or restarting it
+between routed Initial processing, QUIC/TLS, and CONNECT admission.
 
 ## Important interoperability correction
 

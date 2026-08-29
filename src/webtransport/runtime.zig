@@ -3,6 +3,7 @@ const webtransport = @import("mod.zig");
 const http3 = @import("../http3/mod.zig");
 const quic = @import("../quic/mod.zig");
 const round_robin = @import("../internal/round_robin.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 const datagram_stack_capacity: usize = 4096;
@@ -619,6 +620,40 @@ pub const HandshakeServer = struct {
         return receiveStatefulSessionRequest(&session, self.limits);
     }
 
+    /// Preserve one caller-owned budget across a dispatcher-provided Initial,
+    /// the remaining QUIC/TLS handshake, and the first Extended CONNECT.
+    pub fn receiveSessionRequestFromInitialWithDeadline(
+        self: *HandshakeServer,
+        initial: *quic.endpoint_dispatcher.Event,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        var session = try self.h3.acceptFromInitialWithDeadline(
+            initial,
+            deadline,
+        );
+        errdefer session.deinit();
+        return receiveStatefulSessionRequestWithDeadline(
+            &session,
+            self.limits,
+            deadline,
+        );
+    }
+
+    pub fn receiveSessionRequestFromInitialWithTimeout(
+        self: *HandshakeServer,
+        initial: *quic.endpoint_dispatcher.Event,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionRequestFromInitialWithDeadline(
+            initial,
+            .fromNow(
+                self.h3.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     /// Complete only the QUIC/TLS phase from a routed Initial and datagram
     /// source. After this returns, promote `admission.connection()` into the
     /// endpoint dispatcher and feed it packets until `pollSessionRequest`
@@ -634,6 +669,47 @@ pub const HandshakeServer = struct {
         errdefer session.deinit();
         try session.ensureSettingsSent();
         return .{ .h3 = session, .limits = self.limits };
+    }
+
+    pub fn beginSessionAdmissionFromInitialSourceWithDeadline(
+        self: *HandshakeServer,
+        source: quic.runtime.DatagramSource,
+        initial: *quic.endpoint_dispatcher.Event,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!HandshakeAdmission {
+        var session = try self.h3.acceptFromInitialSourceWithDeadline(
+            source,
+            initial,
+            deadline,
+        );
+        errdefer session.deinit();
+        _ = try deadline_policy.usableAwake(
+            session.established.connection.endpoint.io,
+            deadline,
+        );
+        try session.ensureSettingsSent();
+        return .{
+            .h3 = session,
+            .limits = self.limits,
+            .deadline = deadline,
+        };
+    }
+
+    pub fn beginSessionAdmissionFromInitialSourceWithTimeout(
+        self: *HandshakeServer,
+        source: quic.runtime.DatagramSource,
+        initial: *quic.endpoint_dispatcher.Event,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!HandshakeAdmission {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.beginSessionAdmissionFromInitialSourceWithDeadline(
+            source,
+            initial,
+            .fromNow(
+                self.h3.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
     }
 
     /// Receive and validate Extended CONNECT without deciding admission. The
@@ -680,6 +756,10 @@ pub const HandshakeServer = struct {
 pub const HandshakeAdmission = struct {
     h3: http3.runtime.HandshakeServerSession,
     limits: Limits,
+    /// Optional caller-owned budget inherited from the routed QUIC handshake.
+    /// Packet injection and CONNECT polling both check this same timestamp so
+    /// promotion to an endpoint dispatcher cannot silently renew admission.
+    deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn deinit(self: *HandshakeAdmission) void {
         self.h3.deinit();
@@ -696,12 +776,14 @@ pub const HandshakeAdmission = struct {
         self: *HandshakeAdmission,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        try self.ensureWithinDeadline();
         try self.h3.processRequestPacket(packet);
     }
 
     pub fn pollSessionRequest(
         self: *HandshakeAdmission,
     ) Error!?PendingHandshakeSession {
+        try self.ensureWithinDeadline();
         while (try self.h3.pollRequestEvent()) |event_value| {
             var event = event_value;
             const allocator =
@@ -738,6 +820,14 @@ pub const HandshakeAdmission = struct {
             }
         }
         return null;
+    }
+
+    fn ensureWithinDeadline(self: *HandshakeAdmission) ReceiveTimeoutError!void {
+        const deadline = self.deadline orelse return;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
     }
 };
 

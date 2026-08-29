@@ -4084,6 +4084,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServer,
+        "acceptFromInitialWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "acceptFromInitialWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "acceptFromInitialSourceWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
+        "acceptFromInitialSourceWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServer,
         "beginHandshakeAdmission",
     ));
     try std.testing.expect(@hasDecl(
@@ -4138,6 +4154,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
+        "beginSessionAdmissionFromInitialSourceWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
+        "beginSessionAdmissionFromInitialSourceWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
         "acceptWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -4151,6 +4175,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeServer,
         "receiveSessionRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
+        "receiveSessionRequestFromInitialWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeServer,
+        "receiveSessionRequestFromInitialWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,

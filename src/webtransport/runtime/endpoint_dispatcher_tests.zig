@@ -875,6 +875,104 @@ test "WebTransport handshake admission polls routed CONNECT state" {
     try std.testing.expectEqualStrings("/routed", pending.path());
 }
 
+test "WebTransport routed Initial timeout preserves event ownership" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "wt-routed-deadline" } },
+    );
+    defer server.deinit();
+
+    const bytes = try allocator.dupe(u8, "owned-initial");
+    var event = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(4567) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer event.deinit(allocator);
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveSessionRequestFromInitialWithTimeout(
+            &event,
+            .zero,
+        ),
+    );
+    try std.testing.expect(event == .new_initial);
+    try std.testing.expectError(
+        error.Timeout,
+        server.beginSessionAdmissionFromInitialSourceWithTimeout(
+            .fromEndpoint(&server.h3.quic_server.endpoint),
+            &event,
+            .zero,
+        ),
+    );
+    try std.testing.expect(event == .new_initial);
+}
+
+test "WebTransport routed admission keeps its handshake deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xef} ** quic.protection.secret_len,
+    );
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client_endpoint.address(),
+        .{ .local_settings = webtransport.defaultSettings(.{}) },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-server",
+            .peer_connection_id = "wt-client",
+        },
+    );
+    var admission = runtime.HandshakeAdmission{
+        .h3 = h3,
+        .limits = .{},
+        .deadline = .fromNow(
+            io,
+            .{ .raw = .fromMilliseconds(1), .clock = .awake },
+        ),
+    };
+    h3 = undefined;
+    defer admission.deinit();
+    try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+
+    try std.testing.expectError(
+        error.Timeout,
+        admission.pollSessionRequest(),
+    );
+}
+
 test "WebTransport handshake receive helpers honor timeouts" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

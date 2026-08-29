@@ -645,6 +645,44 @@ test "HTTP/3 handshake admission owns generated CID and Initial lifecycle" {
     );
 }
 
+test "HTTP/3 routed Initial timeout validates before consuming event" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "routed-deadline" } },
+    );
+    defer server.deinit();
+
+    const bytes = try allocator.dupe(u8, "owned-initial");
+    var event = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(4567) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer event.deinit(allocator);
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptFromInitialWithTimeout(&event, .zero),
+    );
+    try std.testing.expect(event == .new_initial);
+    try std.testing.expectEqualStrings(
+        "owned-initial",
+        event.new_initial.datagram.bytes,
+    );
+}
+
 test "HTTP/3 handshake supervisor exposes bounded idle receive" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
