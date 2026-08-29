@@ -515,6 +515,10 @@ All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock
 domains before sending Ping/Close or mutating incremental receive state. The
 HTTP/3 adapter applies the same validation before pumping QUIC.
+Cleartext server acceptance likewise exposes timeout and absolute-deadline
+forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
+stricter configured handshake limit. Already accepted HTTP/1 connections can
+be upgraded under the same caller-owned deadline.
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark
    now reports per-class p50/p99/p99.9 and retains matching checksum/sample

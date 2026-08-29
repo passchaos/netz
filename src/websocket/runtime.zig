@@ -197,6 +197,36 @@ pub const Server = struct {
         return self.acceptHttpConnection(http_conn, options);
     }
 
+    /// Accept TCP, then bound the complete HTTP Upgrade with one caller-owned
+    /// awake-clock deadline. The listener accept itself remains unbounded.
+    pub fn acceptWithDeadline(
+        self: *Server,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        const http_conn = try self.http.accept();
+        return self.acceptHttpConnectionWithDeadline(
+            http_conn,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const http_conn = try self.http.accept();
+        return self.acceptHttpConnectionWithDeadline(
+            http_conn,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Upgrade an already accepted HTTP/1 connection. This lets protocol
     /// adapters consume a trusted preface without duplicating WebSocket
     /// handshake validation.
@@ -204,6 +234,35 @@ pub const Server = struct {
         self: *Server,
         http_connection: http1_runtime.Connection,
         options: AcceptOptions,
+    ) Error!Connection {
+        return self.acceptHttpConnectionMaybeBefore(
+            http_connection,
+            options,
+            null,
+        );
+    }
+
+    /// Upgrade an accepted HTTP/1 connection before an absolute deadline. The
+    /// connection transfers at entry and is closed on every failure path.
+    pub fn acceptHttpConnectionWithDeadline(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        return self.acceptHttpConnectionMaybeBefore(
+            http_connection,
+            options,
+            deadline,
+        );
+    }
+
+    fn acceptHttpConnectionMaybeBefore(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         var http_conn = http_connection;
         errdefer http_conn.close();
@@ -220,6 +279,7 @@ pub const Server = struct {
             } },
             self.limits,
             options,
+            deadline,
         );
     }
 
@@ -316,6 +376,7 @@ pub const UnixServer = struct {
             } },
             limits,
             options,
+            null,
         );
         http_owned = false;
         return connection;
@@ -448,6 +509,7 @@ pub const TlsServer = struct {
             .{ .tls_server = tls_connection },
             self.limits,
             options,
+            null,
         );
     }
 
@@ -518,11 +580,15 @@ fn acceptTransport(
     transport: RuntimeTransport,
     limits: Limits,
     options: AcceptOptions,
+    outer_deadline: ?std.Io.Clock.Timestamp,
 ) Error!Connection {
-    const deadline = if (limits.http1_handshake_timeout) |timeout|
-        try handshakeDeadline(transport, timeout)
-    else
-        null;
+    const deadline = deadline_policy.earlier(
+        outer_deadline,
+        if (limits.http1_handshake_timeout) |timeout|
+            try handshakeDeadline(transport, timeout)
+        else
+            null,
+    );
     var head = try readHttpHeadFromTransport(
         allocator,
         transport,

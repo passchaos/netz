@@ -68,6 +68,51 @@ test "WebSocket server handshake timeout is absolute across trickled bytes" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "WebSocket server caller timeout bounds the HTTP upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http1_handshake_timeout = .fromSeconds(1) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.acceptWithTimeout(
+                .{},
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAll(
+        io,
+        client,
+        "GET / HTTP/1.1\r\nHost: localhost\r\n",
+    );
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "WebSocket client bounds an idle HTTP upgrade response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
