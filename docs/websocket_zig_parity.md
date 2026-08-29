@@ -284,6 +284,10 @@ Tests cover a zlib-generated dynamic-DEFLATE fixture, fragmented compressed
 text with interleaved PING, send/receive scratch reuse under failing allocators,
 actual wire shrink plus RSV1, expansion fallback without RSV1, output overflow,
 and H2 compressed caller storage in both directions.
+The authenticated HTTP/3 adapter now uses the same chunked-input Vort encoder
+and incremental UTF-8 validation. It retains only compressed output, preserves
+the caller's fragment count on the wire, and no longer allocates a joined
+plaintext message before sending RFC 9220 DATA.
 TCP and RFC 8441 receive APIs now also complete the RFC 6455 failure handshake:
 malformed frames send Close 1002, invalid message UTF-8 sends 1007, and frame,
 aggregate-message, or decompression limits send 1009 before returning the typed

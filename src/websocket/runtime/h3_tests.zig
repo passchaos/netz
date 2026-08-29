@@ -776,3 +776,57 @@ test "HTTP3 peer SETTINGS wait rejects an expired budget" {
         client.receivePeerSettingsWithTimeout(.zero),
     );
 }
+
+test "WebSocket HTTP3 fragmented compression has no plaintext join" {
+    const allocator = std.testing.allocator;
+    const payload = "h3-fragmented-payload-h3-fragmented-payload-" ** 64;
+    const fragments = [_][]const u8{
+        payload[0..777],
+        payload[777..1555],
+        payload[1555..],
+    };
+    const total = payload.len;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var scratch: @import("compression_scratch.zig").SendScratch = .{};
+    defer scratch.deinit(failing.allocator());
+
+    try scratch.prepare(failing.allocator(), total);
+    _ = try websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
+        &scratch.encoder.?,
+        &scratch.payload,
+        &fragments,
+        15,
+    );
+    failing.fail_index = failing.alloc_index;
+    try scratch.prepare(failing.allocator(), total);
+    const compressed = try websocket
+        .compressMessageFragmentsVortIntoWindowWithEncoder(
+        &scratch.encoder.?,
+        &scratch.payload,
+        &fragments,
+        15,
+    );
+    try std.testing.expect(compressed.len < total);
+    try std.testing.expect(!failing.has_induced_failure);
+
+    const valid_prefix = [_]u8{ 'v', 'a', 'l', 'i', 'd', ' ', 0xe2 };
+    const valid_middle = [_]u8{0x82};
+    const valid_suffix = [_]u8{ 0xac, ' ', 't', 'e', 'x', 't' };
+    const invalid_prefix = [_]u8{ 'i', 'n', 'v', 'a', 'l', 'i', 'd', ' ', 0xe2 };
+    const invalid_suffix = [_]u8{'('};
+    const split_utf8 = [_][]const u8{
+        &valid_prefix,
+        &valid_middle,
+        &valid_suffix,
+    };
+    const invalid_utf8 = [_][]const u8{ &invalid_prefix, &invalid_suffix };
+    try std.testing.expect(h3.testing.fragmentedTextIsValid(&split_utf8));
+    try std.testing.expect(!h3.testing.fragmentedTextIsValid(&invalid_utf8));
+    const first = h3.testing.compressedFragmentRangeForTest(10, 3, 0);
+    const second = h3.testing.compressedFragmentRangeForTest(10, 3, 1);
+    const third = h3.testing.compressedFragmentRangeForTest(10, 3, 2);
+    try std.testing.expectEqual(@as(usize, 0), first.start);
+    try std.testing.expectEqual(first.end, second.start);
+    try std.testing.expectEqual(second.end, third.start);
+    try std.testing.expectEqual(@as(usize, 10), third.end);
+}

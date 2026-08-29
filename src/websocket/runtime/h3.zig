@@ -189,10 +189,8 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.ConnectionClosed;
             }
             if (fragments.len == 0) return error.InvalidFrame;
-            var total: usize = 0;
+            const total = try fragmentedPayloadLen(fragments);
             for (fragments) |fragment| {
-                total = std.math.add(usize, total, fragment.len) catch
-                    return error.PayloadTooLarge;
                 if (fragment.len > self.limits.max_frame_bytes) {
                     return error.MessageTooLarge;
                 }
@@ -200,31 +198,25 @@ pub fn Connection(comptime role: common.Role) type {
             if (total > self.limits.max_message_bytes) {
                 return error.MessageTooLarge;
             }
-            var joined: std.ArrayList(u8) = .empty;
-            defer joined.deinit(self.allocator);
-            const needs_join = opcode == .text or
-                (self.permessage_deflate and
-                    total >= self.compression_threshold);
-            if (needs_join) {
-                try joined.ensureTotalCapacity(self.allocator, total);
-                for (fragments) |fragment| {
-                    joined.appendSliceAssumeCapacity(fragment);
-                }
-            }
-            if (opcode == .text and !std.unicode.utf8ValidateSlice(joined.items)) {
+            if (opcode == .text and !validateFragmentedText(fragments)) {
                 return error.InvalidUtf8;
             }
             if (self.permessage_deflate and
                 total >= self.compression_threshold)
             {
-                const compressed = try self.compressMessage(joined.items);
+                try self.compression_send.prepare(self.allocator, total);
+                const compressed = try websocket
+                    .compressMessageFragmentsVortIntoWindowWithEncoder(
+                    &self.compression_send.encoder.?,
+                    &self.compression_send.payload,
+                    fragments,
+                    self.compression_send_max_window_bits,
+                );
                 if (compressed.len < total) {
-                    try self.writeFrameExtended(
+                    try self.writeCompressedFragments(
                         opcode,
                         compressed,
-                        true,
-                        false,
-                        true,
+                        fragments.len,
                     );
                     return;
                 }
@@ -543,6 +535,28 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
                 self.compression_send_max_window_bits,
             );
+        }
+
+        fn writeCompressedFragments(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            frame_count: usize,
+        ) Error!void {
+            for (0..frame_count) |index| {
+                const range = compressedFragmentRange(
+                    payload.len,
+                    frame_count,
+                    index,
+                );
+                try self.writeFrameExtended(
+                    if (index == 0) opcode else .continuation,
+                    payload[range.start..range.end],
+                    index + 1 == frame_count,
+                    false,
+                    index == 0,
+                );
+            }
         }
 
         fn writeBytes(
@@ -1510,3 +1524,51 @@ fn optionalHeader(
     }
     return found;
 }
+
+fn fragmentedPayloadLen(fragments: []const []const u8) Error!usize {
+    var total: usize = 0;
+    for (fragments) |fragment| {
+        total = std.math.add(usize, total, fragment.len) catch
+            return error.PayloadTooLarge;
+    }
+    return total;
+}
+
+fn validateFragmentedText(fragments: []const []const u8) bool {
+    var validator: websocket.Utf8Validator = .{};
+    for (fragments) |fragment| validator.feed(fragment) catch return false;
+    validator.finish() catch return false;
+    return true;
+}
+
+const FragmentRange = struct { start: usize, end: usize };
+
+fn compressedFragmentRange(
+    total_len: usize,
+    frame_count: usize,
+    index: usize,
+) FragmentRange {
+    std.debug.assert(frame_count != 0);
+    std.debug.assert(index < frame_count);
+    const base = total_len / frame_count;
+    const extra = total_len % frame_count;
+    const start = index * base + @min(index, extra);
+    const len = base + @as(usize, if (index < extra) 1 else 0);
+    return .{ .start = start, .end = start + len };
+}
+
+pub const testing = struct {
+    pub const FragmentRangeForTest = FragmentRange;
+
+    pub fn fragmentedTextIsValid(value: []const []const u8) bool {
+        return validateFragmentedText(value);
+    }
+
+    pub fn compressedFragmentRangeForTest(
+        total_len: usize,
+        frame_count: usize,
+        index: usize,
+    ) FragmentRangeForTest {
+        return compressedFragmentRange(total_len, frame_count, index);
+    }
+};
