@@ -6460,6 +6460,29 @@ pub const HandshakeClient = struct {
         }, absolute);
     }
 
+    pub fn requestUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn requestUriAltSvc(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -6672,6 +6695,21 @@ pub const HandshakeClient = struct {
         }
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithDeadline(stream_id, deadline);
+    }
+
+    pub fn requestWithTimeout(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithDeadline(
+            request_options,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
     }
 
     /// Send a request and observe ordered 1xx heads before the final response.

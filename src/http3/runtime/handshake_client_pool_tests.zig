@@ -78,6 +78,29 @@ test "HTTP/3 direct and URI deadline APIs reject expired deadlines" {
     );
 }
 
+test "HTTP/3 request timeout rejects a non-positive budget" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const options: runtime.HandshakeClientOptions = .{ .handshake = .{
+        .original_destination_connection_id = "timeout-origin",
+        .local_connection_id = "timeout-client",
+    } };
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClient.requestUriWithTimeout(
+            allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            try std.Uri.parse("https://localhost/"),
+            .{},
+            .{},
+            options,
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/3 pool releases a timed-out URI handshake reservation" {
     const quic = @import("../../quic/mod.zig");
     const allocator = std.testing.allocator;
