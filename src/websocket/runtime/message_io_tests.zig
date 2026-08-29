@@ -203,12 +203,12 @@ test "WebSocket deadlines reject a non-awake clock before state changes" {
         error.Timeout,
         connection.continuePingWithTimeout("probe", .zero),
     );
-    try std.testing.expect(!connection.close_sent);
+    try std.testing.expect(!connection.close_sent.load(.acquire));
     try std.testing.expectError(
         error.Timeout,
         connection.closeWithDeadline(null, deadline),
     );
-    try std.testing.expect(!connection.close_sent);
+    try std.testing.expect(!connection.close_sent.load(.acquire));
     try std.testing.expectError(
         error.Timeout,
         connection.continueCloseWithTimeout(.zero),
@@ -1376,7 +1376,7 @@ test "WebSocket HTTP2 caller-buffer receive needs no message scratch" {
         .role = .client,
         // Suppress automatic Pong because this buffer-only test has no live
         // tunnel. The receive state machine must still skip the control frame.
-        .close_sent = true,
+        .close_sent = .init(true),
         .limits = .{
             .max_frame_bytes = 32,
             .max_message_bytes = 32,

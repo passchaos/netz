@@ -2300,8 +2300,10 @@ pub const Connection = struct {
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     send_mutex: std.Io.Mutex = .init,
-    close_sent: bool = false,
-    close_received: bool = false,
+    /// Read progress and application writers may observe close state on
+    /// different threads, while the send mutex orders complete wire writes.
+    close_sent: std.atomic.Value(bool) = .init(false),
+    close_received: std.atomic.Value(bool) = .init(false),
     incoming_data_kind: IncomingDataKind = .none,
     incoming_text_utf8: websocket.Utf8Validator = .{},
     incoming_frame_validated: usize = 0,
@@ -2448,7 +2450,7 @@ pub const Connection = struct {
         first: []const u8,
         second: []const u8,
     ) Error!void {
-        if (!canSendOpcode(.binary, self.close_sent, self.close_received)) {
+        if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
         const payload_len = std.math.add(
@@ -2463,6 +2465,7 @@ pub const Connection = struct {
         }
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
+        if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
 
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
@@ -2528,12 +2531,13 @@ pub const Connection = struct {
         if (self.role != .client or self.permessage_deflate) {
             return error.InvalidFrame;
         }
-        if (!canSendOpcode(.binary, self.close_sent, self.close_received)) {
+        if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
         try validateOutgoingMessagePayload(.binary, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
+        if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
 
         var mask_key: [4]u8 = undefined;
         try std.Io.randomSecure(self.io, &mask_key);
@@ -2578,7 +2582,13 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        try self.sendPing(payload);
+        try validateOutgoingFramePayload(.ping, payload);
+        {
+            self.send_mutex.lockUncancelable(self.io);
+            defer self.send_mutex.unlock(self.io);
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            try self.sendFrameValidatedLocked(.ping, payload);
+        }
         return self.readPingEvent(payload, deadline);
     }
 
@@ -2746,7 +2756,19 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!CloseHandshakeEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        if (!self.close_sent) try self.sendCloseFrame(close_frame);
+        {
+            self.send_mutex.lockUncancelable(self.io);
+            defer self.send_mutex.unlock(self.io);
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            if (!self.closeSent()) {
+                var storage: [125]u8 = undefined;
+                const payload = try websocket.writeClosePayloadInto(
+                    &storage,
+                    close_frame,
+                );
+                try self.sendFrameValidatedLocked(.close, payload);
+            }
+        }
         return self.readCloseHandshakeEvent(deadline);
     }
 
@@ -2757,7 +2779,10 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!CloseHandshakeEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        if (!self.close_sent) return error.InvalidFrame;
+        self.send_mutex.lockUncancelable(self.io);
+        const close_started = self.closeSent();
+        self.send_mutex.unlock(self.io);
+        if (!close_started) return error.InvalidFrame;
         return self.readCloseHandshakeEvent(deadline);
     }
 
@@ -2804,20 +2829,34 @@ pub const Connection = struct {
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         try validateOutgoingFramePayload(opcode, payload);
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
+        try self.sendFrameValidatedLocked(opcode, payload);
+    }
+
+    fn sendFrameValidatedLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) Error!void {
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
         try self.writeFrameLocked(opcode, payload, true);
-        if (opcode == .close) self.close_sent = true;
+        if (opcode == .close) self.close_sent.store(true, .release);
     }
 
     pub fn sendMessage(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
-        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
         try validateOutgoingMessagePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
 
         if (self.permessage_deflate and
             payload.len >= self.compression_threshold)
@@ -2837,13 +2876,16 @@ pub const Connection = struct {
     }
 
     pub fn sendFragmented(self: *Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
-        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
 
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.io);
             defer self.send_mutex.unlock(self.io);
+            if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
             const plain_len = try fragmentedPayloadLen(fragments);
             if (opcode == .text and !fragmentedTextIsValid(fragments)) {
                 return error.InvalidUtf8;
@@ -2885,6 +2927,7 @@ pub const Connection = struct {
 
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
 
         for (fragments, 0..) |fragment, index| {
             const frame_opcode: websocket.Opcode =
@@ -2909,7 +2952,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
         errdefer |err| closeAfterReceiveError(self, err);
-        if (self.close_sent and self.close_received) return error.ConnectionClosed;
+        if (self.closeSent() and self.closeReceived()) return error.ConnectionClosed;
         try self.ensureBufferedWithDeadline(2, deadline);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
@@ -2931,8 +2974,8 @@ pub const Connection = struct {
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
-        if (self.close_received and frame.header.opcode != .close) return error.ConnectionClosed;
-        if (frame.header.opcode == .close) self.close_received = true;
+        if (self.closeReceived() and frame.header.opcode != .close) return error.ConnectionClosed;
+        if (frame.header.opcode == .close) self.close_received.store(true, .release);
         return frame;
     }
 
@@ -2982,12 +3025,11 @@ pub const Connection = struct {
                     // the peer may still deliver in-flight control frames, but
                     // replying with a fresh Pong would write after our close
                     // handshake started.
-                    if (!self.close_sent) try self.sendPong(frame.payload);
+                    try self.replyPong(frame.payload);
                     return frame;
                 },
                 .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) try self.sendFrame(.close, frame.payload);
+                    try self.echoCloseFrame(frame.payload);
                     return frame;
                 },
                 else => return frame,
@@ -3364,6 +3406,41 @@ pub const Connection = struct {
         @memmove(self.inbuf.items[0..remaining.len], remaining);
         self.inbuf.shrinkRetainingCapacity(remaining.len);
     }
+
+    /// Call only while holding `send_mutex`. Every writer repeats its close
+    /// check here so one queued behind an earlier Close cannot append a frame.
+    fn canSendOpcodeLocked(
+        self: *const Connection,
+        opcode: websocket.Opcode,
+    ) bool {
+        return canSendOpcode(opcode, self.closeSent(), self.closeReceived());
+    }
+
+    fn closeSent(self: *const Connection) bool {
+        return self.close_sent.load(.acquire);
+    }
+
+    fn closeReceived(self: *const Connection) bool {
+        return self.close_received.load(.acquire);
+    }
+
+    fn replyPong(self: *Connection, payload: []const u8) Error!void {
+        if (!canSendOpcode(.pong, self.closeSent(), self.closeReceived())) return;
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        if (!self.canSendOpcodeLocked(.pong)) return;
+        try self.writeFrameLocked(.pong, payload, true);
+    }
+
+    fn echoCloseFrame(self: *Connection, payload: []const u8) Error!void {
+        if (self.closeSent()) return;
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        self.close_received.store(true, .release);
+        if (self.closeSent()) return;
+        try self.writeFrameLocked(.close, payload, true);
+        self.close_sent.store(true, .release);
+    }
 };
 
 pub const H2Connection = struct {
@@ -3373,8 +3450,9 @@ pub const H2Connection = struct {
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     send_mutex: std.Io.Mutex = .init,
-    close_sent: bool = false,
-    close_received: bool = false,
+    /// RFC 8441 keeps the same split receive/write ownership as HTTP/1.
+    close_sent: std.atomic.Value(bool) = .init(false),
+    close_received: std.atomic.Value(bool) = .init(false),
     incoming_data_kind: IncomingDataKind = .none,
     incoming_text_utf8: websocket.Utf8Validator = .{},
     incoming_frame_validated: usize = 0,
@@ -3491,7 +3569,7 @@ pub const H2Connection = struct {
         first: []const u8,
         second: []const u8,
     ) Error!void {
-        if (!canSendOpcode(.binary, self.close_sent, self.close_received)) {
+        if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
         const payload_len = std.math.add(
@@ -3506,6 +3584,7 @@ pub const H2Connection = struct {
         }
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
+        if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
 
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
@@ -3585,7 +3664,16 @@ pub const H2Connection = struct {
             self.tunnel.connection.io,
             deadline,
         );
-        try self.sendPing(payload);
+        try validateOutgoingFramePayload(.ping, payload);
+        {
+            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            _ = try deadline_policy.usableAwake(
+                self.tunnel.connection.io,
+                deadline,
+            );
+            try self.sendFrameValidatedLocked(.ping, payload);
+        }
         return self.readPingEvent(payload, deadline);
     }
 
@@ -3756,7 +3844,22 @@ pub const H2Connection = struct {
             self.tunnel.connection.io,
             deadline,
         );
-        if (!self.close_sent) try self.sendCloseFrame(close_frame);
+        {
+            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            _ = try deadline_policy.usableAwake(
+                self.tunnel.connection.io,
+                deadline,
+            );
+            if (!self.closeSent()) {
+                var storage: [125]u8 = undefined;
+                const payload = try websocket.writeClosePayloadInto(
+                    &storage,
+                    close_frame,
+                );
+                try self.sendFrameValidatedLocked(.close, payload);
+            }
+        }
         return self.readCloseHandshakeEvent(deadline);
     }
 
@@ -3769,7 +3872,10 @@ pub const H2Connection = struct {
             self.tunnel.connection.io,
             deadline,
         );
-        if (!self.close_sent) return error.InvalidFrame;
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        const close_started = self.closeSent();
+        self.send_mutex.unlock(self.tunnel.connection.io);
+        if (!close_started) return error.InvalidFrame;
         return self.readCloseHandshakeEvent(deadline);
     }
 
@@ -3814,20 +3920,34 @@ pub const H2Connection = struct {
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         try validateOutgoingFramePayload(opcode, payload);
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
+        try self.sendFrameValidatedLocked(opcode, payload);
+    }
+
+    fn sendFrameValidatedLocked(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) Error!void {
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
         try self.writeFrameLocked(opcode, payload, true);
-        if (opcode == .close) self.close_sent = true;
+        if (opcode == .close) self.close_sent.store(true, .release);
     }
 
     pub fn sendMessage(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
-        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
         try validateOutgoingMessagePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
 
         if (self.permessage_deflate and
             payload.len >= self.compression_threshold)
@@ -3847,13 +3967,16 @@ pub const H2Connection = struct {
     }
 
     pub fn sendFragmented(self: *H2Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
-        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
 
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.tunnel.connection.io);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
+            if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
             const plain_len = try fragmentedPayloadLen(fragments);
             if (opcode == .text and !fragmentedTextIsValid(fragments)) {
                 return error.InvalidUtf8;
@@ -3889,6 +4012,7 @@ pub const H2Connection = struct {
 
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
 
         try self.writeUncompressedFragmentsLocked(opcode, fragments);
     }
@@ -3905,7 +4029,7 @@ pub const H2Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!websocket.Frame {
         errdefer |err| closeAfterReceiveError(self, err);
-        if (self.close_sent and self.close_received) return error.ConnectionClosed;
+        if (self.closeSent() and self.closeReceived()) return error.ConnectionClosed;
         try self.ensureBufferedWithDeadline(2, deadline);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
@@ -3927,8 +4051,8 @@ pub const H2Connection = struct {
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
-        if (self.close_received and frame.header.opcode != .close) return error.ConnectionClosed;
-        if (frame.header.opcode == .close) self.close_received = true;
+        if (self.closeReceived() and frame.header.opcode != .close) return error.ConnectionClosed;
+        if (frame.header.opcode == .close) self.close_received.store(true, .release);
         return frame;
     }
 
@@ -3976,12 +4100,11 @@ pub const H2Connection = struct {
             errdefer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
-                    if (!self.close_sent) try self.sendPong(frame.payload);
+                    try self.replyPong(frame.payload);
                     return frame;
                 },
                 .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) try self.sendFrame(.close, frame.payload);
+                    try self.echoCloseFrame(frame.payload);
                     return frame;
                 },
                 else => return frame,
@@ -4492,6 +4615,41 @@ pub const H2Connection = struct {
         @memmove(self.inbuf.items[0..remaining.len], remaining);
         self.inbuf.shrinkRetainingCapacity(remaining.len);
     }
+
+    /// Same post-lock invariant as the TCP/TLS adapter: no RFC 8441 DATA may
+    /// be queued after an earlier writer has committed the Close frame.
+    fn canSendOpcodeLocked(
+        self: *const H2Connection,
+        opcode: websocket.Opcode,
+    ) bool {
+        return canSendOpcode(opcode, self.closeSent(), self.closeReceived());
+    }
+
+    fn closeSent(self: *const H2Connection) bool {
+        return self.close_sent.load(.acquire);
+    }
+
+    fn closeReceived(self: *const H2Connection) bool {
+        return self.close_received.load(.acquire);
+    }
+
+    fn replyPong(self: *H2Connection, payload: []const u8) Error!void {
+        if (!canSendOpcode(.pong, self.closeSent(), self.closeReceived())) return;
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        if (!self.canSendOpcodeLocked(.pong)) return;
+        try self.writeFrameLocked(.pong, payload, true);
+    }
+
+    fn echoCloseFrame(self: *H2Connection, payload: []const u8) Error!void {
+        if (self.closeSent()) return;
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        self.close_received.store(true, .release);
+        if (self.closeSent()) return;
+        try self.writeFrameLocked(.close, payload, true);
+        self.close_sent.store(true, .release);
+    }
 };
 
 pub const H2Client = struct {
@@ -4798,17 +4956,12 @@ fn receiveMessageIntoConnection(
         );
         switch (frame.header.opcode) {
             .ping => {
-                if (!connection.close_sent) {
-                    try connection.sendPong(frame.payload);
-                }
+                try connection.replyPong(frame.payload);
                 continue;
             },
             .pong => continue,
             .close => {
-                connection.close_received = true;
-                if (!connection.close_sent) {
-                    try connection.sendFrame(.close, frame.payload);
-                }
+                try connection.echoCloseFrame(frame.payload);
                 return error.ConnectionClosed;
             },
             .text, .binary => {
@@ -4888,7 +5041,7 @@ fn receiveFrameIntoConnection(
     control_out: *[125]u8,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!websocket.BorrowedFrame {
-    if (connection.close_sent and connection.close_received) {
+    if (connection.closeSent() and connection.closeReceived()) {
         return error.ConnectionClosed;
     }
     try connection.ensureBufferedWithDeadline(2, deadline);
@@ -4940,7 +5093,7 @@ fn receiveFrameIntoConnection(
         parse_options,
     );
     connection.discardBuffered(frame.consumed);
-    if (connection.close_received and frame.header.opcode != .close) {
+    if (connection.closeReceived() and frame.header.opcode != .close) {
         return error.ConnectionClosed;
     }
     return frame;
@@ -4950,7 +5103,7 @@ fn closeAfterReceiveError(connection: anytype, err: anyerror) void {
     const code = common.closeCodeForReceiveError(err) orelse return;
     // Nested receive helpers may observe the same failure. Only the first
     // layer sends a Close frame; later errdefers preserve the original error.
-    if (connection.close_sent) return;
+    if (connection.closeSent()) return;
     connection.sendClose(code, "") catch {};
 }
 
@@ -5851,7 +6004,7 @@ test "WebSocket runtime client and server exchange over TCP" {
             var close = try connection.receiveFrame();
             defer close.deinit(server_ptr.http.allocator);
             try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
-            try std.testing.expect(connection.close_received);
+            try std.testing.expect(connection.close_received.load(.acquire));
         }
     };
 
@@ -6506,8 +6659,8 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
             // handshake inside DATA frames and maps the final Close write to
             // END_STREAM on the underlying HTTP/2 tunnel.
             try std.testing.expectError(error.ConnectionClosed, ws.receiveMessage());
-            try std.testing.expect(ws.close_received);
-            try std.testing.expect(ws.close_sent);
+            try std.testing.expect(ws.close_received.load(.acquire));
+            try std.testing.expect(ws.close_sent.load(.acquire));
         }
     };
 
@@ -6552,7 +6705,7 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
 
     try ws_client.sendClose(.normal_closure, "bye");
     try std.testing.expectError(error.ConnectionClosed, ws_client.receiveMessage());
-    try std.testing.expect(ws_client.close_received);
+    try std.testing.expect(ws_client.close_received.load(.acquire));
 
     thread.join();
     if (shared.err) |err| return err;
@@ -7912,7 +8065,7 @@ test "WebSocket receiveFrameAuto does not pong after sending close" {
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
-        .close_sent = true,
+        .close_sent = .init(true),
     };
     defer connection.inbuf.deinit(allocator);
     try connection.inbuf.appendSlice(allocator, "\x89\x01?");
@@ -7925,7 +8078,7 @@ test "WebSocket receiveFrameAuto does not pong after sending close" {
         .allocator = allocator,
         .tunnel = undefined,
         .role = .client,
-        .close_sent = true,
+        .close_sent = .init(true),
     };
     defer h2.inbuf.deinit(allocator);
     try h2.inbuf.appendSlice(allocator, "\x89\x01?");
@@ -8028,8 +8181,8 @@ test "WebSocket receiveMessage assembles fragments and handles control frames" {
             try std.testing.expectEqualStrings("hello fragmented", message.payload);
 
             try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
-            try std.testing.expect(connection.close_received);
-            try std.testing.expect(connection.close_sent);
+            try std.testing.expect(connection.close_received.load(.acquire));
+            try std.testing.expect(connection.close_sent.load(.acquire));
         }
     };
 
@@ -8091,7 +8244,7 @@ test "WebSocket receiveMessage enforces aggregate fragmented message limit" {
             defer connection.close();
 
             try std.testing.expectError(error.PayloadTooLarge, connection.receiveMessage());
-            try std.testing.expect(connection.close_sent);
+            try std.testing.expect(connection.close_sent.load(.acquire));
         }
     };
 
@@ -8160,8 +8313,8 @@ test "WebSocket receiveMessage allows in-flight data after initiating close" {
             try std.testing.expectEqualStrings("already in flight", message.payload);
 
             try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
-            try std.testing.expect(connection.close_sent);
-            try std.testing.expect(connection.close_received);
+            try std.testing.expect(connection.close_sent.load(.acquire));
+            try std.testing.expect(connection.close_received.load(.acquire));
         }
     };
 
@@ -8288,7 +8441,7 @@ test "WebSocket runtimes reject duplicate close sends" {
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
-        .close_sent = true,
+        .close_sent = .init(true),
     };
     try std.testing.expectError(error.ConnectionClosed, connection.sendFrame(.close, &.{}));
     try std.testing.expectError(error.ConnectionClosed, connection.sendClose(.normal_closure, "again"));
@@ -8297,10 +8450,33 @@ test "WebSocket runtimes reject duplicate close sends" {
         .allocator = allocator,
         .tunnel = undefined,
         .role = .client,
-        .close_sent = true,
+        .close_sent = .init(true),
     };
     try std.testing.expectError(error.ConnectionClosed, h2.sendFrame(.close, &.{}));
     try std.testing.expectError(error.ConnectionClosed, h2.sendClose(.normal_closure, "again"));
+}
+
+test "WebSocket writers retain close-state guards inside send lock" {
+    // Public writers perform cheap argument/state validation before blocking,
+    // then use this post-lock guard to close the race with an earlier writer
+    // that committed Close while they waited. Exercise both stream adapters
+    // without constructing an unrelated transport.
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .close_sent = .init(true),
+    };
+    try std.testing.expect(!connection.canSendOpcodeLocked(.text));
+
+    var h2 = H2Connection{
+        .allocator = std.testing.allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .close_sent = .init(true),
+    };
+    try std.testing.expect(!h2.canSendOpcodeLocked(.text));
 }
 
 test "WebSocket send state blocks data after receiving close" {
@@ -8347,8 +8523,8 @@ test "WebSocket runtimes return closed after close handshake completes" {
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
-        .close_sent = true,
-        .close_received = true,
+        .close_sent = .init(true),
+        .close_received = .init(true),
     };
     try std.testing.expectError(error.ConnectionClosed, connection.receiveFrame());
     try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
@@ -8357,8 +8533,8 @@ test "WebSocket runtimes return closed after close handshake completes" {
         .allocator = allocator,
         .tunnel = undefined,
         .role = .client,
-        .close_sent = true,
-        .close_received = true,
+        .close_sent = .init(true),
+        .close_received = .init(true),
     };
     try std.testing.expectError(error.ConnectionClosed, h2.receiveFrame());
     try std.testing.expectError(error.ConnectionClosed, h2.receiveMessage());

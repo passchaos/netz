@@ -55,8 +55,8 @@ test "WebSocket close handshake times out on a silent peer" {
             .fromMilliseconds(75),
         ),
     );
-    try std.testing.expect(client.close_sent);
-    try std.testing.expect(!client.close_received);
+    try std.testing.expect(client.close_sent.load(.acquire));
+    try std.testing.expect(!client.close_received.load(.acquire));
 
     thread.join();
     if (shared.err) |err| return err;
@@ -73,7 +73,7 @@ test "WebSocket close handshake validates timeout before writing" {
         error.Timeout,
         connection.closeWithTimeout(null, .zero),
     );
-    try std.testing.expect(!connection.close_sent);
+    try std.testing.expect(!connection.close_sent.load(.acquire));
 
     var h2 = runtime.H2Connection{
         .allocator = std.testing.allocator,
@@ -84,7 +84,7 @@ test "WebSocket close handshake validates timeout before writing" {
         error.Timeout,
         h2.closeWithTimeout(null, .zero),
     );
-    try std.testing.expect(!h2.close_sent);
+    try std.testing.expect(!h2.close_sent.load(.acquire));
 }
 
 test "WebSocket close handshake is absolute across control frames" {

@@ -16,7 +16,7 @@ superiority.
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for both HTTP/1 Upgrade and RFC 8441. Partial Close frames remain resumable after timeout | Handler callbacks and automatic default control replies |
-| Concurrent sends | Serialized by per-connection `std.Io.Mutex` and covered by a runtime test | Documented thread-safe connection writes |
+| Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and runtime tests cover concurrent data sends plus the post-lock Close guard | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | Linux io_uring experiment | Cleartext client helper | Custom epoll/kqueue/Windows server backends |
 
@@ -564,6 +564,10 @@ reference API while keeping the safe `[]const u8` alternatives.
 All H3 message, fragmentation, control, Close, and key-update send entry points
 serialize complete write sequences. This protects compression scratch and stops
 concurrent callers from interleaving one RFC 6455 frame across HTTP/3 DATA.
+HTTP/1, RFC 8441, and HTTP/3 writers also validate connection Close state after
+acquiring their send mutex, so a sender queued behind Close cannot append a
+data or control frame after the closing handshake has begun. Ping and Close
+deadline APIs revalidate their absolute budget after lock contention.
 HTTP/3 receive paths now use the same RFC 6455 failure mapping as HTTP/1 and
 RFC 8441, sending 1002 for malformed framing, 1007 for invalid text, and 1009
 for configured frame/message limits while preserving the original local error.
