@@ -210,6 +210,22 @@ test "HTTP/3 handshake server request deadlines preserve progress" {
 
             try std.testing.expectError(
                 error.Timeout,
+                session.receiveRequestWithDeadline(
+                    .fromNow(
+                        self.io,
+                        .{ .raw = .fromSeconds(1), .clock = .real },
+                    ),
+                ),
+            );
+            // Clock-domain validation happens before the receive pump, so an
+            // invalid caller timestamp cannot consume a pending QUIC packet.
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                session.request_streams.entries.items.len,
+            );
+
+            try std.testing.expectError(
+                error.Timeout,
                 session.receiveRequestWithTimeout(.fromMilliseconds(30)),
             );
             // The request head arrived before the caller deadline, but the FIN
@@ -340,6 +356,16 @@ test "HTTP/3 handshake server request deadlines preserve progress" {
         .path = "/aggregate-deadline",
         .authority = "localhost",
     }, aggregate_body.len);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveResponseWithDeadline(
+            aggregate_id,
+            .fromNow(
+                io,
+                .{ .raw = .fromSeconds(1), .clock = .real },
+            ),
+        ),
+    );
     try shared.aggregate_timed_out.wait(io);
     try client.sendRequestBody(aggregate_id, aggregate_body, true);
     var aggregate_response = try client.receiveResponse(aggregate_id);

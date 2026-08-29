@@ -1,5 +1,6 @@
 const std = @import("std");
 const round_robin = @import("../internal/round_robin.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
@@ -4603,6 +4604,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeRequest {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveRequestInternal(deadline);
     }
 
@@ -4742,6 +4744,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveRequestEventInternal(deadline);
     }
 
@@ -4915,6 +4918,7 @@ pub const HandshakeServerSession = struct {
         detached_stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try self.receive_packets.visitWithDeadline(
             &self.established.connection,
             deadline,
@@ -6688,11 +6692,7 @@ pub const HandshakeClient = struct {
         request_options: http3.Request,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
-        if (deadline.clock != .awake or
-            deadline.durationFromNow(self.connectionIo()).raw.nanoseconds <= 0)
-        {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithDeadline(stream_id, deadline);
     }
@@ -7074,6 +7074,7 @@ pub const HandshakeClient = struct {
         informational: ?http3.InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveResponseWithInformationalInternal(
             stream_id,
             informational,
@@ -7198,6 +7199,7 @@ pub const HandshakeClient = struct {
         informational: ?MultiplexedInformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveNextResponseWithInformationalInternal(
             informational,
             deadline,
@@ -7328,6 +7330,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!http3.Settings {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receivePeerSettingsInternal(deadline);
     }
 
@@ -7429,6 +7432,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?StreamingEvent {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveResponseEventInternal(stream_id, deadline);
     }
 
@@ -7577,6 +7581,7 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -7753,6 +7758,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(null, deadline);
     }
@@ -7867,6 +7873,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receivePushWithInformationalAttempt(null, deadline);
     }
 
@@ -7889,6 +7896,7 @@ pub const HandshakeClient = struct {
         informational: ?PushInformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receivePushWithInformationalAttempt(
             informational,
             deadline,
@@ -8100,6 +8108,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }

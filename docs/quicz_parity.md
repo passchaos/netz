@@ -415,6 +415,10 @@ packet and drain ready HTTP/3 events without any session attempting another UDP
 read. A two-client preconfigured-key test routes interleaved SETTINGS and
 request packets through one dispatcher/socket into two independent HTTP/3
 sessions, validating each path and each QPACK/control state independently.
+All authenticated HTTP/3 request, response, push, streaming-event and detached
+progress deadline entry points validate the awake-clock domain before pumping
+QUIC state. A wrong-clock timestamp therefore fails without consuming a packet
+or mutating a resumable request/response lifecycle.
 The integrated QUIC server handshake can now consume the first client Initial
 already owned by that dispatcher, and HTTP/3/WebTransport expose corresponding
 `acceptFromInitial` entry points. This removes a second socket read at admission
