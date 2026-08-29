@@ -128,7 +128,9 @@ test verifies the WebTransport adapter reaches that deadline instead of
 waiting for the lower-level multi-PTO default. `connectUriWithDeadline` also
 accepts an existing absolute awake-clock budget from an application workflow
 and preserves it through the final Extended CONNECT response rather than
-ending the budget after QUIC/TLS establishment.
+ending the budget after QUIC/TLS establishment. Direct-address handshake
+clients expose the same complete-session deadline, and explicit deadline APIs
+retain a shorter configured HTTP/3 connect timeout when present.
 
 ## Important interoperability correction
 

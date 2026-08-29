@@ -87,6 +87,34 @@ test "WebTransport URI connect exposes an absolute handshake deadline" {
     );
 }
 
+test "WebTransport direct connect composes caller and phase deadlines" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const options: runtime.HandshakeConnectOptions = .{
+        .authority = "localhost",
+        .h3 = .{
+            .connect_timeout = .zero,
+            .handshake = .{
+                .original_destination_connection_id = "wt-direct-origin",
+                .local_connection_id = "wt-direct-client",
+            },
+        },
+    };
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClientSession.connectWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(443) },
+            options,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
 test "WebTransport URI deadline includes Extended CONNECT response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

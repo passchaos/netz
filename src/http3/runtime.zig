@@ -1,5 +1,6 @@
 const std = @import("std");
 const round_robin = @import("../internal/round_robin.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
@@ -353,6 +354,15 @@ fn usableConnectDeadline(
         return error.HandshakeTimeout;
     }
     return deadline;
+}
+
+fn cappedConnectDeadline(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+    timeout: ?std.Io.Duration,
+) Error!std.Io.Clock.Timestamp {
+    return deadline_policy.capTimeout(io, deadline, timeout) catch
+        return error.HandshakeTimeout;
 }
 
 fn resolveEndpointBefore(
@@ -5910,7 +5920,11 @@ pub const HandshakeClient = struct {
             server,
             limits,
             options,
-            try usableConnectDeadline(io, deadline),
+            try cappedConnectDeadline(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
         );
     }
 
@@ -5987,7 +6001,11 @@ pub const HandshakeClient = struct {
             source,
             server,
             options,
-            try usableConnectDeadline(endpoint.io, deadline),
+            try cappedConnectDeadline(
+                endpoint.io,
+                deadline,
+                options.connect_timeout,
+            ),
         );
     }
 
@@ -6289,7 +6307,11 @@ pub const HandshakeClient = struct {
             uri,
             limits,
             options,
-            try usableConnectDeadline(io, deadline),
+            try cappedConnectDeadline(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
         );
     }
 
@@ -6391,7 +6413,11 @@ pub const HandshakeClient = struct {
         options: HandshakeClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
-        const absolute = try usableConnectDeadline(io, deadline);
+        const absolute = try cappedConnectDeadline(
+            io,
+            deadline,
+            options.connect_timeout,
+        );
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
         const path = try uriRequestTargetAlloc(allocator, uri);

@@ -2726,6 +2726,26 @@ pub const HandshakeClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClientSession {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
     /// Establish authenticated QUIC and preserve a non-success Extended
     /// CONNECT response for application inspection.
     pub fn connectAttempt(
@@ -2746,6 +2766,39 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             null,
+        );
+    }
+
+    /// Complete QUIC/TLS and the WebTransport Extended CONNECT under one
+    /// caller-owned deadline. HTTP/3's configured connect timeout may shorten
+    /// the outer budget but never resets it between these phases.
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeConnectAttempt {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        var h3_client = try http3.runtime.HandshakeClient.connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options.limits.http3,
+            webTransportHandshakeClientOptions(options.h3),
+            deadline,
+        );
+        errdefer h3_client.deinit();
+        return connectStatefulAttempt(
+            &h3_client,
+            options.authority,
+            options.path,
+            options.origin,
+            options.headers,
+            options.limits,
+            deadline,
         );
     }
 
