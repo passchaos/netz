@@ -654,6 +654,9 @@ absolute-deadline forms: one caller budget spans TCP when applicable, the
 HTTP/1.1 101 response, HTTP/2 SETTINGS bootstrap, and the complete stream-1
 response without renewal, while stricter connect and handshake limits remain
 in force.
+All public HTTP/1 and HTTP/2 request/response and pool deadline entry points
+reject timestamps outside the awake-clock domain before parsing, writing, or
+reserving pool capacity, matching the constructor deadline contract.
 Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled

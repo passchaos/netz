@@ -459,6 +459,29 @@ test "HTTP/2 URI timeout rejects a non-positive budget" {
     );
 }
 
+test "HTTP/2 response deadline rejects a non-awake clock before writing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var connection = runtime.Connection{
+        .io = threaded.io(),
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestWithDeadline(
+            .{ .path = "/wrong-clock", .authority = "localhost" },
+            std.Io.Clock.Timestamp.fromNow(
+                threaded.io(),
+                .{ .raw = .fromSeconds(1), .clock = .real },
+            ),
+        ),
+    );
+    try std.testing.expect(connection.isReusable());
+}
+
 test "HTTP/2 aggregate response deadline covers header continuations" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

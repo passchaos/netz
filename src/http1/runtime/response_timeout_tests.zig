@@ -251,6 +251,32 @@ test "HTTP/1 URI timeout rejects a non-positive budget" {
     );
 }
 
+test "HTTP/1 response deadline rejects a non-awake clock before writing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var client = runtime.Client{
+        .io = threaded.io(),
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+    };
+    defer {
+        client.inbuf.deinit(std.testing.allocator);
+        client.write_scratch.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithDeadline(
+            .{ .host = "localhost" },
+            std.Io.Clock.Timestamp.fromNow(
+                threaded.io(),
+                .{ .raw = .fromSeconds(1), .clock = .real },
+            ),
+        ),
+    );
+    try std.testing.expect(client.isReusable());
+}
+
 test "HTTP/1 complete response deadline bounds chunk framing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

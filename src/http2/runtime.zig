@@ -2986,9 +2986,7 @@ pub const Connection = struct {
         options: RequestOptions,
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
-        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseUntil(
             pending.stream_id,
@@ -3024,9 +3022,7 @@ pub const Connection = struct {
         extended_connect: bool,
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
-        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readResponseUntil(
             stream_id,
             request_method,
@@ -3097,9 +3093,7 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreamingWithHeadUntil(
             pending,
@@ -3140,9 +3134,7 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readResponseStreamingWithHeadUntil(
             .{
                 .stream_id = stream_id,
@@ -4892,6 +4884,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!http2.PriorityUpdatePayload {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readPriorityUpdateUntil(deadline);
     }
 
@@ -7161,6 +7154,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error![8]u8 {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readPingUntil(deadline);
     }
 
@@ -7267,6 +7261,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedGoAway {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readGoAwayUntil(deadline);
     }
 
@@ -7339,6 +7334,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResetStream {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readResetStreamUntil(deadline);
     }
 
@@ -7912,6 +7908,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedWindowUpdate {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readWindowUpdateUntil(deadline);
     }
 
@@ -10143,9 +10140,7 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
-        if (deadline.durationFromNow(self.connection.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return self.readResponseUntil(null, deadline);
     }
 
@@ -10218,9 +10213,7 @@ pub const RequestWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        if (deadline.durationFromNow(self.connection.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
         }
@@ -10608,6 +10601,7 @@ pub const Tunnel = struct {
         self: *Tunnel,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedTunnelData {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return self.readWithDeadlineInternal(deadline);
     }
 

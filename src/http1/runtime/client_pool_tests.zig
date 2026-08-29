@@ -951,6 +951,28 @@ test "HTTP/1 pool request timeout rejects a non-positive budget" {
     );
 }
 
+test "HTTP/1 pool deadline rejects a non-awake clock before URI parsing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.Pool.init(std.testing.allocator, io, .{});
+    defer pool.deinit();
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .real },
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithDeadline("not a URI", deadline),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        pool.requestUriWithDeadline("not a URI", .{}, deadline),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "HTTP/1 client pool close wakes blocked acquisition" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

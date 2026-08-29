@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const fifo_admission = @import("../internal/fifo_admission.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const runtime = @import("runtime.zig");
 
@@ -124,6 +125,7 @@ pub const Pool = struct {
         uri_text: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) AcquireTimeoutError!Lease {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.acquireUriUntil(uri_text, deadline);
     }
 
@@ -230,6 +232,7 @@ pub const Pool = struct {
         request_options: runtime.RequestOptions,
         deadline: std.Io.Clock.Timestamp,
     ) AcquireTimeoutError!runtime.OwnedResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         const transport = try transportForScheme(uri.scheme);
         var endpoint = try http1_runtime.uriEndpoint(

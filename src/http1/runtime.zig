@@ -702,6 +702,7 @@ pub const TlsClientConnection = struct {
         buffer: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!usize {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.timed_read_deadline == null);
         self.timed_read_deadline = deadline;
         defer self.timed_read_deadline = null;
@@ -2715,9 +2716,7 @@ pub const Client = struct {
         request_options: RequestOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
-        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.response_deadline == null);
         self.response_deadline = deadline;
         defer self.response_deadline = null;
@@ -2806,9 +2805,7 @@ pub const Client = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.response_deadline == null);
         self.response_deadline = deadline;
         defer self.response_deadline = null;
@@ -3683,6 +3680,7 @@ pub const Connection = struct {
         options: http1.ParseOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         try self.writer_state.ensureReadable();
         return readRequestFromTransportBuffered(
             self.allocator,
@@ -4172,6 +4170,7 @@ pub const Tunnel = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!usize {
         if (self.inbuf.items.len != 0) return self.read(buffer);
+        _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.transport().readWithDeadline(buffer, deadline);
     }
 
@@ -4394,9 +4393,7 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
-        if (deadline.durationFromNow(self.client.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
         std.debug.assert(self.client.response_deadline == null);
         self.client.response_deadline = deadline;
         defer self.client.response_deadline = null;
@@ -4466,9 +4463,7 @@ pub const RequestWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        if (deadline.durationFromNow(self.client.io).raw.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
         std.debug.assert(self.client.response_deadline == null);
         self.client.response_deadline = deadline;
         defer self.client.response_deadline = null;
