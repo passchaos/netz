@@ -569,6 +569,49 @@ test "HTTP/1 TLS server caller timeout bounds transport handshake" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "HTTP/1 low-level timeout wrappers reject zero before I/O" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readRequestFromStreamWithTimeout(
+            allocator,
+            io,
+            undefined,
+            .{},
+            .{},
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readResponseFromStreamForRequestWithTimeout(
+            allocator,
+            io,
+            undefined,
+            .{},
+            .{},
+            .GET,
+            .zero,
+        ),
+    );
+    var server = runtime.TlsServer{
+        .allocator = allocator,
+        .io = io,
+        .listener = undefined,
+        .limits = .{},
+        .tls = undefined,
+        .tcp_nodelay = false,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptStreamWithTimeout(undefined, .zero),
+    );
+}
+
 test "HTTP/1 io_uring rejects an unsupported request head timeout" {
     if (comptime @import("builtin").os.tag != .linux) {
         return error.SkipZigTest;

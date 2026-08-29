@@ -397,6 +397,22 @@ test "public modules are reachable" {
         "acceptStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http1.runtime.TlsServer,
+        "acceptStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.TlsClientConnection,
+        "initWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "readRequestFromStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "readResponseFromStreamForRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http1.runtime,
         "ServeUntilOptions",
     ));

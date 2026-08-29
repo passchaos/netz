@@ -599,6 +599,10 @@ and vail TLS constructors additionally accept a caller-owned absolute deadline.
 HTTP/1 TLS servers expose matching post-accept timeout/deadline forms for the
 complete TLS handshake, including already accepted streams; configured TLS
 handshake limits remain stricter.
+The standard-library TLS client initializer and low-level complete-request /
+request-aware-response stream adapters likewise expose relative-timeout and
+absolute-deadline pairs, allowing protocol upgrade adapters to choose either
+budget form without duplicating timestamp conversion.
 HTTP/2 direct-address, hostname, Unix and TLS constructors expose the same
 contract through the complete SETTINGS bootstrap. TLS paths preserve the outer
 deadline across DNS/TCP and TLS while all paths retain stricter phase limits.

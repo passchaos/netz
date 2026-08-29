@@ -587,6 +587,25 @@ pub const TlsClientConnection = struct {
         );
     }
 
+    pub fn initWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        host: []const u8,
+        options: TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!*TlsClientConnection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return initWithDeadline(
+            allocator,
+            io,
+            stream,
+            host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn initBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1620,6 +1639,19 @@ pub const TlsServer = struct {
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.acceptStreamMaybeBefore(stream, deadline);
+    }
+
+    pub fn acceptStreamWithTimeout(
+        self: *TlsServer,
+        stream: net.Stream,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        // As with the deadline form, validation precedes ownership transfer.
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptStreamWithDeadline(
+            stream,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     fn acceptStreamMaybeBefore(
@@ -4856,6 +4888,25 @@ pub fn readRequestFromStreamWithDeadline(
     return .{ .bytes = bytes, .request = request };
 }
 
+pub fn readRequestFromStreamWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    timeout: std.Io.Duration,
+) Error!OwnedRequest {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readRequestFromStreamWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
 pub fn readRequestFromStreamBuffered(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -5008,6 +5059,27 @@ pub fn readResponseFromStreamForRequestWithDeadline(
         request_method,
         null,
         deadline,
+    );
+}
+
+pub fn readResponseFromStreamForRequestWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    request_method: http1.Method,
+    timeout: std.Io.Duration,
+) Error!OwnedResponse {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readResponseFromStreamForRequestWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        request_method,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
     );
 }
 
