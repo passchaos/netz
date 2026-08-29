@@ -4174,6 +4174,14 @@ test "public modules are reachable" {
         netz.http3.runtime,
         "HandshakeAdmissionOptions",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeWorkerError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeAdmission,
+        "deadline",
+    ));
     try std.testing.expect(@hasField(
         netz.http3.runtime.HandshakeAdmissionOptions,
         "max_connections",

@@ -63,9 +63,13 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     InvalidUri,
     InvalidAlpn,
 };
-pub const HandshakeAdmissionError = Error ||
-    quic.endpoint_dispatcher.Error || std.Io.ConcurrentError ||
-    std.Io.Timeout.Error;
+/// Failures produced by a handshake worker after admission has transferred
+/// Initial ownership. Keep this narrower than `HandshakeAdmissionError`: an
+/// endpoint event must not claim that dispatcher or task-spawn failures can
+/// originate asynchronously from an already-admitted worker.
+pub const HandshakeWorkerError = Error || std.Io.Timeout.Error;
+pub const HandshakeAdmissionError = HandshakeWorkerError ||
+    quic.endpoint_dispatcher.Error || std.Io.ConcurrentError;
 pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 const client_control_stream_id: u62 = 2;
@@ -3268,7 +3272,7 @@ pub const HandshakeCompletion = struct {
     admission: *HandshakeAdmission,
     result: union(enum) {
         session: HandshakeServerSession,
-        failure: HandshakeAdmissionError,
+        failure: HandshakeWorkerError,
     },
 
     pub fn deinit(self: *HandshakeCompletion) void {
@@ -3672,7 +3676,7 @@ pub const EndpointTransportEvent = union(enum) {
     },
     handshake_failed: struct {
         handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
-        err: Error,
+        err: HandshakeWorkerError,
     },
     packet: quic.endpoint_dispatcher.RoutedPacket,
     unrouted: quic.endpoint_dispatcher.Event,
@@ -3698,7 +3702,7 @@ pub const EndpointServerEvent = union(enum) {
     },
     handshake_failed: struct {
         handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
-        err: Error,
+        err: HandshakeWorkerError,
     },
     request: EndpointRequestEvent,
     unrouted: quic.endpoint_dispatcher.Event,
@@ -4450,7 +4454,7 @@ pub const HandshakeServer = struct {
     pub fn acceptAdmission(
         self: *HandshakeServer,
         admission: *HandshakeAdmission,
-    ) HandshakeAdmissionError!HandshakeServerSession {
+    ) HandshakeWorkerError!HandshakeServerSession {
         var options = self.handshake_options;
         options.local_connection_id = admission.serverConnectionId();
         var established = try quic.handshake
