@@ -258,6 +258,22 @@ pub const Server = struct {
         );
     }
 
+    pub fn acceptHttpConnectionWithTimeout(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        // The caller retains the HTTP connection if validation fails before
+        // the deadline form receives ownership.
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptHttpConnectionWithDeadline(
+            http_connection,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn acceptHttpConnectionMaybeBefore(
         self: *Server,
         http_connection: http1_runtime.Connection,
@@ -576,6 +592,20 @@ pub const TlsServer = struct {
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.acceptStreamMaybeBefore(stream, options, deadline);
+    }
+
+    pub fn acceptStreamWithTimeout(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptStreamWithDeadline(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     fn acceptStreamMaybeBefore(

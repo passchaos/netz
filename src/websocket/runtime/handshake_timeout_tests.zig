@@ -113,6 +113,52 @@ test "WebSocket server caller timeout bounds the HTTP upgrade" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "WebSocket accepted HTTP connection timeout bounds Upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http1_handshake_timeout = .fromSeconds(1) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const http_connection = self.server.http.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            var connection = self.server.acceptHttpConnectionWithTimeout(
+                http_connection,
+                .{},
+                .fromMilliseconds(40),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAll(io, client, "GET / HTTP/1.1\r\nHost: localhost\r\n");
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "WebSocket client bounds an idle HTTP upgrade response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -496,6 +542,69 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
     // same caller-owned budget. The HTTP phase must not receive a fresh one.
     try std.Io.sleep(io, .fromMilliseconds(25), .awake);
     try client.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n");
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
+test "WSS accepted stream timeout bounds TLS handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .tls_handshake_timeout = .fromSeconds(1),
+            .limits = .{
+                .http1_handshake_timeout = .fromSeconds(1),
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.server.listener.accept(self.server.io) catch
+                |err| {
+                    self.err = err;
+                    return;
+                };
+            var connection = self.server.acceptStreamWithTimeout(
+                stream,
+                .{},
+                .fromMilliseconds(40),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
 
     thread.join();
     try std.testing.expectEqual(error.Timeout, shared.err.?);

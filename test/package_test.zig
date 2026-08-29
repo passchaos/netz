@@ -1139,6 +1139,10 @@ test "public modules are reachable" {
         "acceptHttpConnectionWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Server,
+        "acceptHttpConnectionWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime.TlsServer,
         "acceptStream",
     ));
@@ -1153,6 +1157,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.TlsServer,
         "acceptStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.TlsServer,
+        "acceptStreamWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.UnixServer,
