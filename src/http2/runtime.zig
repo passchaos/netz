@@ -2080,15 +2080,30 @@ pub const Client = struct {
             });
         }
         try validateHeaderBlock(request_options.trailers, .request_trailers);
-        if (request_options.body.len != 0 or request_options.trailers.len != 0) {
-            return error.InvalidContentLength;
+        var trailers: std.ArrayList(http1.Header) = .empty;
+        defer trailers.deinit(allocator);
+        try trailers.ensureTotalCapacity(
+            allocator,
+            request_options.trailers.len,
+        );
+        for (request_options.trailers) |trailer| {
+            trailers.appendAssumeCapacity(.{
+                .name = trailer.name,
+                .value = trailer.value,
+            });
         }
         const method = http1.Method.parse(request_options.method) catch
             return error.InvalidHeader;
+        // RFC 7540 section 3.2 assigns the complete HTTP/1.1 request, including
+        // any entity body and trailers, to half-closed stream 1. CONNECT is not
+        // an Upgrade-capable HTTP/1.1 request and retains its tunnel API.
+        if (method == .CONNECT) return error.InvalidHeader;
         try http1_runtime.writeRequestToStream(allocator, io, stream, .{
             .method = method,
             .target = request_options.path,
             .headers = headers.items,
+            .body = request_options.body,
+            .trailers = trailers.items,
         });
         var upgrade = if (deadline) |absolute|
             try http1_runtime.readResponseFromStreamForRequestWithDeadline(
@@ -11949,7 +11964,6 @@ fn requestAuthority(headers: []const http2.Hpack.HeaderField) ?[]const u8 {
 fn validateH2cUpgradeRequest(request: http1.Request) Error!void {
     if (request.version != .http_1_1) return error.InvalidHeader;
     if (request.method == .CONNECT) return error.InvalidHeader;
-    if (request.body.len != 0 or request.trailers.len != 0) return error.InvalidContentLength;
 
     const upgrade = (try optionalHttp1SingletonHeader(request.headers, "upgrade")) orelse return error.InvalidHeader;
     if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade, " \t"), "h2c")) return error.InvalidHeader;
@@ -12773,7 +12787,7 @@ test "HTTP/2 client sends request to bracketed IPv6 URI" {
     try std.testing.expectEqualStrings("h2-ipv6-uri-ok", response.body);
 }
 
-test "HTTP/2 h2c upgrade request receives stream one response" {
+test "HTTP/2 h2c upgrade carries request body and trailers on stream one" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -12801,13 +12815,23 @@ test "HTTP/2 h2c upgrade request receives stream one response" {
 
             var request = try http1_runtime.readRequestFromStream(shared.allocator, shared.io, stream, .{
                 .max_head_bytes = 4096,
-                .max_body_bytes = 0,
+                .max_body_bytes = 4096,
             }, .{});
             defer request.deinit(shared.allocator);
             try std.testing.expectEqualStrings("/upgrade?x=1", request.request.target);
             try std.testing.expectEqualStrings("h2c", request.request.header("upgrade").?);
             try std.testing.expect(containsHttpToken(request.request.header("connection").?, "http2-settings"));
             try std.testing.expect(request.request.header("http2-settings") != null);
+            try std.testing.expectEqualStrings("upgrade-body", request.request.body);
+            try std.testing.expectEqual(@as(usize, 1), request.request.trailers.len);
+            try std.testing.expectEqualStrings(
+                "x-upload-complete",
+                request.request.trailers[0].name,
+            );
+            try std.testing.expectEqualStrings(
+                "yes",
+                request.request.trailers[0].value,
+            );
 
             try writeAll(shared.io, stream, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n");
 
@@ -12841,7 +12865,14 @@ test "HTTP/2 h2c upgrade request receives stream one response" {
 
     const uri = try std.fmt.allocPrint(allocator, "http://localhost:{d}/upgrade?x=1", .{listener.socket.address.ip4.port});
     defer allocator.free(uri);
-    var response = try Client.requestUriUpgrade(allocator, io, uri, .{}, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    var response = try Client.requestUriUpgrade(allocator, io, uri, .{
+        .method = "POST",
+        .body = "upgrade-body",
+        .trailers = &.{.{
+            .name = "x-upload-complete",
+            .value = "yes",
+        }},
+    }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
     defer response.deinit(allocator);
 
     thread.join();
@@ -12850,7 +12881,7 @@ test "HTTP/2 h2c upgrade request receives stream one response" {
     try std.testing.expectEqualStrings("upgraded", response.body);
 }
 
-test "HTTP/2 server accepts h2c upgrade request" {
+test "HTTP/2 server accepts body-bearing h2c upgrade request" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -12877,8 +12908,14 @@ test "HTTP/2 server accepts h2c upgrade request" {
             var upgrade = try server_ptr.acceptUpgrade();
             defer upgrade.deinit(server_ptr.allocator);
             try std.testing.expectEqual(@as(u31, 1), upgrade.stream_id);
-            try std.testing.expectEqual(http1.Method.GET, upgrade.request.request.method);
+            try std.testing.expectEqual(http1.Method.POST, upgrade.request.request.method);
             try std.testing.expectEqualStrings("/server-upgrade", upgrade.request.request.target);
+            try std.testing.expectEqualStrings("request-body", upgrade.request.request.body);
+            try std.testing.expectEqual(@as(usize, 1), upgrade.request.request.trailers.len);
+            try std.testing.expectEqualStrings(
+                "done",
+                upgrade.request.request.trailers[0].value,
+            );
             try upgrade.connection.writeResponse(upgrade.stream_id, .{ .body = "server-upgraded" });
         }
     };
@@ -12888,7 +12925,11 @@ test "HTTP/2 server accepts h2c upgrade request" {
 
     const uri = try std.fmt.allocPrint(allocator, "http://localhost:{d}/server-upgrade", .{server.address().ip4.port});
     defer allocator.free(uri);
-    var response = try Client.requestUriUpgrade(allocator, io, uri, .{}, .{
+    var response = try Client.requestUriUpgrade(allocator, io, uri, .{
+        .method = "POST",
+        .body = "request-body",
+        .trailers = &.{.{ .name = "x-upload-complete", .value = "done" }},
+    }, .{
         .max_frame_payload = 4096,
         .max_body_bytes = 4096,
     });
