@@ -352,7 +352,10 @@ the same allocation-free FIFO admission queue used by HTTP/1 and HTTP/2. New
 callers cannot barge ahead of older blocked requests, and timeout/cancellation
 unlinks its stack-owned ticket before waking the successor, while
 pool close wakes every waiter and causes outstanding leases to be discarded on
-return. Returning a successful response uses best-effort idle caching: if pool
+return. Deadline-bounded acquisitions also cover arbitrary connector execution,
+closing a concurrent late success, and pooled one-shot requests carry that same
+timestamp through stale retry and complete response assembly. Returning a
+successful response uses best-effort idle caching: if pool
 metadata allocation fails, the connection is closed and the completed HTTP
 result still reaches the caller rather than being replaced by an OOM error. A
 default connector securely

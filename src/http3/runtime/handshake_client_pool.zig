@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const http3 = @import("../mod.zig");
+const deadline_policy = @import("../../internal/deadline.zig");
 const fifo_admission = @import("../../internal/fifo_admission.zig");
 
 pub const Error = error{
@@ -191,6 +192,23 @@ pub fn Pool(comptime Runtime: type) type {
             uri_text: []const u8,
             waiter: ?*fifo_admission.Queue.Waiter,
         ) (Runtime.Error || Error)!Lease {
+            return self.acquireUriForWaiterBefore(
+                uri_text,
+                waiter,
+                null,
+            ) catch |err| switch (err) {
+                error.Timeout => unreachable,
+                else => |other| return other,
+            };
+        }
+
+        fn acquireUriForWaiterBefore(
+            self: *Self,
+            uri_text: []const u8,
+            waiter: ?*fifo_admission.Queue.Waiter,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) (Runtime.Error || Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Lease {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
@@ -252,7 +270,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.mutex.unlock(self.io);
                 var old = displaced;
                 old.deinit();
-                return self.connectReserved(uri, origin_key);
+                return self.connectReservedBefore(uri, origin_key, deadline);
             } else {
                 self.connections += 1;
             }
@@ -268,7 +286,7 @@ pub fn Pool(comptime Runtime: type) type {
                 return lease;
             }
 
-            return self.connectReserved(uri, origin_key);
+            return self.connectReservedBefore(uri, origin_key, deadline);
         }
 
         pub fn acquireUriWithTimeout(
@@ -290,16 +308,24 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: std.Io.Clock.Timestamp,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
+            const absolute = try deadline_policy.usableAwake(
+                self.io,
+                deadline,
+            );
             var waiter: fifo_admission.Queue.Waiter = .{};
             defer self.cancelCapacityWaiter(&waiter);
             while (true) {
-                return self.acquireUriForWaiter(uri_text, &waiter) catch |err| switch (err) {
+                return self.acquireUriForWaiterBefore(
+                    uri_text,
+                    &waiter,
+                    absolute,
+                ) catch |err| switch (err) {
                     error.ConnectionLimitReached => {
-                        waiter.waitUntil(self.io, deadline) catch |wait_err| switch (wait_err) {
+                        waiter.waitUntil(self.io, absolute) catch |wait_err| switch (wait_err) {
                             error.Timeout => return error.Timeout,
                             error.Canceled => return error.Canceled,
                         };
-                        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                        if (absolute.durationFromNow(self.io).raw.nanoseconds <= 0) {
                             return error.Timeout;
                         }
                         continue;
@@ -314,18 +340,38 @@ pub fn Pool(comptime Runtime: type) type {
             uri: std.Uri,
             origin_key_value: http3.OriginKey,
         ) (Runtime.Error || Error)!Lease {
+            return self.connectReservedBefore(
+                uri,
+                origin_key_value,
+                null,
+            ) catch |err| switch (err) {
+                error.Timeout => unreachable,
+                else => |other| return other,
+            };
+        }
+
+        fn connectReservedBefore(
+            self: *Self,
+            uri: std.Uri,
+            origin_key_value: http3.OriginKey,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) (Runtime.Error || Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Lease {
             var origin_key = origin_key_value;
             errdefer origin_key.deinit();
             var reservation_active = true;
             errdefer if (reservation_active) self.releaseReservation();
-            var client = try self.options.connector.connect(
-                self.options.connector.context,
-                self.allocator,
-                self.io,
-                self.options.local_address,
-                uri,
-                self.options.limits,
-            );
+            var client = if (deadline) |absolute|
+                try self.connectClientBefore(uri, absolute)
+            else
+                try self.options.connector.connect(
+                    self.options.connector.context,
+                    self.allocator,
+                    self.io,
+                    self.options.local_address,
+                    uri,
+                    self.options.limits,
+                );
             errdefer client.deinit();
             self.mutex.lockUncancelable(self.io);
             if (self.closed) {
@@ -346,6 +392,63 @@ pub fn Pool(comptime Runtime: type) type {
             };
             origin_key = undefined;
             return lease;
+        }
+
+        /// Bound arbitrary connector implementations without extending the
+        /// public connector ABI. The select drain destroys a connection that
+        /// wins concurrently with timeout, so a late success cannot leak its
+        /// endpoint or consume an untracked pool slot.
+        fn connectClientBefore(
+            self: *Self,
+            uri: std.Uri,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Client {
+            const ConnectResult = Runtime.Error!Client;
+            const Wake = union(enum) {
+                connected: ConnectResult,
+                timeout: std.Io.Cancelable!void,
+            };
+            var wake_buffer: [2]Wake = undefined;
+            var select: std.Io.Select(Wake) = .init(self.io, &wake_buffer);
+            defer while (select.cancel()) |wake| switch (wake) {
+                .connected => |result| if (result) |client_value| {
+                    var client = client_value;
+                    client.deinit();
+                } else |_| {},
+                .timeout => {},
+            };
+            select.async(.connected, callConnector, .{ self, uri });
+            select.async(.timeout, waitUntil, .{ self.io, deadline });
+            return switch (select.await() catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            }) {
+                .connected => |result| result,
+                .timeout => |result| {
+                    result catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                    };
+                    return error.Timeout;
+                },
+            };
+        }
+
+        fn callConnector(self: *Self, uri: std.Uri) Runtime.Error!Client {
+            return self.options.connector.connect(
+                self.options.connector.context,
+                self.allocator,
+                self.io,
+                self.options.local_address,
+                uri,
+                self.options.limits,
+            );
+        }
+
+        fn waitUntil(
+            io: std.Io,
+            deadline: std.Io.Clock.Timestamp,
+        ) std.Io.Cancelable!void {
+            try deadline.wait(io);
         }
 
         pub fn requestUri(
@@ -387,6 +490,93 @@ pub fn Pool(comptime Runtime: type) type {
                 errdefer owned_response.deinit(self.allocator);
                 lease.release();
                 return owned_response;
+            }
+        }
+
+        /// Carry one deadline through FIFO admission, connector execution,
+        /// stale-idempotent retry, and the complete HTTP/3 response.
+        pub fn requestUriWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            const absolute = try deadline_policy.usableAwake(
+                self.io,
+                deadline,
+            );
+            const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+            var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
+            defer endpoint.deinit();
+            const path = try Runtime.uriRequestTargetAlloc(self.allocator, uri);
+            defer self.allocator.free(path);
+            var waiter: fifo_admission.Queue.Waiter = .{};
+            defer self.cancelCapacityWaiter(&waiter);
+
+            var retry_stale = true;
+            while (true) {
+                var lease = while (true) {
+                    break self.acquireUriForWaiterBefore(
+                        uri_text,
+                        &waiter,
+                        absolute,
+                    ) catch |err| switch (err) {
+                        error.ConnectionLimitReached => {
+                            waiter.waitUntil(
+                                self.io,
+                                absolute,
+                            ) catch |wait_err| switch (wait_err) {
+                                error.Timeout => return error.Timeout,
+                                error.Canceled => return error.Canceled,
+                            };
+                            if (absolute.durationFromNow(
+                                self.io,
+                            ).raw.nanoseconds <= 0) return error.Timeout;
+                            continue;
+                        },
+                        else => |other| return other,
+                    };
+                };
+                defer if (lease.active) lease.discard();
+                const stream_id = lease.client().sendRequest(.{
+                    .method = request_options.method,
+                    .path = path,
+                    .scheme = "https",
+                    .authority = endpoint.authority,
+                    .headers = request_options.headers,
+                    .body = request_options.body,
+                    .trailers = request_options.trailers,
+                }) catch |err| {
+                    const reused = lease.was_reused;
+                    lease.discard();
+                    if (retry_stale and reused and
+                        methodIsIdempotent(request_options.method) and
+                        retryableStaleConnectionError(err))
+                    {
+                        retry_stale = false;
+                        continue;
+                    }
+                    return err;
+                };
+                var response = lease.client().receiveResponseWithDeadline(
+                    stream_id,
+                    absolute,
+                ) catch |err| {
+                    const reused = lease.was_reused;
+                    lease.discard();
+                    if (retry_stale and reused and
+                        methodIsIdempotent(request_options.method) and
+                        retryableStaleConnectionError(err))
+                    {
+                        retry_stale = false;
+                        continue;
+                    }
+                    return err;
+                };
+                errdefer response.deinit(self.allocator);
+                lease.release();
+                return response;
             }
         }
 

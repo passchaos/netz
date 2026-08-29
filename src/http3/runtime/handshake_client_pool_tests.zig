@@ -134,6 +134,56 @@ test "HTTP/3 pool releases a timed-out URI handshake reservation" {
     try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
 }
 
+test "HTTP/3 pool acquire deadline bounds a custom connector" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SlowConnector = struct {
+        fn connect(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            io_value: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: runtime.Limits,
+        ) runtime.Error!runtime.HandshakeClient {
+            std.Io.sleep(
+                io_value,
+                .fromMilliseconds(150),
+                .awake,
+            ) catch |err| return err;
+            return error.ConnectionRefused;
+        }
+    };
+    var context: u8 = 0;
+    var pool = try runtime.HandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .loopback(0) },
+        .max_connections = 1,
+        .connector = .{
+            .context = &context,
+            .connect = SlowConnector.connect,
+        },
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithDeadline(
+            "https://localhost/slow",
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
+}
+
 test "HTTP/3 handshake client pool replaces idle capacity across origins" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
