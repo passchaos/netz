@@ -447,6 +447,19 @@ pub const Server = struct {
         return self.acceptStreamMaybeBefore(stream, deadline);
     }
 
+    pub fn acceptStreamWithTimeout(
+        self: *Server,
+        stream: net.Stream,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        // Validation precedes ownership transfer, matching the absolute form.
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptStreamWithDeadline(
+            stream,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn acceptStreamMaybeBefore(
         self: *Server,
         stream: net.Stream,
@@ -1051,6 +1064,18 @@ pub const TlsServer = struct {
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.acceptStreamMaybeBefore(stream, deadline);
+    }
+
+    pub fn acceptStreamWithTimeout(
+        self: *TlsServer,
+        stream: net.Stream,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptStreamWithDeadline(
+            stream,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     fn acceptStreamMaybeBefore(

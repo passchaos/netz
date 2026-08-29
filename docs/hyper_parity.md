@@ -610,7 +610,9 @@ HTTP/2 TLS servers expose matching post-accept timeout/deadline forms spanning
 TLS 1.3, ALPN validation, and the HTTP/2 preface/SETTINGS bootstrap.
 Cleartext TCP and Unix-domain HTTP/2 servers expose the same post-accept
 timeout/deadline contract for their complete preface/SETTINGS bootstrap; TCP
-also accepts an already-dispatched stream under a caller timestamp.
+also accepts an already-dispatched stream under either a relative timeout or a
+caller timestamp. TLS already-accepted streams expose the same pair across TLS,
+ALPN validation, and HTTP/2 bootstrap.
 Both protocol constructors also provide relative-timeout wrappers that convert
 the end-to-end budget once at entry.
 Ordinary timeout-based APIs remain separate from HTTP

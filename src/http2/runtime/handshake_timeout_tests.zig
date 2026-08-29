@@ -181,6 +181,51 @@ test "HTTP/2 cleartext server caller timeout bounds bootstrap" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "HTTP/2 accepted stream timeout bounds cleartext bootstrap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .handshake_timeout = .fromSeconds(1) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.server.listener.accept(self.server.io) catch
+                |err| {
+                    self.err = err;
+                    return;
+                };
+            var connection = self.server.acceptStreamWithTimeout(
+                stream,
+                .fromMilliseconds(30),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "HTTP/2 server handshake deadline is absolute across a trickled preface" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -1198,6 +1243,66 @@ test "HTTP/2 TLS server caller timeout spans TLS and bootstrap" {
     stream_owned = false;
     defer client.deinit();
     try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
+test "HTTP/2 accepted TLS stream timeout bounds handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{ .handshake_timeout = .fromSeconds(1) },
+            .tls_handshake_timeout = .fromSeconds(1),
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.server.listener.accept(self.server.io) catch
+                |err| {
+                    self.err = err;
+                    return;
+                };
+            var connection = self.server.acceptStreamWithTimeout(
+                stream,
+                .fromMilliseconds(30),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
 
     thread.join();
     try std.testing.expectEqual(error.Timeout, shared.err.?);
