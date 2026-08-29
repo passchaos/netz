@@ -12,6 +12,9 @@ const origin_policy = @import("origin_policy.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 
+pub const PingEvent = common.PingEvent;
+pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
+
 pub const Error = websocket.Error || http3.runtime.Error || error{
     ConnectionClosed,
     ConcurrencyUnavailable,
@@ -19,6 +22,7 @@ pub const Error = websocket.Error || http3.runtime.Error || error{
     InvalidOrigin,
     InvalidSubprotocol,
     MessageTooLarge,
+    UnexpectedPong,
     Timeout,
 } || std.Io.RandomSecureError;
 
@@ -310,6 +314,58 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendControlFrame(.pong, payload);
         }
 
+        /// Send Ping once and wait for the matching Pong under one relative
+        /// budget. Application frames already in flight are returned with
+        /// ownership and may be followed with `continuePingWithTimeout`.
+        pub fn pingWithTimeout(
+            self: *Self,
+            payload: []const u8,
+            timeout: std.Io.Duration,
+        ) Error!PingEvent {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.pingWithDeadline(payload, .fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        /// Send Ping once and advance under the caller's absolute deadline.
+        /// Reuse that deadline with `continuePingWithDeadline` when retaining
+        /// one total budget across interleaved application frames.
+        pub fn pingWithDeadline(
+            self: *Self,
+            payload: []const u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!PingEvent {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try self.sendPing(payload);
+            return self.readPingEvent(payload, deadline);
+        }
+
+        /// Resume an outstanding Ping under a fresh relative budget without
+        /// transmitting a second Ping frame.
+        pub fn continuePingWithTimeout(
+            self: *Self,
+            payload: []const u8,
+            timeout: std.Io.Duration,
+        ) Error!PingEvent {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.continuePingWithDeadline(payload, .fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        /// Resume an outstanding Ping under the original absolute deadline.
+        pub fn continuePingWithDeadline(
+            self: *Self,
+            payload: []const u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!PingEvent {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            return self.readPingEvent(payload, deadline);
+        }
+
         pub fn sendClose(
             self: *Self,
             code: websocket.CloseCode,
@@ -321,6 +377,67 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .code = code, .reason = reason },
             );
             try self.sendControlFrame(.close, payload);
+        }
+
+        fn sendCloseFrame(
+            self: *Self,
+            close_frame: ?websocket.CloseFrame,
+        ) Error!void {
+            if (close_frame) |value| {
+                try self.sendClose(value.code, value.reason);
+            } else {
+                try self.sendControlFrame(.close, &.{});
+            }
+        }
+
+        /// Send Close once and wait for peer-close progress under one relative
+        /// budget. In-flight application frames are surfaced, not discarded.
+        pub fn closeWithTimeout(
+            self: *Self,
+            close_frame: ?websocket.CloseFrame,
+            timeout: std.Io.Duration,
+        ) Error!CloseHandshakeEvent {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.closeWithDeadline(close_frame, .fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        /// Send Close once and advance the handshake under an absolute
+        /// deadline. Re-entering after `.application` does not resend Close.
+        pub fn closeWithDeadline(
+            self: *Self,
+            close_frame: ?websocket.CloseFrame,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!CloseHandshakeEvent {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (!self.close_sent) {
+                try self.sendCloseFrame(close_frame);
+            }
+            return self.readCloseHandshakeEvent(deadline);
+        }
+
+        /// Resume a started Close handshake under a fresh relative budget.
+        pub fn continueCloseWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) Error!CloseHandshakeEvent {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.continueCloseWithDeadline(.fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        /// Resume a started Close handshake under the original deadline.
+        pub fn continueCloseWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!CloseHandshakeEvent {
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (!self.close_sent) return error.InvalidFrame;
+            return self.readCloseHandshakeEvent(deadline);
         }
 
         /// Receive one complete message, automatically replying to Ping and
@@ -420,6 +537,72 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!websocket.Frame {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             return self.receiveFrameInternal(deadline);
+        }
+
+        fn readPingEvent(
+            self: *Self,
+            payload: []const u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!PingEvent {
+            while (true) {
+                var frame = try self.receiveFrameInternal(deadline);
+                switch (frame.header.opcode) {
+                    .ping => {
+                        frame.deinit(self.allocator);
+                        continue;
+                    },
+                    .pong => {
+                        defer frame.deinit(self.allocator);
+                        if (!std.mem.eql(u8, frame.payload, payload)) {
+                            return error.UnexpectedPong;
+                        }
+                        return .{ .pong = {} };
+                    },
+                    .close => {
+                        defer frame.deinit(self.allocator);
+                        return .{ .closed = try websocket.parseClosePayloadOwned(
+                            self.allocator,
+                            frame.payload,
+                        ) };
+                    },
+                    .text, .binary, .continuation => {
+                        return .{ .application = frame };
+                    },
+                    else => {
+                        frame.deinit(self.allocator);
+                        return error.InvalidFrame;
+                    },
+                }
+            }
+        }
+
+        fn readCloseHandshakeEvent(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!CloseHandshakeEvent {
+            while (true) {
+                var frame = try self.receiveFrameInternal(deadline);
+                switch (frame.header.opcode) {
+                    .ping, .pong => {
+                        frame.deinit(self.allocator);
+                        continue;
+                    },
+                    .close => {
+                        defer frame.deinit(self.allocator);
+                        return .{ .closed = try websocket.parseClosePayloadOwned(
+                            self.allocator,
+                            frame.payload,
+                        ) };
+                    },
+                    .text, .binary, .continuation => {
+                        return .{ .application = frame };
+                    },
+                    else => {
+                        frame.deinit(self.allocator);
+                        return error.InvalidFrame;
+                    },
+                }
+            }
         }
 
         fn receiveFrameInternal(

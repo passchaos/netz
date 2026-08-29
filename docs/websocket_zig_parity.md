@@ -544,6 +544,10 @@ Direct-address and URI clients also expose attempt variants that preserve a
 non-2xx Extended CONNECT status and owned response headers for application
 authentication, redirect, or retry policy. The compatibility connect helpers
 continue to map those responses to `InvalidResponse`.
+HTTP/3 WebSocket connections now expose the same typed Ping and Close progress
+events as HTTP/1 and RFC 8441. Timeout/deadline continuations return in-flight
+application frames with ownership and resume without retransmitting the control
+frame; peer Close code/reason metadata remains owned until event deinit.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

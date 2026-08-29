@@ -647,21 +647,51 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             try std.testing.expect(text.was_compressed);
             try connection.sendText("hello client");
 
-            var ping = try connection.receiveFrameWithTimeout(
+            var ping = try connection.pingWithTimeout(
+                "server-probe",
                 .fromSeconds(5),
             );
             defer ping.deinit(allocator);
-            try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
-            try std.testing.expectEqualStrings("probe", ping.payload);
+            try std.testing.expectEqual(
+                websocket.Opcode.text,
+                ping.application.header.opcode,
+            );
+            try std.testing.expectEqualStrings(
+                "client in flight",
+                ping.application.payload,
+            );
+            var pong = try connection.continuePingWithTimeout(
+                "server-probe",
+                .fromSeconds(5),
+            );
+            defer pong.deinit(allocator);
+            try std.testing.expect(pong == .pong);
 
-            var close = try connection.receiveFrameWithTimeout(
+            var close = try connection.closeWithTimeout(
+                .{ .code = .normal_closure, .reason = "server-done" },
                 .fromSeconds(5),
             );
             defer close.deinit(allocator);
-            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
-            const parsed = (try websocket.parseClosePayload(close.payload)).?;
-            try std.testing.expectEqual(websocket.CloseCode.normal_closure, parsed.code);
-            try std.testing.expectEqualStrings("done", parsed.reason);
+            try std.testing.expectEqual(
+                websocket.Opcode.text,
+                close.application.header.opcode,
+            );
+            try std.testing.expectEqualStrings(
+                "before close",
+                close.application.payload,
+            );
+            var closed = try connection.continueCloseWithTimeout(
+                .fromSeconds(5),
+            );
+            defer closed.deinit(allocator);
+            try std.testing.expectEqual(
+                websocket.CloseCode.normal_closure,
+                closed.closed.?.code,
+            );
+            try std.testing.expectEqualStrings(
+                "server-done",
+                closed.closed.?.reason,
+            );
         }
     };
 
@@ -708,15 +738,21 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     defer reply.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);
     try std.testing.expectEqualStrings("hello client", reply.payload);
-    try client.sendPing("probe");
-    var pong = try client.receiveFrameWithTimeout(.fromSeconds(5));
-    defer pong.deinit(allocator);
-    try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
-    try std.testing.expectEqualStrings("probe", pong.payload);
-    try client.sendClose(.normal_closure, "done");
-    var close = try client.receiveFrameWithTimeout(.fromSeconds(5));
-    defer close.deinit(allocator);
-    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+    try client.sendText("client in flight");
+    var server_ping = try client.receiveFrameWithTimeout(.fromSeconds(5));
+    defer server_ping.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.ping, server_ping.header.opcode);
+    try std.testing.expectEqualStrings("server-probe", server_ping.payload);
+    try client.sendText("before close");
+    var server_close = try client.receiveFrameWithTimeout(.fromSeconds(5));
+    defer server_close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, server_close.header.opcode);
+    const parsed = (try websocket.parseClosePayload(server_close.payload)).?;
+    try std.testing.expectEqual(websocket.CloseCode.normal_closure, parsed.code);
+    try std.testing.expectEqualStrings("server-done", parsed.reason);
+    // Receiving Close automatically echoes its exact payload. The server's
+    // typed progress event therefore owns the same code and reason inspected
+    // above rather than requiring an otherwise-invalid second Close frame.
 
     thread.join();
     joined = true;
@@ -874,6 +910,26 @@ test "HTTP3 peer SETTINGS wait rejects an expired budget" {
     try std.testing.expectError(
         error.Timeout,
         client.receivePeerSettingsWithTimeout(.zero),
+    );
+}
+
+test "WebSocket HTTP3 control progress APIs reject expired budgets" {
+    var client: h3.ClientConnection = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.pingWithTimeout("probe", .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.continuePingWithTimeout("probe", .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithTimeout(null, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.continueCloseWithTimeout(.zero),
     );
 }
 

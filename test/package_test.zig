@@ -876,6 +876,46 @@ test "public modules are reachable" {
         "receiveMessage",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "pingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "pingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "continuePingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "continuePingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "continueCloseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.ClientConnection,
+        "continueCloseWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "PingEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "CloseHandshakeEvent",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "UnixServer",
     ));

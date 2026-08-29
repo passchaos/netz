@@ -2283,54 +2283,8 @@ pub const ConnectOptions = struct {
 };
 
 pub const OwnedMessage = common.OwnedMessage;
-
-/// One observable step while completing a locally initiated close handshake.
-/// Application frames may already be in flight when Close is sent, so they are
-/// returned with ownership rather than discarded by the shutdown helper.
-pub const CloseHandshakeEvent = union(enum) {
-    closed: ?websocket.OwnedCloseFrame,
-    application: websocket.Frame,
-
-    pub fn deinit(
-        self: *CloseHandshakeEvent,
-        allocator: std.mem.Allocator,
-    ) void {
-        switch (self.*) {
-            .closed => |maybe_close| if (maybe_close) |value| {
-                var close_frame = value;
-                close_frame.deinit(allocator);
-            },
-            .application => |value| {
-                var frame = value;
-                frame.deinit(allocator);
-            },
-        }
-        self.* = undefined;
-    }
-};
-
-/// One observable step while awaiting the Pong for a locally sent Ping.
-/// Application and Close frames are returned rather than consumed invisibly.
-pub const PingEvent = union(enum) {
-    pong: void,
-    closed: ?websocket.OwnedCloseFrame,
-    application: websocket.Frame,
-
-    pub fn deinit(self: *PingEvent, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .pong => {},
-            .closed => |maybe_close| if (maybe_close) |value| {
-                var close_frame = value;
-                close_frame.deinit(allocator);
-            },
-            .application => |value| {
-                var frame = value;
-                frame.deinit(allocator);
-            },
-        }
-        self.* = undefined;
-    }
-};
+pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
+pub const PingEvent = common.PingEvent;
 
 pub const Message = struct {
     opcode: websocket.Opcode,
