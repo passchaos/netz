@@ -4871,6 +4871,7 @@ pub fn readResponseFromStreamObserved(
             false,
             true,
             response_head_deadline,
+            null,
         );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
@@ -4923,26 +4924,19 @@ pub fn readResponseFromStreamForRequestWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
     _ = try deadline_policy.usableAwake(io, deadline);
-    const transport = RuntimeTransport{
-        .tcp = .{ .io = io, .stream = stream },
-    };
-    var inbuf: std.ArrayList(u8) = .empty;
-    defer inbuf.deinit(allocator);
-    var informational_count: usize = 0;
-    return readResponseFromTransportBufferedForRequestObserved(
+    return readResponseFromStreamForRequestObservedUntil(
         allocator,
-        transport,
+        io,
+        stream,
         limits,
         options,
-        &inbuf,
         request_method,
         null,
-        &informational_count,
         deadline,
     );
 }
 
-pub fn readResponseFromStreamForRequestObserved(
+fn readResponseFromStreamForRequestObservedUntil(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
@@ -4950,6 +4944,7 @@ pub fn readResponseFromStreamForRequestObserved(
     options: http1.ParseOptions,
     request_method: http1.Method,
     informational: ?InformationalObserver,
+    response_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
     const transport = RuntimeTransport{
         .tcp = .{ .io = io, .stream = stream },
@@ -4963,6 +4958,10 @@ pub fn readResponseFromStreamForRequestObserved(
             &.{},
             &response_head_deadline,
         );
+        const effective_head_deadline = if (response_deadline) |deadline|
+            earlierDeadline(response_head_deadline, deadline)
+        else
+            response_head_deadline;
         const bytes = try readMessageBytesWithContext(
             allocator,
             transport,
@@ -4970,10 +4969,16 @@ pub fn readResponseFromStreamForRequestObserved(
             request_method,
             false,
             true,
-            response_head_deadline,
+            effective_head_deadline,
+            response_deadline,
         );
         errdefer allocator.free(bytes);
-        var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
+        var response = try parseResponseForRuntime(
+            allocator,
+            bytes,
+            options,
+            request_method,
+        );
         errdefer response.deinit(allocator);
         applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
@@ -4989,6 +4994,27 @@ pub fn readResponseFromStreamForRequestObserved(
         }
         return .{ .bytes = bytes, .response = response };
     }
+}
+
+pub fn readResponseFromStreamForRequestObserved(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    request_method: http1.Method,
+    informational: ?InformationalObserver,
+) Error!OwnedResponse {
+    return readResponseFromStreamForRequestObservedUntil(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        request_method,
+        informational,
+        null,
+    );
 }
 
 pub fn readResponseFromStreamBuffered(
@@ -5495,6 +5521,7 @@ fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net
             try headReadDeadline(transport, timeout)
         else
             null,
+        null,
     );
 }
 
@@ -5506,6 +5533,7 @@ fn readMessageBytesWithContext(
     auto_continue: bool,
     close_delimited_when_unknown: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
+    body_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
@@ -5530,7 +5558,11 @@ fn readMessageBytesWithContext(
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(bytes.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
         while (true) {
-            const n = try transport.read(&scratch);
+            const n = try readTransportUntil(
+                transport,
+                &scratch,
+                body_deadline,
+            );
             if (n == 0) break;
             try bytes.appendSlice(allocator, scratch[0..n]);
             if (bytes.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
@@ -5547,7 +5579,11 @@ fn readMessageBytesWithContext(
                 // terminating chunk into a pipelined message.  Read one byte
                 // at a time until the body parser can compute the target.
                 const read_buf = scratch[0..1];
-                const n = try transport.read(read_buf);
+                const n = try readTransportUntil(
+                    transport,
+                    read_buf,
+                    body_deadline,
+                );
                 if (n == 0) return error.ConnectionClosed;
                 try bytes.appendSlice(allocator, scratch[0..n]);
                 if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -5564,7 +5600,11 @@ fn readMessageBytesWithContext(
     try bytes.ensureTotalCapacity(allocator, target_len);
     while (bytes.items.len < target_len) {
         const read_buf = scratch[0..@min(scratch.len, target_len - bytes.items.len)];
-        const n = try transport.read(read_buf);
+        const n = try readTransportUntil(
+            transport,
+            read_buf,
+            body_deadline,
+        );
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
         if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;

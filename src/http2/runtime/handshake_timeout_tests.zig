@@ -873,6 +873,109 @@ test "HTTP/2 h2c caller deadline spans 101 and binary bootstrap" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 h2c deadline preserves SETTINGS coalesced with 101" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request_buf: [1024]u8 = undefined;
+            var request_len: usize = 0;
+            while (std.mem.indexOf(u8, request_buf[0..request_len], "\r\n\r\n") == null) {
+                var buffers = [_][]u8{request_buf[request_len..]};
+                const count = try self.io.vtable.netRead(
+                    self.io.userdata,
+                    stream.socket.handle,
+                    &buffers,
+                );
+                if (count == 0) return error.ConnectionClosed;
+                request_len += count;
+            }
+
+            var response: std.ArrayList(u8) = .empty;
+            defer response.deinit(self.allocator);
+            try response.appendSlice(
+                self.allocator,
+                "HTTP/1.1 101 Switching Protocols\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Upgrade: h2c\r\n\r\n",
+            );
+            // A legal peer may put its first HTTP/2 frame in the same TCP
+            // segment as the switching response. The unbuffered HTTP/1 reader
+            // must stop exactly at CRLFCRLF so bootstrap can still consume it.
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .settings,
+                    .flags = 0,
+                    .stream_id = 0,
+                },
+                .payload = &.{},
+            }).write(&response, self.allocator);
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .settings,
+                    .flags = flag_ack,
+                    .stream_id = 0,
+                },
+                .payload = &.{},
+            }).write(&response, self.allocator);
+            try writeAll(self.io, stream, response.items);
+
+            var preface: [http2.connection_preface.len]u8 = undefined;
+            try readExact(self.io, stream, &preface);
+            try http2.validateClientPreface(&preface);
+            const settings = try readFrame(self.allocator, self.io, stream);
+            defer self.allocator.free(settings);
+            try expectSettingsFrame(settings, false);
+            const ack = try readFrame(self.allocator, self.io, stream);
+            defer self.allocator.free(ack);
+            try expectSettingsFrame(ack, true);
+        }
+    };
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .listener = &listener,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var upgraded = try runtime.Client.connectStreamUpgradeWithTimeout(
+        allocator,
+        io,
+        try listener.socket.address.connect(io, .{ .mode = .stream }),
+        .{ .handshake_timeout = .fromSeconds(1) },
+        .{ .authority = "localhost" },
+        .fromSeconds(1),
+    );
+    upgraded.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 TLS server bounds bootstrap after transport handshake" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
