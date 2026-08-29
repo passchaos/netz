@@ -192,6 +192,10 @@ test "public modules are reachable" {
         netz.http1.client_pool.Pool,
         "acquireUriWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.client_pool.Pool,
+        "requestUriWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "UnixServer"));
     try std.testing.expect(@hasDecl(netz.http2, "client_pool"));

@@ -138,6 +138,60 @@ pub const Pool = struct {
         }
     }
 
+    /// Bound capacity admission, any new DNS/TCP/TLS connection, and the
+    /// complete HTTP/1 response with one caller-owned deadline. A stale idle
+    /// retry reuses the original timestamp rather than receiving a fresh budget.
+    pub fn requestUriWithDeadline(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!runtime.OwnedResponse {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const transport = try transportForScheme(uri.scheme);
+        var endpoint = try runtime.uriEndpoint(
+            self.allocator,
+            uri,
+            if (transport == .tls) 443 else 80,
+        );
+        defer endpoint.deinit();
+        const target = try uriTargetAlloc(self.allocator, uri);
+        defer self.allocator.free(target);
+        var waiter: fifo_admission.Queue.Waiter = .{};
+        defer self.cancelCapacityWaiter(&waiter);
+
+        var retry_stale = true;
+        while (true) {
+            var lease = try self.acquireUntil(
+                transport,
+                endpoint,
+                &waiter,
+                deadline,
+            );
+            defer if (lease.active) lease.discard();
+            var options = request_options;
+            options.target = target;
+            if (options.host == null) options.host = endpoint.authority;
+            const response = lease.client().requestWithDeadline(
+                options,
+                deadline,
+            ) catch |err| {
+                const was_reused = lease.was_reused;
+                lease.discard();
+                if (retry_stale and was_reused and
+                    request_options.method.idempotent() and
+                    retryableStaleConnectionError(err))
+                {
+                    retry_stale = false;
+                    continue;
+                }
+                return err;
+            };
+            lease.release();
+            return response;
+        }
+    }
+
     /// Lease one connection for streaming or specialized request APIs. The
     /// caller must call `Lease.release`; incomplete writers make `isReusable`
     /// false and are therefore safely discarded.
@@ -197,8 +251,23 @@ pub const Pool = struct {
         defer endpoint.deinit();
         var waiter: fifo_admission.Queue.Waiter = .{};
         defer self.cancelCapacityWaiter(&waiter);
+        return self.acquireUntil(transport, endpoint, &waiter, deadline);
+    }
+
+    fn acquireUntil(
+        self: *Pool,
+        transport: Transport,
+        endpoint: runtime.UriEndpoint,
+        waiter: *fifo_admission.Queue.Waiter,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!Lease {
         while (true) {
-            return self.acquire(transport, endpoint, &waiter) catch |err| switch (err) {
+            return self.acquireBefore(
+                transport,
+                endpoint,
+                waiter,
+                deadline,
+            ) catch |err| switch (err) {
                 error.ConnectionLimitReached => {
                     waiter.waitUntil(self.io, deadline) catch |wait_err| switch (wait_err) {
                         error.Timeout => return error.Timeout,
@@ -273,6 +342,31 @@ pub const Pool = struct {
         endpoint: runtime.UriEndpoint,
         waiter: ?*fifo_admission.Queue.Waiter,
     ) Error!Lease {
+        return self.acquireMaybeBefore(transport, endpoint, waiter, null);
+    }
+
+    fn acquireBefore(
+        self: *Pool,
+        transport: Transport,
+        endpoint: runtime.UriEndpoint,
+        waiter: ?*fifo_admission.Queue.Waiter,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!Lease {
+        return self.acquireMaybeBefore(
+            transport,
+            endpoint,
+            waiter,
+            deadline,
+        );
+    }
+
+    fn acquireMaybeBefore(
+        self: *Pool,
+        transport: Transport,
+        endpoint: runtime.UriEndpoint,
+        waiter: ?*fifo_admission.Queue.Waiter,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!Lease {
         var displaced: ?Slot = null;
         self.mutex.lockUncancelable(self.io);
         if (self.closed) {
@@ -348,20 +442,39 @@ pub const Pool = struct {
 
         var client = switch (transport) {
             .cleartext => switch (endpoint.target) {
-                .host => try runtime.Client.connectHost(
-                    self.allocator,
-                    self.io,
-                    endpoint.tls_host,
-                    endpoint.port,
-                    self.options.limits,
-                ),
-                .ip => |address| blk: {
-                    var value = try runtime.Client.connect(
+                .host => if (deadline) |absolute|
+                    try runtime.Client.connectHostWithDeadline(
                         self.allocator,
                         self.io,
-                        address,
+                        endpoint.tls_host,
+                        endpoint.port,
                         self.options.limits,
-                    );
+                        absolute,
+                    )
+                else
+                    try runtime.Client.connectHost(
+                        self.allocator,
+                        self.io,
+                        endpoint.tls_host,
+                        endpoint.port,
+                        self.options.limits,
+                    ),
+                .ip => |address| blk: {
+                    var value = if (deadline) |absolute|
+                        try runtime.Client.connectWithDeadline(
+                            self.allocator,
+                            self.io,
+                            address,
+                            self.options.limits,
+                            absolute,
+                        )
+                    else
+                        try runtime.Client.connect(
+                            self.allocator,
+                            self.io,
+                            address,
+                            self.options.limits,
+                        );
                     value.default_host = try self.allocator.dupe(
                         u8,
                         endpoint.authority,
@@ -370,23 +483,46 @@ pub const Pool = struct {
                 },
             },
             .tls => switch (endpoint.target) {
-                .host => try runtime.Client.connectTlsHost(
-                    self.allocator,
-                    self.io,
-                    endpoint.tls_host,
-                    endpoint.port,
-                    self.options.limits,
-                    self.options.tls,
-                ),
-                .ip => |address| try runtime.Client.connectTlsAddress(
-                    self.allocator,
-                    self.io,
-                    address,
-                    endpoint.tls_host,
-                    endpoint.authority,
-                    self.options.limits,
-                    self.options.tls,
-                ),
+                .host => if (deadline) |absolute|
+                    try runtime.Client.connectTlsHostWithDeadline(
+                        self.allocator,
+                        self.io,
+                        endpoint.tls_host,
+                        endpoint.port,
+                        self.options.limits,
+                        self.options.tls,
+                        absolute,
+                    )
+                else
+                    try runtime.Client.connectTlsHost(
+                        self.allocator,
+                        self.io,
+                        endpoint.tls_host,
+                        endpoint.port,
+                        self.options.limits,
+                        self.options.tls,
+                    ),
+                .ip => |address| if (deadline) |absolute|
+                    try runtime.Client.connectTlsAddressWithDeadline(
+                        self.allocator,
+                        self.io,
+                        address,
+                        endpoint.tls_host,
+                        endpoint.authority,
+                        self.options.limits,
+                        self.options.tls,
+                        absolute,
+                    )
+                else
+                    try runtime.Client.connectTlsAddress(
+                        self.allocator,
+                        self.io,
+                        address,
+                        endpoint.tls_host,
+                        endpoint.authority,
+                        self.options.limits,
+                        self.options.tls,
+                    ),
             },
         };
         errdefer client.close();

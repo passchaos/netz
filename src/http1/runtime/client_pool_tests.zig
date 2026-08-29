@@ -816,6 +816,94 @@ test "HTTP/1 client pool acquisition timeout preserves capacity" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 pool request deadline spans capacity wait and response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        first_accepted: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_accepted.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept();
+            defer first.close();
+            self.first_accepted.set(self.server.io);
+            var second = try self.server.accept();
+            defer second.close();
+            var request = try second.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 0,
+        .max_idle_per_authority = 0,
+        .limits = .{ .connect_timeout = .fromSeconds(1) },
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/deadline");
+    defer allocator.free(uri);
+    var held = try pool.acquireUri(uri);
+    try shared.first_accepted.wait(io);
+    if (shared.err) |err| return err;
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromMilliseconds(60),
+        .clock = .awake,
+    });
+    const Releaser = struct {
+        io: std.Io,
+        lease: *pool_mod.Lease,
+        fn run(self: *@This()) void {
+            std.Io.sleep(self.io, .fromMilliseconds(25), .awake) catch {};
+            self.lease.discard();
+        }
+    };
+    var releaser = Releaser{ .io = io, .lease = &held };
+    const release_thread = try std.Thread.spawn(.{}, Releaser.run, .{&releaser});
+    var release_joined = false;
+    defer if (!release_joined) release_thread.join();
+    try std.testing.expectError(
+        error.Timeout,
+        pool.requestUriWithDeadline(uri, .{}, deadline),
+    );
+    release_thread.join();
+    release_joined = true;
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 client pool close wakes blocked acquisition" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
