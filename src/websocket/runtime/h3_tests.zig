@@ -674,7 +674,6 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                     compressed.payload,
                 );
             }
-            try connection.sendText("hello client");
             try connection.sendBinaryParts("a", "b");
             try connection.sendBinaryParts(
                 compressed_first,
@@ -697,6 +696,27 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                     connection.compression_send.payload.allocatedSlice().ptr,
                 );
             }
+            try h3.testing.writeFrame(&connection, .binary, "split-", false);
+            try connection.sendPing("between-fragments");
+            try h3.testing.writeFrame(
+                &connection,
+                .continuation,
+                "message",
+                true,
+            );
+            var interleaved_pong = try connection.receiveFrameWithTimeout(
+                .fromSeconds(5),
+            );
+            defer interleaved_pong.deinit(allocator);
+            try std.testing.expectEqual(
+                websocket.Opcode.pong,
+                interleaved_pong.header.opcode,
+            );
+            try std.testing.expectEqualStrings(
+                "between-fragments",
+                interleaved_pong.payload,
+            );
+            try connection.sendText("hello client");
 
             var ping = try connection.pingWithTimeout(
                 "server-probe",
@@ -804,10 +824,6 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             client.compression_send.payload.allocatedSlice().ptr,
         );
     }
-    var reply = try client.receiveFrameWithTimeout(.fromSeconds(5));
-    defer reply.deinit(allocator);
-    try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);
-    try std.testing.expectEqualStrings("hello client", reply.payload);
     var receive_storage: [compressed_parts.len]u8 = undefined;
     const plain_parts = try client.receiveMessageIntoWithTimeout(
         &receive_storage,
@@ -823,6 +839,16 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         try std.testing.expectEqual(websocket.Opcode.binary, compressed.opcode);
         try std.testing.expectEqualStrings(compressed_parts, compressed.payload);
     }
+    const fragmented = try client.receiveMessageIntoWithTimeout(
+        &receive_storage,
+        .fromSeconds(5),
+    );
+    try std.testing.expectEqual(websocket.Opcode.binary, fragmented.opcode);
+    try std.testing.expectEqualStrings("split-message", fragmented.payload);
+    var reply = try client.receiveFrameWithTimeout(.fromSeconds(5));
+    defer reply.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, reply.header.opcode);
+    try std.testing.expectEqualStrings("hello client", reply.payload);
     try client.sendText("client in flight");
     var server_ping = try client.receiveFrameWithTimeout(.fromSeconds(5));
     defer server_ping.deinit(allocator);

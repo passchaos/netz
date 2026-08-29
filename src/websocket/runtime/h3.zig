@@ -2366,6 +2366,17 @@ fn compressedFragmentRange(
 pub const testing = struct {
     pub const FragmentRangeForTest = FragmentRange;
 
+    /// Split one message around control traffic without exposing raw frame
+    /// construction as part of the production connection API.
+    pub fn writeFrame(
+        connection: anytype,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        return connection.writeFrame(opcode, payload, fin, false);
+    }
+
     pub fn fragmentedTextIsValid(value: []const []const u8) bool {
         return validateFragmentedText(value);
     }
