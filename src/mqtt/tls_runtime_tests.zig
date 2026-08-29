@@ -1514,6 +1514,22 @@ test "MQTT TLS caller deadline retains shorter network phase timeout" {
     );
 }
 
+test "MQTT TLS caller timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_tls.Client.connectAddressWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1) },
+            "localhost",
+            .{ .mqtt = .{ .client_id = "tls-total-timeout" } },
+            .zero,
+        ),
+    );
+}
+
 test "MQTT TLS client supports mqtts URI and MQTT 3.1.1" {
     const allocator = std.testing.allocator;
 

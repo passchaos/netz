@@ -1807,6 +1807,42 @@ test "public modules are reachable" {
         "connectUriAttemptWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHostWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHostAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddressWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddressWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddressAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUriWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUriAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,
         "ReconnectConnector",
     ));

@@ -340,6 +340,25 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectHostWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectHostWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -358,6 +377,25 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectHostWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     /// Resolve, establish TLS, and negotiate MQTT under one caller-owned
@@ -390,6 +428,25 @@ pub const Client = struct {
             host,
             options,
             deadline,
+        );
+    }
+
+    pub fn connectHostAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -470,6 +527,25 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectAddressWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAddressWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectAddressWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -488,6 +564,25 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectAddressWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAddressWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectAddressAttemptWithDeadline(
@@ -515,6 +610,25 @@ pub const Client = struct {
             tls_host,
             options,
             deadline,
+        );
+    }
+
+    pub fn connectAddressAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAddressAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -605,6 +719,23 @@ pub const Client = struct {
         return result.connection;
     }
 
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriWithConnAckWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -621,6 +752,23 @@ pub const Client = struct {
         );
         errdefer attempt.deinit(allocator);
         return attempt.requireAccepted();
+    }
+
+    pub fn connectUriWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn connectUriAttemptWithDeadline(
@@ -664,6 +812,23 @@ pub const Client = struct {
             tls_host,
             options,
             deadline,
+        );
+    }
+
+    pub fn connectUriAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
