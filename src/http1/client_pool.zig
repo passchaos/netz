@@ -141,6 +141,20 @@ pub const Pool = struct {
     /// Bound capacity admission, any new DNS/TCP/TLS connection, and the
     /// complete HTTP/1 response with one caller-owned deadline. A stale idle
     /// retry reuses the original timestamp rather than receiving a fresh budget.
+    pub fn requestUriWithTimeout(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        timeout: std.Io.Duration,
+    ) AcquireTimeoutError!runtime.OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestUriWithDeadline(
+            uri_text,
+            request_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn requestUriWithDeadline(
         self: *Pool,
         uri_text: []const u8,

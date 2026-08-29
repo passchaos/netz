@@ -210,6 +210,20 @@ pub const Pool = struct {
 
     /// Apply one absolute deadline to FIFO admission, connection setup, the
     /// HTTP/2 bootstrap, stale-idempotent retry, and the complete response.
+    pub fn requestUriWithTimeout(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        timeout: std.Io.Duration,
+    ) AcquireTimeoutError!runtime.OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestUriWithDeadline(
+            uri_text,
+            request_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn requestUriWithDeadline(
         self: *Pool,
         uri_text: []const u8,

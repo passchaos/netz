@@ -904,6 +904,25 @@ test "HTTP/1 pool request deadline spans capacity wait and response" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 pool request timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var pool = try pool_mod.Pool.init(
+        std.testing.allocator,
+        threaded.io(),
+        .{},
+    );
+    defer pool.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        pool.requestUriWithTimeout(
+            "http://localhost/",
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/1 client pool close wakes blocked acquisition" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
