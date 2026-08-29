@@ -181,7 +181,8 @@ test "MQTT connection deadlines reject a non-awake clock before state changes" {
         .transport = .initTcp(io, client_stream),
         .protocol = .v5,
     };
-    defer connection.close();
+    var connection_open = true;
+    defer if (connection_open) connection.close();
     const deadline = std.Io.Clock.Timestamp.fromNow(
         io,
         .{ .raw = .fromSeconds(1), .clock = .real },
@@ -199,24 +200,17 @@ test "MQTT connection deadlines reject a non-awake clock before state changes" {
         error.Timeout,
         connection.readClientPacketEventWithDeadline(deadline),
     );
+
+    connection.close();
+    connection_open = false;
     var received: [2]u8 = undefined;
     var buffers = [_][]u8{&received};
-    try std.testing.expectError(
-        error.Timeout,
-        io.operateTimeout(
-            .{ .file_read_streaming = .{
-                .file = .{
-                    .handle = server_stream.socket.handle,
-                    .flags = .{ .nonblocking = false },
-                },
-                .data = &buffers,
-            } },
-            .{ .duration = .{
-                .raw = .fromMilliseconds(20),
-                .clock = .awake,
-            } },
-        ),
+    const count = try io.vtable.netRead(
+        io.userdata,
+        server_stream.socket.handle,
+        &buffers,
     );
+    try std.testing.expectEqual(@as(usize, 0), count);
 }
 
 test "MQTT broker event timeout and deadline resume partial publish" {
