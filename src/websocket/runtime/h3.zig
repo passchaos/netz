@@ -159,8 +159,11 @@ pub fn Connection(comptime role: common.Role) type {
         compression_send_max_window_bits: u8 = 15,
         compression_send: compression_scratch.SendScratch = .{},
         compression_receive: compression_scratch.Scratch = .{},
-        close_sent: bool = false,
-        close_received: bool = false,
+        /// Receive progress and public writers may run on separate threads.
+        /// The send mutex orders wire writes; atomics make their shared Close
+        /// observations race-free without holding that mutex across QUIC reads.
+        close_sent: std.atomic.Value(bool) = .init(false),
+        close_received: std.atomic.Value(bool) = .init(false),
         receive_finished: bool = false,
 
         fn init(
@@ -299,7 +302,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (role != .client or self.permessage_deflate) {
                 return error.InvalidFrame;
             }
-            if (self.close_sent or self.close_received) {
+            if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             if (payload_len > self.limits.max_frame_bytes or
@@ -321,7 +324,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!void {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.close_sent or self.close_received) {
+            if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             const payload_len = std.math.add(
@@ -374,7 +377,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.close_sent or self.close_received) {
+            if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             if (fragments.len == 0) return error.InvalidFrame;
@@ -521,7 +524,7 @@ pub fn Connection(comptime role: common.Role) type {
         fn echoCloseFrame(self: *Self, payload: []const u8) Error!void {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (!self.close_sent) {
+            if (!self.closeSent()) {
                 try self.sendControlFrameLocked(.close, payload);
             }
         }
@@ -599,7 +602,7 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!CloseHandshakeEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (!self.close_sent) {
+            if (!self.closeSent()) {
                 var storage: [125]u8 = undefined;
                 const payload = try websocket.writeClosePayloadInto(
                     &storage,
@@ -609,7 +612,7 @@ pub fn Connection(comptime role: common.Role) type {
                     self.send_mutex.lockUncancelable(self.io());
                     defer self.send_mutex.unlock(self.io());
                     _ = try deadline_policy.usableAwake(self.io(), deadline);
-                    if (!self.close_sent) {
+                    if (!self.closeSent()) {
                         try self.sendControlFrameLocked(.close, payload);
                     }
                 }
@@ -635,7 +638,7 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!CloseHandshakeEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (!self.close_sent) return error.InvalidFrame;
+            if (!self.closeSent()) return error.InvalidFrame;
             return self.readCloseHandshakeEvent(deadline);
         }
 
@@ -864,7 +867,7 @@ pub fn Connection(comptime role: common.Role) type {
             control_out: *[125]u8,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!websocket.BorrowedFrame {
-            if (self.close_sent and self.close_received) {
+            if (self.closeSent() and self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             try self.ensureBuffered(2, deadline);
@@ -918,11 +921,11 @@ pub fn Connection(comptime role: common.Role) type {
             self.discardBuffered(frame.consumed);
             switch (frame.header.opcode) {
                 .ping => {
-                    if (!self.close_sent) try self.sendPong(frame.payload);
+                    if (!self.closeSent()) try self.sendPong(frame.payload);
                 },
                 .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) try self.echoCloseFrame(frame.payload);
+                    self.close_received.store(true, .release);
+                    if (!self.closeSent()) try self.echoCloseFrame(frame.payload);
                 },
                 else => {},
             }
@@ -1039,7 +1042,7 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!websocket.Frame {
             errdefer |err| self.closeAfterReceiveError(err);
-            if (self.close_sent and self.close_received) {
+            if (self.closeSent() and self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             try self.ensureBuffered(2, deadline);
@@ -1088,11 +1091,11 @@ pub fn Connection(comptime role: common.Role) type {
             self.discardBuffered(frame.consumed);
             switch (frame.header.opcode) {
                 .ping => {
-                    if (!self.close_sent) try self.sendPong(frame.payload);
+                    if (!self.closeSent()) try self.sendPong(frame.payload);
                 },
                 .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) try self.echoCloseFrame(frame.payload);
+                    self.close_received.store(true, .release);
+                    if (!self.closeSent()) try self.echoCloseFrame(frame.payload);
                 },
                 else => {},
             }
@@ -1103,7 +1106,7 @@ pub fn Connection(comptime role: common.Role) type {
             const code = common.closeCodeForReceiveError(err) orelse return;
             // Nested receive helpers can observe the same error. Emit at most
             // one failure Close while preserving the original receive error.
-            if (self.close_sent) return;
+            if (self.closeSent()) return;
             self.sendClose(code, "") catch {};
         }
 
@@ -1112,7 +1115,7 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
-            if (self.close_sent or self.close_received) {
+            if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             if (payload.len > self.limits.max_frame_bytes or
@@ -1153,9 +1156,17 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
-            if (self.close_sent) return error.ConnectionClosed;
+            if (self.closeSent()) return error.ConnectionClosed;
             try self.writeFrame(opcode, payload, true, opcode == .close);
-            if (opcode == .close) self.close_sent = true;
+            if (opcode == .close) self.close_sent.store(true, .release);
+        }
+
+        fn closeSent(self: *const Self) bool {
+            return self.close_sent.load(.acquire);
+        }
+
+        fn closeReceived(self: *const Self) bool {
+            return self.close_received.load(.acquire);
         }
 
         fn writeFrame(

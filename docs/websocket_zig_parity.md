@@ -567,7 +567,9 @@ concurrent callers from interleaving one RFC 6455 frame across HTTP/3 DATA.
 HTTP/1, RFC 8441, and HTTP/3 writers also validate connection Close state after
 acquiring their send mutex, so a sender queued behind Close cannot append a
 data or control frame after the closing handshake has begun. Ping and Close
-deadline APIs revalidate their absolute budget after lock contention.
+deadline APIs revalidate their absolute budget after lock contention. Close
+flags use acquire/release atomics because a sole receive owner and concurrent
+application writers may observe those transitions on different threads.
 HTTP/3 receive paths now use the same RFC 6455 failure mapping as HTTP/1 and
 RFC 8441, sending 1002 for malformed framing, 1007 for invalid text, and 1009
 for configured frame/message limits while preserving the original local error.

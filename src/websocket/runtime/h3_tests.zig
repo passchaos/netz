@@ -1153,8 +1153,8 @@ test "WebSocket HTTP3 control progress APIs reject expired budgets" {
 test "WebSocket HTTP3 in-place binary send rejects unsupported modes" {
     var server: h3.ServerConnection = undefined;
     server.permessage_deflate = false;
-    server.close_sent = false;
-    server.close_received = false;
+    server.close_sent = .init(false);
+    server.close_received = .init(false);
     server.limits = .{};
     const payload = [_]u8{1};
     try std.testing.expectError(
@@ -1164,20 +1164,20 @@ test "WebSocket HTTP3 in-place binary send rejects unsupported modes" {
 
     var client: h3.ClientConnection = undefined;
     client.permessage_deflate = true;
-    client.close_sent = false;
-    client.close_received = false;
+    client.close_sent = .init(false);
+    client.close_received = .init(false);
     client.limits = .{};
     try std.testing.expectError(
         error.InvalidFrame,
         h3.testing.validateBinaryInPlace(&client, payload.len),
     );
     client.permessage_deflate = false;
-    client.close_sent = true;
+    client.close_sent.store(true, .release);
     try std.testing.expectError(
         error.ConnectionClosed,
         h3.testing.validateBinaryInPlace(&client, payload.len),
     );
-    client.close_sent = false;
+    client.close_sent.store(false, .release);
     client.limits.max_frame_bytes = 0;
     try std.testing.expectError(
         error.MessageTooLarge,
