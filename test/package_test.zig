@@ -1034,6 +1034,14 @@ test "public modules are reachable" {
         netz.websocket.runtime.TlsServer,
         "acceptStreamWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.UnixServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.UnixServer,
+        "acceptWithTimeout",
+    ));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_sent"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_received"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "selected_protocol"));

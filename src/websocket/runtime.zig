@@ -362,9 +362,56 @@ pub const UnixServer = struct {
         self: *UnixServer,
         options: AcceptOptions,
     ) Error!Connection {
-        var http_connection = try self.http.accept();
+        return self.acceptMaybeBefore(options, null);
+    }
+
+    /// Accept a Unix stream, then bound its HTTP Upgrade with one caller-owned
+    /// awake-clock deadline. Socket acceptance itself remains unbounded.
+    pub fn acceptWithDeadline(
+        self: *UnixServer,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        return self.acceptMaybeBefore(options, deadline);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *UnixServer,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const http_connection = try self.http.accept();
+        return self.upgradeHttpConnectionMaybeBefore(
+            http_connection,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn acceptMaybeBefore(
+        self: *UnixServer,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        const http_connection = try self.http.accept();
+        return self.upgradeHttpConnectionMaybeBefore(
+            http_connection,
+            options,
+            deadline,
+        );
+    }
+
+    fn upgradeHttpConnectionMaybeBefore(
+        self: *UnixServer,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var http_connection_owned = http_connection;
         var http_owned = true;
-        errdefer if (http_owned) http_connection.close();
+        errdefer if (http_owned) http_connection_owned.close();
         var limits = self.limits;
         limits.tcp_nodelay = false;
         const connection = try acceptTransport(
@@ -372,11 +419,11 @@ pub const UnixServer = struct {
             self.http.io,
             .{ .tcp = .{
                 .io = self.http.io,
-                .stream = http_connection.stream,
+                .stream = http_connection_owned.stream,
             } },
             limits,
             options,
-            null,
+            deadline,
         );
         http_owned = false;
         return connection;

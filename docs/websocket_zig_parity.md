@@ -520,7 +520,9 @@ forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can
 be upgraded under the same caller-owned deadline. WSS server acceptance carries
 that budget through both TLS 1.3 and HTTP Upgrade, with each configured phase
-timeout able to shorten but never renew it.
+timeout able to shorten but never renew it. Unix-domain WebSocket listeners
+expose the same post-accept Upgrade deadline contract without applying TCP-only
+socket options.
 
 1. **Completed at 128 connections:** the equal-shape mixed-payload benchmark
    now reports per-class p50/p99/p99.9 and retains matching checksum/sample
