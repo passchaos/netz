@@ -330,6 +330,12 @@ benchmarks.
 
 ## Known blockers before declaring the goal complete
 
+HTTP/3's shared-endpoint handshake admission now uses the exact absolute
+deadline recorded when the Initial was registered, rather than relying only on
+the supervisor to close its inbox during periodic expiry scans. The worker's
+QUIC/TLS accept path therefore cannot outlive that admission budget between
+poll iterations.
+
 The generic HTTP/3 origin-keyed idle pool now performs true global LRU
 capacity eviction. Its entry array uses `swapRemove` so array position cannot
 encode age; each release therefore records an independent monotonic sequence

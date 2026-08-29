@@ -64,7 +64,8 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     InvalidAlpn,
 };
 pub const HandshakeAdmissionError = Error ||
-    quic.endpoint_dispatcher.Error || std.Io.ConcurrentError;
+    quic.endpoint_dispatcher.Error || std.Io.ConcurrentError ||
+    std.Io.Timeout.Error;
 pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 const client_control_stream_id: u62 = 2;
@@ -3228,6 +3229,16 @@ pub const HandshakeAdmission = struct {
         return self.deadline_ns;
     }
 
+    pub fn deadline(self: *const HandshakeAdmission) std.Io.Clock.Timestamp {
+        return .{
+            .raw = .{ .nanoseconds = @intCast(@min(
+                self.deadline_ns,
+                @as(u64, @intCast(std.math.maxInt(i64))),
+            )) },
+            .clock = .awake,
+        };
+    }
+
     pub fn takeInitial(self: *HandshakeAdmission) quic.runtime.OwnedBytes {
         std.debug.assert(self.initial_owned);
         self.initial_owned = false;
@@ -3257,7 +3268,7 @@ pub const HandshakeCompletion = struct {
     admission: *HandshakeAdmission,
     result: union(enum) {
         session: HandshakeServerSession,
-        failure: Error,
+        failure: HandshakeAdmissionError,
     },
 
     pub fn deinit(self: *HandshakeCompletion) void {
@@ -4439,14 +4450,16 @@ pub const HandshakeServer = struct {
     pub fn acceptAdmission(
         self: *HandshakeServer,
         admission: *HandshakeAdmission,
-    ) Error!HandshakeServerSession {
+    ) HandshakeAdmissionError!HandshakeServerSession {
         var options = self.handshake_options;
         options.local_connection_id = admission.serverConnectionId();
-        var established = try quic.handshake.acceptFromInitialSource(
+        var established = try quic.handshake
+            .acceptFromInitialSourceWithDeadline(
             &self.quic_server.endpoint,
             admission.datagramSource(),
             admission.takeInitial(),
             options,
+            admission.deadline(),
         );
         errdefer established.deinit();
         return HandshakeServerSession.initEstablished(

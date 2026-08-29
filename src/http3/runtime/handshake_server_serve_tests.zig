@@ -643,6 +643,11 @@ test "HTTP/3 handshake admission owns generated CID and Initial lifecycle" {
         "owned-initial",
         admission.initial.bytes,
     );
+    try std.testing.expectEqual(.awake, admission.deadline().clock);
+    try std.testing.expectEqual(
+        admission.deadlineNs(),
+        @as(u64, @intCast(admission.deadline().raw.nanoseconds)),
+    );
 }
 
 test "HTTP/3 routed Initial timeout validates before consuming event" {
@@ -881,6 +886,53 @@ test "HTTP/3 handshake supervisor expires a silent pending worker" {
         completion.result.failure == error.SocketUnconnected or
             completion.result.failure == error.InvalidInitialPacket,
     );
+}
+
+test "HTTP/3 admission worker enforces its absolute deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "template-cid" } },
+    );
+    defer server.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server.quic_server.endpoint,
+    );
+    defer dispatcher.deinit();
+
+    const bytes = try allocator.dupe(u8, "expired-initial");
+    var event = quic.endpoint_dispatcher.Event{ .new_initial = .{
+        .datagram = .{
+            .from = .{ .ip4 = .loopback(4567) },
+            .bytes = bytes,
+        },
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = bytes[0..8],
+        .source_connection_id = bytes[8..],
+        .first_packet_len = bytes.len,
+    } };
+    defer event.deinit(allocator);
+    var admission = try server.beginHandshakeAdmission(
+        &dispatcher,
+        77,
+        &event,
+        .{ .max_pending_handshakes = 1, .inbox_capacity = 1 },
+    );
+    defer admission.deinit();
+    admission.deadline_ns = 0;
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptAdmission(&admission),
+    );
+    try std.testing.expect(!admission.initial_owned);
 }
 
 test "HTTP/3 handshake supervisor establishes concurrent clients" {
