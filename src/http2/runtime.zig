@@ -9,6 +9,7 @@ const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
 const stream_io = @import("../internal/stream_io.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -247,6 +248,19 @@ fn connectionHandshakeDeadline(
         .tls_server => |connection| connection.io,
     };
     return .fromNow(io, .{ .raw = duration, .clock = .awake });
+}
+
+fn connectionHandshakeDeadlineBefore(
+    transport: RuntimeTransport,
+    deadline: std.Io.Clock.Timestamp,
+    timeout: ?std.Io.Duration,
+) Error!std.Io.Clock.Timestamp {
+    const io = switch (transport) {
+        .tcp => |tcp| tcp.io,
+        .tls_client => |connection| connection.io,
+        .tls_server => |connection| connection.io,
+    };
+    return deadline_policy.capTimeout(io, deadline, timeout);
 }
 
 pub const Limits = struct {
@@ -1220,6 +1234,36 @@ pub const Client = struct {
         return connection;
     }
 
+    /// Establish TCP and complete the HTTP/2 SETTINGS exchange under one
+    /// caller-owned deadline while retaining stricter configured phase limits.
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var connection = try connectStreamBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            deadline,
+        );
+        connection.default_scheme = "http";
+        return connection;
+    }
+
     /// Connect with HTTP/2 prior knowledge over a Unix-domain stream.
     /// `authority` is copied for subsequent requests that omit it; the local
     /// transport still uses the `http` scheme and skips TCP-only NODELAY.
@@ -1246,6 +1290,39 @@ pub const Client = struct {
         return connection;
     }
 
+    pub fn connectUnixWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        authority: []const u8,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        if (authority.len == 0) return error.InvalidHeader;
+        const owned_authority = try allocator.dupe(u8, authority);
+        errdefer allocator.free(owned_authority);
+        const stream = try tcp_connect.unixWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var connection = try connectStreamWithoutTcpOptionsBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            deadline,
+        );
+        connection.default_authority = owned_authority;
+        connection.default_scheme = "http";
+        return connection;
+    }
+
     pub fn connectHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1259,6 +1336,44 @@ pub const Client = struct {
         errdefer allocator.free(owned_host);
         const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
         var connection = try connectStream(allocator, io, stream, limits);
+        connection.default_authority = owned_host;
+        connection.default_scheme = "http";
+        return connection;
+    }
+
+    pub fn connectHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        const host_name = try net.HostName.init(host);
+        const owned_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
+        errdefer allocator.free(owned_host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var connection = try connectStreamBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            deadline,
+        );
         connection.default_authority = owned_host;
         connection.default_scheme = "http";
         return connection;
@@ -1299,6 +1414,50 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectTlsHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        const host_name = try net.HostName.init(host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        const owned_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
+        var authority_owned = true;
+        errdefer if (authority_owned) allocator.free(owned_host);
+        stream_owned = false;
+        authority_owned = false;
+        return connectTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            host,
+            owned_host,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
     /// Connect to an already resolved address while verifying TLS against a
     /// separate hostname. This keeps service discovery and certificate/SNI
     /// identity independent without weakening mandatory HTTP/2 ALPN checks.
@@ -1333,6 +1492,47 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectTlsAddressWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        _ = try net.HostName.init(tls_host);
+        if (authority.len == 0) return error.InvalidHeader;
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        const owned_authority = try allocator.dupe(u8, authority);
+        var authority_owned = true;
+        errdefer if (authority_owned) allocator.free(owned_authority);
+        stream_owned = false;
+        authority_owned = false;
+        return connectTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            owned_authority,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
     /// Own the TCP stream and authority from entry. Centralizing this state
     /// transition keeps address- and hostname-based TLS connections aligned
     /// on NODELAY, ALPN validation, HTTP/2 preface, and error cleanup.
@@ -1345,26 +1545,81 @@ pub const Client = struct {
         limits: Limits,
         tls_options: TlsConnectOptions,
     ) Error!Connection {
+        return connectTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            owned_authority,
+            limits,
+            tls_options,
+            null,
+        );
+    }
+
+    fn connectTlsStreamBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        owned_authority: []u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            owned_authority,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
+    fn connectTlsStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        owned_authority: []u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         errdefer allocator.free(owned_authority);
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
-        const tls_connection = try tls_stream.ClientConnection.initVerified(
-            allocator,
-            io,
-            stream,
-            .{
-                .server_name = tls_host,
-                .verify_host = tls_options.verify_host,
-                .ca_bundle = tls_options.ca_bundle,
-                .server_verifier = tls_options.server_verifier,
-                .client_identity = tls_options.client_identity,
-                .alpn_protocols = &.{"h2"},
-                .cipher_suites = tls_options.cipher_suites,
-                .max_server_handshake_size = tls_options.max_server_handshake_size,
-                .handshake_timeout = tls_options.tls_handshake_timeout,
-            },
-        );
+        const options: tls_stream.ClientVerifiedOptions = .{
+            .server_name = tls_host,
+            .verify_host = tls_options.verify_host,
+            .ca_bundle = tls_options.ca_bundle,
+            .server_verifier = tls_options.server_verifier,
+            .client_identity = tls_options.client_identity,
+            .alpn_protocols = &.{"h2"},
+            .cipher_suites = tls_options.cipher_suites,
+            .max_server_handshake_size = tls_options.max_server_handshake_size,
+            .handshake_timeout = tls_options.tls_handshake_timeout,
+        };
+        const tls_connection = if (deadline) |absolute|
+            try tls_stream.ClientConnection.initVerifiedWithDeadline(
+                allocator,
+                io,
+                stream,
+                options,
+                absolute,
+            )
+        else
+            try tls_stream.ClientConnection.initVerified(
+                allocator,
+                io,
+                stream,
+                options,
+            );
         stream_owned = false;
         var tls_owned = true;
         errdefer if (tls_owned) tls_connection.deinit();
@@ -1375,13 +1630,23 @@ pub const Client = struct {
         }
         // connectTransport owns the TLS connection on every return path.
         tls_owned = false;
-        var connection = try connectTransport(
-            allocator,
-            io,
-            stream,
-            .{ .tls_client = tls_connection },
-            limits,
-        );
+        var connection = if (deadline) |absolute|
+            try connectTransportBefore(
+                allocator,
+                io,
+                stream,
+                .{ .tls_client = tls_connection },
+                limits,
+                absolute,
+            )
+        else
+            try connectTransport(
+                allocator,
+                io,
+                stream,
+                .{ .tls_client = tls_connection },
+                limits,
+            );
         connection.default_authority = owned_authority;
         connection.default_scheme = "https";
         return connection;
@@ -1572,6 +1837,26 @@ pub const Client = struct {
         );
     }
 
+    fn connectStreamBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+        stream_owned = false;
+        return connectStreamWithoutTcpOptionsBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            deadline,
+        );
+    }
+
     fn connectStreamWithoutTcpOptions(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1587,6 +1872,23 @@ pub const Client = struct {
         );
     }
 
+    fn connectStreamWithoutTcpOptionsBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        return connectTransportBefore(
+            allocator,
+            io,
+            stream,
+            tcpTransport(io, stream),
+            limits,
+            deadline,
+        );
+    }
+
     fn connectTransport(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1594,12 +1896,55 @@ pub const Client = struct {
         transport: RuntimeTransport,
         limits: Limits,
     ) Error!Connection {
+        return connectTransportMaybeBefore(
+            allocator,
+            io,
+            stream,
+            transport,
+            limits,
+            null,
+        );
+    }
+
+    fn connectTransportBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        transport: RuntimeTransport,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        return connectTransportMaybeBefore(
+            allocator,
+            io,
+            stream,
+            transport,
+            limits,
+            deadline,
+        );
+    }
+
+    fn connectTransportMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        transport: RuntimeTransport,
+        limits: Limits,
+        outer_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
         var transport_owned = true;
         errdefer if (transport_owned) transport.close();
-        const deadline = try connectionHandshakeDeadline(
-            transport,
-            limits.handshake_timeout,
-        );
+        const deadline = if (outer_deadline) |absolute|
+            try connectionHandshakeDeadlineBefore(
+                transport,
+                absolute,
+                limits.handshake_timeout,
+            )
+        else
+            try connectionHandshakeDeadline(
+                transport,
+                limits.handshake_timeout,
+            );
         try transport.writeAll(http2.connection_preface);
         try writeInitialSettingsTransport(allocator, transport, limits, .client);
         try writeInitialConnectionWindowTransport(allocator, transport, limits);

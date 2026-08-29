@@ -246,6 +246,90 @@ test "HTTP/2 client handshake times out waiting for server SETTINGS" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 caller deadline spans TCP setup and SETTINGS handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var preface: [http2.connection_preface.len]u8 = undefined;
+            try readExact(self.io, stream, &preface);
+            try http2.validateClientPreface(&preface);
+            const settings = try readFrame(self.allocator, self.io, stream);
+            defer self.allocator.free(settings);
+            try std.Io.sleep(self.io, .fromMilliseconds(150), .awake);
+        }
+    };
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .listener = &listener,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithDeadline(
+            allocator,
+            io,
+            listener.socket.address,
+            .{
+                .connect_timeout = .fromSeconds(1),
+                .handshake_timeout = .fromSeconds(1),
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 caller deadline retains shorter connect timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            .{ .connect_timeout = .zero },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
 test "HTTP/2 server SETTINGS does not renew the client handshake deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
