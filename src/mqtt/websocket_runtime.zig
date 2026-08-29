@@ -5,10 +5,21 @@ const runtime = @import("runtime.zig");
 const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
+const deadline_policy = @import("../internal/deadline.zig");
 const vail = @import("vail");
 
 const net = std.Io.net;
 const mqtt_subprotocol = "mqtt";
+
+fn websocketAcceptOptions(
+    allowed_origins: []const []const u8,
+) websocket_runtime.AcceptOptions {
+    return .{
+        .protocols = &.{mqtt_subprotocol},
+        .require_subprotocol = true,
+        .allowed_origins = allowed_origins,
+    };
+}
 
 pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
@@ -67,9 +78,78 @@ pub const Server = struct {
         self: *Server,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.PendingAcceptedClient {
+        return self.acceptPendingMaybeBefore(options, null);
+    }
+
+    pub fn acceptWithDeadline(
+        self: *Server,
+        options: runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.AcceptedClient {
+        var pending = try self.acceptPendingWithDeadline(options, deadline);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        options: runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        var pending = try self.acceptPendingWithTimeout(options, timeout);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPendingWithDeadline(
+        self: *Server,
+        options: runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(
+            self.websocket_server.http.io,
+            deadline,
+        );
+        return self.acceptPendingMaybeBefore(options, deadline);
+    }
+
+    pub fn acceptPendingWithTimeout(
+        self: *Server,
+        options: runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
         const stream = try self.websocket_server.http.listener.accept(
             self.websocket_server.http.io,
         );
+        return self.acceptStreamPendingMaybeBefore(
+            stream,
+            options,
+            .fromNow(
+                self.websocket_server.http.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    fn acceptPendingMaybeBefore(
+        self: *Server,
+        options: runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        const stream = try self.websocket_server.http.listener.accept(
+            self.websocket_server.http.io,
+        );
+        return self.acceptStreamPendingMaybeBefore(stream, options, deadline);
+    }
+
+    fn acceptStreamPendingMaybeBefore(
+        self: *Server,
+        stream: net.Stream,
+        options: runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.websocket_server.http.io);
         var proxy_metadata = try runtime.readProxyMetadata(
@@ -77,7 +157,7 @@ pub const Server = struct {
             self.websocket_server.http.io,
             stream,
             self.limits,
-            null,
+            deadline,
         );
         errdefer if (proxy_metadata) |*metadata| metadata.deinit();
         const http_connection = try self.websocket_server.http.acceptStream(
@@ -85,14 +165,22 @@ pub const Server = struct {
         );
         stream_owned = false;
         // acceptHttpConnection owns the HTTP connection on every return path.
-        var ws = try self.websocket_server.acceptHttpConnection(
-            http_connection,
-            .{
-                .protocols = &.{mqtt_subprotocol},
-                .require_subprotocol = true,
-                .allowed_origins = self.allowed_origins,
-            },
-        );
+        const accept_options: websocket_runtime.AcceptOptions = .{
+            .protocols = &.{mqtt_subprotocol},
+            .require_subprotocol = true,
+            .allowed_origins = self.allowed_origins,
+        };
+        var ws = if (deadline) |absolute|
+            try self.websocket_server.acceptHttpConnectionWithDeadline(
+                http_connection,
+                accept_options,
+                absolute,
+            )
+        else
+            try self.websocket_server.acceptHttpConnection(
+                http_connection,
+                accept_options,
+            );
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
 
@@ -110,7 +198,10 @@ pub const Server = struct {
             connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
-        return connection.acceptPending(options);
+        return if (deadline) |absolute|
+            connection.acceptPendingWithDeadline(options, absolute)
+        else
+            connection.acceptPending(options);
     }
 
     pub fn pendingSource(self: *Server) runtime.PendingSource {
@@ -241,11 +332,85 @@ pub const UnixServer = struct {
         self: *UnixServer,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.PendingAcceptedClient {
-        var ws = try self.websocket_server.accept(.{
-            .protocols = &.{mqtt_subprotocol},
-            .require_subprotocol = true,
-            .allowed_origins = self.allowed_origins,
-        });
+        return self.acceptPendingMaybeBefore(options, null);
+    }
+
+    pub fn acceptWithDeadline(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.AcceptedClient {
+        var pending = try self.acceptPendingWithDeadline(options, deadline);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        var pending = try self.acceptPendingWithTimeout(options, timeout);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPendingWithDeadline(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(
+            self.websocket_server.http.io,
+            deadline,
+        );
+        return self.acceptPendingMaybeBefore(options, deadline);
+    }
+
+    pub fn acceptPendingWithTimeout(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.websocket_server.http.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        const ws = try self.websocket_server.acceptWithDeadline(
+            websocketAcceptOptions(self.allowed_origins),
+            deadline,
+        );
+        return self.finishPendingWebSocket(ws, options, deadline);
+    }
+
+    fn acceptPendingMaybeBefore(
+        self: *UnixServer,
+        options: runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        const ws = if (deadline) |absolute|
+            try self.websocket_server.acceptWithDeadline(
+                websocketAcceptOptions(self.allowed_origins),
+                absolute,
+            )
+        else
+            try self.websocket_server.accept(.{
+                .protocols = &.{mqtt_subprotocol},
+                .require_subprotocol = true,
+                .allowed_origins = self.allowed_origins,
+            });
+        return self.finishPendingWebSocket(ws, options, deadline);
+    }
+
+    fn finishPendingWebSocket(
+        self: *UnixServer,
+        ws_value: websocket_runtime.Connection,
+        options: runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        var ws = ws_value;
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
         var connection = runtime.Connection.initWebSocket(
@@ -258,7 +423,10 @@ pub const UnixServer = struct {
         );
         ws_owned = false;
         errdefer connection.close();
-        return connection.acceptPending(options);
+        return if (deadline) |absolute|
+            connection.acceptPendingWithDeadline(options, absolute)
+        else
+            connection.acceptPending(options);
     }
 
     pub fn pendingSource(self: *UnixServer) runtime.PendingSource {
@@ -395,9 +563,78 @@ pub const TlsServer = struct {
         self: *TlsServer,
         options: runtime.AcceptOptions,
     ) runtime.Error!runtime.PendingAcceptedClient {
+        return self.acceptPendingMaybeBefore(options, null);
+    }
+
+    pub fn acceptWithDeadline(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.AcceptedClient {
+        var pending = try self.acceptPendingWithDeadline(options, deadline);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        var pending = try self.acceptPendingWithTimeout(options, timeout);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptPendingWithDeadline(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(
+            self.websocket_server.io,
+            deadline,
+        );
+        return self.acceptPendingMaybeBefore(options, deadline);
+    }
+
+    pub fn acceptPendingWithTimeout(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
         const stream = try self.websocket_server.listener.accept(
             self.websocket_server.io,
         );
+        return self.acceptStreamPendingMaybeBefore(
+            stream,
+            options,
+            .fromNow(
+                self.websocket_server.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    fn acceptPendingMaybeBefore(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
+        const stream = try self.websocket_server.listener.accept(
+            self.websocket_server.io,
+        );
+        return self.acceptStreamPendingMaybeBefore(stream, options, deadline);
+    }
+
+    fn acceptStreamPendingMaybeBefore(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.PendingAcceptedClient {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.websocket_server.io);
         var proxy_metadata = try runtime.readProxyMetadata(
@@ -405,16 +642,22 @@ pub const TlsServer = struct {
             self.websocket_server.io,
             stream,
             self.limits,
-            null,
+            deadline,
         );
         errdefer if (proxy_metadata) |*metadata| metadata.deinit();
         // acceptStream owns the socket on both success and failure.
         stream_owned = false;
-        var ws = try self.websocket_server.acceptStream(stream, .{
-            .protocols = &.{mqtt_subprotocol},
-            .require_subprotocol = true,
-            .allowed_origins = self.allowed_origins,
-        });
+        var ws = if (deadline) |absolute|
+            try self.websocket_server.acceptStreamWithDeadline(
+                stream,
+                websocketAcceptOptions(self.allowed_origins),
+                absolute,
+            )
+        else
+            try self.websocket_server.acceptStream(
+                stream,
+                websocketAcceptOptions(self.allowed_origins),
+            );
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
 
@@ -432,7 +675,10 @@ pub const TlsServer = struct {
             connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
-        return connection.acceptPending(options);
+        return if (deadline) |absolute|
+            connection.acceptPendingWithDeadline(options, absolute)
+        else
+            connection.acceptPending(options);
     }
 
     pub fn pendingSource(self: *TlsServer) runtime.PendingSource {

@@ -3161,6 +3161,25 @@ test "public modules are reachable" {
         netz.mqtt.websocket_runtime.Server,
         "listen",
     ));
+    inline for (.{
+        "acceptWithDeadline",
+        "acceptWithTimeout",
+        "acceptPendingWithDeadline",
+        "acceptPendingWithTimeout",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.mqtt.websocket_runtime.Server,
+            name,
+        ));
+        try std.testing.expect(@hasDecl(
+            netz.mqtt.websocket_runtime.UnixServer,
+            name,
+        ));
+        try std.testing.expect(@hasDecl(
+            netz.mqtt.websocket_runtime.TlsServer,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Server,
         "accept",

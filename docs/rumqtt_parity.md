@@ -1113,6 +1113,9 @@ admission; configured proxy, TLS, and CONNECT limits can only shorten it.
 Raw TCP server accept and already-accepted-stream APIs expose the same bounded
 CONNECT admission contract, including a shared budget with a trusted PROXY
 preface when enabled.
+WS, Unix-WS, and WSS server accept APIs carry the same outer deadline through
+their WebSocket Upgrade and MQTT CONNECT phases; WSS additionally includes TLS
+and trusted PROXY parsing in that unchanged timestamp.
 Current
 tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
 continuation, incoming QoS 1 delivery across a keep-alive cycle, inbound QoS 2

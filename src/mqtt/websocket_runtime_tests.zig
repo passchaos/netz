@@ -116,6 +116,59 @@ test "MQTT 5 WebSocket runtime negotiates mqtt and completes QoS 1 and 2" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT WebSocket server caller timeout spans Upgrade and CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try mqtt_ws.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{ .max_packet_size = max_packet_size },
+            .max_head_bytes = max_packet_size,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var pending = self.server.acceptPendingWithTimeout(
+                .{ .connect_timeout = .fromSeconds(1) },
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            pending.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var ws = try websocket_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .host = "localhost",
+            .target = "/mqtt",
+            .protocols = &.{"mqtt"},
+        },
+    );
+    defer ws.close();
+    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "MQTT WebSocket server consumes PROXY v1 before HTTP Upgrade" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
