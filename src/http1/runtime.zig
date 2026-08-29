@@ -1973,6 +1973,32 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        errdefer stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+        };
+    }
+
     /// Connect over a Unix-domain socket while retaining ordinary HTTP/1 Host
     /// semantics. `host` is copied because later requests may omit it and use
     /// the connection default. TCP_NODELAY is deliberately not applied.
@@ -1984,6 +2010,35 @@ pub const Client = struct {
         limits: Limits,
     ) Error!Client {
         const stream = try tcp_connect.unix(io, address, limits.connect_timeout);
+        errdefer stream.close(io);
+        const owned_host = try allocator.dupe(u8, host);
+        errdefer allocator.free(owned_host);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_host,
+        };
+    }
+
+    pub fn connectUnixWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        host: []const u8,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const stream = try tcp_connect.unixWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
         errdefer stream.close(io);
         const owned_host = try allocator.dupe(u8, host);
         errdefer allocator.free(owned_host);
@@ -2018,6 +2073,44 @@ pub const Client = struct {
         };
     }
 
+    /// Resolve a hostname and connect under a caller-owned awake-clock
+    /// deadline. A configured connect timeout can only shorten that budget.
+    pub fn connectHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const host_name = try net.HostName.init(host);
+        const owned_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
+        errdefer allocator.free(owned_host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        errdefer stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_host,
+        };
+    }
+
     pub fn connectTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2035,6 +2128,57 @@ pub const Client = struct {
         stream_owned = false;
         errdefer tls_conn.deinit();
         const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+        errdefer allocator.free(owned_host);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_host,
+            .tls_conn = tls_conn,
+        };
+    }
+
+    /// Share one absolute deadline across DNS/TCP and the TLS handshake while
+    /// retaining stricter connect and TLS phase limits.
+    pub fn connectTlsHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const host_name = try net.HostName.init(host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const tls_conn = try TlsClientConnection.initWithDeadline(
+            allocator,
+            io,
+            stream,
+            host,
+            tls_options,
+            deadline,
+        );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        const owned_host = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
         errdefer allocator.free(owned_host);
         return .{
             .io = io,
@@ -2079,6 +2223,49 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectTlsAddressWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const tls_conn = try TlsClientConnection.initWithDeadline(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            tls_options,
+            deadline,
+        );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        const owned_authority = try allocator.dupe(u8, authority);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_authority,
+            .tls_conn = tls_conn,
+        };
+    }
+
     pub fn connectVailTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2097,6 +2284,38 @@ pub const Client = struct {
             port,
             limits,
             tls_options,
+        );
+    }
+
+    pub fn connectVailTlsHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const host_name = try net.HostName.init(host);
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        return connectVailTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            host,
+            port,
+            limits,
+            tls_options,
+            deadline,
         );
     }
 
@@ -2124,6 +2343,36 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectVailTlsAddressWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                limits.connect_timeout,
+            ),
+        );
+        return connectVailTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            address.getPort(),
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
     fn connectVailTlsStream(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2133,25 +2382,80 @@ pub const Client = struct {
         limits: Limits,
         tls_options: VailTlsClientOptions,
     ) Error!Client {
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
-        const tls_connection = try tls_stream.ClientConnection.initVerified(
+        return connectVailTlsStreamMaybeBefore(
             allocator,
             io,
             stream,
-            .{
-                .server_name = tls_host,
-                .verify_host = tls_options.verify_host,
-                .ca_bundle = tls_options.ca_bundle,
-                .server_verifier = tls_options.server_verifier,
-                .client_identity = tls_options.client_identity,
-                .alpn_protocols = tls_options.alpn_protocols,
-                .cipher_suites = tls_options.cipher_suites,
-                .max_server_handshake_size = tls_options.max_server_handshake_size,
-                .handshake_timeout = tls_options.handshake_timeout,
-            },
+            tls_host,
+            port,
+            limits,
+            tls_options,
+            null,
         );
+    }
+
+    fn connectVailTlsStreamBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectVailTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            port,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
+    fn connectVailTlsStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: VailTlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Client {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const options: tls_stream.ClientVerifiedOptions = .{
+            .server_name = tls_host,
+            .verify_host = tls_options.verify_host,
+            .ca_bundle = tls_options.ca_bundle,
+            .server_verifier = tls_options.server_verifier,
+            .client_identity = tls_options.client_identity,
+            .alpn_protocols = tls_options.alpn_protocols,
+            .cipher_suites = tls_options.cipher_suites,
+            .max_server_handshake_size = tls_options.max_server_handshake_size,
+            .handshake_timeout = tls_options.handshake_timeout,
+        };
+        const tls_connection = if (deadline) |absolute|
+            try tls_stream.ClientConnection.initVerifiedWithDeadline(
+                allocator,
+                io,
+                stream,
+                options,
+                absolute,
+            )
+        else
+            try tls_stream.ClientConnection.initVerified(
+                allocator,
+                io,
+                stream,
+                options,
+            );
         stream_owned = false;
         errdefer tls_connection.deinit();
         const owned_host = try std.fmt.allocPrint(

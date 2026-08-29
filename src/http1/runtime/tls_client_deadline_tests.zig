@@ -5,6 +5,75 @@ const tls_testing = @import("../../tls/testing.zig");
 
 const net = std.Io.net;
 
+test "HTTP1 TLS connection deadline bounds a silent handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            std.Io.sleep(self.io, .fromMilliseconds(150), .awake) catch {};
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        http1_runtime.Client.connectTlsAddressWithDeadline(
+            allocator,
+            io,
+            listener.socket.address,
+            "localhost",
+            "localhost",
+            .{ .connect_timeout = .fromSeconds(1) },
+            .{
+                .verify_host = false,
+                .handshake_timeout = .fromSeconds(1),
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    thread.join();
+    joined = true;
+}
+
+test "HTTP1 connection deadline retains shorter connect timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        http1_runtime.Client.connectWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            .{ .connect_timeout = .zero },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
 test "standard TLS client deadline preserves buffered plaintext" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

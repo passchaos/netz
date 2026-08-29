@@ -292,6 +292,34 @@ test "public modules are reachable" {
         netz.http1.runtime.Client,
         "connectUnix",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectUnixWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectTlsHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectTlsAddressWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectVailTlsHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "connectVailTlsAddressWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamBuffered"));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime,
