@@ -443,6 +443,22 @@ test "HTTP/2 URI deadline spans connection bootstrap and response" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 URI timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.requestUriWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            "http://localhost/",
+            .{},
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/2 aggregate response deadline covers header continuations" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

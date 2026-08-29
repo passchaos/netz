@@ -635,6 +635,7 @@ connection unusable so pools cannot replay against ambiguous leftover bytes.
 One-shot HTTP and HTTPS URI helpers additionally accept an end-to-end absolute
 deadline spanning DNS/TCP, standard or vail TLS, request emission, and the same
 complete response boundary, while retaining every stricter phase timeout.
+Relative-timeout wrappers convert their budget once at the one-shot API entry.
 
 HTTP/2 aggregate and callback-streaming client requests now expose relative-
 timeout and absolute-deadline forms on both complete requests and split
@@ -644,7 +645,8 @@ renewal. A timeout sends RST_STREAM(CANCEL) best-effort and marks the connection
 unusable because discarded HPACK/body state cannot safely be reconstructed;
 client pools consequently discard that lease. Netz also exposes
 one-shot HTTP/HTTPS URI deadline helpers that preserve that same absolute
-timestamp across DNS/TCP, TLS, SETTINGS bootstrap, and the complete response.
+timestamp across DNS/TCP, TLS, SETTINGS bootstrap, and the complete response;
+matching relative-timeout wrappers convert once before any network work.
 Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled

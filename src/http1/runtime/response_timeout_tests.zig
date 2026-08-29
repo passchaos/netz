@@ -235,6 +235,22 @@ test "HTTP/1 URI deadline spans connection and complete response" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 URI timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.requestUriWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            "http://localhost/",
+            .{},
+            .{},
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/1 complete response deadline bounds chunk framing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

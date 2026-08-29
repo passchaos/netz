@@ -310,7 +310,15 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,
+        "requestUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
         "requestUriTlsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "requestUriTlsWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.UnixServer,
@@ -391,11 +399,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
+        "requestUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
         "requestUriTlsWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
+        "requestUriTlsWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
         "requestUriVailTlsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "requestUriVailTlsWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,

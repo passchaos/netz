@@ -2118,6 +2118,25 @@ pub const Client = struct {
         );
     }
 
+    pub fn requestUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Apply one absolute deadline to URI parsing's network work, DNS/TCP,
     /// optional TLS, the HTTP/2 SETTINGS bootstrap, and the complete response.
     /// Configured connect, TLS, and bootstrap timeouts remain stricter bounds.
@@ -2193,6 +2212,27 @@ pub const Client = struct {
         options.path = target;
         if (options.scheme == null) options.scheme = uri.scheme;
         return connection.requestWithDeadline(options, deadline);
+    }
+
+    pub fn requestUriTlsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriTlsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 };
 
