@@ -3,6 +3,7 @@ const http3 = @import("../../http3/mod.zig");
 const runtime = @import("../runtime.zig");
 const webtransport = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_testing = @import("../../tls/testing.zig");
 
 const net = std.Io.net;
 
@@ -84,6 +85,99 @@ test "WebTransport URI connect exposes an absolute handshake deadline" {
             .fromNow(io, .{ .raw = .zero, .clock = .awake }),
         ),
     );
+}
+
+test "WebTransport URI deadline includes Extended CONNECT response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const original_dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveSessionRequest();
+            defer pending.deinit();
+            try std.Io.sleep(
+                self.server.h3.quic_server.endpoint.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/deadline",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClientSession.connectUriWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            .{ .h3 = .{
+                .connect_timeout = .fromSeconds(1),
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .random = [_]u8{0x81} ** 32,
+                    .x25519_secret_key = [_]u8{0x82} ** 32,
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = public_key,
+                    },
+                },
+            } },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(50),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "WebTransport endpoint server rotates ready sessions fairly" {

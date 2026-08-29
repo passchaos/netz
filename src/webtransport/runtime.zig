@@ -16,7 +16,8 @@ test {
     _ = @import("runtime/endpoint_server_tests.zig");
 }
 
-pub const Error = webtransport.Error || http3.runtime.Error || error{
+pub const Error = webtransport.Error || http3.runtime.Error ||
+    quic.runtime.ReceiveTimeoutError || error{
     InvalidConnect,
     SessionRejected,
     MissingDatagram,
@@ -2744,6 +2745,7 @@ pub const HandshakeClientSession = struct {
             options.origin,
             options.headers,
             options.limits,
+            null,
         );
     }
 
@@ -2854,6 +2856,7 @@ pub const HandshakeClientSession = struct {
             options.origin,
             options.headers,
             options.limits,
+            null,
         );
     }
 
@@ -2894,6 +2897,7 @@ pub const HandshakeClientSession = struct {
             options.origin,
             options.headers,
             options.limits,
+            deadline,
         );
     }
 
@@ -2943,6 +2947,7 @@ pub const HandshakeClientSession = struct {
             options.origin,
             options.headers,
             options.limits,
+            null,
         );
     }
 
@@ -4674,6 +4679,7 @@ fn connectStatefulAttempt(
     origin: []const u8,
     additional_headers: []const http3.Qpack.HeaderField,
     limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!HandshakeConnectAttempt {
     const session_id = try startStatefulConnect(
         h3_client,
@@ -4683,10 +4689,17 @@ fn connectStatefulAttempt(
         additional_headers,
     );
     const allocator = h3_client.allocator;
-    var response_head = try receiveHandshakeConnectAttemptResponse(
-        h3_client,
-        session_id.value,
-    );
+    var response_head = if (deadline) |absolute|
+        try receiveHandshakeConnectAttemptResponseBefore(
+            h3_client,
+            session_id.value,
+            absolute,
+        )
+    else
+        try receiveHandshakeConnectAttemptResponse(
+            h3_client,
+            session_id.value,
+        );
     errdefer response_head.deinit(allocator);
     const owned_h3 = h3_client.*;
     h3_client.* = undefined;
@@ -4828,6 +4841,34 @@ fn receiveHandshakeConnectAttemptResponse(
                     try validateOptionalCapsuleProtocol(
                         head.response.headers,
                     );
+                }
+                const owned = head.response;
+                event = .finished;
+                return owned;
+            },
+            else => return error.InvalidConnect,
+        }
+    }
+}
+
+fn receiveHandshakeConnectAttemptResponseBefore(
+    client: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+    deadline: std.Io.Clock.Timestamp,
+) Error!http3.DecodedResponseHead {
+    while (true) {
+        var event = (try client.receiveResponseEventWithDeadline(
+            stream_id,
+            deadline,
+        )) orelse continue;
+        defer event.deinit(client.allocator);
+        switch (event) {
+            .head => |*head| {
+                if (head.* != .response) return error.InvalidConnect;
+                if (head.response.status >= 200 and
+                    head.response.status < 300)
+                {
+                    try validateOptionalCapsuleProtocol(head.response.headers);
                 }
                 const owned = head.response;
                 event = .finished;

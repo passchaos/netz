@@ -126,7 +126,9 @@ address-specific QUIC/TLS attempt share one absolute deadline across Initial,
 Retry, Version Negotiation, and passive Handshake flights. A real silent-UDP
 test verifies the WebTransport adapter reaches that deadline instead of
 waiting for the lower-level multi-PTO default. `connectUriWithDeadline` also
-accepts an existing absolute awake-clock budget from an application workflow.
+accepts an existing absolute awake-clock budget from an application workflow
+and preserves it through the final Extended CONNECT response rather than
+ending the budget after QUIC/TLS establishment.
 
 ## Important interoperability correction
 
