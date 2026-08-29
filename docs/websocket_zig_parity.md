@@ -515,6 +515,14 @@ All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock
 domains before sending Ping/Close or mutating incremental receive state. The
 HTTP/3 adapter applies the same validation before pumping QUIC.
+The authenticated HTTP/3 adapter now also applies this contract to RFC 9220
+session establishment itself. Client connect APIs preserve one absolute
+awake-clock timestamp across QUIC/TLS, peer SETTINGS, Extended CONNECT, and
+the response head; server accept APIs preserve it across the first QUIC
+Initial, TLS, peer SETTINGS/request processing, and the 200 response. Existing
+HTTP/3 sessions expose matching bounded adapter entry points. A cross-phase
+regression completes QUIC/TLS, withholds CONNECT past the original deadline,
+and verifies that the server does not start a fresh post-handshake budget.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

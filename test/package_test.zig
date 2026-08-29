@@ -768,6 +768,38 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime.h3, "Client"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.h3, "Server"));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
+        "connectSessionWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
+        "connectSessionWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Server,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Server,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Server,
+        "acceptSessionWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Server,
+        "acceptSessionWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3.ClientConnection,
         "receiveFrame",
     ));

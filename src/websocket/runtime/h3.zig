@@ -673,7 +673,47 @@ pub const Client = struct {
         options: ConnectOptions,
     ) Error!ClientConnection {
         h3.options.local_settings.enable_connect_protocol = true;
-        return connectEstablished(allocator, h3, options);
+        return connectEstablishedBefore(allocator, h3, options, null);
+    }
+
+    /// Complete RFC 9220 negotiation on an existing HTTP/3 connection before
+    /// one absolute awake-clock deadline. The caller keeps ownership of `h3`
+    /// on failure and transfers it to the returned WebSocket on success.
+    pub fn connectSessionWithDeadline(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ClientConnection {
+        const absolute = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            deadline,
+        );
+        h3.options.local_settings.enable_connect_protocol = true;
+        return connectEstablishedBefore(
+            allocator,
+            h3,
+            options,
+            absolute,
+        );
+    }
+
+    pub fn connectSessionWithTimeout(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ClientConnection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectSessionWithDeadline(
+            allocator,
+            h3,
+            options,
+            .fromNow(
+                h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
     }
 
     pub fn connect(
@@ -697,18 +737,75 @@ pub const Client = struct {
             h3_options_with_connect,
         );
         errdefer h3.deinit();
-        return connectEstablished(allocator, &h3, options);
+        return connectEstablishedBefore(allocator, &h3, options, null);
+    }
+
+    /// Establish QUIC/TLS and finish the RFC 9220 Extended CONNECT under one
+    /// caller-owned deadline. Passing the original timestamp to every HTTP/3
+    /// receive phase prevents SETTINGS or response traffic from renewing it.
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        server: std.Io.net.IpAddress,
+        h3_limits: http3.runtime.Limits,
+        h3_options: http3.runtime.HandshakeClientOptions,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ClientConnection {
+        const absolute = try deadline_policy.usableAwake(io, deadline);
+        var h3_options_with_connect = h3_options;
+        h3_options_with_connect.session.local_settings
+            .enable_connect_protocol = true;
+        var h3 = try http3.runtime.HandshakeClient.connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            h3_limits,
+            h3_options_with_connect,
+            absolute,
+        );
+        errdefer h3.deinit();
+        return connectEstablishedBefore(allocator, &h3, options, absolute);
+    }
+
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        server: std.Io.net.IpAddress,
+        h3_limits: http3.runtime.Limits,
+        h3_options: http3.runtime.HandshakeClientOptions,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ClientConnection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            h3_limits,
+            h3_options,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 };
 
-fn connectEstablished(
+fn connectEstablishedBefore(
     allocator: std.mem.Allocator,
     h3: *http3.runtime.HandshakeClient,
     options: ConnectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!ClientConnection {
     try validateClientExtraHeaders(options.extra_headers);
     try validateProtocols(options.protocols);
-    const peer_settings = try h3.receivePeerSettings();
+    const peer_settings = if (deadline) |absolute|
+        try h3.receivePeerSettingsWithDeadline(absolute)
+    else
+        try h3.receivePeerSettings();
     if (!peer_settings.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
@@ -747,6 +844,14 @@ fn connectEstablished(
         });
     }
     try fields.appendSlice(allocator, options.extra_headers);
+    if (deadline) |absolute| {
+        // Header construction is local work but remains part of the caller's
+        // operation. Do not emit CONNECT after its absolute budget elapsed.
+        _ = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            absolute,
+        );
+    }
     const stream_id = try h3.startRequest(.{
         .method = "CONNECT",
         .path = options.path,
@@ -754,7 +859,10 @@ fn connectEstablished(
         .authority = options.authority,
         .headers = fields.items,
     }, null);
-    var response = try receiveResponseHead(h3, stream_id);
+    var response = if (deadline) |absolute|
+        try receiveResponseHeadWithDeadline(h3, stream_id, absolute)
+    else
+        try receiveResponseHead(h3, stream_id);
     defer response.deinit(allocator);
     if (response.status < 200 or response.status >= 300) {
         return error.InvalidResponse;
@@ -827,7 +935,48 @@ pub const Server = struct {
     ) Error!ServerConnection {
         var h3 = try self.transport.accept();
         errdefer h3.deinit();
-        return acceptServerSession(self.transport.allocator, &h3, options);
+        return acceptServerSessionBefore(
+            self.transport.allocator,
+            &h3,
+            options,
+            null,
+        );
+    }
+
+    /// Carry one absolute deadline through QUIC/TLS, peer SETTINGS, the first
+    /// WebSocket Extended CONNECT request, and the local 200 response.
+    pub fn acceptWithDeadline(
+        self: *Server,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ServerConnection {
+        const absolute = try deadline_policy.usableAwake(
+            self.transport.quic_server.endpoint.io,
+            deadline,
+        );
+        var h3 = try self.transport.acceptWithDeadline(absolute);
+        errdefer h3.deinit();
+        return acceptServerSessionBefore(
+            self.transport.allocator,
+            &h3,
+            options,
+            absolute,
+        );
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!ServerConnection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(
+            options,
+            .fromNow(
+                self.transport.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
     }
 
     pub fn acceptSession(
@@ -835,17 +984,63 @@ pub const Server = struct {
         h3: *http3.runtime.HandshakeServerSession,
         options: AcceptOptions,
     ) Error!ServerConnection {
-        return acceptServerSession(allocator, h3, options);
+        return acceptServerSessionBefore(allocator, h3, options, null);
+    }
+
+    pub fn acceptSessionWithDeadline(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeServerSession,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ServerConnection {
+        const absolute = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            deadline,
+        );
+        return acceptServerSessionBefore(
+            allocator,
+            h3,
+            options,
+            absolute,
+        );
+    }
+
+    pub fn acceptSessionWithTimeout(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeServerSession,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!ServerConnection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return acceptSessionWithDeadline(
+            allocator,
+            h3,
+            options,
+            .fromNow(
+                h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
     }
 };
 
-fn acceptServerSession(
+fn acceptServerSessionBefore(
     allocator: std.mem.Allocator,
     h3: *http3.runtime.HandshakeServerSession,
     options: AcceptOptions,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!ServerConnection {
+    if (deadline) |absolute| {
+        _ = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            absolute,
+        );
+    }
     try h3.ensureSettingsSent();
-    var request = try receiveRequestHead(h3);
+    var request = if (deadline) |absolute|
+        try receiveRequestHeadWithDeadline(h3, absolute)
+    else
+        try receiveRequestHead(h3);
     defer request.head.deinit(allocator);
     try validateRequestHandshake(
         request.head,
@@ -883,6 +1078,14 @@ fn acceptServerSession(
         });
     }
     try headers.appendSlice(allocator, options.extra_headers);
+    if (deadline) |absolute| {
+        // Request validation and extension selection remain within the same
+        // admission budget; never send a successful response after expiry.
+        _ = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            absolute,
+        );
+    }
     try h3.startResponse(
         request.stream_id,
         .{
@@ -914,8 +1117,25 @@ const RequestHead = struct {
 fn receiveRequestHead(
     h3: *http3.runtime.HandshakeServerSession,
 ) Error!RequestHead {
+    return receiveRequestHeadBefore(h3, null);
+}
+
+fn receiveRequestHeadWithDeadline(
+    h3: *http3.runtime.HandshakeServerSession,
+    deadline: std.Io.Clock.Timestamp,
+) Error!RequestHead {
+    return receiveRequestHeadBefore(h3, deadline);
+}
+
+fn receiveRequestHeadBefore(
+    h3: *http3.runtime.HandshakeServerSession,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!RequestHead {
     while (true) {
-        var event = try h3.receiveRequestEvent();
+        var event = if (deadline) |absolute|
+            try h3.receiveRequestEventWithDeadline(absolute)
+        else
+            try h3.receiveRequestEvent();
         defer event.deinit(h3.established.connection.endpoint.allocator);
         switch (event) {
             .reset => return error.InvalidHandshake,
@@ -936,8 +1156,27 @@ fn receiveResponseHead(
     h3: *http3.runtime.HandshakeClient,
     stream_id: u62,
 ) Error!http3.DecodedResponseHead {
+    return receiveResponseHeadBefore(h3, stream_id, null);
+}
+
+fn receiveResponseHeadWithDeadline(
+    h3: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+    deadline: std.Io.Clock.Timestamp,
+) Error!http3.DecodedResponseHead {
+    return receiveResponseHeadBefore(h3, stream_id, deadline);
+}
+
+fn receiveResponseHeadBefore(
+    h3: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!http3.DecodedResponseHead {
     while (true) {
-        var event = (try h3.receiveResponseEvent(stream_id)) orelse continue;
+        var event = (if (deadline) |absolute|
+            try h3.receiveResponseEventWithDeadline(stream_id, absolute)
+        else
+            try h3.receiveResponseEvent(stream_id)) orelse continue;
         defer event.deinit(h3.allocator);
         switch (event) {
             .head => |*head| {

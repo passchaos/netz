@@ -3,6 +3,315 @@ const websocket = @import("../mod.zig");
 const h3 = @import("h3.zig");
 const http3 = @import("../../http3/mod.zig");
 
+test "WebSocket HTTP3 server deadline spans QUIC TLS and CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x55} ** 32,
+            .x25519_secret_key = [_]u8{0x56} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        io: std.Io,
+        handshake_complete: std.Io.Event = .unset,
+        send_connect: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.handshake_complete.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h3_client = try http3.runtime.HandshakeClient.connect(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.server.address(),
+                limits,
+                .{
+                    .handshake = .{
+                        .original_destination_connection_id = &original_dcid,
+                        .local_connection_id = &client_cid,
+                        .server_name = "localhost",
+                        .random = [_]u8{0x57} ** 32,
+                        .x25519_secret_key = [_]u8{0x58} ** 32,
+                    },
+                    .session = .{ .local_settings = .{
+                        .enable_connect_protocol = true,
+                    } },
+                },
+            );
+            defer h3_client.deinit();
+            self.handshake_complete.set(self.io);
+            try self.send_connect.wait(self.io);
+            _ = try h3_client.startRequest(.{
+                .method = "CONNECT",
+                .path = "/late-websocket",
+                .scheme = "https",
+                .authority = "localhost",
+                .headers = &.{
+                    .{ .name = ":protocol", .value = "websocket" },
+                    .{ .name = "sec-websocket-version", .value = "13" },
+                },
+            }, null);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const client_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.send_connect.set(io);
+        client_thread.join();
+    };
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromMilliseconds(300), .clock = .awake },
+    );
+    const AcceptResult = h3.Error!h3.ServerConnection;
+    const Wake = union(enum) {
+        server: AcceptResult,
+        client_handshake: std.Io.Cancelable!void,
+    };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer while (select.cancel()) |wake| switch (wake) {
+        .server => |result| if (result) |connection_value| {
+            var connection = connection_value;
+            connection.deinit();
+        } else |_| {},
+        .client_handshake => {},
+    };
+    select.async(
+        .server,
+        h3.Server.acceptWithDeadline,
+        .{ &server, h3.AcceptOptions{}, deadline },
+    );
+    select.async(
+        .client_handshake,
+        std.Io.Event.wait,
+        .{ &shared.handshake_complete, io },
+    );
+    switch (try select.await()) {
+        .server => |result| {
+            if (result) |connection_value| {
+                var connection = connection_value;
+                connection.deinit();
+                return error.TestUnexpectedResult;
+            } else |err| return err;
+        },
+        .client_handshake => |result| try result,
+    }
+
+    // The client deliberately withholds CONNECT until the original absolute
+    // deadline has expired. Restarting a phase-local timeout would accept it.
+    const remaining = deadline.durationFromNow(io).raw.nanoseconds;
+    if (remaining > 0) {
+        try std.Io.sleep(
+            io,
+            .{ .nanoseconds = remaining + 10 * std.time.ns_per_ms },
+            .awake,
+        );
+    }
+    shared.send_connect.set(io);
+    try std.testing.expectError(
+        error.Timeout,
+        switch (try select.await()) {
+            .server => |result| result,
+            .client_handshake => return error.TestUnexpectedResult,
+        },
+    );
+
+    client_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP3 client deadline includes CONNECT response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x85} ** 32,
+            .x25519_secret_key = [_]u8{0x86} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        io: std.Io,
+        deadline: std.Io.Clock.Timestamp,
+        received_connect: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const guard_deadline = std.Io.Clock.Timestamp.fromNow(
+                self.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            );
+            var session = try self.server.transport.acceptWithDeadline(
+                guard_deadline,
+            );
+            defer session.deinit();
+            try session.ensureSettingsSent();
+            while (true) {
+                var event = try session.receiveRequestEventWithDeadline(
+                    guard_deadline,
+                );
+                defer event.deinit(allocator);
+                switch (event) {
+                    .reset => return error.TestUnexpectedResult,
+                    .message => |message| switch (message.value) {
+                        .head => |head| {
+                            if (head != .request or
+                                !std.mem.eql(u8, head.request.method, "CONNECT") or
+                                !std.mem.eql(u8, head.request.path, "/slow-response"))
+                            {
+                                return error.TestUnexpectedResult;
+                            }
+                            self.received_connect = true;
+                            break;
+                        },
+                        else => return error.TestUnexpectedResult,
+                    },
+                }
+            }
+            const remaining = self.deadline.durationFromNow(self.io)
+                .raw.nanoseconds;
+            if (remaining > 0) {
+                try std.Io.sleep(
+                    self.io,
+                    .{ .nanoseconds = remaining + 10 * std.time.ns_per_ms },
+                    .awake,
+                );
+            }
+            // Intentionally omit the response. The client must reach its
+            // original caller deadline rather than beginning a new wait after
+            // QUIC/TLS and peer SETTINGS have completed.
+        }
+    };
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromMilliseconds(300), .clock = .awake },
+    );
+    var shared = Shared{
+        .server = &server,
+        .io = io,
+        .deadline = deadline,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        h3.Client.connectWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            limits,
+            .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x87} ** 32,
+                .x25519_secret_key = [_]u8{0x88} ** 32,
+            } },
+            .{
+                .authority = "localhost",
+                .path = "/slow-response",
+            },
+            deadline,
+        ),
+    );
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.received_connect);
+}
+
+test "WebSocket HTTP3 deadline APIs reject invalid budgets" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client: http3.runtime.HandshakeClient = undefined;
+    var server_session: http3.runtime.HandshakeServerSession = undefined;
+
+    try std.testing.expectError(
+        error.Timeout,
+        h3.Client.connectSessionWithTimeout(
+            std.testing.allocator,
+            &client,
+            .{ .authority = "localhost" },
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        h3.Server.acceptSessionWithTimeout(
+            std.testing.allocator,
+            &server_session,
+            .{},
+            .zero,
+        ),
+    );
+    _ = io;
+}
+
 test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
