@@ -6591,6 +6591,44 @@ test "WebSocket runtime negotiates permessage-deflate" {
 
             try connection.sendFragmented(.text, &.{ "deflated response ", "deflated response" });
 
+            const ConcurrentSender = struct {
+                connection: *Connection,
+                io: std.Io,
+                start: *std.Io.Event,
+                payload: []const u8,
+                err: ?anyerror = null,
+
+                fn run(sender: *@This()) void {
+                    sender.start.wait(sender.io) catch |err| {
+                        sender.err = err;
+                        return;
+                    };
+                    sender.connection.sendText(sender.payload) catch |err| {
+                        sender.err = err;
+                    };
+                }
+            };
+            const concurrent_a = "h1-concurrent-a-h1-concurrent-a-" ++
+                ("a" ** 480);
+            const concurrent_b = "h1-concurrent-b-h1-concurrent-b-" ++
+                ("b" ** 480);
+            var start: std.Io.Event = .unset;
+            var senders = [_]ConcurrentSender{
+                .{ .connection = &connection, .io = server_ptr.http.io, .start = &start, .payload = concurrent_a },
+                .{ .connection = &connection, .io = server_ptr.http.io, .start = &start, .payload = concurrent_b },
+            };
+            const sender_a = try std.Thread.spawn(.{}, ConcurrentSender.run, .{&senders[0]});
+            const sender_b = std.Thread.spawn(.{}, ConcurrentSender.run, .{&senders[1]}) catch |err| {
+                start.set(server_ptr.http.io);
+                sender_a.join();
+                return err;
+            };
+            start.set(server_ptr.http.io);
+            sender_a.join();
+            sender_b.join();
+            if (senders[0].err) |err| return err;
+            if (senders[1].err) |err| return err;
+
             var close = try connection.receiveFrame();
             defer close.deinit(server_ptr.http.allocator);
             try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
@@ -6621,6 +6659,28 @@ test "WebSocket runtime negotiates permessage-deflate" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
     try std.testing.expectEqualStrings("deflated response deflated response", response.payload);
+    try std.testing.expect(response.was_compressed);
+
+    const concurrent_a = "h1-concurrent-a-h1-concurrent-a-" ++
+        ("a" ** 480);
+    const concurrent_b = "h1-concurrent-b-h1-concurrent-b-" ++
+        ("b" ** 480);
+    var concurrent_first = try client.receiveMessageWithTimeout(
+        .fromSeconds(5),
+    );
+    defer concurrent_first.deinit(allocator);
+    var concurrent_second = try client.receiveMessageWithTimeout(
+        .fromSeconds(5),
+    );
+    defer concurrent_second.deinit(allocator);
+    try std.testing.expect(concurrent_first.was_compressed);
+    try std.testing.expect(concurrent_second.was_compressed);
+    const saw_a = std.mem.eql(u8, concurrent_first.payload, concurrent_a) or
+        std.mem.eql(u8, concurrent_second.payload, concurrent_a);
+    const saw_b = std.mem.eql(u8, concurrent_first.payload, concurrent_b) or
+        std.mem.eql(u8, concurrent_second.payload, concurrent_b);
+    try std.testing.expect(saw_a);
+    try std.testing.expect(saw_b);
 
     try client.sendClose(.normal_closure, "bye");
 

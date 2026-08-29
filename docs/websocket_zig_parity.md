@@ -575,6 +575,9 @@ application writers may observe those transitions on different threads.
 Allocating receives on every transport preserve `was_compressed` provenance
 after decompression, so callers and concurrency regressions can distinguish an
 RSV1 message from an uncompressed fallback without inspecting wire storage.
+The HTTP/1 Upgrade regression also drives two writers through the negotiated
+permessage-deflate encoder concurrently and accepts either complete-message
+order while requiring exact decompressed payloads.
 HTTP/3 receive paths now use the same RFC 6455 failure mapping as HTTP/1 and
 RFC 8441, sending 1002 for malformed framing, 1007 for invalid text, and 1009
 for configured frame/message limits while preserving the original local error.
