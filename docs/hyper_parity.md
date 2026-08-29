@@ -587,7 +587,8 @@ successor. Real TCP tests hold the sole slot, enqueue two waiters in a known
 order, and prove that they acquire in that order.
 HTTP/1 pooled one-shot requests also expose an end-to-end absolute deadline: a
 single timestamp spans FIFO capacity waiting, a new DNS/TCP/TLS connection when
-needed, stale-idempotent retry, and the complete response.
+needed, stale-idempotent retry, and the complete response. HTTP/2 pooled
+one-shot requests expose the same contract through TLS and SETTINGS bootstrap.
 
 Both protocol `Limits` now also expose a TCP connect timeout used by literal-IP,
 hostname, URI, Unix-socket and pooled connection paths. Host resolution and all

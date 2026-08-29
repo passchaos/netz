@@ -217,6 +217,10 @@ test "public modules are reachable" {
         "acquireUriWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
+        "requestUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "isReusable",
     ));
