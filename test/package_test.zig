@@ -2342,6 +2342,54 @@ test "public modules are reachable" {
         "connectUnixAttemptWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectHostWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectHostWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectHostAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUriWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUriAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUnixWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUnixWithConnAckWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Client,
+        "connectUnixAttemptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "establishClientWithDeadline",
     ));

@@ -419,6 +419,21 @@ test "MQTT caller deadline composes with shorter phase timeout" {
     );
 }
 
+test "MQTT caller connect timeout rejects a non-positive budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.connectWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1) },
+            .{ .client_id = "total-timeout" },
+            .zero,
+        ),
+    );
+}
+
 test "MQTT client rejects non-positive network connect timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
