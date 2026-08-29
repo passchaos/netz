@@ -441,7 +441,9 @@ socket in one owner while its handshake worker consumes only a CID/source-bound
 inbox. The ordinary `connect` API remains the endpoint-backed convenience path.
 HTTP/3 exposes the same source-driven construction on `HandshakeClient`,
 retaining caller ownership of the endpoint so the established client can be
-registered directly with the endpoint dispatcher after TLS completes.
+registered directly with the endpoint dispatcher after TLS completes. Its
+timeout and absolute-deadline forms preserve one budget across the complete
+source-driven QUIC/TLS handshake, matching the direct-endpoint client surface.
 
 This is deliberately not yet described as a complete HTTP/3 multi-connection
 server. The low-level ownership and routing primitive is now present, but the

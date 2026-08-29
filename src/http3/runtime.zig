@@ -6154,6 +6154,26 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn connectFromWithTimeout(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.HandshakeTimeout;
+        return connectFromWithDeadline(
+            endpoint,
+            source,
+            server,
+            options,
+            .fromNow(
+                endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     fn connectFromBefore(
         endpoint: *quic.runtime.Endpoint,
         source: quic.runtime.DatagramSource,

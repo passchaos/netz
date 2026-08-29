@@ -226,6 +226,73 @@ test "HTTP/3 client handshakes through one endpoint socket owner" {
     if (server_task.err) |err| return err;
 }
 
+test "HTTP/3 source-driven client handshake has a total timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{"h3-timeout-client"},
+        silent.address(),
+        1,
+    );
+    defer inbox.deinit();
+
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClient.connectFromWithTimeout(
+            &endpoint,
+            inbox.datagramSource(),
+            silent.address(),
+            .{ .handshake = .{
+                .original_destination_connection_id = "h3-timeout-origin",
+                .local_connection_id = "h3-timeout-client",
+                .handshake_recovery = .{
+                    .initial_pto_ms = 1_000,
+                    .max_pto_ms = 4_000,
+                    .max_retries = 3,
+                },
+            } },
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            500 * std.time.ns_per_ms,
+    );
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClient.connectFromWithTimeout(
+            &endpoint,
+            inbox.datagramSource(),
+            silent.address(),
+            .{ .handshake = .{
+                .original_destination_connection_id = "h3-timeout-origin",
+                .local_connection_id = "h3-timeout-client",
+            } },
+            .zero,
+        ),
+    );
+}
+
 test "HTTP/3 sessions consume dispatcher packets without socket races" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

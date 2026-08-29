@@ -4163,6 +4163,14 @@ test "public modules are reachable" {
         "acceptFromInitialSourceWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectFromWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectFromWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServer,
         "beginHandshakeAdmission",
     ));
