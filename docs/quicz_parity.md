@@ -383,7 +383,8 @@ flight reads rather than restarting for each stage or fallback address. Direct-
 address clients use the same total timeout directly in addition to the lower-
 level bounded PTO/retry policy. Explicit `connectWithDeadline` and
 `connectUriWithDeadline` entry points let a larger operation share its existing
-awake-clock budget instead of converting it back into a relative timeout. The
+awake-clock budget instead of converting it back into a relative timeout; both
+also expose explicit per-call timeout counterparts. The
 one-shot `requestUriWithDeadline` path carries that same timestamp through DNS,
 all QUIC/TLS connection attempts, request transmission, and response assembly;
 its relative-timeout counterpart converts the budget once before any work.

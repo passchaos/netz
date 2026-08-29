@@ -6077,6 +6077,27 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.HandshakeTimeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn connectBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -6478,6 +6499,27 @@ pub const HandshakeClient = struct {
                 deadline,
                 options.connect_timeout,
             ),
+        );
+    }
+
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.HandshakeTimeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            limits,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

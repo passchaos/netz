@@ -76,6 +76,30 @@ test "HTTP/3 direct and URI deadline APIs reject expired deadlines" {
             expired,
         ),
     );
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClient.connectWithTimeout(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(443) },
+            .{},
+            options,
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.HandshakeClient.connectUriWithTimeout(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            try std.Uri.parse("https://localhost/"),
+            .{},
+            options,
+            .zero,
+        ),
+    );
 }
 
 test "HTTP/3 request timeout rejects a non-positive budget" {
