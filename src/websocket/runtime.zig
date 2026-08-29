@@ -3561,6 +3561,45 @@ pub const H2Connection = struct {
         try self.sendMessage(.binary, payload);
     }
 
+    /// Mask a mutable RFC 8441 client payload in place and submit its header
+    /// and body as one ordered HTTP/2 tunnel sequence. The payload remains
+    /// masked after return. Server connections and negotiated compression use
+    /// the immutable send APIs instead.
+    pub fn sendBinaryInPlace(
+        self: *H2Connection,
+        payload: []u8,
+    ) Error!void {
+        if (self.role != .client or self.permessage_deflate) {
+            return error.InvalidFrame;
+        }
+        if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
+        if (payload.len > self.limits.max_frame_bytes or
+            payload.len > self.limits.max_message_bytes)
+        {
+            return error.PayloadTooLarge;
+        }
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
+
+        var mask_key: [4]u8 = undefined;
+        try std.Io.randomSecure(self.tunnel.connection.io, &mask_key);
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        const header = try websocket.writeFrameHeaderInto(
+            &header_storage,
+            .binary,
+            payload,
+            .{ .mask_key = mask_key },
+        );
+        websocket.applyMask(payload, mask_key, 0);
+        // `Tunnel.writeParts` is synchronous: every DATA write has consumed
+        // its borrowed slices before return, so ownership immediately returns
+        // to the caller even when flow control split the message.
+        try self.tunnel.writeParts(header, payload, false);
+    }
+
     /// RFC 8441 counterpart to `Connection.sendBinaryParts`. The two caller-
     /// owned slices remain one WebSocket message even when HTTP/2 flow control
     /// divides its byte stream into several DATA frames.
@@ -7295,6 +7334,92 @@ test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket over HTTP/2 in-place binary send masks and roundtrips" {
+    const allocator = std.testing.allocator;
+    const original = "mutable-rfc8441-payload";
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_body_bytes = 4096, .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var h2 = try shared.server.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(shared.server.allocator, &h2, .{
+                .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = 4096,
+                    .max_message_bytes = 4096,
+                },
+            });
+            defer ws.close();
+
+            var request = try ws.receiveMessage();
+            defer request.deinit(shared.server.allocator);
+            try std.testing.expectEqual(websocket.Opcode.binary, request.opcode);
+            try std.testing.expectEqualStrings(original, request.payload);
+            try ws.sendText("in-place-received");
+            var close = try ws.receiveFrameAuto();
+            defer close.deinit(shared.server.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_body_bytes = 4096 },
+    );
+    defer h2_client.close();
+    var client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/in-place",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    });
+    defer client.close();
+
+    var payload = original.*;
+    try client.sendBinaryInPlace(&payload);
+    try std.testing.expect(!std.mem.eql(u8, original, &payload));
+    var confirmation = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer confirmation.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, confirmation.opcode);
+    try std.testing.expectEqualStrings("in-place-received", confirmation.payload);
+    try client.sendClose(.normal_closure, "done");
+    var close = try client.receiveFrameWithTimeout(.fromSeconds(5));
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket over HTTP/2 compressed binary parts preserve one message" {
     const allocator = std.testing.allocator;
     const first = "h2-compressed-prefix-";
@@ -8477,6 +8602,52 @@ test "WebSocket writers retain close-state guards inside send lock" {
         .close_sent = .init(true),
     };
     try std.testing.expect(!h2.canSendOpcodeLocked(.text));
+}
+
+test "WebSocket HTTP2 in-place send rejects unsupported modes" {
+    var server = H2Connection{
+        .allocator = std.testing.allocator,
+        .tunnel = undefined,
+        .role = .server,
+    };
+    var payload = [_]u8{1};
+    try std.testing.expectError(
+        error.InvalidFrame,
+        server.sendBinaryInPlace(&payload),
+    );
+
+    var compressed = H2Connection{
+        .allocator = std.testing.allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .permessage_deflate = true,
+    };
+    try std.testing.expectError(
+        error.InvalidFrame,
+        compressed.sendBinaryInPlace(&payload),
+    );
+
+    var closed = H2Connection{
+        .allocator = std.testing.allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .close_sent = .init(true),
+    };
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        closed.sendBinaryInPlace(&payload),
+    );
+
+    var too_small = H2Connection{
+        .allocator = std.testing.allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .limits = .{ .max_frame_bytes = 0, .max_message_bytes = 0 },
+    };
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        too_small.sendBinaryInPlace(&payload),
+    );
 }
 
 test "WebSocket send state blocks data after receiving close" {

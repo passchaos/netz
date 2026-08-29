@@ -1184,6 +1184,10 @@ test "public modules are reachable" {
         "exportKeyingMaterial",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.H2Connection,
+        "sendBinaryInPlace",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket,
         "decompressMessageInto",
     ));

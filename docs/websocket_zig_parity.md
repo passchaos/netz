@@ -14,7 +14,7 @@ superiority.
 | HTTP/2 and HTTP/3 WebSocket (RFC 8441/RFC 9220) | Covered through extended CONNECT client/server adapters. The authenticated HTTP/3 path negotiates CONNECT over QUIC/TLS, preserves masking direction, subprotocol, Origin and permessage-deflate validation, and exchanges data/control/Close frames across split HTTP/3 DATA framing | Neither transport is present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
-| Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
+| Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; HTTP/1, RFC 8441, and HTTP/3 clients expose `sendBinaryInPlace` for the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for both HTTP/1 Upgrade and RFC 8441. Partial Close frames remain resumable after timeout | Handler callbacks and automatic default control replies |
 | Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and runtime tests cover concurrent data sends plus the post-lock Close guard | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
@@ -558,9 +558,11 @@ Its caller-buffer receive APIs likewise assemble uncompressed messages directly
 into application storage, reuse connection-owned compressed input/inflater
 scratch, and preserve partial-frame plus completed-fragment progress across
 timeout retries while requiring the same output buffer for resumed messages.
-H3 clients additionally expose `sendBinaryInPlace`: callers opting into mutable
-post-send storage avoid the immutable client's masking copy, matching the
-reference API while keeping the safe `[]const u8` alternatives.
+RFC 8441 and H3 clients additionally expose `sendBinaryInPlace`: callers
+opting into mutable post-send storage avoid the immutable client's masking
+copy, matching the HTTP/1/reference API while keeping safe `[]const u8`
+alternatives. The synchronous H2 tunnel send consumes the borrowed masked
+payload before ownership returns even when flow control divides it into DATA.
 All H3 message, fragmentation, control, Close, and key-update send entry points
 serialize complete write sequences. This protects compression scratch and stops
 concurrent callers from interleaving one RFC 6455 frame across HTTP/3 DATA.
