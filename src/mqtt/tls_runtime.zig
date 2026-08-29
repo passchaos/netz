@@ -80,6 +80,29 @@ pub const Server = struct {
         return pending.finish(options);
     }
 
+    /// Accept TCP, then bound PROXY parsing, TLS, MQTT CONNECT, and CONNACK
+    /// policy with one caller-owned awake-clock deadline.
+    pub fn acceptWithDeadline(
+        self: *Server,
+        options: mqtt_runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.AcceptedClient {
+        var pending = try self.acceptPendingWithDeadline(options, deadline);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        options: mqtt_runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        var pending = try self.acceptPendingWithTimeout(options, timeout);
+        errdefer pending.deinit(self.allocator);
+        return pending.finish(options);
+    }
+
     /// Complete transport setup and parse CONNECT without sending CONNACK.
     /// Stateful brokers use this to apply Session and authorization policy
     /// consistently across TCP, TLS, WS and WSS listeners.
@@ -88,6 +111,43 @@ pub const Server = struct {
         options: mqtt_runtime.AcceptOptions,
     ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingMaybeBefore(stream, options, null);
+    }
+
+    pub fn acceptPendingWithDeadline(
+        self: *Server,
+        options: mqtt_runtime.AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingMaybeBefore(
+            stream,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn acceptPendingWithTimeout(
+        self: *Server,
+        options: mqtt_runtime.AcceptOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.acceptStreamPendingMaybeBefore(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn acceptStreamPendingMaybeBefore(
+        self: *Server,
+        stream: net.Stream,
+        options: mqtt_runtime.AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         var proxy_metadata = try mqtt_runtime.readProxyMetadata(
@@ -95,18 +155,27 @@ pub const Server = struct {
             self.io,
             stream,
             self.limits,
-            null,
+            deadline,
         );
         errdefer if (proxy_metadata) |*metadata| metadata.deinit();
         if (self.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
-        const tls_connection = try tls_stream.ServerConnection.init(
-            self.allocator,
-            self.io,
-            stream,
-            self.tls,
-        );
+        const tls_connection = if (deadline) |absolute|
+            try tls_stream.ServerConnection.initWithDeadline(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+                absolute,
+            )
+        else
+            try tls_stream.ServerConnection.init(
+                self.allocator,
+                self.io,
+                stream,
+                self.tls,
+            );
         stream_owned = false;
 
         var connection = mqtt_runtime.Connection.initTlsServer(
@@ -122,7 +191,10 @@ pub const Server = struct {
             connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
-        return connection.acceptPending(options);
+        return if (deadline) |absolute|
+            connection.acceptPendingWithDeadline(options, absolute)
+        else
+            connection.acceptPending(options);
     }
 
     pub fn pendingSource(self: *Server) mqtt_runtime.PendingSource {

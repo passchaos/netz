@@ -737,6 +737,79 @@ test "MQTT TLS server bounds the post-handshake CONNECT packet" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "MQTT TLS server caller timeout spans TLS and CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{ .max_packet_size = max_packet_size },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls_handshake_timeout = .fromSeconds(1),
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.acceptWithTimeout(
+                .{ .connect_timeout = .fromSeconds(1) },
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            accepted.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const tls_connection = try http1_runtime.TlsClientConnection.init(
+        allocator,
+        io,
+        stream,
+        "localhost",
+        .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    );
+    stream_owned = false;
+    defer tls_connection.deinit();
+    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "MQTT TLS server enforces Keep Alive inactivity" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

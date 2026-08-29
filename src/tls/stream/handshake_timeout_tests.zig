@@ -125,11 +125,16 @@ test "TLS server handshake times out while waiting for ClientHello" {
                 return;
             };
             defer stream.close(self.io);
+            const certificate_chain = [_][]const u8{
+                &self.identity.certificate,
+            };
+            var options = self.identity.options(.fromMilliseconds(75));
+            options.identity.certificate_chain = &certificate_chain;
             const result = server.Connection.init(
                 allocator,
                 self.io,
                 stream,
-                self.identity.options(.fromMilliseconds(75)),
+                options,
             );
             if (result) |connection| {
                 connection.deinit();
@@ -411,11 +416,16 @@ test "TLS handshake succeeds within one shared deadline" {
             const stream = try self.listener.accept(self.io);
             var stream_owned = true;
             errdefer if (stream_owned) stream.close(self.io);
+            const certificate_chain = [_][]const u8{
+                &self.identity.certificate,
+            };
+            var options = self.identity.options(.fromSeconds(2));
+            options.identity.certificate_chain = &certificate_chain;
             const connection = try server.Connection.init(
                 allocator,
                 self.io,
                 stream,
-                self.identity.options(.fromSeconds(2)),
+                options,
             );
             stream_owned = false;
             defer connection.deinit();
@@ -497,11 +507,16 @@ test "TLS server deadline is not renewed after ClientHello" {
             defer stream.close(self.io);
             const started = std.Io.Timestamp.now(self.io, .awake);
             self.started.set(self.io);
+            const certificate_chain = [_][]const u8{
+                &self.identity.certificate,
+            };
+            var options = self.identity.options(.fromMilliseconds(200));
+            options.identity.certificate_chain = &certificate_chain;
             const result = server.Connection.init(
                 allocator,
                 self.io,
                 stream,
-                self.identity.options(.fromMilliseconds(200)),
+                options,
             );
             self.elapsed = started.durationTo(
                 std.Io.Timestamp.now(self.io, .awake),

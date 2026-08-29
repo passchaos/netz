@@ -2389,6 +2389,26 @@ pub const Connection = struct {
         return self.acceptPendingBefore(options, deadline);
     }
 
+    /// Parse CONNECT under the earlier of a caller-owned absolute deadline and
+    /// `options.connect_timeout`. Transport adapters use this to preserve one
+    /// budget across an outer TLS or WebSocket handshake and MQTT admission.
+    pub fn acceptPendingWithDeadline(
+        self: *Connection,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingAcceptedClient {
+        const io = self.transport.ioHandle();
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const phase_deadline = if (options.connect_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk self.transport.deadlineFromNow(timeout);
+        } else null;
+        return self.acceptPendingBefore(
+            options,
+            earliestClockDeadline(deadline, phase_deadline),
+        );
+    }
+
     fn acceptPendingBefore(
         self: *Connection,
         options: AcceptOptions,
