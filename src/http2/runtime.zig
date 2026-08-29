@@ -7313,6 +7313,19 @@ pub const Connection = struct {
         return self.pingUntil(data, deadline);
     }
 
+    /// Send a PING and wait for its matching ACK under a caller-owned
+    /// awake-clock deadline. Validation happens before writing so a timestamp
+    /// from another clock domain, or an already-expired budget, cannot emit a
+    /// probe that the caller no longer intends to wait for.
+    pub fn pingWithDeadline(
+        self: *Connection,
+        data: [8]u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error![8]u8 {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.pingUntil(data, absolute);
+    }
+
     /// Run one inactivity-triggered keep-alive cycle on this blocking
     /// connection. This method must be the sole frame reader for its duration.
     ///

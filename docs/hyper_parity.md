@@ -678,7 +678,8 @@ All public HTTP/1 and HTTP/2 request/response and pool deadline entry points
 reject timestamps outside the awake-clock domain before parsing, writing, or
 reserving pool capacity, matching the constructor deadline contract.
 Netz also exposes
-`Connection.pingWithTimeout(data, timeout)` for a bounded HTTP/2
+`Connection.pingWithTimeout(data, timeout)` and
+`Connection.pingWithDeadline(data, deadline)` for a bounded HTTP/2
 liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
 keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, WINDOW_UPDATE, and RFC
 9218 PRIORITY_UPDATE readers now provide both timeout and absolute-deadline

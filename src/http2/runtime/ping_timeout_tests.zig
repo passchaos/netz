@@ -1480,6 +1480,67 @@ test "HTTP/2 bounded PING rejects non-positive durations before writing" {
     );
 }
 
+test "HTTP/2 PING deadline validates before writing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(20),
+                .awake,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var connection = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer connection.close();
+    try std.testing.expectError(
+        error.Timeout,
+        connection.pingWithDeadline(
+            .{0} ** 8,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .real }),
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.pingWithDeadline(
+            .{0} ** 8,
+            .{ .raw = .zero, .clock = .awake },
+        ),
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 PING queue overflow preserves the consumed frame" {
     const allocator = std.testing.allocator;
     var connection = runtime.Connection{
