@@ -528,6 +528,10 @@ Initial, TLS, peer SETTINGS/request processing, and the 200 response. Existing
 HTTP/3 sessions expose matching bounded adapter entry points. A cross-phase
 regression completes QUIC/TLS, withholds CONNECT past the original deadline,
 and verifies that the server does not start a fresh post-handshake budget.
+URI entry points accept a complete HTTPS URL and derive DNS target, SNI,
+authority, and the raw path/query while retaining HTTP/3's multi-address
+fallback. Their timeout/deadline forms keep that same absolute budget through
+resolution, every QUIC/TLS attempt, SETTINGS, and the CONNECT response.
 Cleartext server acceptance likewise exposes timeout and absolute-deadline
 forms for the complete HTTP/1.1 Upgrade after TCP accept, while preserving a
 stricter configured handshake limit. Already accepted HTTP/1 connections can

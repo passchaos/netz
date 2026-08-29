@@ -777,6 +777,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3.Client,
+        "connectUri",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
+        "connectUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
+        "connectUriWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "UriConnectOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.Client,
         "connectSessionWithDeadline",
     ));
     try std.testing.expect(@hasDecl(

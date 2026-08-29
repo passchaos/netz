@@ -33,6 +33,19 @@ pub const ConnectOptions = struct {
     limits: common.Limits = .{},
 };
 
+/// URI-based RFC 9220 connection options. Authority, request target, DNS
+/// destination, and default TLS server name are derived from the HTTPS URI.
+pub const UriConnectOptions = struct {
+    protocols: []const []const u8 = &.{},
+    origin: ?[]const u8 = null,
+    extra_headers: []const http3.Qpack.HeaderField = &.{},
+    enable_permessage_deflate: bool = false,
+    compression_threshold: usize = 32,
+    limits: common.Limits = .{},
+    h3_limits: http3.runtime.Limits = .{},
+    h3: http3.runtime.HandshakeClientOptions,
+};
+
 pub const AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
     allowed_origins: []const []const u8 = &.{},
@@ -790,6 +803,120 @@ pub const Client = struct {
             h3_options,
             options,
             .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Connect to a complete HTTPS URL, deriving authority, path/query, DNS
+    /// destination, and SNI while retaining HTTP/3's all-address fallback.
+    pub fn connectUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+    ) Error!ClientConnection {
+        return connectUriBefore(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            null,
+        );
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ClientConnection {
+        return connectUriBefore(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ClientConnection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectUriBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        uri_text: []const u8,
+        options: UriConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ClientConnection {
+        try validateClientExtraHeaders(options.extra_headers);
+        try validateProtocols(options.protocols);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        const path = try http3.runtime.uriRequestTargetAlloc(allocator, uri);
+        defer allocator.free(path);
+
+        var h3_options = options.h3;
+        h3_options.session.local_settings.enable_connect_protocol = true;
+        if (h3_options.handshake.server_name == null) {
+            h3_options.handshake.server_name = endpoint.tls_host;
+        }
+        var h3_client = if (deadline) |absolute|
+            try http3.runtime.HandshakeClient.connectUriWithDeadline(
+                allocator,
+                io,
+                local_address,
+                uri,
+                options.h3_limits,
+                h3_options,
+                absolute,
+            )
+        else
+            try http3.runtime.HandshakeClient.connectUri(
+                allocator,
+                io,
+                local_address,
+                uri,
+                options.h3_limits,
+                h3_options,
+            );
+        errdefer h3_client.deinit();
+        return connectEstablishedBefore(
+            allocator,
+            &h3_client,
+            .{
+                .authority = endpoint.authority,
+                .path = path,
+                .protocols = options.protocols,
+                .origin = options.origin,
+                .extra_headers = options.extra_headers,
+                .enable_permessage_deflate = options.enable_permessage_deflate,
+                .compression_threshold = options.compression_threshold,
+                .limits = options.limits,
+            },
+            deadline,
         );
     }
 };

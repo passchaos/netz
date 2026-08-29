@@ -312,6 +312,174 @@ test "WebSocket HTTP3 deadline APIs reject invalid budgets" {
     _ = io;
 }
 
+test "WebSocket HTTP3 URI derives authority path query and SNI" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18 };
+    const client_cid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x35} ** 32,
+            .x25519_secret_key = [_]u8{0x36} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        expected_authority: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.transport.acceptWithTimeout(
+                .fromSeconds(2),
+            );
+            defer session.deinit();
+            try session.ensureSettingsSent();
+            while (true) {
+                var event = try session.receiveRequestEventWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer event.deinit(allocator);
+                switch (event) {
+                    .reset => return error.TestUnexpectedResult,
+                    .message => |message| switch (message.value) {
+                        .head => |head| {
+                            if (head != .request) {
+                                return error.TestUnexpectedResult;
+                            }
+                            try std.testing.expectEqualStrings(
+                                "/chat/room?token=a%2Fb",
+                                head.request.path,
+                            );
+                            try std.testing.expectEqualStrings(
+                                self.expected_authority,
+                                head.request.authority.?,
+                            );
+                            try session.startResponse(
+                                message.stream_id,
+                                .{
+                                    .status = 200,
+                                    .request_method = "CONNECT",
+                                    .extended_connect = true,
+                                },
+                                null,
+                            );
+                            return;
+                        },
+                        else => return error.TestUnexpectedResult,
+                    },
+                }
+            }
+        }
+    };
+
+    const port = server.address().getPort();
+    const authority = try std.fmt.allocPrint(
+        allocator,
+        "127.0.0.1:{d}",
+        .{port},
+    );
+    defer allocator.free(authority);
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://{s}/chat/room?token=a%2Fb",
+        .{authority},
+    );
+    defer allocator.free(uri);
+    var shared = Shared{
+        .server = &server,
+        .expected_authority = authority,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try h3.Client.connectUriWithTimeout(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        uri,
+        .{
+            .h3_limits = limits,
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .random = [_]u8{0x37} ** 32,
+                .x25519_secret_key = [_]u8{0x38} ** 32,
+            } },
+        },
+        .fromSeconds(2),
+    );
+    defer client.deinit();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP3 URI rejects non-HTTPS and userinfo before I/O" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const options = h3.UriConnectOptions{
+        .h3 = .{ .handshake = .{
+            .original_destination_connection_id = "original",
+            .local_connection_id = "local",
+        } },
+    };
+    try std.testing.expectError(
+        error.InvalidUri,
+        h3.Client.connectUri(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "http://example.com/chat",
+            options,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidUri,
+        h3.Client.connectUri(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://user@example.com/chat",
+            options,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        h3.Client.connectUriWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://localhost/chat",
+            options,
+            .zero,
+        ),
+    );
+}
+
 test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
