@@ -430,6 +430,35 @@ pub const Server = struct {
     }
 
     pub fn acceptUpgrade(self: *Server) Error!H2cUpgradeRequest {
+        return self.acceptUpgradeMaybeBefore(null);
+    }
+
+    /// Accept an h2c Upgrade under one caller-owned awake-clock deadline. The
+    /// budget begins after TCP accept and spans the complete HTTP/1.1 request,
+    /// the 101 write, client preface/SETTINGS, and SETTINGS acknowledgement.
+    pub fn acceptUpgradeWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!H2cUpgradeRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptUpgradeMaybeBefore(deadline);
+    }
+
+    pub fn acceptUpgradeWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) Error!H2cUpgradeRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptUpgradeWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    fn acceptUpgradeMaybeBefore(
+        self: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!H2cUpgradeRequest {
         const stream = try self.listener.accept(self.io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
@@ -437,7 +466,23 @@ pub const Server = struct {
             try socket_options.setTcpNoDelay(stream);
         }
 
-        var request = try http1_runtime.readRequestFromStream(self.allocator, self.io, stream, limitsToHttp1(self.limits), .{});
+        var request = if (deadline) |absolute|
+            try http1_runtime.readRequestFromStreamWithDeadline(
+                self.allocator,
+                self.io,
+                stream,
+                limitsToHttp1(self.limits),
+                .{},
+                absolute,
+            )
+        else
+            try http1_runtime.readRequestFromStream(
+                self.allocator,
+                self.io,
+                stream,
+                limitsToHttp1(self.limits),
+                .{},
+            );
         errdefer request.deinit(self.allocator);
         try validateH2cUpgradeRequest(request.request);
 
@@ -460,19 +505,30 @@ pub const Server = struct {
         // protocol switch is committed, one new deadline spans every byte of
         // the client preface, its repeated SETTINGS, and its server-SETTINGS
         // acknowledgement. Partial frames cannot turn this into an idle timer.
-        const deadline = try connectionHandshakeDeadline(
-            transport,
-            self.limits.handshake_timeout,
-        );
+        const handshake_deadline = if (deadline) |absolute|
+            try connectionHandshakeDeadlineBefore(
+                transport,
+                absolute,
+                self.limits.handshake_timeout,
+            )
+        else
+            try connectionHandshakeDeadline(
+                transport,
+                self.limits.handshake_timeout,
+            );
         var preface_buf: [http2.connection_preface.len]u8 = undefined;
-        try readExactTransportWithDeadline(transport, &preface_buf, deadline);
+        try readExactTransportWithDeadline(
+            transport,
+            &preface_buf,
+            handshake_deadline,
+        );
         try http2.validateClientPreface(&preface_buf);
 
         var client_settings = try readFrameTransportWithDeadline(
             self.allocator,
             transport,
             self.limits,
-            deadline,
+            handshake_deadline,
         );
         defer client_settings.deinit(self.allocator);
         if (client_settings.frame.header.frame_type != .settings or (client_settings.frame.header.flags & flag_ack) != 0) {
@@ -512,7 +568,7 @@ pub const Server = struct {
             self.allocator,
             transport,
             self.limits,
-            deadline,
+            handshake_deadline,
         );
         defer client_ack.deinit(self.allocator);
         if (client_ack.frame.header.frame_type != .settings or (client_ack.frame.header.flags & flag_ack) == 0) {

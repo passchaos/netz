@@ -4776,6 +4776,35 @@ pub fn readRequestFromStream(
     return .{ .bytes = bytes, .request = request };
 }
 
+/// Read one complete request under a caller-owned absolute deadline. This
+/// unbuffered adapter is intended for protocol handshakes such as h2c, where
+/// the request head, body, and trailers must share one outer budget.
+pub fn readRequestFromStreamWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedRequest {
+    _ = try deadline_policy.usableAwake(io, deadline);
+    const bytes = try readMessageBytesWithContext(
+        allocator,
+        .{ .tcp = .{ .io = io, .stream = stream } },
+        limits,
+        null,
+        true,
+        false,
+        deadline,
+        deadline,
+    );
+    errdefer allocator.free(bytes);
+    var request = try http1.parseRequest(allocator, bytes, options);
+    errdefer request.deinit(allocator);
+    try http1.validateRequestHost(request);
+    return .{ .bytes = bytes, .request = request };
+}
+
 pub fn readRequestFromStreamBuffered(
     allocator: std.mem.Allocator,
     io: std.Io,

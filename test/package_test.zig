@@ -1064,6 +1064,14 @@ test "public modules are reachable" {
     );
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveUntil"));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Server,
+        "acceptUpgradeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Server,
+        "acceptUpgradeWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "UnixServer"));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.UnixServer,

@@ -663,6 +663,54 @@ test "HTTP/2 h2c server bounds binary bootstrap after 101" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "HTTP/2 h2c server caller deadline spans request and bootstrap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .handshake_timeout = .fromSeconds(1) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var upgrade = self.server.acceptUpgradeWithTimeout(
+                .fromMilliseconds(50),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            upgrade.deinit(self.server.allocator);
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // Consume part of the caller-owned budget in the HTTP/1 phase. The server
+    // must carry only the remainder into the binary bootstrap rather than
+    // granting the configured one-second phase timeout after sending 101.
+    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    try writeH2cUpgradeRequest(io, client);
+    var response: [71]u8 = undefined;
+    try readExact(io, client, &response);
+    try std.testing.expect(std.mem.startsWith(u8, &response, "HTTP/1.1 101"));
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "HTTP/2 h2c client bounds the 101 response head" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -656,6 +656,9 @@ response without renewal, while stricter connect and handshake limits remain
 in force. The upgrade request may carry a fixed-length or chunked body plus
 trailers; the server returns those complete HTTP/1.1 bytes as the already
 half-closed HTTP/2 stream 1 request, matching RFC 7540 section 3.2 semantics.
+Server-side `acceptUpgradeWithTimeout` and `acceptUpgradeWithDeadline` apply
+one outer budget after TCP accept through the complete Upgrade request and the
+HTTP/2 SETTINGS exchange rather than granting a fresh timeout after 101.
 All public HTTP/1 and HTTP/2 request/response and pool deadline entry points
 reject timestamps outside the awake-clock domain before parsing, writing, or
 reserving pool capacity, matching the constructor deadline contract.
