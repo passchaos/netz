@@ -93,11 +93,48 @@ pub const Connection = struct {
         stream: net.Stream,
         options: Options,
     ) Error!*Connection {
-        if (options.client_identity) |identity| try identity.validate();
-        const deadline = try handshake_deadline.fromTimeout(
+        return initBefore(
+            allocator,
             io,
-            options.handshake_timeout,
+            stream,
+            options,
+            try handshake_deadline.fromTimeout(
+                io,
+                options.handshake_timeout,
+            ),
         );
+    }
+
+    /// Perform the complete TLS handshake under the earlier of the caller's
+    /// absolute deadline and `options.handshake_timeout`.
+    pub fn initWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        return initBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            try handshake_deadline.capTimeout(
+                io,
+                deadline,
+                options.handshake_timeout,
+            ),
+        );
+    }
+
+    fn initBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        if (options.client_identity) |identity| try identity.validate();
 
         var client_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_random);
@@ -299,6 +336,39 @@ pub const Connection = struct {
         stream: net.Stream,
         options: VerifiedOptions,
     ) Error!*Connection {
+        return initVerifiedBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            null,
+        );
+    }
+
+    /// High-level verified-client counterpart to `initWithDeadline`.
+    pub fn initVerifiedWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: VerifiedOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        return initVerifiedBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            try handshake_deadline.usable(io, deadline),
+        );
+    }
+
+    fn initVerifiedBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: VerifiedOptions,
+        outer_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!*Connection {
         var system_store: ?vail.x509.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
         var caller_bundle_locked = false;
@@ -328,7 +398,7 @@ pub const Connection = struct {
             break :blk bundle_verifier.clientVerifier();
         };
 
-        return init(allocator, io, stream, .{
+        const low_level_options: Options = .{
             .server_name = options.server_name,
             .server_verifier = verifier,
             .client_identity = options.client_identity,
@@ -336,7 +406,17 @@ pub const Connection = struct {
             .cipher_suites = options.cipher_suites,
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.handshake_timeout,
-        });
+        };
+        return if (outer_deadline) |deadline|
+            initWithDeadline(
+                allocator,
+                io,
+                stream,
+                low_level_options,
+                deadline,
+            )
+        else
+            init(allocator, io, stream, low_level_options);
     }
 
     pub fn deinit(self: *Connection) void {

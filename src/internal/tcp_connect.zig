@@ -7,6 +7,7 @@
 //! select draining closes that unselected socket.
 
 const std = @import("std");
+const deadline_policy = @import("deadline.zig");
 
 const net = std.Io.net;
 
@@ -17,7 +18,7 @@ pub fn ip(
 ) net.IpAddress.ConnectError!net.Stream {
     const duration = timeout orelse
         return address.connect(io, .{ .mode = .stream });
-    const deadline = try deadlineFromTimeout(io, duration);
+    const deadline = (try deadline_policy.fromTimeout(io, duration)).?;
     return race(io, deadline, connectIp, .{ io, address });
 }
 
@@ -28,7 +29,7 @@ pub fn ipWithDeadline(
 ) net.IpAddress.ConnectError!net.Stream {
     return race(
         io,
-        try usableDeadline(io, deadline),
+        try deadline_policy.usableAwake(io, deadline),
         connectIp,
         .{ io, address },
     );
@@ -42,7 +43,7 @@ pub fn host(
 ) net.HostName.ConnectError!net.Stream {
     const duration = timeout orelse
         return host_name.connect(io, port, .{ .mode = .stream });
-    const deadline = try deadlineFromTimeout(io, duration);
+    const deadline = (try deadline_policy.fromTimeout(io, duration)).?;
     return race(io, deadline, connectHost, .{ io, host_name, port });
 }
 
@@ -54,7 +55,7 @@ pub fn hostWithDeadline(
 ) net.HostName.ConnectError!net.Stream {
     return race(
         io,
-        try usableDeadline(io, deadline),
+        try deadline_policy.usableAwake(io, deadline),
         connectHost,
         .{ io, host_name, port },
     );
@@ -66,7 +67,7 @@ pub fn unix(
     timeout: ?std.Io.Duration,
 ) (net.UnixAddress.ConnectError || std.Io.Timeout.Error)!net.Stream {
     const duration = timeout orelse return address.connect(io);
-    const deadline = try deadlineFromTimeout(io, duration);
+    const deadline = (try deadline_policy.fromTimeout(io, duration)).?;
     return race(io, deadline, connectUnix, .{ io, address });
 }
 
@@ -77,33 +78,10 @@ pub fn unixWithDeadline(
 ) (net.UnixAddress.ConnectError || std.Io.Timeout.Error)!net.Stream {
     return race(
         io,
-        try usableDeadline(io, deadline),
+        try deadline_policy.usableAwake(io, deadline),
         connectUnix,
         .{ io, address },
     );
-}
-
-fn deadlineFromTimeout(
-    io: std.Io,
-    timeout: std.Io.Duration,
-) std.Io.Timeout.Error!std.Io.Clock.Timestamp {
-    if (timeout.nanoseconds <= 0) return error.Timeout;
-    return .fromNow(io, .{ .raw = timeout, .clock = .awake });
-}
-
-fn usableDeadline(
-    io: std.Io,
-    deadline: std.Io.Clock.Timestamp,
-) std.Io.Timeout.Error!std.Io.Clock.Timestamp {
-    // Connection cancellation is scheduled on the awake clock. Reject other
-    // clock domains instead of comparing unrelated epochs and accidentally
-    // turning an invalid timestamp into an effectively unbounded connect.
-    if (deadline.clock != .awake or
-        deadline.durationFromNow(io).raw.nanoseconds <= 0)
-    {
-        return error.Timeout;
-    }
-    return deadline;
 }
 
 fn race(

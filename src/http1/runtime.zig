@@ -5,6 +5,7 @@ const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -552,6 +553,48 @@ pub const TlsClientConnection = struct {
         host: []const u8,
         options: TlsClientOptions,
     ) Error!*TlsClientConnection {
+        const deadline = if (options.handshake_timeout) |timeout| blk: {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            break :blk std.Io.Clock.Timestamp.fromNow(io, .{
+                .raw = timeout,
+                .clock = .awake,
+            });
+        } else null;
+        return initBefore(allocator, io, stream, host, options, deadline);
+    }
+
+    /// Complete the standard-library TLS handshake under the earlier of the
+    /// caller's absolute deadline and `options.handshake_timeout`.
+    pub fn initWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        host: []const u8,
+        options: TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*TlsClientConnection {
+        return initBefore(
+            allocator,
+            io,
+            stream,
+            host,
+            options,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.handshake_timeout,
+            ),
+        );
+    }
+
+    fn initBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        host: []const u8,
+        options: TlsClientOptions,
+        handshake_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!*TlsClientConnection {
         const net_read_buf = try allocator.alloc(u8, tls.Client.min_buffer_len);
         errdefer allocator.free(net_read_buf);
         const net_write_buf = try allocator.alloc(u8, tls.Client.min_buffer_len);
@@ -578,13 +621,7 @@ pub const TlsClientConnection = struct {
         conn.net_reader = net.Stream.reader(stream, io, conn.net_read_buf);
         conn.net_reader.interface.vtable = &tls_client_reader_vtable;
         conn.net_writer = net.Stream.writer(stream, io, conn.net_write_buf);
-        if (options.handshake_timeout) |timeout| {
-            if (timeout.nanoseconds <= 0) return error.Timeout;
-            conn.timed_read_deadline = .fromNow(io, .{
-                .raw = timeout,
-                .clock = .awake,
-            });
-        }
+        conn.timed_read_deadline = handshake_deadline;
         defer conn.timed_read_deadline = null;
 
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;

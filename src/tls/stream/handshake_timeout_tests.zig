@@ -194,6 +194,87 @@ test "TLS client handshake times out while waiting for ServerHello" {
     joined = true;
 }
 
+test "TLS client absolute deadline bounds the complete handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch return;
+            closeAfterDelay(self.io, stream, .fromMilliseconds(250));
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    const stream = try connect(io, &listener);
+    defer stream.close(io);
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.Connection.initWithDeadline(
+            allocator,
+            io,
+            stream,
+            .{
+                .server_name = "localhost",
+                .server_verifier = .{},
+                .handshake_timeout = .fromSeconds(1),
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    thread.join();
+    joined = true;
+}
+
+test "TLS client absolute deadline retains shorter handshake timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const peer = try connect(io, &listener);
+    defer peer.close(io);
+    const stream = try listener.accept(io);
+    defer stream.close(io);
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.Connection.initWithDeadline(
+            allocator,
+            io,
+            stream,
+            .{
+                .server_name = "localhost",
+                .server_verifier = .{},
+                .handshake_timeout = .zero,
+            },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
 test "TLS handshake rejects non-positive timeout before network IO" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -6,6 +6,7 @@ const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const auth_runtime = @import("runtime/auth.zig");
 const topic_alias = @import("runtime/topic_alias.zig");
 const proxy_protocol = @import("proxy_protocol.zig");
@@ -1791,19 +1792,7 @@ fn cappedConnectDeadline(
     deadline: std.Io.Clock.Timestamp,
     timeout: ?std.Io.Duration,
 ) Error!std.Io.Clock.Timestamp {
-    if (deadline.clock != .awake or
-        deadline.durationFromNow(io).raw.nanoseconds <= 0)
-    {
-        return error.Timeout;
-    }
-    const phase_deadline = if (timeout) |duration| blk: {
-        if (duration.nanoseconds <= 0) return error.Timeout;
-        break :blk std.Io.Clock.Timestamp.fromNow(io, .{
-            .raw = duration,
-            .clock = .awake,
-        });
-    } else null;
-    return earliestClockDeadline(deadline, phase_deadline).?;
+    return deadline_policy.capTimeout(io, deadline, timeout);
 }
 
 fn appendTopicAliasMaximumSetting(

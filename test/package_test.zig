@@ -143,6 +143,14 @@ test "public modules are reachable" {
         "keyUpdateCounts",
     ));
     try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "initWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream.ClientConnection,
+        "initVerifiedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.tls.stream.ServerConnection,
         "negotiatedCipherSuite",
     ));
@@ -1577,6 +1585,42 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.tls_runtime,
         "UriReconnectConnector",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHostWithConnAckWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHostAttemptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddressWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddressWithConnAckWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddressAttemptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUriWithConnAckWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUriAttemptWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,

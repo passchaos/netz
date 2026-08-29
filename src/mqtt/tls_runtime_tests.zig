@@ -1421,6 +1421,99 @@ test "MQTT TLS client bounds the post-handshake CONNACK packet" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT TLS caller deadline spans TLS setup and CONNACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try tls_test.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *tls_test.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var input: [max_packet_size]u8 = undefined;
+            _ = try connection.readApplication(&input);
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_tls.Client.connectAddressAttemptWithDeadline(
+            allocator,
+            io,
+            server.address(),
+            "localhost",
+            .{
+                .mqtt = .{
+                    .client_id = "total-tls-connect-deadline",
+                    .network_connect_timeout = .fromSeconds(1),
+                    .connect_timeout = .fromSeconds(1),
+                },
+                .tls = .{
+                    .verify_host = false,
+                    .handshake_timeout = .fromSeconds(1),
+                },
+            },
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(40),
+                .clock = .awake,
+            }),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TLS caller deadline retains shorter network phase timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_tls.Client.connectAddressAttemptWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(1) },
+            "localhost",
+            .{ .mqtt = .{
+                .client_id = "tls-phase-timeout",
+                .network_connect_timeout = .zero,
+            } },
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+}
+
 test "MQTT TLS client supports mqtts URI and MQTT 3.1.1" {
     const allocator = std.testing.allocator;
 

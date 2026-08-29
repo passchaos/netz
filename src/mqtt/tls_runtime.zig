@@ -5,6 +5,7 @@ const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const network_endpoint = @import("runtime/network_endpoint.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
@@ -319,6 +320,79 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.Connection {
+        var result = try connectHostWithConnAckWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectHostWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        var attempt = try connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    /// Resolve, establish TLS, and negotiate MQTT under one caller-owned
+    /// deadline. Configured network, TLS, and MQTT phase limits remain stricter
+    /// upper bounds when they expire before the outer timestamp.
+    pub fn connectHostAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const host_name = try net.HostName.init(host);
+        const network_deadline = try deadline_policy.capTimeout(
+            io,
+            deadline,
+            options.mqtt.network_connect_timeout,
+        );
+        const stream = try tcp_connect.hostWithDeadline(
+            io,
+            host_name,
+            port,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            host,
+            options,
+            deadline,
+        );
+    }
+
     pub fn connectAddress(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -373,6 +447,74 @@ pub const Client = struct {
             stream,
             tls_host,
             options,
+        );
+    }
+
+    pub fn connectAddressWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.Connection {
+        var result = try connectAddressWithConnAckWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectAddressWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        var attempt = try connectAddressAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAddressAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const network_deadline = try deadline_policy.capTimeout(
+            io,
+            deadline,
+            options.mqtt.network_connect_timeout,
+        );
+        const stream = try tcp_connect.ipWithDeadline(
+            io,
+            address,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            options,
+            deadline,
         );
     }
 
@@ -442,6 +584,86 @@ pub const Client = struct {
             stream,
             tls_host,
             options,
+        );
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.Connection {
+        var result = try connectUriWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUriWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectResult {
+        var attempt = try connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        var target = redirect.parse(
+            allocator,
+            uri_text,
+            .tls,
+        ) catch |err| return switch (err) {
+            error.UnsupportedRedirectScheme => error.UnsupportedScheme,
+            error.InvalidServerReference => error.InvalidUri,
+            else => err,
+        };
+        defer target.deinit();
+        const tls_host = network_endpoint.tlsHost(&target) catch
+            return error.InvalidUri;
+        const network_deadline = try deadline_policy.capTimeout(
+            io,
+            deadline,
+            options.mqtt.network_connect_timeout,
+        );
+        const stream = network_endpoint.connectTargetWithDeadline(
+            io,
+            &target,
+            .tls,
+            network_deadline,
+        ) catch |err| return switch (err) {
+            error.UnsupportedRedirectScheme => error.UnsupportedScheme,
+            error.InvalidServerReference => error.InvalidUri,
+            else => err,
+        };
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            options,
+            deadline,
         );
     }
 
@@ -643,6 +865,43 @@ fn connectStreamAttempt(
     tls_host: []const u8,
     options: ConnectOptions,
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+    return connectStreamAttemptMaybeBefore(
+        allocator,
+        io,
+        stream,
+        tls_host,
+        options,
+        null,
+    );
+}
+
+fn connectStreamAttemptBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    tls_host: []const u8,
+    options: ConnectOptions,
+    deadline: std.Io.Clock.Timestamp,
+) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+    _ = try deadline_policy.usableAwake(io, deadline);
+    return connectStreamAttemptMaybeBefore(
+        allocator,
+        io,
+        stream,
+        tls_host,
+        options,
+        deadline,
+    );
+}
+
+fn connectStreamAttemptMaybeBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    tls_host: []const u8,
+    options: ConnectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
     if (options.tcp_nodelay) {
@@ -662,22 +921,34 @@ fn connectStreamAttempt(
             tls_host,
             options,
             options.client_identity,
+            deadline,
         );
     }
-    const tls_connection = try http1_runtime.TlsClientConnection.init(
-        allocator,
-        io,
-        stream,
-        tls_host,
-        blk: {
-            var tls_options = options.tls;
-            if (tls_options.handshake_timeout == null) {
-                tls_options.handshake_timeout =
-                    options.tls_handshake_timeout;
-            }
-            break :blk tls_options;
-        },
-    );
+    const standard_tls_options = blk: {
+        var tls_options = options.tls;
+        if (tls_options.handshake_timeout == null) {
+            tls_options.handshake_timeout =
+                options.tls_handshake_timeout;
+        }
+        break :blk tls_options;
+    };
+    const tls_connection = if (deadline) |absolute|
+        try http1_runtime.TlsClientConnection.initWithDeadline(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            standard_tls_options,
+            absolute,
+        )
+    else
+        try http1_runtime.TlsClientConnection.init(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            standard_tls_options,
+        );
     stream_owned = false;
 
     // `initTls` is infallible and transfers ownership into the MQTT
@@ -689,7 +960,10 @@ fn connectStreamAttempt(
         options.mqtt,
     );
     errdefer connection.close();
-    return connection.establishClient(options.mqtt);
+    return if (deadline) |absolute|
+        connection.establishClientWithDeadline(options.mqtt, absolute)
+    else
+        connection.establishClient(options.mqtt);
 }
 
 fn connectVailStreamAttempt(
@@ -699,28 +973,39 @@ fn connectVailStreamAttempt(
     tls_host: []const u8,
     options: ConnectOptions,
     client_identity: ?ClientIdentity,
+    deadline: ?std.Io.Clock.Timestamp,
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
-    const connection = try tls_stream.ClientConnection.initVerified(
-        allocator,
-        io,
-        stream,
-        .{
-            .server_name = tls_host,
-            .verify_host = options.tls.verify_host,
-            .ca_bundle = if (options.tls.ca_bundle) |bundle|
-                .{ .bundle = bundle.bundle, .lock = bundle.lock }
-            else
-                null,
-            .server_verifier = options.server_verifier,
-            .client_identity = client_identity,
-            .alpn_protocols = options.alpn_protocols,
-            .cipher_suites = options.cipher_suites,
-            .max_server_handshake_size = options.max_server_handshake_size,
-            .handshake_timeout = options.tls_handshake_timeout,
-        },
-    );
+    const tls_options: tls_stream.ClientVerifiedOptions = .{
+        .server_name = tls_host,
+        .verify_host = options.tls.verify_host,
+        .ca_bundle = if (options.tls.ca_bundle) |bundle|
+            .{ .bundle = bundle.bundle, .lock = bundle.lock }
+        else
+            null,
+        .server_verifier = options.server_verifier,
+        .client_identity = client_identity,
+        .alpn_protocols = options.alpn_protocols,
+        .cipher_suites = options.cipher_suites,
+        .max_server_handshake_size = options.max_server_handshake_size,
+        .handshake_timeout = options.tls_handshake_timeout,
+    };
+    const connection = if (deadline) |absolute|
+        try tls_stream.ClientConnection.initVerifiedWithDeadline(
+            allocator,
+            io,
+            stream,
+            tls_options,
+            absolute,
+        )
+    else
+        try tls_stream.ClientConnection.initVerified(
+            allocator,
+            io,
+            stream,
+            tls_options,
+        );
     stream_owned = false;
     var mqtt_connection = mqtt_runtime.Connection.initVailTls(
         allocator,
@@ -728,5 +1013,8 @@ fn connectVailStreamAttempt(
         options.mqtt,
     );
     errdefer mqtt_connection.close();
-    return mqtt_connection.establishClient(options.mqtt);
+    return if (deadline) |absolute|
+        mqtt_connection.establishClientWithDeadline(options.mqtt, absolute)
+    else
+        mqtt_connection.establishClient(options.mqtt);
 }
