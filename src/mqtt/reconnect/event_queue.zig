@@ -89,6 +89,24 @@ pub fn Queue(comptime Event: type) type {
             timeout: std.Io.Duration,
         ) ReceiveTimeoutError!OwnedEvent {
             if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveWithDeadline(.fromNow(self.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }));
+        }
+
+        /// Wait under one caller-owned absolute deadline. If the event and
+        /// timer complete concurrently, cancellation cleanup still reclaims
+        /// any dequeued but unselected owned event.
+        pub fn receiveWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) ReceiveTimeoutError!OwnedEvent {
+            if (deadline.clock != .awake or
+                deadline.durationFromNow(self.io).raw.nanoseconds <= 0)
+            {
+                return error.Timeout;
+            }
             const Wake = union(enum) {
                 event: (std.Io.QueueClosedError ||
                     std.Io.Cancelable)!OwnedEvent,
@@ -104,7 +122,11 @@ pub fn Queue(comptime Event: type) type {
                 .timeout => {},
             };
             try select.concurrent(.event, receiveRaw, .{self});
-            try select.concurrent(.timeout, waitForTimeout, .{ self.io, timeout });
+            try select.concurrent(
+                .timeout,
+                waitForDeadline,
+                .{ self.io, deadline },
+            );
             return switch (try select.await()) {
                 .event => |result| result catch |err| switch (err) {
                     error.Closed => error.EventQueueClosed,
@@ -151,11 +173,11 @@ pub fn Queue(comptime Event: type) type {
             return self.queue.getOne(self.io);
         }
 
-        fn waitForTimeout(
+        fn waitForDeadline(
             io: std.Io,
-            timeout: std.Io.Duration,
+            deadline: std.Io.Clock.Timestamp,
         ) std.Io.Cancelable!void {
-            try std.Io.sleep(io, timeout, .awake);
+            try deadline.wait(io);
         }
     };
 }
@@ -211,11 +233,20 @@ test "MQTT event queue receive timeout returns data and timeout" {
         error.Timeout,
         queue.receiveTimeout(.fromMilliseconds(1)),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveWithDeadline(
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
     try queue.send(
         .{ .bytes = try std.testing.allocator.dupe(u8, "ready") },
         std.testing.allocator,
     );
-    var event = try queue.receiveTimeout(.fromSeconds(1));
+    var event = try queue.receiveWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
     defer event.deinit();
     try std.testing.expectEqualStrings("ready", event.value.bytes);
 }

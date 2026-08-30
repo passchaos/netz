@@ -1242,6 +1242,24 @@ pub const CompletionQueue = struct {
         timeout: std.Io.Duration,
     ) CompletionQueueReceiveTimeoutError!OwnedCompletion {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveWithDeadline(.fromNow(self.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
+    /// Wait for one completion until the caller's absolute awake-clock
+    /// deadline. A completion removed concurrently with timeout remains owned
+    /// by the select cleanup path and is never leaked.
+    pub fn receiveWithDeadline(
+        self: *CompletionQueue,
+        deadline: std.Io.Clock.Timestamp,
+    ) CompletionQueueReceiveTimeoutError!OwnedCompletion {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
         const Wake = union(enum) {
             completion: (std.Io.QueueClosedError ||
                 std.Io.Cancelable)!OwnedCompletion,
@@ -1259,8 +1277,8 @@ pub const CompletionQueue = struct {
         try select.concurrent(.completion, receiveRaw, .{self});
         try select.concurrent(
             .timeout,
-            waitForTimeout,
-            .{ self.io, timeout },
+            waitForDeadline,
+            .{ self.io, deadline },
         );
         return switch (try select.await()) {
             .completion => |result| result catch |err| switch (err) {
@@ -1284,11 +1302,11 @@ pub const CompletionQueue = struct {
         return self.queue.getOne(self.io);
     }
 
-    fn waitForTimeout(
+    fn waitForDeadline(
         io: std.Io,
-        timeout: std.Io.Duration,
+        deadline: std.Io.Clock.Timestamp,
     ) std.Io.Cancelable!void {
-        try std.Io.sleep(io, timeout, .awake);
+        try deadline.wait(io);
     }
 
     fn captureCompletion(
@@ -1493,13 +1511,22 @@ test "MQTT completion queue receive timeout returns data and timeout" {
         error.Timeout,
         queue.receiveTimeout(.fromMilliseconds(1)),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveWithDeadline(
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
 
     const handler = queue.handler();
     handler.complete(handler.context, .{
         .command_id = 45,
         .result = .{ .publish = 23 },
     });
-    var completion = try queue.receiveTimeout(.fromSeconds(1));
+    var completion = try queue.receiveWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
     defer completion.deinit();
     try std.testing.expectEqual(@as(u64, 45), completion.command_id);
     const result = try completion.result;
