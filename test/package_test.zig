@@ -4431,6 +4431,10 @@ test "public modules are reachable" {
         "receiveTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "receivePendingPacket",
     ));

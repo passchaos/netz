@@ -7,6 +7,7 @@
 //! to read a shared UDP socket and discard one another's packets.
 
 const std = @import("std");
+const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
 const connection_router = @import("connection_router.zig");
 const endpoint_timers = @import("endpoint_timers.zig");
@@ -750,7 +751,7 @@ pub const Dispatcher = struct {
         self: *Dispatcher,
         supported_versions: []const u32,
     ) ReceiveError!Event {
-        return self.receiveTimeout(supported_versions, .none);
+        return self.receiveUntil(supported_versions, null);
     }
 
     /// `receive` with an additional endpoint-loop wakeup deadline. Connection
@@ -762,7 +763,32 @@ pub const Dispatcher = struct {
         supported_versions: []const u32,
         timeout: std.Io.Timeout,
     ) ReceiveError!Event {
-        const caller_deadline = timeout.toTimestamp(self.endpoint.io);
+        return self.receiveUntil(
+            supported_versions,
+            timeout.toTimestamp(self.endpoint.io),
+        );
+    }
+
+    /// Receive under one caller-owned awake-clock budget. Transport timers can
+    /// wake the dispatcher earlier, but processing them never renews this
+    /// absolute deadline. Rejecting other clocks also prevents incomparable
+    /// timestamps from being ordered against QUIC's awake-clock timers.
+    pub fn receiveWithDeadline(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveError!Event {
+        return self.receiveUntil(
+            supported_versions,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+        );
+    }
+
+    fn receiveUntil(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveError!Event {
         while (true) {
             if (self.promoted_datagrams.items.len != 0) {
                 const datagram = self.promoted_datagrams.orderedRemove(0);
@@ -775,6 +801,7 @@ pub const Dispatcher = struct {
                 return .{ .timer = timer };
             }
             const receive_timeout = earliestReceiveTimeout(
+                self.endpoint.io,
                 self.timers.earliestDeadline(),
                 caller_deadline,
             );
@@ -931,6 +958,7 @@ pub const Dispatcher = struct {
 };
 
 fn earliestReceiveTimeout(
+    io: std.Io,
     scheduled: ?endpoint_timers.EndpointTimerDeadline,
     caller_deadline: ?std.Io.Clock.Timestamp,
 ) std.Io.Timeout {
@@ -943,8 +971,11 @@ fn earliestReceiveTimeout(
     } else null;
     if (timer_deadline) |timer| {
         if (caller_deadline) |caller| {
-            return .{ .deadline = if (timer.raw.nanoseconds <
-                caller.raw.nanoseconds)
+            // Relative `std.Io.Timeout` callers may choose another clock.
+            // Compare remaining durations rather than unrelated timestamp
+            // epochs, while the explicit deadline API stays awake-only.
+            return .{ .deadline = if (timer.durationFromNow(io).raw.nanoseconds <
+                caller.durationFromNow(io).raw.nanoseconds)
                 timer
             else
                 caller };

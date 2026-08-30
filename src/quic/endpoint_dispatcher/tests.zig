@@ -597,7 +597,7 @@ test "QUIC endpoint dispatcher admits only bounded unknown Initials" {
     );
 }
 
-test "QUIC endpoint dispatcher wakes socket receive for transport timers" {
+test "QUIC endpoint dispatcher wakes deadline receive for transport timers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -639,7 +639,10 @@ test "QUIC endpoint dispatcher wakes socket receive for transport timers" {
     try dispatcher.refreshConnectionTimer(9);
 
     const versions = [_]u32{quic.Version.version_1.wireValue()};
-    var event = try dispatcher.receive(&versions);
+    var event = try dispatcher.receiveWithDeadline(&versions, .fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    }));
     defer event.deinit(allocator);
     try std.testing.expect(event == .timer);
     try std.testing.expectEqual(@as(ConnectionHandle, 9), event.timer.connection_handle);
@@ -1100,6 +1103,63 @@ test "QUIC endpoint dispatcher caller timeout coexists with transport timers" {
             .raw = .fromMilliseconds(1),
         } },
     ));
+}
+
+test "QUIC endpoint dispatcher validates caller-owned deadlines" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    const versions = &.{quic.Version.version_1.wireValue()};
+
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveWithDeadline(
+            versions,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveWithDeadline(versions, .fromNow(io, .{
+            .clock = .awake,
+            .raw = .zero,
+        })),
+    );
+    // The generic std.Io.Timeout API retains support for relative durations
+    // on other clocks; internal awake transport timers compare remaining
+    // durations instead of unrelated timestamp epochs.
+    try std.testing.expectError(error.Timeout, dispatcher.receiveTimeout(
+        versions,
+        .{ .duration = .{
+            .clock = .real,
+            .raw = .fromMilliseconds(1),
+        } },
+    ));
+
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveWithDeadline(versions, .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(5),
+        })),
+    );
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            std.time.ns_per_s,
+    );
 }
 
 test "QUIC endpoint dispatcher releases failed routed datagram once" {
