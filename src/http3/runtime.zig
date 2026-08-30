@@ -10600,59 +10600,111 @@ pub const ProtectedClient = struct {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
+        return self.receiveNextResponseEventInternal(null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    /// Return the next response event already buffered on any outstanding
+    /// request without reading UDP. The selected stream ID lets one
+    /// dispatcher service multiple lightweight protected requests fairly.
+    pub fn pollNextResponseEvent(
+        self: *ProtectedClient,
+    ) Error!?StreamingResponseEvent {
+        if (self.request_lifecycle.outstanding.items.len == 0) return null;
+
+        if (self.response_streams.firstReset()) |reset| {
+            if (!self.request_lifecycle.contains(reset.stream_id)) {
+                return error.UnexpectedStream;
+            }
+            _ = self.response_streams.takeReset(reset.stream_id);
+            try self.finishStreamingResponse(reset.stream_id);
+            return .{ .reset = .{
+                .stream_id = reset.stream_id,
+                .application_error_code = reset.application_error_code,
+            } };
+        }
+        const ready_value = try self.streaming_responses.nextResponse(
+            &self.response_streams,
+            self.qpack_decode.table,
+            self.config.local_settings.qpack_blocked_streams,
+        ) orelse return null;
+        var ready = ready_value;
+        const stream_id: u62 = @intCast(
+            ready.entry.reader.receive.stream_id,
+        );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &ready.entry.reader,
+        );
+        // `nextResponse` decoded this head before applying request context.
+        // Validate request-sensitive HEAD/CONNECT semantics before exposure.
+        if (ready.event == .head and ready.event.head == .response) {
+            try http3.applyResponseHeadRequestSemantics(
+                &ready.event.head.response,
+                ready.entry.reader.response_request_method,
+                ready.entry.reader.response_extended_connect,
+            );
+            ready.entry.reader.body_allowed =
+                ready.event.head.response.body_allowed;
+            if (!ready.entry.reader.body_allowed) {
+                ready.entry.reader.content_length = null;
+            }
+        }
+        var owned_event = ready.event;
+        errdefer owned_event.deinit(
+            self.quic_client.endpoint.allocator,
+        );
+        try self.applyStreamingResponseEvent(stream_id, owned_event);
+        return .{ .message = .{
+            .stream_id = stream_id,
+            .value = owned_event,
+        } };
+    }
+
+    /// Wait for the next incremental event within one relative budget. A
+    /// timeout leaves all active readers and partially received frames intact.
+    pub fn receiveNextResponseEventWithTimeout(
+        self: *ProtectedClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        return self.receiveNextResponseEventInternal(.fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveNextResponseEventWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingResponseEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        return self.receiveNextResponseEventInternal(deadline);
+    }
+
+    fn receiveNextResponseEventInternal(
+        self: *ProtectedClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingResponseEvent {
         while (true) {
-            if (self.response_streams.firstReset()) |reset| {
-                if (!self.request_lifecycle.contains(reset.stream_id)) {
-                    return error.UnexpectedStream;
-                }
-                _ = self.response_streams.takeReset(reset.stream_id);
-                try self.finishStreamingResponse(reset.stream_id);
-                return .{ .reset = .{
-                    .stream_id = reset.stream_id,
-                    .application_error_code = reset.application_error_code,
-                } };
+            if (try self.pollNextResponseEvent()) |event| return event;
+            if (deadline) |absolute| {
+                try self.receiveResponsePacketWithDeadline(absolute);
+            } else {
+                try self.receiveResponsePacket();
             }
-            if (try self.streaming_responses.nextResponse(
-                &self.response_streams,
-                self.qpack_decode.table,
-                self.config.local_settings.qpack_blocked_streams,
-            )) |ready_value| {
-                var ready = ready_value;
-                const stream_id: u62 = @intCast(
-                    ready.entry.reader.receive.stream_id,
-                );
-                self.request_lifecycle.applyResponseReaderSemantics(
-                    stream_id,
-                    &ready.entry.reader,
-                );
-                if (ready.event == .head and
-                    ready.event.head == .response)
-                {
-                    try http3.applyResponseHeadRequestSemantics(
-                        &ready.event.head.response,
-                        ready.entry.reader.response_request_method,
-                        ready.entry.reader.response_extended_connect,
-                    );
-                    ready.entry.reader.body_allowed =
-                        ready.event.head.response.body_allowed;
-                    if (!ready.entry.reader.body_allowed) {
-                        ready.entry.reader.content_length = null;
-                    }
-                }
-                var owned_event = ready.event;
-                errdefer owned_event.deinit(
-                    self.quic_client.endpoint.allocator,
-                );
-                try self.applyStreamingResponseEvent(
-                    stream_id,
-                    owned_event,
-                );
-                return .{ .message = .{
-                    .stream_id = stream_id,
-                    .value = owned_event,
-                } };
-            }
-            try self.receiveResponsePacket();
         }
     }
 
@@ -21419,7 +21471,7 @@ test "HTTP/3 protected client retains interleaved responses" {
     );
 }
 
-test "HTTP/3 protected aggregate response deadlines preserve progress" {
+test "HTTP/3 protected response deadlines preserve aggregate and streaming progress" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -21454,6 +21506,7 @@ test "HTTP/3 protected aggregate response deadlines preserve progress" {
 
     const direct_body = "direct-after-timeout";
     const next_body = "next-after-timeout";
+    const streaming_body = "streaming-after-timeout";
     const Shared = struct {
         server: *ProtectedServer,
         io: std.Io,
@@ -21461,6 +21514,8 @@ test "HTTP/3 protected aggregate response deadlines preserve progress" {
         direct_timed_out: std.Io.Event = .unset,
         next_head_sent: std.Io.Event = .unset,
         next_timed_out: std.Io.Event = .unset,
+        streaming_head_sent: std.Io.Event = .unset,
+        streaming_timed_out: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -21470,6 +21525,8 @@ test "HTTP/3 protected aggregate response deadlines preserve progress" {
                 self.direct_timed_out.set(self.io);
                 self.next_head_sent.set(self.io);
                 self.next_timed_out.set(self.io);
+                self.streaming_head_sent.set(self.io);
+                self.streaming_timed_out.set(self.io);
             };
         }
 
@@ -21507,6 +21564,11 @@ test "HTTP/3 protected aggregate response deadlines preserve progress" {
                 next_body,
                 &self.next_head_sent,
                 &self.next_timed_out,
+            );
+            try self.sendSplitResponse(
+                streaming_body,
+                &self.streaming_head_sent,
+                &self.streaming_timed_out,
             );
         }
     };
@@ -21581,6 +21643,64 @@ test "HTTP/3 protected aggregate response deadlines preserve progress" {
         next.response.value.response.body,
     );
     try std.testing.expect(!client.request_lifecycle.contains(next_id));
+
+    const streaming_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/streaming-next-deadline",
+        .authority = "localhost",
+    });
+    try shared.streaming_head_sent.wait(io);
+    var head = try client.receiveNextResponseEventWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .message);
+    try std.testing.expectEqual(streaming_id, head.message.stream_id);
+    try std.testing.expect(head.message.value == .head);
+    try std.testing.expectEqual(
+        @as(?StreamingResponseEvent, null),
+        try client.pollNextResponseEvent(),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveNextResponseEventWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(streaming_id));
+    try std.testing.expect(
+        client.streaming_responses.find(streaming_id) != null,
+    );
+    shared.streaming_timed_out.set(io);
+
+    var body: [32]u8 = undefined;
+    var body_len: usize = 0;
+    var finished = false;
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    );
+    while (!finished) {
+        var event = try client.receiveNextResponseEventWithDeadline(deadline);
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .message);
+        try std.testing.expectEqual(streaming_id, event.message.stream_id);
+        switch (event.message.value) {
+            .data_available => {
+                body_len += try client.readResponseData(
+                    streaming_id,
+                    body[body_len..],
+                );
+            },
+            .finished => finished = true,
+            .head, .trailers, .push_promise => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqualStrings(
+        streaming_body,
+        body[0..body_len],
+    );
+    try std.testing.expect(
+        !client.request_lifecycle.contains(streaming_id),
+    );
 
     thread.join();
     joined = true;
