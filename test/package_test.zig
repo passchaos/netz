@@ -270,6 +270,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
+        "requestStreamingWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestStreamingWithInformationalAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
         "readResponseWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -283,6 +291,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "readResponseStreamingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readResponseStreamingWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readResponseStreamingWithInformationalAndDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.RequestWriter,
@@ -307,6 +323,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.RequestWriter,
         "readResponseStreamingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.RequestWriter,
+        "readResponseStreamingWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.RequestWriter,
+        "readResponseStreamingWithInformationalAndDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,

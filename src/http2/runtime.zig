@@ -3403,14 +3403,49 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.requestStreamingWithInformationalAndDeadline(
+            options,
+            null,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithInformationalAndDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreamingWithHeadUntil(
             pending,
-            null,
+            informational,
             deadline,
             context,
             ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithInformationalAndTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithInformationalAndDeadline(
+            options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
             consume,
         );
     }
@@ -3444,6 +3479,27 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            null,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndDeadline(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         return self.readResponseStreamingWithHeadUntil(
             .{
@@ -3451,10 +3507,32 @@ pub const Connection = struct {
                 .request_method = request_method,
                 .extended_connect = extended_connect,
             },
-            null,
+            informational,
             deadline,
             context,
             ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndTimeout(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
             consume,
         );
     }
@@ -10686,6 +10764,21 @@ pub const RequestWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndDeadline(
+            null,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndDeadline(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
@@ -10697,7 +10790,7 @@ pub const RequestWriter = struct {
                 .request_method = if (self.head_request) "HEAD" else "POST",
                 .extended_connect = false,
             },
-            null,
+            informational,
             deadline,
             context,
             ignoreStreamingResponseHead,
@@ -10708,6 +10801,25 @@ pub const RequestWriter = struct {
         };
         self.completed = true;
         return response;
+    }
+
+    pub fn readResponseStreamingWithInformationalAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            consume,
+        );
     }
 
     pub fn readResponseStreamingWithInformational(
