@@ -657,6 +657,29 @@ pub const StatefulProtectedServer = struct {
         return pending.accept();
     }
 
+    /// Bound the initial datagram and Extended CONNECT with one absolute
+    /// deadline. The preconfigured transport setup itself performs no network
+    /// I/O, so the caller's budget is never restarted between those phases.
+    pub fn acceptWithDeadline(
+        self: *StatefulProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        var pending = try self.receiveSessionRequestWithDeadline(deadline);
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    pub fn acceptWithTimeout(
+        self: *StatefulProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(.fromNow(
+            self.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     pub fn receiveSessionRequest(
         self: *StatefulProtectedServer,
     ) Error!PendingHandshakeSession {
@@ -677,6 +700,43 @@ pub const StatefulProtectedServer = struct {
         return receiveStatefulSessionRequest(&h3, self.limits);
     }
 
+    pub fn receiveSessionRequestWithDeadline(
+        self: *StatefulProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        var first = try self.endpoint.receiveBytesWithDeadline(deadline);
+        defer first.deinit(self.endpoint.allocator);
+        var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+            &self.endpoint,
+            first.from,
+            self.h3_options,
+            self.transport,
+        );
+        errdefer h3.deinit();
+        try h3.established.connection.preloadReceivedDatagram(
+            first.from,
+            first.bytes,
+            first.ecn,
+        );
+        return receiveStatefulSessionRequestWithDeadline(
+            &h3,
+            self.limits,
+            deadline,
+        );
+    }
+
+    pub fn receiveSessionRequestWithTimeout(
+        self: *StatefulProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionRequestWithDeadline(.fromNow(
+            self.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// Accept one WebTransport session from an already authenticated peer.
     /// The returned value borrows this server's endpoint and must be destroyed
     /// before the server, matching ordinary `HandshakeServer.accept`.
@@ -687,6 +747,34 @@ pub const StatefulProtectedServer = struct {
         var pending = try self.receiveSessionRequestFrom(peer);
         errdefer pending.deinit();
         return pending.accept();
+    }
+
+    pub fn acceptFromWithDeadline(
+        self: *StatefulProtectedServer,
+        peer: net.IpAddress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        var pending = try self.receiveSessionRequestFromWithDeadline(
+            peer,
+            deadline,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    pub fn acceptFromWithTimeout(
+        self: *StatefulProtectedServer,
+        peer: net.IpAddress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptFromWithDeadline(
+            peer,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
     }
 
     pub fn receiveSessionRequestFrom(
@@ -701,6 +789,41 @@ pub const StatefulProtectedServer = struct {
         );
         errdefer h3.deinit();
         return receiveStatefulSessionRequest(&h3, self.limits);
+    }
+
+    pub fn receiveSessionRequestFromWithDeadline(
+        self: *StatefulProtectedServer,
+        peer: net.IpAddress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+            &self.endpoint,
+            peer,
+            self.h3_options,
+            self.transport,
+        );
+        errdefer h3.deinit();
+        return receiveStatefulSessionRequestWithDeadline(
+            &h3,
+            self.limits,
+            deadline,
+        );
+    }
+
+    pub fn receiveSessionRequestFromWithTimeout(
+        self: *StatefulProtectedServer,
+        peer: net.IpAddress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionRequestFromWithDeadline(
+            peer,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
     }
 };
 
@@ -3524,12 +3647,107 @@ pub const HandshakeClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectPreconfiguredWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClientSession {
+        var attempt = try connectPreconfiguredAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectPreconfiguredWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClientSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectPreconfiguredWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectPreconfiguredAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
         local_address: net.IpAddress,
         server: net.IpAddress,
         options: StatefulProtectedConnectOptions,
+    ) Error!HandshakeConnectAttempt {
+        return connectPreconfiguredAttemptBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            null,
+        );
+    }
+
+    pub fn connectPreconfiguredAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeConnectAttempt {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectPreconfiguredAttemptBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn connectPreconfiguredAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectPreconfiguredAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectPreconfiguredAttemptBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         const h3_options = webTransportHandshakeSessionOptions(options.h3);
@@ -3550,7 +3768,7 @@ pub const HandshakeClientSession = struct {
             options.origin,
             options.headers,
             options.limits,
-            null,
+            deadline,
         );
     }
 
@@ -5030,6 +5248,45 @@ pub const StatefulProtectedClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!StatefulProtectedClientSession {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!StatefulProtectedClientSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -5047,6 +5304,46 @@ pub const StatefulProtectedClientSession = struct {
                 options,
             ),
         };
+    }
+
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!StatefulProtectedConnectAttempt {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        return .{ .attempt = try HandshakeClientSession
+            .connectPreconfiguredAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        ) };
+    }
+
+    pub fn connectAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: StatefulProtectedConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!StatefulProtectedConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn deinit(self: *StatefulProtectedClientSession) void {
@@ -7276,16 +7573,36 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
 
     const Shared = struct {
         server: *StatefulProtectedServer,
+        io: std.Io,
+        initial_timeout_done: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
                 self.err = err;
+                self.initial_timeout_done.set(self.io);
             };
         }
 
         fn runFallible(self: *@This()) !void {
-            var session = try self.server.accept();
+            try std.testing.expectError(
+                error.Timeout,
+                self.server.receiveSessionRequestWithDeadline(.{
+                    .clock = .real,
+                    .raw = .zero,
+                }),
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                self.server.receiveSessionRequestWithTimeout(
+                    .fromMilliseconds(10),
+                ),
+            );
+            self.initial_timeout_done.set(self.io);
+            var session = try self.server.acceptWithDeadline(.fromNow(
+                self.io,
+                .{ .raw = .fromSeconds(1), .clock = .awake },
+            ));
             defer session.deinit();
 
             var client_bidi = try session.receiveStream();
@@ -7355,34 +7672,59 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             );
         }
     };
-    var shared = Shared{ .server = &server };
+    var shared = Shared{ .server = &server, .io = io };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
+    try shared.initial_timeout_done.wait(io);
 
-    var client = try StatefulProtectedClientSession.connect(
+    const connect_options: StatefulProtectedConnectOptions = .{
+        .authority = "localhost",
+        .path = "/wt-stateful-protected",
+        .limits = .{
+            .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+            .max_session_streams = 2,
+        },
+        .h3 = .{ .local_settings = local_settings },
+        .transport = .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_transport_parameters = quic.practical_transport_parameters,
+            .peer_transport_parameters = quic.practical_transport_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        StatefulProtectedClientSession.connectAttemptWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            connect_options,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        StatefulProtectedClientSession.connectAttemptWithTimeout(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            connect_options,
+            .zero,
+        ),
+    );
+    var client = try StatefulProtectedClientSession.connectWithDeadline(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
         server.address(),
-        .{
-            .authority = "localhost",
-            .path = "/wt-stateful-protected",
-            .limits = .{
-                .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
-                .max_session_streams = 2,
-            },
-            .h3 = .{ .local_settings = local_settings },
-            .transport = .{
-                .receive_keys = server_keys,
-                .send_keys = client_keys,
-                .local_connection_id = &client_cid,
-                .peer_connection_id = &server_cid,
-                .local_transport_parameters = quic.practical_transport_parameters,
-                .peer_transport_parameters = quic.practical_transport_parameters,
-                .one_rtt = .{ .enable_pacing = false },
-            },
-        },
+        connect_options,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
     );
     defer client.deinit();
     try std.testing.expect(client.datagramsNegotiated());

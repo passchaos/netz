@@ -4967,6 +4967,22 @@ test "public modules are reachable" {
         netz.webtransport.runtime.HandshakeClientSession,
         "connectUriAttemptWithTimeout",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectPreconfiguredWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectPreconfiguredWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectPreconfiguredAttemptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "connectPreconfiguredAttemptWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "ProtectedClientSession"));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
@@ -5546,6 +5562,38 @@ test "public modules are reachable" {
         "receiveSessionRequest",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "receiveSessionRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "receiveSessionRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "receiveSessionRequestFromWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "receiveSessionRequestFromWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "acceptFromWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedServer,
+        "acceptFromWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.PendingHandshakeSession,
         "acceptWithHeaders",
     ));
@@ -5580,6 +5628,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "connectAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "connectWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "connectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "connectAttemptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "connectAttemptWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedConnectAttempt,
