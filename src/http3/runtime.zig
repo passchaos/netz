@@ -9135,32 +9135,52 @@ pub const ProtectedServer = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
         while (true) {
-            if (self.streaming_requests.takeFirstReset()) |reset| {
-                self.request_lifecycle.markFinished(reset.stream_id);
-                self.qpack_encode.abandonStream(reset.stream_id);
-                _ = self.outbound_bodies.finish(reset.stream_id);
-                return .{ .reset = .{
-                    .from = reset.from,
-                    .stream_id = reset.stream_id,
-                    .application_error_code = reset.application_error_code,
-                } };
-            }
-            if (try self.streaming_requests.nextRequest(
-                &self.request_streams,
-                self.qpack_decode.table,
-                self.config.local_settings.qpack_blocked_streams,
-            )) |ready| {
-                return try self.applyStreamingRequestEvent(
-                    ready.entry,
-                    ready.event,
-                );
-            }
+            if (try self.pollRequestEvent()) |event| return event;
             if (deadline) |absolute| {
                 try self.receiveRequestPacketWithDeadline(absolute);
             } else {
                 try self.receiveRequestPacket();
             }
         }
+    }
+
+    /// Return the next request event already buffered locally without reading
+    /// UDP. Consumed DATA credit is emitted first so repeated polling and
+    /// `readRequestData` calls continue to advance bounded request windows.
+    pub fn pollRequestEvent(
+        self: *ProtectedServer,
+    ) Error!?StreamingRequestEvent {
+        for (self.streaming_requests.entries.items) |*entry| {
+            try sendProtectedReaderCapacity(
+                &self.quic_server.endpoint,
+                entry.from orelse return error.UnexpectedStream,
+                self.config,
+                &self.next_packet_number,
+                &self.protected_send,
+                &entry.reader,
+            );
+        }
+        if (self.streaming_requests.takeFirstReset()) |reset| {
+            self.request_lifecycle.markFinished(reset.stream_id);
+            self.qpack_encode.abandonStream(reset.stream_id);
+            _ = self.outbound_bodies.finish(reset.stream_id);
+            return .{ .reset = .{
+                .from = reset.from,
+                .stream_id = reset.stream_id,
+                .application_error_code = reset.application_error_code,
+            } };
+        }
+        if (try self.streaming_requests.nextRequest(
+            &self.request_streams,
+            self.qpack_decode.table,
+            self.config.local_settings.qpack_blocked_streams,
+        )) |ready| {
+            return try self.applyStreamingRequestEvent(
+                ready.entry,
+                ready.event,
+            );
+        }
+        return null;
     }
 
     pub fn readRequestData(
@@ -23602,6 +23622,88 @@ test "HTTP/3 protected server streams interleaved requests through small windows
     try std.testing.expectEqual(
         @as(usize, 0),
         server.streaming_requests.retainedCount(),
+    );
+}
+
+test "HTTP/3 protected server polls buffered request events" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xe9, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xea, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xeb} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xec} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.sendRequest(.{
+        .method = "POST",
+        .path = "/poll",
+        .authority = "localhost",
+        .body = "buffered",
+    });
+    // Polling must not claim a datagram directly from the shared socket.
+    try std.testing.expectEqual(
+        @as(?StreamingRequestEvent, null),
+        try server.pollRequestEvent(),
+    );
+
+    var head = try server.receiveRequestEvent();
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .message);
+    try std.testing.expectEqual(stream_id, head.message.stream_id);
+    try std.testing.expect(head.message.value == .head);
+
+    var data = (try server.pollRequestEvent()) orelse
+        return error.TestUnexpectedResult;
+    defer data.deinit(allocator);
+    try std.testing.expect(data == .message);
+    try std.testing.expectEqual(stream_id, data.message.stream_id);
+    try std.testing.expect(data.message.value == .data_available);
+    var body: [16]u8 = undefined;
+    const body_len = try server.readRequestData(stream_id, &body);
+    try std.testing.expectEqualStrings("buffered", body[0..body_len]);
+
+    var finished = (try server.pollRequestEvent()) orelse
+        return error.TestUnexpectedResult;
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .message);
+    try std.testing.expectEqual(stream_id, finished.message.stream_id);
+    try std.testing.expect(finished.message.value == .finished);
+    try std.testing.expectEqual(
+        @as(?StreamingRequestEvent, null),
+        try server.pollRequestEvent(),
     );
 }
 

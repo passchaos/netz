@@ -1916,6 +1916,10 @@ test "public modules are reachable" {
         netz.http3.runtime.ProtectedServer,
         "receiveRequestEventWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "pollRequestEvent",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "readRequestData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "startResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseBody"));
