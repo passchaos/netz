@@ -9246,6 +9246,36 @@ pub const ProtectedServer = struct {
         return read;
     }
 
+    /// Discard currently available DATA without copying it to caller storage.
+    /// Receive-window updates match `readRequestData`, including the credit
+    /// created by bytes consumed in a prior call.
+    pub fn skipRequestData(
+        self: *ProtectedServer,
+        stream_id: u62,
+    ) Error!usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        const from = entry.from orelse return error.UnexpectedStream;
+        try sendProtectedReaderCapacity(
+            &self.quic_server.endpoint,
+            from,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        const skipped = try entry.reader.skipData();
+        try sendProtectedReaderCapacity(
+            &self.quic_server.endpoint,
+            from,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        return skipped;
+    }
+
     pub fn sendResponse(self: *ProtectedServer, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(to, stream_id, &.{}, response);
     }
@@ -10800,6 +10830,35 @@ pub const ProtectedClient = struct {
             &entry.reader,
         );
         return read;
+    }
+
+    /// Discard currently available response DATA without an intermediate copy
+    /// while preserving the same protected receive-window feedback as reads.
+    pub fn skipResponseData(
+        self: *ProtectedClient,
+        stream_id: u62,
+    ) Error!usize {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        const from = entry.from orelse self.quic_client.peer;
+        try sendProtectedReaderCapacity(
+            &self.quic_client.endpoint,
+            from,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        const skipped = try entry.reader.skipData();
+        try sendProtectedReaderCapacity(
+            &self.quic_client.endpoint,
+            from,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        return skipped;
     }
 
     pub fn receivePushEvent(
@@ -23582,9 +23641,8 @@ test "HTTP/3 protected server streams interleaved requests through small windows
     var dynamic_trailers: usize = 0;
     var finished: usize = 0;
     var first_read: usize = 0;
-    var second_read: usize = 0;
+    var second_skipped: usize = 0;
     var first_checksum: u64 = 0;
-    var second_checksum: u64 = 0;
     var read_buf: [113]u8 = undefined;
     while (finished != 2) {
         var event = try server.receiveRequestEvent();
@@ -23606,22 +23664,23 @@ test "HTTP/3 protected server streams interleaved requests through small windows
                         message.stream_id,
                     ).?;
                     if (active.reader.current_frame == null) break;
-                    const read = try server.readRequestData(
-                        message.stream_id,
-                        &read_buf,
-                    );
-                    if (read == 0) break;
                     if (message.stream_id == first_id) {
+                        const read = try server.readRequestData(
+                            message.stream_id,
+                            &read_buf,
+                        );
+                        if (read == 0) break;
                         for (read_buf[0..read]) |byte| {
                             first_checksum +%= byte;
                         }
                         first_read += read;
                     } else {
                         try std.testing.expectEqual(second_id, message.stream_id);
-                        for (read_buf[0..read]) |byte| {
-                            second_checksum +%= byte;
-                        }
-                        second_read += read;
+                        const skipped = try server.skipRequestData(
+                            message.stream_id,
+                        );
+                        if (skipped == 0) break;
+                        second_skipped += skipped;
                     }
                 }
                 const active = server.streaming_requests.find(
@@ -23656,17 +23715,13 @@ test "HTTP/3 protected server streams interleaved requests through small windows
     for (chunk) |byte| chunk_sum += byte;
     expected_first += chunk_sum * (remaining / chunk.len);
     for (chunk[0 .. remaining % chunk.len]) |byte| expected_first += byte;
-    var expected_second: u64 = 0;
-    for ("second") |byte| expected_second += byte;
-
     try std.testing.expectEqual(@as(usize, 2), heads);
     try std.testing.expect(dynamic_heads != 0);
     try std.testing.expectEqual(@as(usize, 2), trailers);
     try std.testing.expect(dynamic_trailers != 0);
     try std.testing.expectEqual(body_len, first_read);
-    try std.testing.expectEqual(@as(usize, 6), second_read);
+    try std.testing.expectEqual(@as(usize, 6), second_skipped);
     try std.testing.expectEqual(expected_first, first_checksum);
-    try std.testing.expectEqual(expected_second, second_checksum);
     try std.testing.expectEqual(
         @as(usize, 0),
         server.streaming_requests.retainedCount(),
@@ -24076,6 +24131,7 @@ test "HTTP/3 protected client streams large response through small window" {
     var saw_head = false;
     var saw_trailers = false;
     var body_read: usize = 0;
+    var body_skipped: usize = 0;
     var checksum: u64 = 0;
     var read_buf: [113]u8 = undefined;
     while (client.request_lifecycle.contains(stream_id)) {
@@ -24097,6 +24153,12 @@ test "HTTP/3 protected client streams large response through small window" {
                 while (true) {
                     const active = client.streaming_responses.find(stream_id).?;
                     if (active.reader.current_frame == null) break;
+                    if (body_skipped == 0) {
+                        const skipped = try client.skipResponseData(stream_id);
+                        if (skipped == 0) break;
+                        body_skipped += skipped;
+                        continue;
+                    }
                     const read = try client.readResponseData(
                         stream_id,
                         &read_buf,
@@ -24124,7 +24186,8 @@ test "HTTP/3 protected client streams large response through small window" {
     if (shared.err) |err| return err;
     try std.testing.expect(saw_head);
     try std.testing.expect(saw_trailers);
-    try std.testing.expectEqual(body_len, body_read);
+    try std.testing.expect(body_skipped != 0);
+    try std.testing.expectEqual(body_len, body_read + body_skipped);
     try std.testing.expect(checksum != 0);
     try std.testing.expectEqual(
         @as(usize, 0),
