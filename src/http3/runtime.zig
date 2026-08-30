@@ -7115,6 +7115,38 @@ pub const HandshakeClient = struct {
         return self.receiveResponseWithInformational(stream_id, informational);
     }
 
+    pub fn requestWithInformationalAndTimeout(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            informational,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn requestWithInformationalAndDeadline(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        const stream_id = try self.sendRequest(request_options);
+        return self.receiveResponseWithInformationalAndDeadline(
+            stream_id,
+            informational,
+            deadline,
+        );
+    }
+
     pub fn sendRequest(
         self: *HandshakeClient,
         request_options: http3.Request,
@@ -7426,7 +7458,7 @@ pub const HandshakeClient = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.receiveResponseWithInformationalUntil(
+        return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
             null,
             .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
@@ -7438,7 +7470,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
-        return self.receiveResponseWithInformationalUntil(
+        return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
             null,
             deadline,
@@ -7461,7 +7493,24 @@ pub const HandshakeClient = struct {
         };
     }
 
-    pub fn receiveResponseWithInformationalUntil(
+    pub fn receiveResponseWithInformationalAndTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseWithInformationalAndDeadline(
+            stream_id,
+            informational,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveResponseWithInformationalAndDeadline(
         self: *HandshakeClient,
         stream_id: u62,
         informational: ?http3.InformationalObserver,
@@ -7557,7 +7606,7 @@ pub const HandshakeClient = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.receiveNextResponseWithInformationalUntil(
+        return self.receiveNextResponseWithInformationalAndDeadline(
             null,
             .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
         );
@@ -7567,7 +7616,10 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
-        return self.receiveNextResponseWithInformationalUntil(null, deadline);
+        return self.receiveNextResponseWithInformationalAndDeadline(
+            null,
+            deadline,
+        );
     }
 
     /// Aggregate whichever outstanding response becomes ready first and
@@ -7585,13 +7637,28 @@ pub const HandshakeClient = struct {
         };
     }
 
-    /// Deadline-bounded variant that preserves callback ordering across all
-    /// packets consumed before the timeout.
-    pub fn receiveNextResponseWithInformationalUntil(
+    pub fn receiveNextResponseWithInformationalAndTimeout(
+        self: *HandshakeClient,
+        informational: ?MultiplexedInformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveNextResponseWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveNextResponseWithInformationalAndDeadline(
         self: *HandshakeClient,
         informational: ?MultiplexedInformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        // Callback ordering is preserved across all packets consumed before
+        // the timeout, including unrelated response streams.
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveNextResponseWithInformationalInternal(
             informational,
@@ -8256,7 +8323,7 @@ pub const HandshakeClient = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!PushedResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.receivePushWithInformationalAttempt(
+        return self.receivePushWithInformationalAndDeadline(
             null,
             .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
         );
@@ -8266,8 +8333,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
-        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        return self.receivePushWithInformationalAttempt(null, deadline);
+        return self.receivePushWithInformationalAndDeadline(null, deadline);
     }
 
     /// Aggregate one promised response while reporting its ordered 1xx heads.
@@ -8284,7 +8350,22 @@ pub const HandshakeClient = struct {
         };
     }
 
-    pub fn receivePushWithInformationalUntil(
+    pub fn receivePushWithInformationalAndTimeout(
+        self: *HandshakeClient,
+        informational: ?PushInformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PushedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePushWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receivePushWithInformationalAndDeadline(
         self: *HandshakeClient,
         informational: ?PushInformationalObserver,
         deadline: std.Io.Clock.Timestamp,

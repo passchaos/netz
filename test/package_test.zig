@@ -1694,6 +1694,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
+        "requestWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestWithInformationalAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
         "requestUriWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -1823,6 +1831,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
+        "receiveResponseWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveResponseWithInformationalAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
         "receiveDetachedResponseProgressWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -1872,7 +1888,11 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
-        "receiveNextResponseWithInformationalUntil",
+        "receiveNextResponseWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveNextResponseWithInformationalAndDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponseEvent"));
     try std.testing.expect(@hasDecl(
@@ -1905,7 +1925,11 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
-        "receivePushWithInformationalUntil",
+        "receivePushWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receivePushWithInformationalAndDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePushEvent"));
     try std.testing.expect(@hasDecl(

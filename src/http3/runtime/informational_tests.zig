@@ -260,6 +260,116 @@ test "HTTP/3 protected client observes and bounds informational responses" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/3 authenticated informational deadline variants validate and deliver" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const original_dcid =
+        [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const client_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const server_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x65} ** 32,
+            .x25519_secret_key = [_]u8{0x66} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try session.sendResponseWithInformational(
+                request.stream_id,
+                &.{.{ .status = 103 }},
+                .{ .status = 200, .body = "late" },
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x67} ** 32,
+            .x25519_secret_key = [_]u8{0x68} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    // These validation paths run before sending or selecting a stream, so a
+    // bogus clock cannot mutate request lifecycle state.
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndDeadline(
+            .{ .method = "GET", .path = "/wrong-clock", .authority = "localhost" },
+            null,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndTimeout(
+            .{ .method = "GET", .path = "/zero", .authority = "localhost" },
+            null,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.request_lifecycle.outstanding.items.len,
+    );
+
+    var observation: Observation = .{};
+    var response = try client.requestWithInformationalAndTimeout(
+        .{ .method = "GET", .path = "/observed", .authority = "localhost" },
+        .{
+            .context = &observation,
+            .on_response = Observation.observe,
+        },
+        .fromSeconds(1),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), observation.count);
+    try std.testing.expectEqual(@as(u16, 103), observation.statuses[0]);
+    try std.testing.expectEqualStrings("late", response.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/3 protected receive-next correlates informational responses" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
