@@ -1028,6 +1028,8 @@ pub const PublishDeliveryQueue = delivery_queue.Queue(
 );
 pub const OwnedPublishDelivery = PublishDeliveryQueue.OwnedDelivery;
 pub const PublishDeliveryQueueError = PublishDeliveryQueue.Error;
+pub const PublishDeliveryQueueReceiveTimeoutError =
+    PublishDeliveryQueue.ReceiveTimeoutError;
 
 const OwnedSubscription = owned_subscription.Owned;
 

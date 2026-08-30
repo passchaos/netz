@@ -1958,6 +1958,22 @@ test "public modules are reachable" {
         netz.mqtt.reconnect,
         "OwnedPublishDelivery",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "PublishDeliveryQueueReceiveTimeoutError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.PublishDeliveryQueue,
+        "receiveTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.PublishDeliveryQueue,
+        "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.PublishDeliveryQueue,
+        "ReceiveTimeoutError",
+    ));
     try std.testing.expect(@hasField(
         netz.mqtt.reconnect.ClientOptions,
         "manual_acknowledgements",

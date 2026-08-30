@@ -95,6 +95,24 @@ pub fn Queue(comptime Delivery: type, comptime Handler: type) type {
             timeout: std.Io.Duration,
         ) ReceiveTimeoutError!OwnedDelivery {
             if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveWithDeadline(.fromNow(self.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }));
+        }
+
+        /// Wait under one caller-owned absolute awake-clock budget. If queue
+        /// delivery and the timer complete concurrently, cancellation cleanup
+        /// releases any removed but unselected owned notification.
+        pub fn receiveWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) ReceiveTimeoutError!OwnedDelivery {
+            if (deadline.clock != .awake or
+                deadline.durationFromNow(self.io).raw.nanoseconds <= 0)
+            {
+                return error.Timeout;
+            }
             const Wake = union(enum) {
                 delivery: (std.Io.QueueClosedError ||
                     std.Io.Cancelable)!OwnedDelivery,
@@ -110,7 +128,11 @@ pub fn Queue(comptime Delivery: type, comptime Handler: type) type {
                 .timeout => {},
             };
             try select.concurrent(.delivery, receiveRaw, .{self});
-            try select.concurrent(.timeout, waitForTimeout, .{ self.io, timeout });
+            try select.concurrent(
+                .timeout,
+                waitForDeadline,
+                .{ self.io, deadline },
+            );
             return switch (try select.await()) {
                 .delivery => |result| result catch |err| switch (err) {
                     error.Closed => error.DeliveryQueueClosed,
@@ -158,11 +180,11 @@ pub fn Queue(comptime Delivery: type, comptime Handler: type) type {
             return self.queue.getOne(self.io);
         }
 
-        fn waitForTimeout(
+        fn waitForDeadline(
             io: std.Io,
-            timeout: std.Io.Duration,
+            deadline: std.Io.Clock.Timestamp,
         ) std.Io.Cancelable!void {
-            try std.Io.sleep(io, timeout, .awake);
+            try deadline.wait(io);
         }
     };
 }
@@ -225,6 +247,21 @@ test "MQTT delivery queue receive timeout returns data and timeout" {
         error.Timeout,
         queue.receiveTimeout(.fromMilliseconds(1)),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveWithDeadline(.{ .raw = .zero, .clock = .real }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveWithDeadline(.fromNow(io, .{
+            .raw = .zero,
+            .clock = .awake,
+        })),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        queue.outstanding.load(.acquire),
+    );
     const handler = queue.handler();
     handler.complete(handler.context, .{
         .packet_id = null,
@@ -232,9 +269,67 @@ test "MQTT delivery queue receive timeout returns data and timeout" {
         .reason_code = 0,
         .properties = &.{},
     });
-    var delivery = try queue.receiveTimeout(.fromSeconds(1));
+    try std.testing.expectError(
+        error.Timeout,
+        queue.receiveWithDeadline(.fromNow(io, .{
+            .raw = .zero,
+            .clock = .awake,
+        })),
+    );
+    // An expired caller budget never consumes already-owned queue data.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        queue.outstanding.load(.acquire),
+    );
+    var delivery = try queue.receiveWithDeadline(.fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    }));
     defer delivery.deinit();
     try std.testing.expect(delivery.packet_id == null);
+}
+
+test "MQTT delivery queue deadline reports closure distinctly" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try TestQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+
+    const Consumer = struct {
+        io: std.Io,
+        queue: *TestQueue,
+        deadline: std.Io.Clock.Timestamp,
+        started: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.started.set(self.io);
+            var delivery = self.queue.receiveWithDeadline(
+                self.deadline,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            delivery.deinit();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var consumer = Consumer{
+        .io = io,
+        .queue = &queue,
+        .deadline = .fromNow(io, .{
+            .raw = .fromSeconds(30),
+            .clock = .awake,
+        }),
+    };
+    const thread = try std.Thread.spawn(.{}, Consumer.run, .{&consumer});
+    consumer.started.waitUncancelable(io);
+    queue.close();
+    thread.join();
+    try std.testing.expectEqual(error.DeliveryQueueClosed, consumer.err.?);
 }
 
 test "MQTT delivery queue drops notifications after close" {
