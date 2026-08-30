@@ -6129,6 +6129,25 @@ pub const HandshakeServerSession = struct {
         try self.receiveRequestPacket();
     }
 
+    pub fn pollControlWithTimeout(
+        self: *HandshakeServerSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestPacketUntil(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn pollControlWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.receiveRequestPacketUntil(deadline);
+    }
+
     fn applyStreamingRequestEvent(
         self: *HandshakeServerSession,
         entry: *StreamingRequestSet.Entry,
@@ -8672,6 +8691,38 @@ pub const HandshakeClient = struct {
         try self.receiveResponsePacket();
     }
 
+    pub fn pollControlWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.pollControlWithDeadline(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn pollControlWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        try receiveConnectionResponsePacketUntil(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+            null,
+            deadline,
+        );
+        try self.flushResponsePacketFeedback();
+    }
+
     /// Advertise the inclusive server-push ID limit.
     pub fn sendMaxPushId(
         self: *HandshakeClient,
@@ -9853,6 +9904,28 @@ pub const ProtectedServer = struct {
     /// Process one protected transport packet for control-stream progress.
     pub fn pollControl(self: *ProtectedServer) Error!void {
         try self.receiveRequestPacket();
+    }
+
+    pub fn pollControlWithTimeout(
+        self: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.pollControlWithDeadline(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn pollControlWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveRequestPacketWithDeadline(deadline);
     }
 
     fn receiveRequestPacketTimeout(
@@ -11254,6 +11327,28 @@ pub const ProtectedClient = struct {
     /// Process one protected transport packet for control-stream progress.
     pub fn pollControl(self: *ProtectedClient) Error!void {
         try self.receiveResponsePacket();
+    }
+
+    pub fn pollControlWithTimeout(
+        self: *ProtectedClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.pollControlWithDeadline(.fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn pollControlWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveResponsePacketWithDeadline(deadline);
     }
 
     pub fn sendMaxPushId(
@@ -17754,9 +17849,19 @@ test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
     // ORIGIN is processed by the same shared control-stream receive path as
     // SETTINGS and GOAWAY. Reading any application response is unnecessary;
     // consume the two control packets directly to isolate this extension.
-    try client.pollControl();
+    try std.testing.expectError(
+        error.Timeout,
+        client.pollControlWithDeadline(.{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try client.pollControlWithTimeout(.fromSeconds(1));
     while (client.peerOrigins().len < 3) {
-        try client.pollControl();
+        try client.pollControlWithDeadline(.fromNow(io, .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        }));
     }
 
     try std.testing.expect(client.peerOriginSetInitialized());

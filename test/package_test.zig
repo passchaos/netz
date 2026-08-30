@@ -1783,9 +1783,25 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "UriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "uriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "pollControlWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "pollControlWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendMaxPushId"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "pollControlWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "pollControlWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendPriorityUpdate"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendPushPriorityUpdate"));
@@ -1941,6 +1957,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "finishResponseTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "pollControlWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "pollControlWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,
         "GoAwayRetryDisposition",
@@ -2146,6 +2170,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
         "pollRequestEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "pollControlWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "pollControlWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
