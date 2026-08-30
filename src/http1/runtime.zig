@@ -4923,6 +4923,59 @@ pub fn readRequestFromStreamBuffered(
     return .{ .bytes = bytes, .request = request };
 }
 
+/// Buffered counterpart to `readRequestFromStreamWithDeadline`. Bytes for a
+/// later pipelined request remain in `inbuf`, while the supplied deadline
+/// covers both this request's head and body.
+pub fn readRequestFromStreamBufferedWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedRequest {
+    _ = try deadline_policy.usableAwake(io, deadline);
+    const bytes = try readMessageBytesBufferedWithContext(
+        allocator,
+        .{ .tcp = .{ .io = io, .stream = stream } },
+        limits,
+        options,
+        inbuf,
+        null,
+        true,
+        false,
+        deadline,
+        deadline,
+    );
+    errdefer allocator.free(bytes);
+    var request = try http1.parseRequest(allocator, bytes, options);
+    errdefer request.deinit(allocator);
+    try http1.validateRequestHost(request);
+    return .{ .bytes = bytes, .request = request };
+}
+
+pub fn readRequestFromStreamBufferedWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    timeout: std.Io.Duration,
+) Error!OwnedRequest {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readRequestFromStreamBufferedWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        inbuf,
+        .fromNow(io, .{ .clock = .awake, .raw = timeout }),
+    );
+}
+
 fn readRequestFromTransportBuffered(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
@@ -5253,6 +5306,56 @@ pub fn readResponseFromStreamBufferedForRequest(
         inbuf,
         request_method,
         null,
+    );
+}
+
+/// Read a buffered response under one caller-owned deadline. Informational
+/// responses, the final head, body, and trailers all consume the same budget;
+/// bytes belonging to a pipelined successor remain in `inbuf`.
+pub fn readResponseFromStreamBufferedForRequestWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    request_method: http1.Method,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedResponse {
+    _ = try deadline_policy.usableAwake(io, deadline);
+    return readResponseFromTransportBufferedForRequestObserved(
+        allocator,
+        .{ .tcp = .{ .io = io, .stream = stream } },
+        limits,
+        options,
+        inbuf,
+        request_method,
+        null,
+        null,
+        deadline,
+    );
+}
+
+pub fn readResponseFromStreamBufferedForRequestWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    request_method: http1.Method,
+    timeout: std.Io.Duration,
+) Error!OwnedResponse {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readResponseFromStreamBufferedForRequestWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        inbuf,
+        request_method,
+        .fromNow(io, .{ .clock = .awake, .raw = timeout }),
     );
 }
 

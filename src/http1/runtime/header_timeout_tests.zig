@@ -204,6 +204,92 @@ test "HTTP/1 explicit request deadline resumes a partial head" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 buffered stream request deadline resumes a partial body" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.timed_out.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            try writeAll(
+                self.io,
+                stream,
+                "POST /resume HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhe",
+            );
+            try self.timed_out.wait(self.io);
+            try writeAll(self.io, stream, "llo");
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer stream.close(io);
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readRequestFromStreamBufferedWithTimeout(
+            allocator,
+            io,
+            stream,
+            .{},
+            .{},
+            &inbuf,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(inbuf.items.len != 0);
+    shared.timed_out.set(io);
+
+    var request = try runtime.readRequestFromStreamBufferedWithDeadline(
+        allocator,
+        io,
+        stream,
+        .{},
+        .{},
+        &inbuf,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    defer request.deinit(allocator);
+    try std.testing.expectEqualStrings("/resume", request.request.target);
+    try std.testing.expectEqualStrings("hello", request.request.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 request head timeout resets for each persistent request" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -596,6 +682,60 @@ test "HTTP/1 low-level timeout wrappers reject zero before I/O" {
             .{},
             .GET,
             .zero,
+        ),
+    );
+    var request_buffer: std.ArrayList(u8) = .empty;
+    defer request_buffer.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readRequestFromStreamBufferedWithTimeout(
+            allocator,
+            io,
+            undefined,
+            .{},
+            .{},
+            &request_buffer,
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readRequestFromStreamBufferedWithDeadline(
+            allocator,
+            io,
+            undefined,
+            .{},
+            .{},
+            &request_buffer,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    var response_buffer: std.ArrayList(u8) = .empty;
+    defer response_buffer.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readResponseFromStreamBufferedForRequestWithTimeout(
+            allocator,
+            io,
+            undefined,
+            .{},
+            .{},
+            &response_buffer,
+            .GET,
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readResponseFromStreamBufferedForRequestWithDeadline(
+            allocator,
+            io,
+            undefined,
+            .{},
+            .{},
+            &response_buffer,
+            .GET,
+            .{ .clock = .real, .raw = .zero },
         ),
     );
     var server = runtime.TlsServer{

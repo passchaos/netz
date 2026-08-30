@@ -652,6 +652,10 @@ One-shot HTTP and HTTPS URI helpers additionally accept an end-to-end absolute
 deadline spanning DNS/TCP, standard or vail TLS, request emission, and the same
 complete response boundary, while retaining every stricter phase timeout.
 Relative-timeout wrappers convert their budget once at the one-shot API entry.
+The reusable low-level TCP stream adapters now expose the same timeout/deadline
+pair for buffered requests and request-aware responses. One deadline covers
+the complete head/body/trailer sequence while bytes already read for the next
+pipelined exchange remain in caller-owned storage.
 
 HTTP/2 aggregate and callback-streaming client requests now expose relative-
 timeout and absolute-deadline forms on both complete requests and split

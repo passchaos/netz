@@ -507,6 +507,121 @@ test "HTTP/1 buffered response bypasses zero head timeout" {
     try std.testing.expectEqualStrings("ok", response.response.body);
 }
 
+test "HTTP/1 buffered response deadline retains pipelined bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const first = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none";
+    const second = "HTTP/1.1 204 No Content\r\n\r\n";
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    try inbuf.appendSlice(allocator, first ++ second);
+
+    var response = try runtime.readResponseFromStreamBufferedForRequestWithDeadline(
+        allocator,
+        io,
+        undefined,
+        .{},
+        .{},
+        &inbuf,
+        .GET,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("one", response.response.body);
+    try std.testing.expectEqualStrings(second, inbuf.items);
+}
+
+test "HTTP/1 buffered response resumes after body deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        release_tail: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe",
+            );
+            try self.release_tail.wait(self.io);
+            try writeAll(self.io, stream, "llo");
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer stream.close(io);
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.readResponseFromStreamBufferedForRequestWithTimeout(
+            allocator,
+            io,
+            stream,
+            .{},
+            .{},
+            &inbuf,
+            .GET,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(inbuf.items.len != 0);
+    shared.release_tail.set(io);
+
+    var response = try runtime.readResponseFromStreamBufferedForRequestWithDeadline(
+        allocator,
+        io,
+        stream,
+        .{},
+        .{},
+        &inbuf,
+        .GET,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("hello", response.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 client response head timeout is absolute across trickled bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
