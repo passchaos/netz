@@ -228,15 +228,49 @@ test "HTTP/3 protected client observes and bounds informational responses" {
     );
     defer client.deinit();
 
+    const next_stream_id = client.next_stream_id;
+    // Deadline validation must precede stream allocation and request
+    // lifecycle mutation. Both an incompatible clock and an already-expired
+    // awake deadline are rejected without sending a request.
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndDeadline(
+            .{
+                .method = "GET",
+                .path = "/wrong-clock",
+                .authority = "localhost",
+            },
+            null,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndDeadline(
+            .{
+                .method = "GET",
+                .path = "/expired",
+                .authority = "localhost",
+            },
+            null,
+            .{ .clock = .awake, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(next_stream_id, client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.request_lifecycle.outstanding.items.len,
+    );
+
     var observation: Observation = .{};
-    var response = try client.requestWithInformational(.{
+    var response = try client.requestWithInformationalAndTimeout(.{
         .method = "GET",
         .path = "/informational",
         .authority = "localhost",
     }, .{
         .context = &observation,
         .on_response = Observation.observe,
-    });
+    }, .fromSeconds(1));
     defer response.deinit(allocator);
     try std.testing.expectEqualSlices(
         u16,

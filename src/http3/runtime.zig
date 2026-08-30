@@ -1157,7 +1157,7 @@ pub const PushedResponse = struct {
 /// Resumable ownership for an aggregate push receive. Unlike ordinary
 /// responses, push bodies are intentionally consumed through the incremental
 /// reader, so decoded heads and copied DATA must outlive a caller timeout.
-const HandshakePushAggregateState = struct {
+const ClientPushAggregateState = struct {
     head: ?http3.DecodedResponseHead = null,
     trailers: ?http3.DecodedTrailers = null,
     body: std.ArrayList(u8) = .empty,
@@ -1166,12 +1166,12 @@ const HandshakePushAggregateState = struct {
     stream_id: u62 = 0,
     finished: bool = false,
 
-    fn active(self: HandshakePushAggregateState) bool {
+    fn active(self: ClientPushAggregateState) bool {
         return self.push_id != null;
     }
 
     fn deinit(
-        self: *HandshakePushAggregateState,
+        self: *ClientPushAggregateState,
         allocator: std.mem.Allocator,
     ) void {
         if (self.head) |*head| head.deinit(allocator);
@@ -1181,7 +1181,7 @@ const HandshakePushAggregateState = struct {
     }
 
     fn takeResponse(
-        self: *HandshakePushAggregateState,
+        self: *ClientPushAggregateState,
         allocator: std.mem.Allocator,
     ) Error!PushedResponse {
         if (!self.finished) return error.UnexpectedStream;
@@ -6208,7 +6208,7 @@ pub const HandshakeClient = struct {
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
     push_streams: PushStreamSet,
-    push_aggregate: HandshakePushAggregateState = .{},
+    push_aggregate: ClientPushAggregateState = .{},
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
@@ -9838,6 +9838,7 @@ pub const ProtectedClient = struct {
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
     push_streams: PushStreamSet,
+    push_aggregate: ClientPushAggregateState = .{},
     receive_packets: ProtectedPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
@@ -9901,6 +9902,7 @@ pub const ProtectedClient = struct {
         );
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
+        self.push_aggregate.deinit(self.quic_client.endpoint.allocator);
         self.push_streams.deinit();
         self.streaming_responses.deinit();
         self.request_lifecycle.deinit();
@@ -9916,6 +9918,30 @@ pub const ProtectedClient = struct {
     pub fn request(self: *ProtectedClient, request_options: http3.Request) Error!OwnedProtectedResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
+    }
+
+    pub fn requestWithTimeout(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithDeadline(request_options, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn requestWithDeadline(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            null,
+            deadline,
+        );
     }
 
     pub fn peerGoAwayId(self: ProtectedClient) ?u64 {
@@ -9942,6 +9968,41 @@ pub const ProtectedClient = struct {
     ) Error!OwnedProtectedResponse {
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithInformational(stream_id, informational);
+    }
+
+    pub fn requestWithInformationalAndTimeout(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            informational,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn requestWithInformationalAndDeadline(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        const stream_id = try self.sendRequest(request_options);
+        return self.receiveResponseWithInformationalAndDeadline(
+            stream_id,
+            informational,
+            deadline,
+        );
     }
 
     pub fn sendRequest(
@@ -10162,19 +10223,96 @@ pub const ProtectedClient = struct {
         return self.receiveResponseWithInformational(stream_id, null);
     }
 
+    pub fn receiveResponseWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseWithDeadline(stream_id, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveResponseWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        return self.receiveResponseWithInformationalAndDeadline(
+            stream_id,
+            null,
+            deadline,
+        );
+    }
+
     /// Aggregate a protected response with callback-scoped 1xx observation.
     pub fn receiveResponseWithInformational(
         self: *ProtectedClient,
         stream_id: u62,
         informational: ?http3.InformationalObserver,
     ) Error!OwnedProtectedResponse {
+        return self.receiveResponseWithInformationalInternal(
+            stream_id,
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveResponseWithInformationalAndTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseWithInformationalAndDeadline(
+            stream_id,
+            informational,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveResponseWithInformationalAndDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveResponseWithInformationalInternal(
+            stream_id,
+            informational,
+            deadline,
+        );
+    }
+
+    fn receiveResponseWithInformationalInternal(
+        self: *ProtectedClient,
+        stream_id: u62,
+        informational: ?http3.InformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponse {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
         if (self.streaming_responses.find(stream_id) != null) {
             return error.UnexpectedStream;
         }
-        const assembled = self.receiveStreamBytes(stream_id) catch |err| switch (err) {
+        const assembled = self.receiveStreamBytesUntil(
+            stream_id,
+            deadline,
+        ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
                 _ = try self.request_lifecycle.finish(stream_id);
@@ -10223,12 +10361,77 @@ pub const ProtectedClient = struct {
         return self.receiveNextResponseWithInformational(null);
     }
 
+    pub fn receiveNextResponseWithTimeout(
+        self: *ProtectedClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveNextResponseWithDeadline(.fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveNextResponseWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponseEvent {
+        return self.receiveNextResponseWithInformationalAndDeadline(
+            null,
+            deadline,
+        );
+    }
+
     /// Aggregate whichever outstanding response becomes ready first and
     /// correlate every callback-scoped 1xx head with its request stream.
     pub fn receiveNextResponseWithInformational(
         self: *ProtectedClient,
         informational: ?MultiplexedInformationalObserver,
     ) Error!OwnedProtectedResponseEvent {
+        return self.receiveNextResponseWithInformationalInternal(
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveNextResponseWithInformationalAndTimeout(
+        self: *ProtectedClient,
+        informational: ?MultiplexedInformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveNextResponseWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveNextResponseWithInformationalAndDeadline(
+        self: *ProtectedClient,
+        informational: ?MultiplexedInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponseEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveNextResponseWithInformationalInternal(
+            informational,
+            deadline,
+        );
+    }
+
+    fn receiveNextResponseWithInformationalInternal(
+        self: *ProtectedClient,
+        informational: ?MultiplexedInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedResponseEvent {
         if (self.request_lifecycle.outstanding.items.len == 0) {
             return error.UnexpectedStream;
         }
@@ -10261,21 +10464,30 @@ pub const ProtectedClient = struct {
                     };
                     return .{ .response = .{
                         .stream_id = stream_id,
-                        .value = try self.receiveResponseWithInformational(
+                        .value = try self.receiveResponseWithInformationalInternal(
                             stream_id,
                             .{
                                 .context = &adapter,
                                 .on_response = MultiplexedInformationalContext.notify,
                             },
+                            deadline,
                         ),
                     } };
                 }
                 return .{ .response = .{
                     .stream_id = stream_id,
-                    .value = try self.receiveResponse(stream_id),
+                    .value = try self.receiveResponseWithInformationalInternal(
+                        stream_id,
+                        null,
+                        deadline,
+                    ),
                 } };
             }
-            try self.receiveResponsePacket();
+            if (deadline) |absolute| {
+                try self.receiveResponsePacketWithDeadline(absolute);
+            } else {
+                try self.receiveResponsePacket();
+            }
         }
     }
 
@@ -10474,13 +10686,52 @@ pub const ProtectedClient = struct {
     pub fn receivePushEvent(
         self: *ProtectedClient,
     ) Error!StreamingPushEvent {
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(null);
+    }
+
+    pub fn receivePushEventWithTimeout(
+        self: *ProtectedClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingPushEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.receivePushEventWithDeadline(.fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receivePushEventWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingPushEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.receivePushEventMatchingUntil(null, deadline);
     }
 
     fn receivePushEventMatching(
         self: *ProtectedClient,
         target_push_id: ?u64,
     ) Error!StreamingPushEvent {
+        return self.receivePushEventMatchingUntil(
+            target_push_id,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn receivePushEventMatchingUntil(
+        self: *ProtectedClient,
+        target_push_id: ?u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingPushEvent {
         while (true) {
             try self.applyPendingPushCancellations();
             if (try self.push_streams.next(
@@ -10509,7 +10760,11 @@ pub const ProtectedClient = struct {
                 }
                 return event;
             }
-            try self.receiveResponsePacket();
+            if (deadline) |absolute| {
+                try self.receiveResponsePacketWithDeadline(absolute);
+            } else {
+                try self.receiveResponsePacket();
+            }
         }
     }
 
@@ -10548,12 +10803,91 @@ pub const ProtectedClient = struct {
         return self.receivePushWithInformational(null);
     }
 
+    /// Aggregate one promised response within a relative budget. The partial
+    /// head, body, trailers, and reader remain owned by the client on timeout.
+    pub fn receivePushWithTimeout(
+        self: *ProtectedClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PushedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePushWithInformationalAndDeadline(
+            null,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receivePushWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        return self.receivePushWithInformationalAndDeadline(null, deadline);
+    }
+
     /// Aggregate one promised response while reporting its ordered 1xx heads.
     pub fn receivePushWithInformational(
         self: *ProtectedClient,
         informational: ?PushInformationalObserver,
     ) Error!PushedResponse {
-        return receiveProtectedPush(self, informational);
+        return self.receivePushWithInformationalAttempt(
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receivePushWithInformationalAndTimeout(
+        self: *ProtectedClient,
+        informational: ?PushInformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PushedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePushWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receivePushWithInformationalAndDeadline(
+        self: *ProtectedClient,
+        informational: ?PushInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receivePushWithInformationalAttempt(
+            informational,
+            deadline,
+        );
+    }
+
+    fn receivePushWithInformationalAttempt(
+        self: *ProtectedClient,
+        informational: ?PushInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PushedResponse {
+        return receiveProtectedPush(self, informational, deadline) catch |err|
+            switch (err) {
+                // The reader and decoded values are resumable only for
+                // transport-budget failures. Protocol/allocator failures end
+                // this aggregate attempt and must release retained ownership.
+                error.Timeout, error.ConcurrencyUnavailable => return err,
+                else => {
+                    self.push_aggregate.deinit(
+                        self.quic_client.endpoint.allocator,
+                    );
+                    return err;
+                },
+            };
     }
 
     pub fn sendGoAway(self: *ProtectedClient, stream_id: u64) Error!void {
@@ -10682,6 +11016,9 @@ pub const ProtectedClient = struct {
             push_id,
         );
         try self.push_streams.observePeerCancellation(push_id);
+        defer if (self.push_aggregate.push_id == push_id) {
+            self.push_aggregate.deinit(self.quic_client.endpoint.allocator);
+        };
         try self.applyPendingPushCancellations();
     }
 
@@ -10787,7 +11124,11 @@ pub const ProtectedClient = struct {
         );
     }
 
-    fn receiveStreamBytes(self: *ProtectedClient, expected_stream_id: u62) Error!AssembledStream {
+    fn receiveStreamBytesUntil(
+        self: *ProtectedClient,
+        expected_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AssembledStream {
         if (self.response_streams.takeReset(expected_stream_id)) |code| {
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -10800,7 +11141,11 @@ pub const ProtectedClient = struct {
             self.config.local_settings.qpack_blocked_streams,
         )) |ready| return ready;
         while (true) {
-            try self.receiveResponsePacket();
+            if (deadline) |absolute| {
+                try self.receiveResponsePacketWithDeadline(absolute);
+            } else {
+                try self.receiveResponsePacket();
+            }
             if (self.response_streams.takeReset(expected_stream_id)) |code| {
                 return if (code == http3.ApplicationErrorCode.request_rejected)
                     error.RequestRejected
@@ -11060,26 +11405,24 @@ fn streamingRequestSectionAcknowledgments(
 fn receiveProtectedPush(
     client: *ProtectedClient,
     informational: ?PushInformationalObserver,
-) Error!PushedResponse {
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!PushedResponse {
     const allocator = client.quic_client.endpoint.allocator;
-    var head: ?http3.DecodedResponseHead = null;
-    errdefer if (head) |*value| value.deinit(allocator);
-    var trailers: ?http3.DecodedTrailers = null;
-    errdefer if (trailers) |*value| value.deinit(allocator);
-    var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(allocator);
-    var push_id: ?u64 = null;
-    var request_stream_id: u62 = 0;
-    var push_stream_id: u62 = 0;
+    if (client.push_aggregate.finished) {
+        return client.push_aggregate.takeResponse(allocator);
+    }
     while (true) {
-        var event = try client.receivePushEventMatching(push_id);
+        var event = try client.receivePushEventMatchingUntil(
+            client.push_aggregate.push_id,
+            deadline,
+        );
         defer event.deinit(allocator);
-        if (push_id) |expected| {
+        if (client.push_aggregate.push_id) |expected| {
             if (event.push_id != expected) return error.UnexpectedStream;
         } else {
-            push_id = event.push_id;
-            request_stream_id = event.request_stream_id;
-            push_stream_id = event.stream_id;
+            client.push_aggregate.push_id = event.push_id;
+            client.push_aggregate.request_stream_id = event.request_stream_id;
+            client.push_aggregate.stream_id = event.stream_id;
         }
         switch (event.value) {
             .head => |value| {
@@ -11101,8 +11444,10 @@ fn receiveProtectedPush(
                     }
                     continue;
                 }
-                if (head != null) return error.UnexpectedFrame;
-                head = value.response;
+                if (client.push_aggregate.head != null) {
+                    return error.UnexpectedFrame;
+                }
+                client.push_aggregate.head = value.response;
                 event.value = .finished;
             },
             .data_available => {
@@ -11117,12 +11462,17 @@ fn receiveProtectedPush(
                         &chunk,
                     );
                     if (count == 0) break;
-                    try body.appendSlice(allocator, chunk[0..count]);
+                    try client.push_aggregate.body.appendSlice(
+                        allocator,
+                        chunk[0..count],
+                    );
                 }
             },
             .trailers => |value| {
-                if (trailers != null) return error.UnexpectedFrame;
-                trailers = value;
+                if (client.push_aggregate.trailers != null) {
+                    return error.UnexpectedFrame;
+                }
+                client.push_aggregate.trailers = value;
                 event.value = .finished;
             },
             .finished => {},
@@ -11133,35 +11483,8 @@ fn receiveProtectedPush(
         {
             continue;
         }
-        const decoded_head = head orelse return error.ExpectedHeadersFrame;
-        const body_storage: ?[]u8 = if (body.items.len == 0) storage: {
-            body.deinit(allocator);
-            break :storage null;
-        } else try body.toOwnedSlice(allocator);
-        const trailer_fields: []http3.Qpack.HeaderField = if (trailers) |value|
-            value.fields
-        else
-            @constCast(&.{});
-        const acknowledgments =
-            decoded_head.qpack_section_acknowledgments +
-            if (trailers) |value|
-                value.qpack_section_acknowledgments
-            else
-                0;
-        return .{
-            .push_id = push_id.?,
-            .request_stream_id = request_stream_id,
-            .stream_id = push_stream_id,
-            .response = .{
-                .status = decoded_head.status,
-                .headers = decoded_head.headers,
-                .trailers = trailer_fields,
-                .body = if (body_storage) |storage| storage else &.{},
-                .body_storage = body_storage,
-                .consumed = 0,
-                .qpack_section_acknowledgments = acknowledgments,
-            },
-        };
+        client.push_aggregate.finished = true;
+        return client.push_aggregate.takeResponse(allocator);
     }
 }
 
@@ -21096,6 +21419,174 @@ test "HTTP/3 protected client retains interleaved responses" {
     );
 }
 
+test "HTTP/3 protected aggregate response deadlines preserve progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xa9, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xaa, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xab} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xac} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+
+    const direct_body = "direct-after-timeout";
+    const next_body = "next-after-timeout";
+    const Shared = struct {
+        server: *ProtectedServer,
+        io: std.Io,
+        direct_head_sent: std.Io.Event = .unset,
+        direct_timed_out: std.Io.Event = .unset,
+        next_head_sent: std.Io.Event = .unset,
+        next_timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.direct_head_sent.set(self.io);
+                self.direct_timed_out.set(self.io);
+                self.next_head_sent.set(self.io);
+                self.next_timed_out.set(self.io);
+            };
+        }
+
+        fn sendSplitResponse(
+            self: *@This(),
+            body: []const u8,
+            head_sent: *std.Io.Event,
+            timed_out: *std.Io.Event,
+        ) !void {
+            var request = try self.server.receiveRequest();
+            defer request.deinit(allocator);
+            try self.server.startResponse(
+                request.from,
+                request.stream_id,
+                .{ .status = 200 },
+                body.len,
+            );
+            head_sent.set(self.io);
+            try timed_out.wait(self.io);
+            try self.server.sendResponseBody(
+                request.from,
+                request.stream_id,
+                body,
+                true,
+            );
+        }
+
+        fn runFallible(self: *@This()) !void {
+            try self.sendSplitResponse(
+                direct_body,
+                &self.direct_head_sent,
+                &self.direct_timed_out,
+            );
+            try self.sendSplitResponse(
+                next_body,
+                &self.next_head_sent,
+                &self.next_timed_out,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const direct_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/direct-deadline",
+        .authority = "localhost",
+    });
+    try shared.direct_head_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveResponseWithTimeout(
+            direct_id,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(direct_id));
+    try std.testing.expect(client.response_streams.entries.items.len != 0);
+    shared.direct_timed_out.set(io);
+    var direct = try client.receiveResponseWithDeadline(
+        direct_id,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer direct.deinit(allocator);
+    try std.testing.expectEqualStrings(direct_body, direct.response.body);
+    try std.testing.expect(!client.request_lifecycle.contains(direct_id));
+
+    const next_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/next-deadline",
+        .authority = "localhost",
+    });
+    try shared.next_head_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveNextResponseWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(next_id));
+    try std.testing.expect(client.response_streams.entries.items.len != 0);
+    shared.next_timed_out.set(io);
+    var next = try client.receiveNextResponseWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer next.deinit(allocator);
+    try std.testing.expect(next == .response);
+    try std.testing.expectEqual(next_id, next.response.stream_id);
+    try std.testing.expectEqualStrings(
+        next_body,
+        next.response.value.response.body,
+    );
+    try std.testing.expect(!client.request_lifecycle.contains(next_id));
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/3 protected client polls interleaved streaming responses" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -21805,6 +22296,163 @@ test "HTTP/3 protected client aggregates promised push response" {
         "done",
         pushed.response.trailers[0].value,
     );
+}
+
+test "HTTP/3 protected aggregate push deadline preserves progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xe5, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xe6, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+    try client.sendMaxPushId(1);
+    const request_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/push-deadline",
+        .authority = "example.test",
+    });
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+
+    var fields: std.ArrayList(u8) = .empty;
+    defer fields.deinit(allocator);
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    try http3.Qpack.encodeDynamicBlock(&fields, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/deadline.js" },
+        .{ .name = ":authority", .value = "example.test" },
+    }, table);
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    try http3.writePushPromiseFrame(
+        &response_bytes,
+        allocator,
+        1,
+        fields.items,
+    );
+    try (http3.Response{ .status = 204 }).write(
+        &response_bytes,
+        allocator,
+    );
+
+    const body = "javascript-after-timeout";
+    var push_bytes: std.ArrayList(u8) = .empty;
+    defer push_bytes.deinit(allocator);
+    try quic.varint.encode(
+        &push_bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.push),
+    );
+    try quic.varint.encode(&push_bytes, allocator, 1);
+    try (http3.Response{ .status = 200, .body = body }).write(
+        &push_bytes,
+        allocator,
+    );
+    const body_prefix_len = body.len / 2;
+    const split = push_bytes.items.len - body.len + body_prefix_len;
+    try sendProtectedFrames(
+        &server.quic_server.endpoint,
+        client.quic_client.address(),
+        server.config.send_keys,
+        server.config.peer_connection_id,
+        &server.next_packet_number,
+        &.{
+            .{ .stream = .{
+                .stream_id = request_stream_id,
+                .data = response_bytes.items,
+                .fin = true,
+            } },
+            .{ .stream = .{
+                .stream_id = first_server_push_stream_id,
+                .data = push_bytes.items[0..split],
+            } },
+        },
+        server.config.max_frames_per_packet,
+        &server.protected_send,
+    );
+
+    var promise = while (true) {
+        if (try client.receiveResponseEvent(request_stream_id)) |event| {
+            break event;
+        }
+    };
+    defer promise.deinit(allocator);
+    try std.testing.expect(promise == .push_promise);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receivePushWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectEqual(@as(?u64, 1), client.push_aggregate.push_id);
+    try std.testing.expect(client.push_aggregate.head != null);
+    try std.testing.expectEqualStrings(
+        body[0..body_prefix_len],
+        client.push_aggregate.body.items,
+    );
+    // Aggregate and incremental consumption cannot safely share one reader.
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        client.receivePushEvent(),
+    );
+
+    try sendProtectedFrames(
+        &server.quic_server.endpoint,
+        client.quic_client.address(),
+        server.config.send_keys,
+        server.config.peer_connection_id,
+        &server.next_packet_number,
+        &.{.{ .stream = .{
+            .stream_id = first_server_push_stream_id,
+            .offset = split,
+            .data = push_bytes.items[split..],
+            .fin = true,
+        } }},
+        server.config.max_frames_per_packet,
+        &server.protected_send,
+    );
+    var pushed = try client.receivePushWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer pushed.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), pushed.push_id);
+    try std.testing.expectEqualStrings(body, pushed.response.body);
+    try std.testing.expect(!client.push_aggregate.active());
 }
 
 test "HTTP/3 protected server sends promised push response" {
