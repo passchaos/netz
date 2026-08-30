@@ -7,9 +7,59 @@ const net = std.Io.net;
 
 test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "receiveOnce"));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
+        "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
+        "receiveTransportWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "serveUntil"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeEvent"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeOptions"));
+}
+
+test "HTTP/3 endpoint server validates receive deadlines" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "deadline-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+    const versions = &.{quic.Version.version_1.wireValue()};
+
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveTransportWithDeadline(
+            versions,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveWithDeadline(versions, .fromNow(io, .{
+            .clock = .awake,
+            .raw = .zero,
+        })),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveWithDeadline(versions, .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(5),
+        })),
+    );
 }
 
 test "HTTP/3 endpoint reports an admission timeout as a typed failure" {

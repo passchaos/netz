@@ -722,6 +722,21 @@ test "HTTP/3 handshake supervisor exposes bounded idle receive" {
     )) == null);
     const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
     try std.testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
+
+    try std.testing.expectError(
+        error.Timeout,
+        supervisor.receiveWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        supervisor.receiveWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            .fromNow(io, .{ .clock = .awake, .raw = .zero }),
+        ),
+    );
 }
 
 test "HTTP/3 handshake supervisor bounds and reports failed workers" {

@@ -3586,6 +3586,35 @@ pub const HandshakeSupervisor = struct {
         if (poll_interval.raw.nanoseconds <= 0) {
             return error.InvalidHandshakeRecovery;
         }
+        return self.receiveOnceUntil(
+            supported_versions,
+            .{ .duration = poll_interval },
+        ) catch |err| switch (err) {
+            error.Timeout => null,
+            else => |other| return other,
+        };
+    }
+
+    /// Perform one receive iteration under the caller's absolute deadline.
+    /// Handshake expiry and QUIC transport timers may be serviced first, but
+    /// neither can renew the outer endpoint-loop budget.
+    pub fn receiveWithDeadline(
+        self: *HandshakeSupervisor,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) HandshakeAdmissionError!HandshakeSupervisorEvent {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.receiveOnceUntil(
+            supported_versions,
+            .{ .deadline = absolute },
+        );
+    }
+
+    fn receiveOnceUntil(
+        self: *HandshakeSupervisor,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) HandshakeAdmissionError!HandshakeSupervisorEvent {
         if (self.pollCompleted()) |completion| {
             return .{ .completed = completion };
         }
@@ -3594,13 +3623,10 @@ pub const HandshakeSupervisor = struct {
             0
         else
             std.math.cast(u64, now) orelse std.math.maxInt(u64));
-        return .{ .endpoint = self.dispatcher.receiveTimeout(
+        return .{ .endpoint = try self.dispatcher.receiveTimeout(
             supported_versions,
-            .{ .duration = poll_interval },
-        ) catch |err| switch (err) {
-            error.Timeout => return null,
-            else => |other| return other,
-        } };
+            timeout,
+        ) };
     }
 
     pub fn promote(
@@ -3913,11 +3939,40 @@ pub const EndpointServer = struct {
         poll_interval: std.Io.Clock.Duration,
     ) HandshakeAdmissionError!?EndpointServerEvent {
         if (try self.pollRequestAcrossSessions()) |request| return request;
-
-        const event_value = (try self.receiveTransportOnce(
+        const event = (try self.receiveTransportOnce(
             supported_versions,
             poll_interval,
         )) orelse return null;
+        return self.processTransportEvent(event);
+    }
+
+    /// Receive one application event without renewing an outer operation's
+    /// absolute deadline while processing unrelated packets and timers.
+    pub fn receiveWithDeadline(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) HandshakeAdmissionError!EndpointServerEvent {
+        const absolute = try deadline_policy.usableAwake(
+            self.server.quic_server.endpoint.io,
+            deadline,
+        );
+        if (try self.pollRequestAcrossSessions()) |request| return request;
+        while (true) {
+            const event = try self.receiveTransportWithDeadline(
+                supported_versions,
+                absolute,
+            );
+            if (try self.processTransportEvent(event)) |application_event| {
+                return application_event;
+            }
+        }
+    }
+
+    fn processTransportEvent(
+        self: *EndpointServer,
+        event_value: EndpointTransportEvent,
+    ) HandshakeAdmissionError!?EndpointServerEvent {
         var event = event_value;
         defer event.deinit(self.allocator);
         switch (event) {
@@ -4158,10 +4213,50 @@ pub const EndpointServer = struct {
         supported_versions: []const u32,
         poll_interval: std.Io.Clock.Duration,
     ) HandshakeAdmissionError!?EndpointTransportEvent {
-        var event = (try self.handshakes.receiveOnce(
+        if (poll_interval.raw.nanoseconds <= 0) {
+            return error.InvalidHandshakeRecovery;
+        }
+        return self.receiveTransportUntil(
             supported_versions,
-            poll_interval,
-        )) orelse return null;
+            .{ .duration = poll_interval },
+        ) catch |err| switch (err) {
+            error.Timeout => null,
+            else => |other| return other,
+        };
+    }
+
+    /// Drive one transport iteration under an existing absolute budget.
+    pub fn receiveTransportWithDeadline(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) HandshakeAdmissionError!EndpointTransportEvent {
+        const absolute = try deadline_policy.usableAwake(
+            self.server.quic_server.endpoint.io,
+            deadline,
+        );
+        while (true) {
+            if (try self.receiveTransportUntil(
+                supported_versions,
+                .{ .deadline = absolute },
+            )) |event| return event;
+        }
+    }
+
+    fn receiveTransportUntil(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+    ) HandshakeAdmissionError!?EndpointTransportEvent {
+        var event = switch (timeout) {
+            .none => unreachable,
+            .duration => |duration| (try self.handshakes.receiveOnce(
+                supported_versions,
+                duration,
+            )) orelse return error.Timeout,
+            .deadline => |deadline| try self.handshakes
+                .receiveWithDeadline(supported_versions, deadline),
+        };
         switch (event) {
             .consumed => unreachable,
             .completed => {

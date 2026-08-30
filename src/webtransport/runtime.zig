@@ -1617,6 +1617,44 @@ pub const EndpointServer = struct {
             supported_versions,
             poll_interval,
         )) orelse return null;
+        return self.processTransportEvent(event_value, stream_buffer);
+    }
+
+    /// Receive one session event under a caller-owned absolute deadline.
+    /// Packets for other sessions, handshake completions, and QUIC timers are
+    /// processed without renewing that outer budget.
+    pub fn receiveWithDeadline(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        deadline: std.Io.Clock.Timestamp,
+        stream_buffer: []u8,
+    ) EndpointServerError!EndpointServerEvent {
+        if (stream_buffer.len == 0) return error.BufferTooShort;
+        const absolute = try deadline_policy.usableAwake(
+            self.h3.server.quic_server.endpoint.io,
+            deadline,
+        );
+        if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
+        while (true) {
+            const transport_event = try self.h3.receiveTransportWithDeadline(
+                supported_versions,
+                absolute,
+            );
+            if (try self.processTransportEvent(
+                transport_event,
+                stream_buffer,
+            )) |event| return event;
+            if (try self.pollAcceptedSessions(stream_buffer)) |event| {
+                return event;
+            }
+        }
+    }
+
+    fn processTransportEvent(
+        self: *EndpointServer,
+        event_value: http3.runtime.EndpointTransportEvent,
+        stream_buffer: []u8,
+    ) EndpointServerError!?EndpointServerEvent {
         var event = event_value;
         defer event.deinit(self.allocator);
         switch (event) {
@@ -1654,7 +1692,7 @@ pub const EndpointServer = struct {
                         session_value.session_id.value,
                         &packet.packet,
                     );
-                    return null;
+                    return self.pollAcceptedSessions(stream_buffer);
                 }
                 if (self.pending.get(handle)) |pending_value| {
                     try pending_value.h3.processRequestPacket(
@@ -1706,6 +1744,7 @@ pub const EndpointServer = struct {
                 return .{ .unrouted = unrouted };
             },
         }
+        return null;
     }
 
     fn pollAcceptedSessions(

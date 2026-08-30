@@ -11,12 +11,51 @@ test "WebTransport endpoint server exposes stable session API" {
     try std.testing.expect(@hasDecl(runtime, "EndpointServer"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServerEvent"));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "receive"));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
+        "receiveWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "accept"));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "reject"));
     try std.testing.expect(@hasDecl(
         http3.runtime.EndpointServer,
         "promotedSession",
     ));
+}
+
+test "WebTransport endpoint server validates receive deadlines" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "wt-deadline" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+    var buffer: [1]u8 = undefined;
+
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            .{ .clock = .real, .raw = .zero },
+            &buffer,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            .fromNow(io, .{ .clock = .awake, .raw = .zero }),
+            &buffer,
+        ),
+    );
 }
 
 test "WebTransport server deadline spans QUIC TLS and Extended CONNECT" {

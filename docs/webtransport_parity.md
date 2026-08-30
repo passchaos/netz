@@ -342,7 +342,10 @@ lightweight protected transport does not own a stateful recovery connection.
 1. The endpoint also exposes a synchronous `serveUntil` callback loop with
    bounded receive polling and external shutdown. Add independent per-session
    handler tasks only if profiling shows that serialized callback dispatch is
-   insufficient; QUIC/HTTP/3 state remains intentionally single-owner.
+   insufficient; QUIC/HTTP/3 state remains intentionally single-owner. The
+   typed endpoint receive also accepts one caller-owned absolute deadline; it
+   retains that timestamp while routing unrelated connections, completing
+   handshakes, and servicing transport timers.
 2. Expose associated bidi/uni stream APIs on preconfigured protected and
    development runtimes. Protected CONNECT/Capsule lifecycle is now
    long-lived, but the lightweight protected HTTP/3 runtime deliberately lacks
