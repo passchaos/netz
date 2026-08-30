@@ -34,6 +34,7 @@ pub const OwnedMessage = struct {
 pub const Message = struct {
     opcode: websocket.Opcode,
     payload: []u8,
+    was_compressed: bool = false,
 };
 
 /// Resumable caller-buffer message state shared by every stream transport.

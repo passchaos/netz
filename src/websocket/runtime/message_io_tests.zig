@@ -1202,6 +1202,7 @@ test "WebSocket compressed fragmented messages use caller storage" {
                 websocket.Opcode.text,
                 message.opcode,
             );
+            try std.testing.expect(message.was_compressed);
             try std.testing.expectEqualStrings(
                 request_payload,
                 message.payload,
@@ -1248,6 +1249,7 @@ test "WebSocket compressed fragmented messages use caller storage" {
         websocket.Opcode.text,
         response.opcode,
     );
+    try std.testing.expect(response.was_compressed);
     try std.testing.expectEqualStrings(
         response_payload,
         response.payload,

@@ -902,6 +902,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         .fromSeconds(5),
     );
     try std.testing.expectEqual(websocket.Opcode.binary, plain_parts.opcode);
+    try std.testing.expect(!plain_parts.was_compressed);
     try std.testing.expectEqualStrings("ab", plain_parts.payload);
     for (0..2) |_| {
         const compressed = try client.receiveMessageIntoWithTimeout(
@@ -909,6 +910,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             .fromSeconds(5),
         );
         try std.testing.expectEqual(websocket.Opcode.binary, compressed.opcode);
+        try std.testing.expect(compressed.was_compressed);
         try std.testing.expectEqualStrings(compressed_parts, compressed.payload);
     }
     const fragmented = try client.receiveMessageIntoWithTimeout(
@@ -916,6 +918,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         .fromSeconds(5),
     );
     try std.testing.expectEqual(websocket.Opcode.binary, fragmented.opcode);
+    try std.testing.expect(!fragmented.was_compressed);
     try std.testing.expectEqualStrings("split-message", fragmented.payload);
     var reply = try client.receiveFrameWithTimeout(.fromSeconds(5));
     defer reply.deinit(allocator);

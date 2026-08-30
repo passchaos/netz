@@ -841,7 +841,8 @@ pub fn Connection(comptime role: common.Role) type {
 
                 const message_opcode = self.message_into.opcode orelse
                     return error.InvalidFrame;
-                const payload = if (self.message_into.compressed)
+                const was_compressed = self.message_into.compressed;
+                const payload = if (was_compressed)
                     try websocket.decompressMessageInto(
                         out[0..self.limits.max_message_bytes],
                         self.compression_receive
@@ -857,7 +858,11 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.InvalidUtf8;
                 }
                 self.message_into.reset();
-                return .{ .opcode = message_opcode, .payload = payload };
+                return .{
+                    .opcode = message_opcode,
+                    .payload = payload,
+                    .was_compressed = was_compressed,
+                };
             }
         }
 

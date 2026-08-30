@@ -5055,7 +5055,8 @@ fn receiveMessageIntoConnection(
 
         const message_opcode = connection.message_into.opcode orelse
             return error.InvalidFrame;
-        const payload = if (connection.message_into.compressed)
+        const was_compressed = connection.message_into.compressed;
+        const payload = if (was_compressed)
             try websocket.decompressMessageInto(
                 out[0..connection.limits.max_message_bytes],
                 connection.compression_receive.payload.items[0..connection.message_into.written],
@@ -5070,7 +5071,11 @@ fn receiveMessageIntoConnection(
             return error.InvalidUtf8;
         }
         connection.message_into.reset();
-        return .{ .opcode = message_opcode, .payload = payload };
+        return .{
+            .opcode = message_opcode,
+            .payload = payload,
+            .was_compressed = was_compressed,
+        };
     }
 }
 
