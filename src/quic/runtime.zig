@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const quic = @import("mod.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 
@@ -648,7 +649,7 @@ pub const Endpoint = struct {
         self: *Endpoint,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedDatagram {
-        return self.receiveUntil(.{ .deadline = deadline });
+        return self.receiveUntil(.{ .deadline = try deadline_policy.usableAwake(self.io, deadline) });
     }
 
     fn receiveUntil(
@@ -728,6 +729,20 @@ pub const Endpoint = struct {
         return self.receiveKernelBytesIntoTimeout(buffer, timeout);
     }
 
+    pub fn receiveBytesIntoWithDeadline(
+        self: *Endpoint,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!ReceivedBytesView {
+        return self.receiveBytesIntoTimeout(
+            buffer,
+            .{ .deadline = try deadline_policy.usableAwake(
+                self.io,
+                deadline,
+            ) },
+        );
+    }
+
     /// Receive one datagram with a caller-supplied deadline.
     ///
     /// Pending GRO segments are consumed before arming a kernel timeout. This
@@ -741,6 +756,15 @@ pub const Endpoint = struct {
         defer self.socket_receive_mutex.unlock(self.io);
         if (self.takePendingReceived()) |pending| return pending;
         return self.receiveKernelBytesTimeout(timeout);
+    }
+
+    pub fn receiveBytesWithDeadline(
+        self: *Endpoint,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.receiveBytesTimeout(.{
+            .deadline = try deadline_policy.usableAwake(self.io, deadline),
+        });
     }
 
     /// Receive one kernel datagram, which may contain multiple UDP_GRO
@@ -769,6 +793,15 @@ pub const Endpoint = struct {
             return ownedBytesAsBatch(pending);
         }
         return self.receiveKernelBytesBatchTimeout(timeout);
+    }
+
+    pub fn receiveBytesBatchWithDeadline(
+        self: *Endpoint,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedBytesBatch {
+        return self.receiveBytesBatchTimeout(.{
+            .deadline = try deadline_policy.usableAwake(self.io, deadline),
+        });
     }
 
     pub fn receiveBytesBatchWithEcn(self: *Endpoint) Error!OwnedBytesBatch {
@@ -1235,7 +1268,10 @@ pub const Endpoint = struct {
     ) ReceiveTimeoutError!OwnedBytes {
         return self.receiveBytesHandlingVersionNegotiationUntil(
             supported_versions,
-            .{ .deadline = deadline },
+            .{ .deadline = try deadline_policy.usableAwake(
+                self.io,
+                deadline,
+            ) },
         );
     }
 
@@ -1704,12 +1740,25 @@ pub const DatagramSource = struct {
         return self.receive_timeout_fn(self.context, timeout);
     }
 
+    /// Preserve a caller-owned absolute budget through either an endpoint or
+    /// a routed handshake inbox. Sources themselves remain type-erased, so
+    /// clock validation belongs to the concrete implementation.
+    pub fn receiveWithDeadline(
+        self: DatagramSource,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedBytes {
+        return self.receiveTimeout(.{ .deadline = deadline });
+    }
+
     fn endpointReceiveTimeout(
         context: *anyopaque,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytes {
         const endpoint: *Endpoint = @ptrCast(@alignCast(context));
-        return endpoint.receiveBytesTimeout(timeout);
+        return endpoint.receiveBytesTimeout(switch (timeout) {
+            .deadline => |deadline| .{ .deadline = try deadline_policy.usableAwake(endpoint.io, deadline) },
+            else => timeout,
+        });
     }
 };
 
@@ -1830,6 +1879,91 @@ test "QUIC parsed datagram receive honors timeout and deadline" {
     defer datagram.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), datagram.frames.len);
     try std.testing.expect(datagram.frames[0] == .ping);
+}
+
+test "QUIC raw endpoint deadline receives validate and deliver" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer sender.deinit();
+    const invalid: std.Io.Clock.Timestamp = .{
+        .clock = .real,
+        .raw = .zero,
+    };
+    var buffer: [16]u8 = undefined;
+
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesIntoWithDeadline(&buffer, invalid),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesWithDeadline(invalid),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesBatchWithDeadline(invalid),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        DatagramSource.fromEndpoint(&receiver).receiveWithDeadline(invalid),
+    );
+
+    try sender.sendBytes(receiver.address(), "caller-buffer");
+    const view = try receiver.receiveBytesIntoWithDeadline(
+        &buffer,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expectEqualStrings("caller-buffer", view.bytes);
+
+    try sender.sendBytes(receiver.address(), "owned");
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesWithDeadline(.fromNow(io, .{
+            .clock = .awake,
+            .raw = .zero,
+        })),
+    );
+    // Deadline validation precedes the socket read, so an expired attempt
+    // cannot consume a datagram that a later call still owns.
+    var owned = try DatagramSource.fromEndpoint(&receiver)
+        .receiveWithDeadline(.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    }));
+    defer owned.deinit(allocator);
+    try std.testing.expectEqualStrings("owned", owned.bytes);
+
+    try sender.sendBytes(receiver.address(), "batch");
+    var batch = try receiver.receiveBytesBatchWithDeadline(.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    }));
+    defer batch.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), batch.segment_count);
+    try std.testing.expectEqualStrings(
+        "batch",
+        batch.datagramAt(0).?,
+    );
 }
 
 test "QUIC UDP endpoint sends and receives frame datagrams" {

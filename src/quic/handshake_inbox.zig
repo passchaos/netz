@@ -7,6 +7,7 @@
 //! grow memory by flooding one unfinished handshake.
 
 const std = @import("std");
+const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
 
 pub const Error = quic.connection_router.Error || error{
@@ -227,6 +228,15 @@ pub const Inbox = struct {
         return self.receiveTimeoutInternal(timeout);
     }
 
+    pub fn receiveWithDeadline(
+        self: *Inbox,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || std.Io.Event.WaitTimeoutError)!quic.runtime.OwnedBytes {
+        return self.receiveTimeoutInternal(.{
+            .deadline = try deadline_policy.usableAwake(self.io, deadline),
+        });
+    }
+
     pub fn datagramSource(self: *Inbox) quic.runtime.DatagramSource {
         return .{
             .context = self,
@@ -239,7 +249,11 @@ pub const Inbox = struct {
         timeout: std.Io.Timeout,
     ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
         const self: *Inbox = @ptrCast(@alignCast(context));
-        return self.receiveTimeoutInternal(timeout) catch |err| switch (err) {
+        const checked = switch (timeout) {
+            .deadline => |deadline| std.Io.Timeout{ .deadline = try deadline_policy.usableAwake(self.io, deadline) },
+            else => timeout,
+        };
+        return self.receiveTimeoutInternal(checked) catch |err| switch (err) {
             error.Closed => error.SocketUnconnected,
             error.Timeout, error.Canceled => |other| return other,
             else => unreachable,
@@ -374,6 +388,26 @@ test "QUIC pending handshake inbox wakes and closes waiters" {
             .raw = .fromMilliseconds(1),
         },
     }));
+    try std.testing.expectError(
+        error.Timeout,
+        inbox.receiveWithDeadline(.{ .clock = .real, .raw = .zero }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        inbox.datagramSource().receiveWithDeadline(
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+
+    const bytes = try makeLongDatagram(allocator, "server", 'f');
+    try inbox.push(.{ .from = peer, .bytes = bytes });
+    var received = try inbox.receiveWithDeadline(.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    }));
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 'f'), received.bytes[12]);
+
     inbox.close();
     try std.testing.expectError(error.Closed, inbox.receive());
 }

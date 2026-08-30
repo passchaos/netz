@@ -1567,6 +1567,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.Frame, "parseHeader"));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatchTimeout"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveBytesBatchWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveBytesIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveBytesWithDeadline",
+    ));
     try std.testing.expectEqual(
         @as(usize, 128),
         (netz.http3.runtime.Limits{}).max_concurrent_request_streams,
@@ -4402,6 +4414,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.quic, "handshake_inbox"));
     try std.testing.expect(@hasDecl(netz.quic.handshake_inbox, "Inbox"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.handshake_inbox.Inbox,
+        "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.DatagramSource,
+        "receiveWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
         "registerPendingHandshake",
