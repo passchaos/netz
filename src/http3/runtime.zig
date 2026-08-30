@@ -9064,10 +9064,46 @@ pub const ProtectedServer = struct {
     }
 
     pub fn receiveRequest(self: *ProtectedServer) Error!OwnedProtectedRequest {
+        return self.receiveRequestInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Aggregate the next request within one relative application budget. A
+    /// timeout preserves partial STREAM and QPACK state for a later call.
+    pub fn receiveRequestWithTimeout(
+        self: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestInternal(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Aggregate the next request before `deadline` without retiring a
+    /// partially received request when the deadline expires.
+    pub fn receiveRequestWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedRequest {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveRequestInternal(deadline);
+    }
+
+    fn receiveRequestInternal(
+        self: *ProtectedServer,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedRequest {
         if (self.streaming_requests.retainedCount() != 0) {
             return error.UnexpectedStream;
         }
-        const assembled = try self.receiveStreamBytes(null);
+        const assembled = try self.receiveStreamBytesUntil(deadline);
         errdefer self.quic_server.endpoint.allocator.free(assembled.bytes);
         var request = try http3.decodeRequestWithDynamicTable(
             self.quic_server.endpoint.allocator,
@@ -9633,21 +9669,33 @@ pub const ProtectedServer = struct {
         );
     }
 
-    fn receiveStreamBytes(self: *ProtectedServer, expected_stream_id: ?u62) Error!AssembledStream {
-        std.debug.assert(expected_stream_id == null);
+    fn receiveStreamBytesUntil(
+        self: *ProtectedServer,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AssembledStream {
         if (try self.request_streams.takeReady(
             self.qpack_decode.table,
             self.config.local_settings.qpack_blocked_streams,
         )) |ready| return ready;
 
         while (true) {
-            var packet = try self.receive_packets.take(
-                &self.quic_server.endpoint,
-                self.config.receive_keys,
-                self.config.local_connection_id.len,
-                &self.expected_packet_number,
-                self.config.max_frames_per_packet,
-            );
+            var packet = if (deadline) |absolute|
+                try self.receive_packets.takeWithDeadline(
+                    &self.quic_server.endpoint,
+                    self.config.receive_keys,
+                    self.config.local_connection_id.len,
+                    &self.expected_packet_number,
+                    self.config.max_frames_per_packet,
+                    absolute,
+                )
+            else
+                try self.receive_packets.take(
+                    &self.quic_server.endpoint,
+                    self.config.receive_keys,
+                    self.config.local_connection_id.len,
+                    &self.expected_packet_number,
+                    self.config.max_frames_per_packet,
+                );
             defer packet.deinit(self.quic_server.endpoint.allocator);
             updateOutboundBodyFlowLimitsFromFrames(
                 &self.outbound_bodies,
@@ -23704,6 +23752,132 @@ test "HTTP/3 protected server polls buffered request events" {
     try std.testing.expectEqual(
         @as(?StreamingRequestEvent, null),
         try server.pollRequestEvent(),
+    );
+}
+
+test "HTTP/3 protected aggregate request deadline preserves progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xed, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xee, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xef} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf0} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const body = "request-after-timeout";
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try (http3.Request{
+        .method = "POST",
+        .path = "/aggregate-deadline",
+        .authority = "localhost",
+        .body = body,
+    }).write(&bytes, allocator);
+    const split = bytes.items.len - body.len + body.len / 2;
+    try sendProtectedSettings(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config,
+        &client.control,
+        &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
+        &client.qpack_decoder_send,
+        &client.qpack_decoder_prefix_sent,
+        &client.next_packet_number,
+        &client.protected_send,
+        client_control_stream_id,
+    );
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = bytes.items[0..split],
+        } }},
+        client.config.max_frames_per_packet,
+        &client.protected_send,
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithDeadline(.{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_streams.entries.items.len,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(server.request_streams.entries.items.len != 0);
+
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = split,
+            .data = bytes.items[split..],
+            .fin = true,
+        } }},
+        client.config.max_frames_per_packet,
+        &client.protected_send,
+    );
+    var request = try server.receiveRequestWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+    try std.testing.expectEqualStrings(body, request.request.body);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_streams.entries.items.len,
     );
 }
 

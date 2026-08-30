@@ -4125,6 +4125,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "PushedResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ServerPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "receiveRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "receiveRequestWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseWithPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
     try std.testing.expect(@hasDecl(
