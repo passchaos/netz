@@ -49,6 +49,10 @@ pub const BatchSendResult = struct {
     /// Number of consecutive packets handed to the socket. Packet numbers in
     /// this prefix must never be reused, even when `send_error` is non-null.
     sent_count: usize,
+    /// Input packets protected before the socket submission. This can exceed
+    /// `sent_count` after a partial batch send; callers must never reuse those
+    /// packet numbers even though only the prefix was visible on the wire.
+    protected_count: usize,
     /// Protected bytes corresponding to `sent_count`.
     sent_bytes: usize,
     /// A sendmmsg-style backend can accept a prefix before failing.
@@ -7591,7 +7595,11 @@ pub fn sendFramesBatchIntoProgress(
     packet_storage: []u8,
 ) Error!BatchSendResult {
     if (options.packets.len == 0) {
-        return .{ .sent_count = 0, .sent_bytes = 0 };
+        return .{
+            .sent_count = 0,
+            .protected_count = 0,
+            .sent_bytes = 0,
+        };
     }
     if (options.packets.len > max_batch_packets) return error.DatagramTooLarge;
 
@@ -7663,6 +7671,7 @@ pub fn sendFramesBatchIntoProgress(
     }
     return .{
         .sent_count = send_result.sent_count,
+        .protected_count = options.packets.len,
         .sent_bytes = sent_bytes,
         .send_error = send_result.send_error,
     };

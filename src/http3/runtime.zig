@@ -643,13 +643,14 @@ const ProtectedSendState = struct {
             self.payload_scratch.items,
             self.packet_scratch.items,
         );
-        // Only socket-visible packet numbers become externally observable in
-        // this lightweight transport; the caller receives the same prefix
-        // count for committing its higher-level stream state.
+        // Protection consumes the nonce for the whole staged batch, even when
+        // the socket accepts only a prefix. Advance past every protected
+        // packet while the caller commits HTTP/3 stream state only for the
+        // socket-visible prefix reported separately.
         next_packet_number.* = std.math.add(
             u64,
             next_packet_number.*,
-            result.sent_count,
+            result.protected_count,
         ) catch return error.InvalidPacketNumber;
         return result;
     }

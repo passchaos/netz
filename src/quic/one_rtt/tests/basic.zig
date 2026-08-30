@@ -542,6 +542,7 @@ test "QUIC 1-RTT batch send reports a socket-sent prefix" {
         storage[sizes.payload..],
     );
     try std.testing.expectEqual(@as(usize, 1), result.sent_count);
+    try std.testing.expectEqual(@as(usize, 2), result.protected_count);
     try std.testing.expect(result.sent_bytes != 0);
     try std.testing.expectEqual(error.NetworkDown, result.send_error.?);
 

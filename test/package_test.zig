@@ -4395,6 +4395,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFrames"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "BatchSendOptions"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "BatchSendResult"));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.BatchSendResult,
+        "protected_count",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "batchStorageSizes"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFramesBatchInto"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFramesBatchIntoProgress"));
