@@ -10502,6 +10502,51 @@ pub const ProtectedClient = struct {
             };
     }
 
+    /// Return one event already buffered for `stream_id` without reading UDP.
+    /// Calling this selects incremental mode for that response, matching the
+    /// blocking event APIs while remaining suitable for external event loops.
+    pub fn pollResponseEvent(
+        self: *ProtectedClient,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        if (self.streaming_responses.find(stream_id)) |active| {
+            try sendProtectedReaderCapacity(
+                &self.quic_client.endpoint,
+                active.from orelse self.quic_client.peer,
+                self.config,
+                &self.next_packet_number,
+                &self.protected_send,
+                &active.reader,
+            );
+        }
+        if (self.response_streams.takeReset(stream_id)) |code| {
+            try self.finishStreamingResponse(stream_id);
+            return if (code == http3.ApplicationErrorCode.request_rejected)
+                error.RequestRejected
+            else
+                error.RequestCancelled;
+        }
+        const entry = try self.streaming_responses.activateResponse(
+            &self.response_streams,
+            stream_id,
+        );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &entry.reader,
+        );
+        const event = (try entry.reader.next(self.qpack_decode.table)) orelse
+            return null;
+        var owned_event = event;
+        errdefer owned_event.deinit(
+            self.quic_client.endpoint.allocator,
+        );
+        try self.applyStreamingResponseEvent(stream_id, owned_event);
+        return owned_event;
+    }
+
     pub fn receiveResponseEventWithTimeout(
         self: *ProtectedClient,
         stream_id: u62,
@@ -10534,59 +10579,13 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?StreamingEvent {
-        if (!self.request_lifecycle.contains(stream_id)) {
-            return error.UnexpectedStream;
-        }
-        if (self.response_streams.takeReset(stream_id)) |code| {
-            try self.finishStreamingResponse(stream_id);
-            return if (code == http3.ApplicationErrorCode.request_rejected)
-                error.RequestRejected
-            else
-                error.RequestCancelled;
-        }
-        const entry = try self.streaming_responses.activateResponse(
-            &self.response_streams,
-            stream_id,
-        );
-        self.request_lifecycle.applyResponseReaderSemantics(
-            stream_id,
-            &entry.reader,
-        );
-        if (try entry.reader.next(self.qpack_decode.table)) |event| {
-            var owned_event = event;
-            errdefer owned_event.deinit(
-                self.quic_client.endpoint.allocator,
-            );
-            try self.applyStreamingResponseEvent(stream_id, owned_event);
-            return owned_event;
-        }
+        if (try self.pollResponseEvent(stream_id)) |event| return event;
         if (deadline) |absolute| {
             try self.receiveResponsePacketWithDeadline(absolute);
         } else {
             try self.receiveResponsePacket();
         }
-        if (self.response_streams.takeReset(stream_id)) |code| {
-            try self.finishStreamingResponse(stream_id);
-            return if (code == http3.ApplicationErrorCode.request_rejected)
-                error.RequestRejected
-            else
-                error.RequestCancelled;
-        }
-        const active = self.streaming_responses.find(stream_id) orelse
-            return error.UnexpectedStream;
-        self.request_lifecycle.applyResponseReaderSemantics(
-            stream_id,
-            &active.reader,
-        );
-        if (try active.reader.next(self.qpack_decode.table)) |event| {
-            var owned_event = event;
-            errdefer owned_event.deinit(
-                self.quic_client.endpoint.allocator,
-            );
-            try self.applyStreamingResponseEvent(stream_id, owned_event);
-            return owned_event;
-        }
-        return null;
+        return self.pollResponseEvent(stream_id);
     }
 
     /// Poll one incremental event from any outstanding response stream.
@@ -10742,6 +10741,15 @@ pub const ProtectedClient = struct {
         return self.receivePushEventMatching(null);
     }
 
+    /// Return one promised-response event already buffered locally without
+    /// reading UDP. Aggregate push state remains exclusive with this API.
+    pub fn pollPushEvent(
+        self: *ProtectedClient,
+    ) Error!?StreamingPushEvent {
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.pollPushEventMatching(null);
+    }
+
     pub fn receivePushEventWithTimeout(
         self: *ProtectedClient,
         timeout: std.Io.Duration,
@@ -10785,31 +10793,7 @@ pub const ProtectedClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
         while (true) {
-            try self.applyPendingPushCancellations();
-            if (try self.push_streams.next(
-                self.qpack_decode.table,
-                self.config.local_settings.qpack_blocked_streams,
-                target_push_id,
-            )) |ready| {
-                var event = ready.event;
-                errdefer event.deinit(
-                    self.quic_client.endpoint.allocator,
-                );
-                if (event.value == .push_promise) {
-                    return error.UnexpectedFrame;
-                }
-                if (try streamingResponseSectionAcknowledgments(
-                    event.value,
-                )) |count| {
-                    try self.qpack_decode.acknowledgeSections(
-                        event.stream_id,
-                        count,
-                    );
-                    try self.sendQpackFeedback();
-                }
-                if (event.value == .finished) {
-                    self.push_streams.removeFinished(ready.index);
-                }
+            if (try self.pollPushEventMatching(target_push_id)) |event| {
                 return event;
             }
             if (deadline) |absolute| {
@@ -10818,6 +10802,47 @@ pub const ProtectedClient = struct {
                 try self.receiveResponsePacket();
             }
         }
+    }
+
+    fn pollPushEventMatching(
+        self: *ProtectedClient,
+        target_push_id: ?u64,
+    ) Error!?StreamingPushEvent {
+        // Consumption may have created receive-window credit. Emit it before
+        // selecting the next event so nonblocking loops do not deadlock after
+        // repeatedly reading DATA without another socket receive.
+        for (self.push_streams.entries.items) |*entry| {
+            if (entry.reader) |*reader| {
+                try sendProtectedReaderCapacity(
+                    &self.quic_client.endpoint,
+                    entry.from orelse self.quic_client.peer,
+                    self.config,
+                    &self.next_packet_number,
+                    &self.protected_send,
+                    reader,
+                );
+            }
+        }
+        try self.applyPendingPushCancellations();
+        const ready = try self.push_streams.next(
+            self.qpack_decode.table,
+            self.config.local_settings.qpack_blocked_streams,
+            target_push_id,
+        ) orelse return null;
+        var event = ready.event;
+        errdefer event.deinit(self.quic_client.endpoint.allocator);
+        if (event.value == .push_promise) return error.UnexpectedFrame;
+        if (try streamingResponseSectionAcknowledgments(event.value)) |count| {
+            try self.qpack_decode.acknowledgeSections(
+                event.stream_id,
+                count,
+            );
+            try self.sendQpackFeedback();
+        }
+        if (event.value == .finished) {
+            self.push_streams.removeFinished(ready.index);
+        }
+        return event;
     }
 
     fn applyPendingPushCancellations(
@@ -21801,6 +21826,16 @@ test "HTTP/3 protected client polls interleaved streaming responses" {
         1,
         &server.protected_send,
     );
+    // Polling is intentionally socket-free: bytes are not visible until a
+    // blocking receive pumps the datagram into the client's retained sets.
+    try std.testing.expectEqual(
+        @as(?StreamingEvent, null),
+        try client.pollResponseEvent(first_id),
+    );
+    try std.testing.expectEqual(
+        @as(?StreamingResponseEvent, null),
+        try client.pollNextResponseEvent(),
+    );
 
     var saw_head = false;
     var saw_body = false;
@@ -22185,7 +22220,8 @@ test "HTTP/3 protected client streams promised push response" {
     try std.testing.expect(promise == .push_promise);
     try std.testing.expectEqual(@as(u64, 3), promise.push_promise.push_id);
 
-    var push_head = try client.receivePushEvent();
+    var push_head = (try client.pollPushEvent()) orelse
+        return error.TestUnexpectedResult;
     defer push_head.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 3), push_head.push_id);
     try std.testing.expectEqual(

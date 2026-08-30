@@ -1843,6 +1843,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponseEvent"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedClient,
+        "pollResponseEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
         "receiveResponseEventWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -1881,6 +1885,10 @@ test "public modules are reachable" {
         "receivePushWithInformationalAndDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receivePushEvent"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "pollPushEvent",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedClient,
         "receivePushEventWithTimeout",
