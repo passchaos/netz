@@ -916,6 +916,84 @@ const ProtectedPacketCursor = struct {
         self.batch = batch;
         return packet;
     }
+
+    /// Deadline-aware counterpart to `take`. Already-decoded GRO packets are
+    /// consumed first; otherwise the same absolute deadline bounds the kernel
+    /// receive and every segment decoded from that datagram.
+    fn takeWithDeadline(
+        self: *ProtectedPacketCursor,
+        endpoint: *quic.runtime.Endpoint,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id_len: usize,
+        expected_packet_number: *u64,
+        max_frames: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.one_rtt.ReceivedPacket {
+        if (self.batch) |*batch| {
+            if (batch.takeNext()) |packet| {
+                expected_packet_number.* = packet.packet.packet_number + 1;
+                return packet;
+            }
+            batch.deinit();
+            self.batch = null;
+        }
+
+        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        const timeout: std.Io.Timeout = .{ .deadline = deadline };
+        if (!endpoint.groReceiveEnabled()) {
+            var datagram = try endpoint.receiveBytesTimeout(timeout);
+            defer datagram.deinit(endpoint.allocator);
+            const packet = try quic.one_rtt.openReceivedBytes(
+                endpoint,
+                datagram.from,
+                datagram.bytes,
+                keys,
+                destination_connection_id_len,
+                expected_packet_number.*,
+                max_frames,
+            );
+            expected_packet_number.* = packet.packet.packet_number + 1;
+            return packet;
+        }
+
+        var datagrams = try endpoint.receiveBytesBatchTimeout(timeout);
+        defer datagrams.deinit(endpoint.allocator);
+        const packets = try endpoint.allocator.alloc(
+            quic.one_rtt.ReceivedPacket,
+            datagrams.segment_count,
+        );
+        var completed: usize = 0;
+        errdefer {
+            for (packets[0..completed]) |*packet| {
+                packet.deinit(endpoint.allocator);
+            }
+            endpoint.allocator.free(packets);
+        }
+        var next_expected = expected_packet_number.*;
+        for (packets, 0..) |*packet, index| {
+            const bytes = datagrams.datagramAt(index) orelse
+                return error.InvalidPacket;
+            packet.* = try quic.one_rtt.openReceivedBytes(
+                endpoint,
+                datagrams.from,
+                bytes,
+                keys,
+                destination_connection_id_len,
+                next_expected,
+                max_frames,
+            );
+            next_expected = packet.packet.packet_number + 1;
+            completed += 1;
+        }
+        var batch = Batch{
+            .allocator = endpoint.allocator,
+            .packets = packets,
+        };
+        const packet = batch.takeNext() orelse return error.MissingStreamFrame;
+        expected_packet_number.* = packet.packet.packet_number + 1;
+        self.batch = batch;
+        return packet;
+    }
 };
 
 pub const Limits = struct {
@@ -8829,6 +8907,38 @@ pub const ProtectedServer = struct {
     pub fn receiveRequestEvent(
         self: *ProtectedServer,
     ) Error!StreamingRequestEvent {
+        return self.receiveRequestEventInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveRequestEventWithTimeout(
+        self: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestEventInternal(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveRequestEventWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveRequestEventInternal(deadline);
+    }
+
+    fn receiveRequestEventInternal(
+        self: *ProtectedServer,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
         while (true) {
             if (self.streaming_requests.takeFirstReset()) |reset| {
                 self.request_lifecycle.markFinished(reset.stream_id);
@@ -8850,7 +8960,11 @@ pub const ProtectedServer = struct {
                     ready.event,
                 );
             }
-            try self.receiveRequestPacket();
+            if (deadline) |absolute| {
+                try self.receiveRequestPacketWithDeadline(absolute);
+            } else {
+                try self.receiveRequestPacket();
+            }
         }
     }
 
@@ -9355,6 +9469,41 @@ pub const ProtectedServer = struct {
             self.config.local_connection_id.len,
             &self.expected_packet_number,
             self.config.max_frames_per_packet,
+        );
+        defer packet.deinit(self.quic_server.endpoint.allocator);
+
+        updateOutboundBodyFlowLimitsFromFrames(
+            &self.outbound_bodies,
+            packet.frames,
+        );
+        _ = try applyServerRequestPacketFrames(
+            packet.from,
+            packet.frames,
+            self.quic_server.endpoint.allocator,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.request_streams,
+            &self.streaming_requests,
+            self.peer_promised_push_ids.items,
+            null,
+        );
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback(packet.from);
+        }
+    }
+
+    fn receiveRequestPacketWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        var packet = try self.receive_packets.takeWithDeadline(
+            &self.quic_server.endpoint,
+            self.config.receive_keys,
+            self.config.local_connection_id.len,
+            &self.expected_packet_number,
+            self.config.max_frames_per_packet,
+            deadline,
         );
         defer packet.deinit(self.quic_server.endpoint.allocator);
 
@@ -9939,6 +10088,45 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        return self.receiveResponseEventInternal(stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveResponseEventWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseEventInternal(
+            stream_id,
+            .fromNow(
+                self.quic_client.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveResponseEventWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveResponseEventInternal(stream_id, deadline);
+    }
+
+    fn receiveResponseEventInternal(
+        self: *ProtectedClient,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?StreamingEvent {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -9965,7 +10153,11 @@ pub const ProtectedClient = struct {
             try self.applyStreamingResponseEvent(stream_id, owned_event);
             return owned_event;
         }
-        try self.receiveResponsePacket();
+        if (deadline) |absolute| {
+            try self.receiveResponsePacketWithDeadline(absolute);
+        } else {
+            try self.receiveResponsePacket();
+        }
         if (self.response_streams.takeReset(stream_id)) |code| {
             try self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
@@ -10431,13 +10623,44 @@ pub const ProtectedClient = struct {
     }
 
     fn receiveResponsePacket(self: *ProtectedClient) Error!void {
-        var packet = try self.receive_packets.take(
-            &self.quic_client.endpoint,
-            self.config.receive_keys,
-            self.config.local_connection_id.len,
-            &self.expected_packet_number,
-            self.config.max_frames_per_packet,
+        return self.receiveResponsePacketInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn receiveResponsePacketWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
         );
+        return self.receiveResponsePacketInternal(deadline);
+    }
+
+    fn receiveResponsePacketInternal(
+        self: *ProtectedClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        var packet = if (deadline) |absolute|
+            try self.receive_packets.takeWithDeadline(
+                &self.quic_client.endpoint,
+                self.config.receive_keys,
+                self.config.local_connection_id.len,
+                &self.expected_packet_number,
+                self.config.max_frames_per_packet,
+                absolute,
+            )
+        else
+            try self.receive_packets.take(
+                &self.quic_client.endpoint,
+                self.config.receive_keys,
+                self.config.local_connection_id.len,
+                &self.expected_packet_number,
+                self.config.max_frames_per_packet,
+            );
         defer packet.deinit(self.quic_client.endpoint.allocator);
         updateOutboundBodyFlowLimitsFromFrames(
             &self.outbound_bodies,

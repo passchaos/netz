@@ -1649,6 +1649,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponseEvent"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "receiveResponseEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "receiveResponseEventWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveNextResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "readResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receivePush"));
@@ -1664,6 +1672,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "completeShutdown"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "drainComplete"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequestEvent"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "receiveRequestEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "receiveRequestEventWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "readRequestData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "startResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseBody"));
@@ -4510,7 +4526,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
+        "receiveSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "receiveSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
         "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "receiveSessionEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
@@ -4525,6 +4557,14 @@ test "public modules are reachable" {
         "sendSessionData",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "receiveSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "receiveSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedProtectedSession,
         "drain",
     ));
@@ -4535,6 +4575,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedProtectedSession,
         "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "receiveSessionEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
     try std.testing.expect(@hasDecl(

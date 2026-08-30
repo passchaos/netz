@@ -181,8 +181,54 @@ pub const ProtectedServer = struct {
         session_id: webtransport.SessionId,
         out: []u8,
     ) Error!ProtectedSessionRead {
+        return self.receiveSessionDataInternal(session_id, out, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveSessionDataWithTimeout(
+        self: *ProtectedServer,
+        session_id: webtransport.SessionId,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!ProtectedSessionRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionDataInternal(
+            session_id,
+            out,
+            .fromNow(
+                self.h3.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveSessionDataWithDeadline(
+        self: *ProtectedServer,
+        session_id: webtransport.SessionId,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!ProtectedSessionRead {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveSessionDataInternal(session_id, out, deadline);
+    }
+
+    fn receiveSessionDataInternal(
+        self: *ProtectedServer,
+        session_id: webtransport.SessionId,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!ProtectedSessionRead {
         while (true) {
-            var event = try self.h3.receiveRequestEvent();
+            var event = if (deadline) |absolute|
+                try self.h3.receiveRequestEventWithDeadline(absolute)
+            else
+                try self.h3.receiveRequestEvent();
             defer event.deinit(self.h3.quic_server.endpoint.allocator);
             switch (event) {
                 .reset => return error.InvalidSessionState,
@@ -1855,7 +1901,8 @@ pub const AcceptedProtectedSession = struct {
         self: *AcceptedProtectedSession,
         server: *ProtectedServer,
     ) Error!SessionEvent {
-        return receiveProtectedServerEvent(server, self) catch |err| switch (err) {
+        return receiveProtectedServerEvent(server, self, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
             error.InvalidCapsule => {
                 try server.h3.cancelRequest(
                     self.request.from,
@@ -1866,6 +1913,44 @@ pub const AcceptedProtectedSession = struct {
             },
             else => return err,
         };
+    }
+
+    pub fn receiveSessionEventWithTimeout(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!SessionEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionEventWithDeadline(
+            server,
+            .fromNow(
+                server.h3.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveSessionEventWithDeadline(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!SessionEvent {
+        _ = try deadline_policy.usableAwake(
+            server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return receiveProtectedServerEvent(server, self, deadline) catch |err|
+            switch (err) {
+                error.InvalidCapsule => {
+                    try server.h3.cancelRequest(
+                        self.request.from,
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                    );
+                    return err;
+                },
+                else => return err,
+            };
     }
 };
 
@@ -4219,10 +4304,54 @@ pub const ProtectedClientSession = struct {
         self: *ProtectedClientSession,
         out: []u8,
     ) Error!ProtectedSessionRead {
+        return self.receiveSessionDataInternal(out, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveSessionDataWithTimeout(
+        self: *ProtectedClientSession,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!ProtectedSessionRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionDataInternal(
+            out,
+            .fromNow(
+                self.h3.quic_client.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveSessionDataWithDeadline(
+        self: *ProtectedClientSession,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!ProtectedSessionRead {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveSessionDataInternal(out, deadline);
+    }
+
+    fn receiveSessionDataInternal(
+        self: *ProtectedClientSession,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!ProtectedSessionRead {
         while (true) {
-            var event = (try self.h3.receiveResponseEvent(
-                self.session_id.value,
-            )) orelse continue;
+            var event = (if (deadline) |absolute|
+                try self.h3.receiveResponseEventWithDeadline(
+                    self.session_id.value,
+                    absolute,
+                )
+            else
+                try self.h3.receiveResponseEvent(self.session_id.value)) orelse
+                continue;
             defer event.deinit(self.h3.quic_client.endpoint.allocator);
             switch (event) {
                 .data_available => {
@@ -4266,7 +4395,8 @@ pub const ProtectedClientSession = struct {
     pub fn receiveSessionEvent(
         self: *ProtectedClientSession,
     ) Error!SessionEvent {
-        return receiveProtectedClientEvent(self) catch |err| switch (err) {
+        return receiveProtectedClientEvent(self, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
             error.InvalidCapsule => {
                 try self.h3.cancelRequest(
                     self.session_id.value,
@@ -4276,6 +4406,38 @@ pub const ProtectedClientSession = struct {
             },
             else => return err,
         };
+    }
+
+    pub fn receiveSessionEventWithTimeout(
+        self: *ProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!SessionEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionEventWithDeadline(.fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveSessionEventWithDeadline(
+        self: *ProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!SessionEvent {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        return receiveProtectedClientEvent(self, deadline) catch |err|
+            switch (err) {
+                error.InvalidCapsule => {
+                    try self.h3.cancelRequest(
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                    );
+                    return err;
+                },
+                else => return err,
+            };
     }
 };
 
@@ -4332,16 +4494,21 @@ pub const ProtectedSessionRead = struct {
 fn receiveProtectedServerEvent(
     server: *ProtectedServer,
     session: *AcceptedProtectedSession,
-) Error!SessionEvent {
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!SessionEvent {
     if (try session.control.pollPending()) |event| {
         return completeProtectedServerEvent(server, session, event);
     }
     var buffer: [protected_control.buffer_capacity]u8 = undefined;
     while (true) {
-        const read = try server.receiveSessionData(
-            session.session_id,
-            &buffer,
-        );
+        const read = if (deadline) |absolute|
+            try server.receiveSessionDataWithDeadline(
+                session.session_id,
+                &buffer,
+                absolute,
+            )
+        else
+            try server.receiveSessionData(session.session_id, &buffer);
         if (read.fin) {
             const event = (try session.control.finish()) orelse
                 return error.InvalidSessionState;
@@ -4377,13 +4544,17 @@ fn completeProtectedServerEvent(
 
 fn receiveProtectedClientEvent(
     session: *ProtectedClientSession,
-) Error!SessionEvent {
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!SessionEvent {
     if (try session.control.pollPending()) |event| {
         return completeProtectedClientEvent(session, event);
     }
     var buffer: [protected_control.buffer_capacity]u8 = undefined;
     while (true) {
-        const read = try session.receiveSessionData(&buffer);
+        const read = if (deadline) |absolute|
+            try session.receiveSessionDataWithDeadline(&buffer, absolute)
+        else
+            try session.receiveSessionData(&buffer);
         if (read.fin) {
             const event = (try session.control.finish()) orelse
                 return error.InvalidSessionState;
@@ -6324,6 +6495,235 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebTransport protected control receive deadlines preserve parser state" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xfa, 0xce, 0x10, 0x01 };
+    const server_cid = [_]u8{ 0xfa, 0xce, 0x10, 0x02 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd2} ** quic.protection.secret_len,
+    );
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .max_stream_frame_data = 5,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        io: std.Io,
+        client_timeout_done: std.Io.Event = .unset,
+        close_prefix_sent: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var pending = try shared.server.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var accepted = try pending.accept();
+            pending_owned = false;
+            defer accepted.deinit(
+                shared.server.h3.quic_server.endpoint.allocator,
+            );
+
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.receiveSessionEventWithTimeout(
+                    shared.server,
+                    .fromMilliseconds(5),
+                ),
+            );
+            try shared.client_timeout_done.wait(shared.io);
+            try shared.server.sendSessionData(
+                accepted.request.from,
+                accepted.session_id,
+                "server-after-timeout",
+                false,
+            );
+
+            var close_storage: [64]u8 = undefined;
+            const close = try session_control.writeCloseInto(
+                &close_storage,
+                71,
+                "server done",
+            );
+            try std.Io.sleep(
+                shared.io,
+                .fromMilliseconds(5),
+                .awake,
+            );
+            try shared.server.sendSessionData(
+                accepted.request.from,
+                accepted.session_id,
+                close[0..3],
+                false,
+            );
+            shared.close_prefix_sent.set(shared.io);
+            try std.Io.sleep(shared.io, .fromMilliseconds(25), .awake);
+            try shared.server.sendSessionData(
+                accepted.request.from,
+                accepted.session_id,
+                close[3..],
+                true,
+            );
+            try accepted.control.control.recordLocalClose(71);
+        }
+    };
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try ProtectedClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-protected-deadline",
+            .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+            .config = .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = &client_cid,
+                .peer_connection_id = &server_cid,
+                .max_stream_frame_data = 5,
+            },
+        },
+    );
+    defer client.deinit();
+
+    var control_bytes: [64]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveSessionDataWithTimeout(
+            &control_bytes,
+            .fromMilliseconds(5),
+        ),
+    );
+    shared.client_timeout_done.set(io);
+    const read = try client.receiveSessionDataWithDeadline(
+        &control_bytes,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqualStrings(
+        "server-after-timeout",
+        control_bytes[0..read.bytes],
+    );
+    try shared.close_prefix_sent.wait(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveSessionEventWithTimeout(.fromMilliseconds(5)),
+    );
+    const closed = try client.receiveSessionEventWithTimeout(
+        .fromSeconds(1),
+    );
+    try std.testing.expect(closed == .closed);
+    try std.testing.expectEqual(@as(u32, 71), closed.closed.code);
+    try std.testing.expectEqualStrings("server done", closed.closed.reason);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport protected control deadlines reject invalid budgets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe1} ** quic.protection.secret_len,
+    );
+    const config: http3.runtime.ProtectedConfig = .{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-deadline",
+        .peer_connection_id = "wt-deadline-peer",
+    };
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        config,
+    );
+    defer server.deinit();
+    var server_session = AcceptedProtectedSession{
+        .request = undefined,
+        .session_id = .init(0),
+        .control = protected_control.Reader.init(
+            try session_control.Control.init(.init(0)),
+        ),
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        server_session.receiveSessionEventWithTimeout(&server, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server_session.receiveSessionEventWithDeadline(
+            &server,
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
+
+    var client_h3 = try http3.runtime.ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        config,
+    );
+    var client_session = ProtectedClientSession{
+        .h3 = client_h3,
+        .session_id = .init(0),
+        .response = undefined,
+        .control = protected_control.Reader.init(
+            try session_control.Control.init(.init(0)),
+        ),
+    };
+    client_h3 = undefined;
+    defer client_session.h3.deinit();
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client_session.receiveSessionDataWithTimeout(&buffer, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client_session.receiveSessionEventWithDeadline(
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
 }
 
 test "WebTransport stateful preconfigured runtime exchanges associated streams" {
