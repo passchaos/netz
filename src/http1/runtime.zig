@@ -2799,11 +2799,43 @@ pub const Client = struct {
         request_options: RequestOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            null,
+            deadline,
+        );
+    }
+
+    /// Observe interim responses while bounding the request write and complete
+    /// response with one caller-owned deadline.
+    pub fn requestWithInformationalAndDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.response_deadline == null);
         self.response_deadline = deadline;
         defer self.response_deadline = null;
-        return self.request(request_options);
+        return self.requestWithInformational(
+            request_options,
+            informational,
+        );
+    }
+
+    pub fn requestWithInformationalAndTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     /// Send a complete request and observe each valid interim response before
@@ -4476,11 +4508,37 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        return self.readResponseWithInformationalAndDeadline(
+            null,
+            deadline,
+        );
+    }
+
+    pub fn readResponseWithInformationalAndDeadline(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
         _ = try deadline_policy.usableAwake(self.client.io, deadline);
         std.debug.assert(self.client.response_deadline == null);
         self.client.response_deadline = deadline;
         defer self.client.response_deadline = null;
-        return self.readResponse();
+        return self.readResponseWithInformational(informational);
+    }
+
+    pub fn readResponseWithInformationalAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.client.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
     }
 
     /// Read the final response while synchronously observing preceding 1xx

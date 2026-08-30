@@ -911,6 +911,87 @@ test "HTTP/1 response head timeout spans informational responses" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 client informational response shares request deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request: [4096]u8 = undefined;
+            try readUntilHead(self.io, stream, &request);
+            try writeAll(self.io, stream, "HTTP/1.1 103 Early Hints\r\n\r\n");
+            try std.Io.sleep(self.io, .fromMilliseconds(75), .awake);
+            writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            ) catch |err| switch (err) {
+                error.SocketUnconnected, error.ConnectionResetByPeer => {},
+                else => return err,
+            };
+        }
+    };
+    const Observer = struct {
+        count: usize = 0,
+
+        fn onResponse(context: *anyopaque, head: runtime.InformationalResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (head.status != 103) @panic("unexpected informational status");
+            self.count += 1;
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        listener.socket.address,
+        .{},
+    );
+    defer client.close();
+    var observer: Observer = .{};
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndTimeout(
+            .{ .host = "localhost" },
+            .{
+                .context = &observer,
+                .on_response = Observer.onResponse,
+            },
+            .fromMilliseconds(25),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), observer.count);
+    try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 response head timeout excludes a slow body" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
