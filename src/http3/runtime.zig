@@ -591,47 +591,67 @@ const ProtectedSendState = struct {
                 frame_offset = end;
             }
 
-            // The batch-into API is allocation-free for one packet as well as
-            // many. Reusing its exact payload/packet storage avoids two heap
-            // allocations on the latency-sensitive single-datagram path.
-            const options: quic.one_rtt.BatchSendOptions = .{
-                .destination_connection_id = destination_connection_id,
-                .first_packet_number = next_packet_number.*,
-                .packets = packets[0..packet_count],
-            };
-            const sizes = try quic.one_rtt.batchStorageSizes(options);
-            try self.payload_scratch.ensureTotalCapacity(
-                self.allocator,
-                sizes.payload,
-            );
-            try self.packet_scratch.ensureTotalCapacity(
-                self.allocator,
-                sizes.packet,
-            );
-            self.payload_scratch.items.len = sizes.payload;
-            defer self.payload_scratch.items.len = 0;
-            self.packet_scratch.items.len = sizes.packet;
-            defer self.packet_scratch.items.len = 0;
-
-            const result = try quic.one_rtt.sendFramesBatchIntoProgress(
+            const result = try self.sendPacketBatchProgress(
                 endpoint,
                 to,
                 keys,
-                options,
-                self.payload_scratch.items,
-                self.packet_scratch.items,
+                destination_connection_id,
+                next_packet_number,
+                packets[0..packet_count],
             );
-            // A packet number becomes consumed as soon as the socket accepts
-            // its datagram. Preserve a partial batch prefix even though this
-            // lightweight runtime has no retransmission queue for the suffix.
-            next_packet_number.* = std.math.add(
-                u64,
-                next_packet_number.*,
-                result.sent_count,
-            ) catch return error.InvalidPacketNumber;
             if (result.send_error) |err| return err;
             std.debug.assert(result.sent_count == packet_count);
         }
+    }
+
+    /// Protect and submit one explicit packet batch while exposing the exact
+    /// socket-visible prefix. HTTP/3 body batching uses that count to commit
+    /// only matching stream offsets and FIN state after a partial send.
+    fn sendPacketBatchProgress(
+        self: *ProtectedSendState,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        packets: []const []const quic.Frame,
+    ) Error!quic.one_rtt.BatchSendResult {
+        const options: quic.one_rtt.BatchSendOptions = .{
+            .destination_connection_id = destination_connection_id,
+            .first_packet_number = next_packet_number.*,
+            .packets = packets,
+        };
+        const sizes = try quic.one_rtt.batchStorageSizes(options);
+        try self.payload_scratch.ensureTotalCapacity(
+            self.allocator,
+            sizes.payload,
+        );
+        try self.packet_scratch.ensureTotalCapacity(
+            self.allocator,
+            sizes.packet,
+        );
+        self.payload_scratch.items.len = sizes.payload;
+        defer self.payload_scratch.items.len = 0;
+        self.packet_scratch.items.len = sizes.packet;
+        defer self.packet_scratch.items.len = 0;
+
+        const result = try quic.one_rtt.sendFramesBatchIntoProgress(
+            endpoint,
+            to,
+            keys,
+            options,
+            self.payload_scratch.items,
+            self.packet_scratch.items,
+        );
+        // Only socket-visible packet numbers become externally observable in
+        // this lightweight transport; the caller receives the same prefix
+        // count for committing its higher-level stream state.
+        next_packet_number.* = std.math.add(
+            u64,
+            next_packet_number.*,
+            result.sent_count,
+        ) catch return error.InvalidPacketNumber;
+        return result;
     }
 };
 
@@ -9528,6 +9548,39 @@ pub const ProtectedServer = struct {
         }
     }
 
+    /// Send one DATA contribution per response stream in socket batches. All
+    /// streams must belong to `to`; a socket-visible prefix commits exactly
+    /// the corresponding HTTP/3 offsets and FIN states.
+    pub fn sendResponseBodyBatchPaced(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        chunks: []const BodyChunk,
+    ) Error!void {
+        try sendProtectedBodyBatchPaced(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            chunks,
+            self,
+            ProtectedServer.receiveBatchProgressForSend,
+            ProtectedServer.finishBatchResponseStream,
+        );
+    }
+
+    fn receiveBatchProgressForSend(self: *ProtectedServer) Error!void {
+        _ = try self.receiveRequestPacketTimeout(100_000);
+    }
+
+    fn finishBatchResponseStream(
+        self: *ProtectedServer,
+        stream_id: u62,
+    ) void {
+        self.request_lifecycle.markFinished(stream_id);
+    }
+
     fn sendResponseBodyPacedChunk(
         self: *ProtectedServer,
         to: net.IpAddress,
@@ -10380,6 +10433,45 @@ pub const ProtectedClient = struct {
                 fin and sent == non_empty,
             );
         }
+    }
+
+    /// Batch one DATA contribution per active request stream. The shared
+    /// destination allows packet protection and the UDP send to be amortized
+    /// while preserving stream state for any unsent suffix.
+    pub fn sendRequestBodyBatchPaced(
+        self: *ProtectedClient,
+        chunks: []const BodyChunk,
+    ) Error!void {
+        for (chunks) |chunk| {
+            if (!self.request_lifecycle.contains(chunk.stream_id)) {
+                return error.UnexpectedStream;
+            }
+        }
+        try sendProtectedBodyBatchPaced(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            chunks,
+            self,
+            ProtectedClient.receiveBatchProgressForSend,
+            ProtectedClient.finishBatchRequestStream,
+        );
+    }
+
+    fn receiveBatchProgressForSend(self: *ProtectedClient) Error!void {
+        try self.receiveResponsePacket();
+    }
+
+    fn finishBatchRequestStream(
+        self: *ProtectedClient,
+        stream_id: u62,
+    ) void {
+        _ = self;
+        _ = stream_id;
+        // The request lifecycle remains open until its response is consumed.
     }
 
     fn sendRequestBodyPacedChunk(
@@ -15269,6 +15361,156 @@ fn sendConnectionBodyBatchPacedProgress(
     if (result.sent_count != result.protected_count) {
         return error.Unexpected;
     }
+    if (result.sent_count == 0) return error.Unexpected;
+    return result.sent_count;
+}
+
+fn sendProtectedBodyBatchPaced(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    context: anytype,
+    comptime receive_progress: anytype,
+    comptime finish_stream: anytype,
+) Error!void {
+    var sent: usize = 0;
+    while (sent < chunks.len) {
+        sent += sendProtectedBodyBatchProgress(
+            endpoint,
+            to,
+            config,
+            next_packet_number,
+            protected_send,
+            bodies,
+            chunks[sent..],
+            context,
+            finish_stream,
+        ) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receive_progress(context);
+                continue;
+            },
+            else => return err,
+        };
+    }
+}
+
+fn sendProtectedBodyBatchProgress(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    context: anytype,
+    comptime finish_stream: anytype,
+) Error!usize {
+    if (chunks.len == 0) return 0;
+    for (chunks, 0..) |chunk, i| {
+        if (chunk.data.len > pacedProtectedBodyChunkLimit(config)) {
+            return error.DatagramTooLarge;
+        }
+        var j: usize = 0;
+        while (j < i) : (j += 1) {
+            if (chunks[j].stream_id == chunk.stream_id) {
+                return error.UnexpectedStream;
+            }
+        }
+    }
+
+    const Staged = struct {
+        stream_id: u62,
+        entry: OutboundBodySet.Entry,
+        fin: bool,
+    };
+    var staged: [quic.one_rtt.max_batch_packets]Staged = undefined;
+    var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame = undefined;
+    const count = @min(quic.one_rtt.max_batch_packets, chunks.len);
+    const window = chunks[0..count];
+    try bodies.batch_scratch.begin(bodies.allocator, count);
+
+    for (window, 0..) |chunk, i| {
+        const current = bodies.find(chunk.stream_id) orelse
+            return error.UnexpectedStream;
+        staged[i] = .{
+            .stream_id = chunk.stream_id,
+            .entry = current.*,
+            .fin = chunk.fin,
+        };
+        try bodies.prepareChunkForEntry(
+            &staged[i].entry,
+            chunk.data.len,
+            chunk.fin,
+        );
+        const frame_start = bodies.batch_scratch.frames.items.len;
+        if (chunk.data.len == 0) {
+            try staged[i].entry.send.appendFrames(
+                &bodies.batch_scratch.frames,
+                bodies.allocator,
+                &.{},
+                config.max_stream_frame_data,
+                chunk.fin,
+            );
+        } else if (!try body_batch.appendDataStreamFrames(
+            &staged[i].entry.send,
+            &bodies.batch_scratch.frames,
+            bodies.allocator,
+            &bodies.batch_scratch.prefixes.items[i],
+            chunk.data,
+            chunk.fin,
+            config.max_stream_frame_data,
+            config.max_frames_per_packet,
+        )) {
+            return error.DatagramTooLarge;
+        }
+        if (staged[i].entry.flow_limit) |limit| {
+            if (staged[i].entry.send.next_offset > limit) {
+                return error.FlowControlBlocked;
+            }
+        }
+        const frame_len = bodies.batch_scratch.frames.items.len - frame_start;
+        if (frame_len == 0 or
+            frame_len > @max(@as(usize, 1), config.max_frames_per_packet))
+        {
+            return error.DatagramTooLarge;
+        }
+        bodies.batch_scratch.frame_ranges.items[i] = .{
+            .start = frame_start,
+            .len = frame_len,
+        };
+    }
+
+    for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
+        packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
+    }
+    const result = try protected_send.sendPacketBatchProgress(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        packets[0..count],
+    );
+    if (result.sent_count > count) return error.Unexpected;
+
+    // `sendFramesBatchIntoProgress` protects the complete window before the
+    // socket call, but only the reported prefix reached the peer. Commit the
+    // same prefix to HTTP/3 stream offsets and leave the suffix retryable.
+    for (staged[0..result.sent_count]) |committed| {
+        const entry = bodies.find(committed.stream_id) orelse
+            return error.UnexpectedStream;
+        entry.* = committed.entry;
+        if (committed.fin) {
+            _ = bodies.finish(committed.stream_id);
+            finish_stream(context, committed.stream_id);
+        }
+    }
+    if (result.send_error) |err| return err;
     if (result.sent_count == 0) return error.Unexpected;
     return result.sent_count;
 }
@@ -23691,6 +23933,124 @@ test "HTTP/3 protected DATA send retries without allocation" {
         wire_packet_ptr,
         protected_send.packet_scratch.allocatedSlice().ptr,
     );
+}
+
+test "HTTP/3 protected body batch sends and rejects duplicate streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc5} ** quic.protection.secret_len,
+    );
+    const config: ProtectedConfig = .{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .max_stream_frame_data = 64,
+        .max_frames_per_packet = 4,
+    };
+    var protected_send = ProtectedSendState.init(allocator);
+    defer protected_send.deinit();
+    var bodies = OutboundBodySet.init(allocator, 2);
+    defer bodies.deinit();
+    inline for (.{ @as(u62, 0), @as(u62, 4) }) |stream_id| {
+        try bodies.reserveOpen(stream_id);
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            quic.stream_state.SendState.init(stream_id),
+            3,
+        );
+    }
+    var next_packet_number: u64 = 0;
+    const Context = struct {
+        finished: usize = 0,
+
+        fn receiveProgress(_: *@This()) Error!void {
+            return error.Unexpected;
+        }
+
+        fn finish(self: *@This(), _: u62) void {
+            self.finished += 1;
+        }
+    };
+    var context: Context = .{};
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        sendProtectedBodyBatchPaced(
+            &sender,
+            receiver.address(),
+            config,
+            &next_packet_number,
+            &protected_send,
+            &bodies,
+            &.{
+                .{ .stream_id = 0, .data = "one", .fin = true },
+                .{ .stream_id = 0, .data = "one", .fin = true },
+            },
+            &context,
+            Context.receiveProgress,
+            Context.finish,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), next_packet_number);
+    try std.testing.expectEqual(@as(u64, 0), bodies.find(0).?.send.next_offset);
+
+    try sendProtectedBodyBatchPaced(
+        &sender,
+        receiver.address(),
+        config,
+        &next_packet_number,
+        &protected_send,
+        &bodies,
+        &.{
+            .{ .stream_id = 0, .data = "one", .fin = true },
+            .{ .stream_id = 4, .data = "two", .fin = true },
+        },
+        &context,
+        Context.receiveProgress,
+        Context.finish,
+    );
+    try std.testing.expectEqual(@as(u64, 2), next_packet_number);
+    try std.testing.expectEqual(@as(usize, 2), context.finished);
+    try std.testing.expectEqual(@as(usize, 0), bodies.entries.items.len);
+
+    var first = try quic.one_rtt.receive(
+        &receiver,
+        keys,
+        config.peer_connection_id.len,
+        0,
+        4,
+    );
+    defer first.deinit(allocator);
+    var second = try quic.one_rtt.receive(
+        &receiver,
+        keys,
+        config.peer_connection_id.len,
+        1,
+        4,
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first.frames[0].stream.stream_id);
+    try std.testing.expectEqual(@as(u64, 4), second.frames[0].stream.stream_id);
+    try std.testing.expect(first.frames[first.frames.len - 1].stream.fin);
+    try std.testing.expect(second.frames[second.frames.len - 1].stream.fin);
 }
 
 test "HTTP/3 protected server streams interleaved requests through small windows" {

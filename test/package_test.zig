@@ -1924,6 +1924,10 @@ test "public modules are reachable" {
         netz.http3.runtime.ProtectedClient,
         "sendRequestBodyPartsPaced",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyBatchPaced",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "finishRequestTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "OwnedProtectedResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "cancelRequest"));
@@ -1954,6 +1958,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedServer,
         "sendResponseBodyPartsPaced",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyBatchPaced",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "finishResponseTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendGoAway"));
