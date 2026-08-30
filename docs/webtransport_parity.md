@@ -319,7 +319,11 @@ traffic, detailed close, clean-FIN close and post-close rejection.
 
 The lightweight preconfigured-key protected runtime also establishes
 WebTransport with incremental HTTP/3 request/response HEADERS rather than the
-aggregate helpers that set QUIC FIN. `sendSessionData` and
+aggregate helpers that set QUIC FIN. Its client exposes relative-timeout and
+absolute-deadline connect/attempt variants; one unchanged deadline covers peer
+SETTINGS and the final Extended CONNECT head, including response bytes that race
+ahead of the control stream. Protected server accept and pending-admission APIs
+carry the same bounded contract through fragmented request HEADERS. `sendSessionData` and
 `receiveSessionData` expose bounded caller-buffer DATA on that long-lived
 Extended CONNECT stream in both directions. Its typed `drain`, `close`, and
 `receiveSessionEvent` APIs now reuse the shared incremental Capsule state

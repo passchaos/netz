@@ -137,12 +137,67 @@ pub const ProtectedServer = struct {
         return pending.accept();
     }
 
+    pub fn acceptWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AcceptedProtectedSession {
+        var pending = try self.receiveSessionRequestWithDeadline(deadline);
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    pub fn acceptWithTimeout(
+        self: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!AcceptedProtectedSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(.fromNow(
+            self.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     /// Receive and validate a protected Extended CONNECT before deciding
     /// whether to accept or reject the session.
     pub fn receiveSessionRequest(
         self: *ProtectedServer,
     ) Error!PendingProtectedSession {
-        const request = try receiveProtectedConnectRequest(&self.h3);
+        return self.receiveSessionRequestInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveSessionRequestWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingProtectedSession {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveSessionRequestInternal(deadline);
+    }
+
+    pub fn receiveSessionRequestWithTimeout(
+        self: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PendingProtectedSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveSessionRequestWithDeadline(.fromNow(
+            self.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    fn receiveSessionRequestInternal(
+        self: *ProtectedServer,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingProtectedSession {
+        const request = if (deadline) |absolute|
+            try receiveProtectedConnectRequestBefore(&self.h3, absolute)
+        else
+            try receiveProtectedConnectRequest(&self.h3);
         var request_head = request.head;
         errdefer request_head.deinit(
             self.h3.quic_server.endpoint.allocator,
@@ -4338,6 +4393,48 @@ pub const ProtectedClientSession = struct {
         return attempt.requireAccepted();
     }
 
+    /// Establish the complete preconfigured HTTP/3 Extended CONNECT within
+    /// one caller-owned deadline, including peer SETTINGS and the response
+    /// head needed to validate WebTransport capability negotiation.
+    pub fn connectWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ProtectedClientSession {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ProtectedClientSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Establish the preconfigured transport while preserving a non-success
     /// CONNECT response for application inspection.
     pub fn connectAttempt(
@@ -4346,6 +4443,63 @@ pub const ProtectedClientSession = struct {
         local_address: net.IpAddress,
         server: net.IpAddress,
         options: ProtectedConnectOptions,
+    ) Error!ProtectedConnectAttempt {
+        return connectProtectedAttemptBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            null,
+        );
+    }
+
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ProtectedConnectAttempt {
+        try validateAdditionalConnectHeaders(options.headers, .request);
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectProtectedAttemptBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn connectAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ProtectedConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAttemptWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectProtectedAttemptBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!ProtectedConnectAttempt {
         var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
         const headers = try connectRequestHeadersWithAdditional(
@@ -4362,10 +4516,24 @@ pub const ProtectedClientSession = struct {
             .authority = options.authority,
             .headers = headers,
         }, null);
-        var response_head = try receiveProtectedConnectAttemptResponse(
-            &h3_client,
-            session_stream_id,
-        );
+        // A response stream is allowed to race ahead of the server control
+        // stream. The H3 client retains it while SETTINGS is awaited, and the
+        // same absolute timestamp bounds both protocol phases.
+        _ = if (deadline) |absolute|
+            try h3_client.receivePeerSettingsWithDeadline(absolute)
+        else
+            try h3_client.receivePeerSettings();
+        var response_head = if (deadline) |absolute|
+            try receiveProtectedConnectAttemptResponseBefore(
+                &h3_client,
+                session_stream_id,
+                absolute,
+            )
+        else
+            try receiveProtectedConnectAttemptResponse(
+                &h3_client,
+                session_stream_id,
+            );
         errdefer response_head.deinit(allocator);
         if (response_head.status >= 200 and response_head.status < 300) {
             try validateOptionalCapsuleProtocol(response_head.headers);
@@ -5508,15 +5676,44 @@ fn receiveHandshakeConnectRequestBefore(
     }
 }
 
-fn receiveProtectedConnectRequest(
-    server: *http3.runtime.ProtectedServer,
-) Error!struct {
+const ProtectedConnectRequest = struct {
     from: net.IpAddress,
     stream_id: u62,
     head: http3.DecodedRequestHead,
-} {
+};
+
+fn receiveProtectedConnectRequest(
+    server: *http3.runtime.ProtectedServer,
+) Error!ProtectedConnectRequest {
     while (true) {
         var event = try server.receiveRequestEvent();
+        defer event.deinit(server.quic_server.endpoint.allocator);
+        switch (event) {
+            .reset => return error.InvalidConnect,
+            .message => |*message| switch (message.value) {
+                .head => |*head| {
+                    if (head.* != .request) return error.InvalidConnect;
+                    try validateConnectRequest(head.request);
+                    const owned = head.request;
+                    message.value = .finished;
+                    return .{
+                        .from = message.from,
+                        .stream_id = message.stream_id,
+                        .head = owned,
+                    };
+                },
+                else => return error.InvalidConnect,
+            },
+        }
+    }
+}
+
+fn receiveProtectedConnectRequestBefore(
+    server: *http3.runtime.ProtectedServer,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!ProtectedConnectRequest {
+    while (true) {
+        var event = try server.receiveRequestEventWithDeadline(deadline);
         defer event.deinit(server.quic_server.endpoint.allocator);
         switch (event) {
             .reset => return error.InvalidConnect,
@@ -5613,6 +5810,29 @@ fn receiveProtectedConnectAttemptResponse(
     while (true) {
         var event = (try client.receiveResponseEvent(stream_id)) orelse
             continue;
+        defer event.deinit(client.quic_client.endpoint.allocator);
+        switch (event) {
+            .head => |*head| {
+                if (head.* != .response) return error.InvalidConnect;
+                const owned = head.response;
+                event = .finished;
+                return owned;
+            },
+            else => return error.InvalidConnect,
+        }
+    }
+}
+
+fn receiveProtectedConnectAttemptResponseBefore(
+    client: *http3.runtime.ProtectedClient,
+    stream_id: u62,
+    deadline: std.Io.Clock.Timestamp,
+) Error!http3.DecodedResponseHead {
+    while (true) {
+        var event = (try client.receiveResponseEventWithDeadline(
+            stream_id,
+            deadline,
+        )) orelse continue;
         defer event.deinit(client.quic_client.endpoint.allocator);
         switch (event) {
             .head => |*head| {
@@ -6619,16 +6839,39 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
 
     const Shared = struct {
         server: *ProtectedServer,
+        io: std.Io,
+        initial_timeout_done: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
+            shared.runFallible() catch |err| {
                 shared.err = err;
+                shared.initial_timeout_done.set(shared.io);
             };
         }
 
-        fn runFallible(server_ptr: *ProtectedServer) !void {
-            var pending = try server_ptr.receiveSessionRequest();
+        fn runFallible(shared: *@This()) !void {
+            const server_ptr = shared.server;
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.receiveSessionRequestWithDeadline(.{
+                    .clock = .real,
+                    .raw = .zero,
+                }),
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.receiveSessionRequestWithTimeout(
+                    .fromMilliseconds(10),
+                ),
+            );
+            shared.initial_timeout_done.set(shared.io);
+            var pending = try server_ptr.receiveSessionRequestWithDeadline(
+                .fromNow(shared.io, .{
+                    .raw = .fromSeconds(1),
+                    .clock = .awake,
+                }),
+            );
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
             try std.testing.expectEqualStrings(
@@ -6681,10 +6924,11 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{ .server = &server, .io = io };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try shared.initial_timeout_done.wait(io);
 
-    var client = try ProtectedClientSession.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+    const connect_options: ProtectedConnectOptions = .{
         .authority = "localhost",
         .path = "/wt-protected",
         .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } } },
@@ -6695,7 +6939,37 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             .peer_connection_id = &server_cid,
             .max_stream_frame_data = 5,
         },
-    });
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        ProtectedClientSession.connectAttemptWithDeadline(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            connect_options,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        ProtectedClientSession.connectAttemptWithTimeout(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            connect_options,
+            .zero,
+        ),
+    );
+    var client = try ProtectedClientSession.connectWithDeadline(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        connect_options,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
     defer client.deinit();
     try std.testing.expectEqualStrings(
         "accepted",
