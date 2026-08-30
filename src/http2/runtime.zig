@@ -3232,14 +3232,43 @@ pub const Connection = struct {
         options: RequestOptions,
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
+        return self.requestWithInformationalAndDeadline(
+            options,
+            null,
+            deadline,
+        );
+    }
+
+    /// Send a complete request and observe interim responses under one
+    /// caller-owned deadline shared with the final response.
+    pub fn requestWithInformationalAndDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseUntil(
             pending.stream_id,
             pending.request_method,
             pending.extended_connect,
-            null,
+            informational,
             deadline,
+        );
+    }
+
+    pub fn requestWithInformationalAndTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithInformationalAndDeadline(
+            options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -3268,13 +3297,48 @@ pub const Connection = struct {
         extended_connect: bool,
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
-        _ = try deadline_policy.usableAwake(self.io, deadline);
-        return self.readResponseUntil(
+        return self.readResponseWithInformationalAndDeadline(
             stream_id,
             request_method,
             extended_connect,
             null,
             deadline,
+        );
+    }
+
+    pub fn readResponseWithInformationalAndDeadline(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readResponseUntil(
+            stream_id,
+            request_method,
+            extended_connect,
+            informational,
+            deadline,
+        );
+    }
+
+    pub fn readResponseWithInformationalAndTimeout(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithInformationalAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -10523,8 +10587,34 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        return self.readResponseWithInformationalAndDeadline(
+            null,
+            deadline,
+        );
+    }
+
+    pub fn readResponseWithInformationalAndDeadline(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
-        return self.readResponseUntil(null, deadline);
+        return self.readResponseUntil(informational, deadline);
+    }
+
+    pub fn readResponseWithInformationalAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
     }
 
     /// Finish a streaming request while observing ordered interim responses.

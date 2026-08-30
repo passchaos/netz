@@ -372,6 +372,92 @@ test "HTTP/2 aggregate response deadline is not renewed by control frames" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 informational response shares aggregate deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try connection.writeInformationalResponse(
+                request.stream_id,
+                103,
+                &.{.{ .name = "link", .value = "</deadline.css>" }},
+            );
+            try std.Io.sleep(self.server.io, .fromMilliseconds(75), .awake);
+            connection.writeResponse(request.stream_id, .{
+                .body = "late",
+                .request_method = request.method,
+            }) catch |err| switch (err) {
+                error.SocketUnconnected, error.ConnectionResetByPeer => {},
+                else => return err,
+            };
+        }
+    };
+    const Observer = struct {
+        count: usize = 0,
+
+        fn observe(context: *anyopaque, head: runtime.StreamingResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (head.status != 103) @panic("unexpected informational status");
+            self.count += 1;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var observer: Observer = .{};
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndTimeout(
+            .{ .path = "/informational-deadline", .authority = "localhost" },
+            .{
+                .context = &observer,
+                .on_response = Observer.observe,
+            },
+            .fromMilliseconds(25),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), observer.count);
+    try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 URI deadline spans connection bootstrap and response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -478,6 +564,61 @@ test "HTTP/2 response deadline rejects a non-awake clock before writing" {
                 .{ .raw = .fromSeconds(1), .clock = .real },
             ),
         ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestWithInformationalAndDeadline(
+            .{ .path = "/wrong-clock-observed", .authority = "localhost" },
+            null,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestWithInformationalAndTimeout(
+            .{ .path = "/zero-observed", .authority = "localhost" },
+            null,
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readResponseWithInformationalAndDeadline(
+            1,
+            "GET",
+            false,
+            null,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readResponseWithInformationalAndTimeout(
+            1,
+            "GET",
+            false,
+            null,
+            .zero,
+        ),
+    );
+    var writer = runtime.RequestWriter{
+        .connection = &connection,
+        .stream_id = 1,
+        .expected_length = 0,
+        .head_request = false,
+        .body_finished = true,
+    };
+    defer writer.completed = true;
+    try std.testing.expectError(
+        error.Timeout,
+        writer.readResponseWithInformationalAndDeadline(
+            null,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        writer.readResponseWithInformationalAndTimeout(null, .zero),
     );
     try std.testing.expect(connection.isReusable());
 }

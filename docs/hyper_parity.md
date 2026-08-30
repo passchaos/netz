@@ -664,7 +664,10 @@ HTTP/2 aggregate and callback-streaming client requests now expose relative-
 timeout and absolute-deadline forms on both complete requests and split
 request/response flows. One deadline covers the complete response, including
 permitted connection-control traffic and fragmented header blocks, without
-renewal. A timeout sends RST_STREAM(CANCEL) best-effort and marks the connection
+renewal. Aggregate complete-request, split-response, and streaming-request
+writer variants can retain ordered informational-response callbacks under that
+same budget, so a 1xx response cannot grant extra time to the final response.
+A timeout sends RST_STREAM(CANCEL) best-effort and marks the connection
 unusable because discarded HPACK/body state cannot safely be reconstructed;
 client pools consequently discard that lease. Netz also exposes
 one-shot HTTP/HTTPS URI deadline helpers that preserve that same absolute
