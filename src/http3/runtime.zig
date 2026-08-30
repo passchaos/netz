@@ -858,63 +858,17 @@ const ProtectedPacketCursor = struct {
         expected_packet_number: *u64,
         max_frames: usize,
     ) Error!quic.one_rtt.ReceivedPacket {
-        if (self.batch) |*batch| {
-            if (batch.takeNext()) |packet| {
-                expected_packet_number.* = packet.packet.packet_number + 1;
-                return packet;
-            }
-            batch.deinit();
-            self.batch = null;
-        }
-
-        if (!endpoint.groReceiveEnabled()) {
-            const packet = try quic.one_rtt.receive(
-                endpoint,
-                keys,
-                destination_connection_id_len,
-                expected_packet_number.*,
-                max_frames,
-            );
-            expected_packet_number.* = packet.packet.packet_number + 1;
-            return packet;
-        }
-        var datagrams = try endpoint.receiveBytesBatch();
-        defer datagrams.deinit(endpoint.allocator);
-        const packets = try endpoint.allocator.alloc(
-            quic.one_rtt.ReceivedPacket,
-            datagrams.segment_count,
-        );
-        var completed: usize = 0;
-        errdefer {
-            for (packets[0..completed]) |*packet| {
-                packet.deinit(endpoint.allocator);
-            }
-            endpoint.allocator.free(packets);
-        }
-        var next_expected = expected_packet_number.*;
-        for (packets, 0..) |*packet, index| {
-            const bytes = datagrams.datagramAt(index) orelse
-                return error.InvalidPacket;
-            packet.* = try quic.one_rtt.openReceivedBytes(
-                endpoint,
-                datagrams.from,
-                bytes,
-                keys,
-                destination_connection_id_len,
-                next_expected,
-                max_frames,
-            );
-            next_expected = packet.packet.packet_number + 1;
-            completed += 1;
-        }
-        var batch = Batch{
-            .allocator = endpoint.allocator,
-            .packets = packets,
+        return self.takeUntil(
+            endpoint,
+            keys,
+            destination_connection_id_len,
+            expected_packet_number,
+            max_frames,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
         };
-        const packet = batch.takeNext() orelse return error.MissingStreamFrame;
-        expected_packet_number.* = packet.packet.packet_number + 1;
-        self.batch = batch;
-        return packet;
     }
 
     /// Deadline-aware counterpart to `take`. Already-decoded GRO packets are
@@ -929,6 +883,26 @@ const ProtectedPacketCursor = struct {
         max_frames: usize,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!quic.one_rtt.ReceivedPacket {
+        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        return self.takeUntil(
+            endpoint,
+            keys,
+            destination_connection_id_len,
+            expected_packet_number,
+            max_frames,
+            .{ .deadline = deadline },
+        );
+    }
+
+    fn takeUntil(
+        self: *ProtectedPacketCursor,
+        endpoint: *quic.runtime.Endpoint,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id_len: usize,
+        expected_packet_number: *u64,
+        max_frames: usize,
+        timeout: ?std.Io.Timeout,
+    ) ReceiveTimeoutError!quic.one_rtt.ReceivedPacket {
         if (self.batch) |*batch| {
             if (batch.takeNext()) |packet| {
                 expected_packet_number.* = packet.packet.packet_number + 1;
@@ -938,10 +912,11 @@ const ProtectedPacketCursor = struct {
             self.batch = null;
         }
 
-        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
-        const timeout: std.Io.Timeout = .{ .deadline = deadline };
         if (!endpoint.groReceiveEnabled()) {
-            var datagram = try endpoint.receiveBytesTimeout(timeout);
+            var datagram = if (timeout) |bounded|
+                try endpoint.receiveBytesTimeout(bounded)
+            else
+                try endpoint.receiveBytes();
             defer datagram.deinit(endpoint.allocator);
             const packet = try quic.one_rtt.openReceivedBytes(
                 endpoint,
@@ -955,8 +930,10 @@ const ProtectedPacketCursor = struct {
             expected_packet_number.* = packet.packet.packet_number + 1;
             return packet;
         }
-
-        var datagrams = try endpoint.receiveBytesBatchTimeout(timeout);
+        var datagrams = if (timeout) |bounded|
+            try endpoint.receiveBytesBatchTimeout(bounded)
+        else
+            try endpoint.receiveBytesBatch();
         defer datagrams.deinit(endpoint.allocator);
         const packets = try endpoint.allocator.alloc(
             quic.one_rtt.ReceivedPacket,
