@@ -79,6 +79,31 @@ pub const Server = struct {
         return receiveDatagramFromEndpoint(&self.h3.quic_server.endpoint);
     }
 
+    pub fn receiveDatagramWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveDatagramFromEndpointUntil(
+            &self.h3.quic_server.endpoint,
+            .{ .duration = .{ .raw = timeout, .clock = .awake } },
+        );
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return receiveDatagramFromEndpointUntil(
+            &self.h3.quic_server.endpoint,
+            .{ .deadline = deadline },
+        );
+    }
+
     pub fn sendDatagram(self: *Server, to: net.IpAddress, session_id: webtransport.SessionId, payload: []const u8) Error!void {
         try sendDatagramFromEndpoint(&self.h3.quic_server.endpoint, to, session_id, payload);
     }
@@ -2909,6 +2934,31 @@ pub const ClientSession = struct {
 
     pub fn receiveDatagram(self: *ClientSession) Error!OwnedDatagram {
         return receiveDatagramFromEndpoint(&self.h3.quic_client.endpoint);
+    }
+
+    pub fn receiveDatagramWithTimeout(
+        self: *ClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveDatagramFromEndpointUntil(
+            &self.h3.quic_client.endpoint,
+            .{ .duration = .{ .raw = timeout, .clock = .awake } },
+        );
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *ClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDatagram {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        return receiveDatagramFromEndpointUntil(
+            &self.h3.quic_client.endpoint,
+            .{ .deadline = deadline },
+        );
     }
 };
 
@@ -5764,8 +5814,22 @@ fn encodeDatagramIntoStack(
 }
 
 fn receiveDatagramFromEndpoint(endpoint: *quic.runtime.Endpoint) Error!OwnedDatagram {
+    return receiveDatagramFromEndpointUntil(endpoint, null) catch |err|
+        switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+}
+
+fn receiveDatagramFromEndpointUntil(
+    endpoint: *quic.runtime.Endpoint,
+    timeout: ?std.Io.Timeout,
+) ReceiveTimeoutError!OwnedDatagram {
     while (true) {
-        var datagram = try endpoint.receive();
+        var datagram = if (timeout) |bounded|
+            try endpoint.receiveWithTimeout(bounded)
+        else
+            try endpoint.receive();
         errdefer datagram.deinit(endpoint.allocator);
         for (datagram.frames) |frame| {
             if (frame == .datagram) {
@@ -6453,6 +6517,16 @@ test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
     });
     defer client.deinit();
 
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveDatagramWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveDatagramWithDeadline(
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
     try client.sendDatagram("client-dgram");
     var response = try client.receiveDatagram();
     defer response.deinit(allocator);

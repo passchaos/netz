@@ -4479,6 +4479,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport, "ensureDatagramsNegotiated"));
     try std.testing.expectEqual(@as(?usize, 1199), netz.webtransport.maxDatagramPayloadSize(1200, .init(0)));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveDatagramWithDeadline",
+    ));
     try std.testing.expect(@hasField(
         netz.webtransport.runtime.HandshakeUriConnectOptions,
         "h3",
