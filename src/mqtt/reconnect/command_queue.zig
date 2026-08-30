@@ -27,6 +27,27 @@ pub const Error = runtime.Error || session.Error || std.Io.Cancelable || error{
 pub const EnqueueTimeoutError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 
+const EnqueueWait = union(enum) {
+    duration: std.Io.Duration,
+    deadline: std.Io.Clock.Timestamp,
+};
+
+/// Queue capacity waits use the awake clock so a caller's absolute budget is
+/// comparable to the timestamp consumed by `Timestamp.wait`. Validate before
+/// cloning variable command data as well as at the final enqueue boundary: the
+/// first check avoids needless ownership work, while the second covers budgets
+/// that expire during allocation.
+fn validateEnqueueDeadline(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+) std.Io.Timeout.Error!void {
+    if (deadline.clock != .awake or
+        deadline.durationFromNow(io).raw.nanoseconds <= 0)
+    {
+        return error.Timeout;
+    }
+}
+
 pub const CommandQueue = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -116,7 +137,27 @@ pub const CommandQueue = struct {
             payload,
             options,
             completion,
-            timeout,
+            .{ .duration = timeout },
+        );
+    }
+
+    /// Enqueue an owned publication without renewing a caller's existing
+    /// absolute budget while waiting for bounded queue capacity.
+    pub fn publishAsyncWithDeadline(
+        self: *CommandQueue,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.publishAsyncInternal(
+            topic,
+            payload,
+            options,
+            completion,
+            .{ .deadline = deadline },
         );
     }
 
@@ -126,7 +167,7 @@ pub const CommandQueue = struct {
         payload: []const u8,
         options: runtime.PublishOptions,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -161,11 +202,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        if (enqueue_timeout) |timeout| {
-            try self.enqueueOwnedTimeout(command, timeout);
-        } else {
-            try self.enqueueOwned(command);
-        }
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
@@ -201,7 +238,23 @@ pub const CommandQueue = struct {
             subscriptions,
             options,
             completion,
-            timeout,
+            .{ .duration = timeout },
+        );
+    }
+
+    pub fn subscribeAsyncWithDeadline(
+        self: *CommandQueue,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.subscribeAsyncInternal(
+            subscriptions,
+            options,
+            completion,
+            .{ .deadline = deadline },
         );
     }
 
@@ -210,7 +263,7 @@ pub const CommandQueue = struct {
         subscriptions: []const mqtt.Subscription,
         options: runtime.SubscribeOptions,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -242,7 +295,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
@@ -277,7 +330,23 @@ pub const CommandQueue = struct {
             filters,
             options,
             completion,
-            timeout,
+            .{ .duration = timeout },
+        );
+    }
+
+    pub fn unsubscribeAsyncWithDeadline(
+        self: *CommandQueue,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.unsubscribeAsyncInternal(
+            filters,
+            options,
+            completion,
+            .{ .deadline = deadline },
         );
     }
 
@@ -286,7 +355,7 @@ pub const CommandQueue = struct {
         filters: []const []const u8,
         options: runtime.UnsubscribeOptions,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -315,7 +384,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
@@ -365,7 +434,23 @@ pub const CommandQueue = struct {
             reason_code,
             properties,
             completion,
-            timeout,
+            .{ .duration = timeout },
+        );
+    }
+
+    pub fn disconnectAsyncWithDeadline(
+        self: *CommandQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.disconnectAsyncInternal(
+            reason_code,
+            properties,
+            completion,
+            .{ .deadline = deadline },
         );
     }
 
@@ -374,7 +459,7 @@ pub const CommandQueue = struct {
         reason_code: u8,
         properties: []const mqtt.Property,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -401,7 +486,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
@@ -456,7 +541,25 @@ pub const CommandQueue = struct {
             qos,
             options,
             completion,
-            timeout,
+            .{ .duration = timeout },
+        );
+    }
+
+    pub fn acknowledgeAsyncWithDeadline(
+        self: *CommandQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.acknowledgeAsyncInternal(
+            packet_id,
+            qos,
+            options,
+            completion,
+            .{ .deadline = deadline },
         );
     }
 
@@ -466,7 +569,7 @@ pub const CommandQueue = struct {
         qos: mqtt.QoS,
         options: runtime.AcknowledgeOptions,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -495,7 +598,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
@@ -522,13 +625,28 @@ pub const CommandQueue = struct {
         timeout: std.Io.Duration,
     ) EnqueueTimeoutError!u64 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.flushPendingAsyncInternal(completion, timeout);
+        return self.flushPendingAsyncInternal(
+            completion,
+            .{ .duration = timeout },
+        );
+    }
+
+    pub fn flushPendingAsyncWithDeadline(
+        self: *CommandQueue,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.flushPendingAsyncInternal(
+            completion,
+            .{ .deadline = deadline },
+        );
     }
 
     fn flushPendingAsyncInternal(
         self: *CommandQueue,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -543,7 +661,7 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
@@ -586,7 +704,21 @@ pub const CommandQueue = struct {
         return self.beginReauthenticationAsyncInternal(
             properties,
             completion,
-            timeout,
+            .{ .duration = timeout },
+        );
+    }
+
+    pub fn beginReauthenticationAsyncWithDeadline(
+        self: *CommandQueue,
+        properties: []const mqtt.Property,
+        completion: CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!u64 {
+        try validateEnqueueDeadline(self.io, deadline);
+        return self.beginReauthenticationAsyncInternal(
+            properties,
+            completion,
+            .{ .deadline = deadline },
         );
     }
 
@@ -594,7 +726,7 @@ pub const CommandQueue = struct {
         self: *CommandQueue,
         properties: []const mqtt.Property,
         completion: CompletionHandler,
-        enqueue_timeout: ?std.Io.Duration,
+        enqueue_wait: ?EnqueueWait,
     ) EnqueueTimeoutError!u64 {
         self.allocator_mutex.lockUncancelable(self.io);
         defer self.allocator_mutex.unlock(self.io);
@@ -620,17 +752,26 @@ pub const CommandQueue = struct {
             },
             .owner = self,
         };
-        try self.enqueueOwnedMaybeTimeout(command, enqueue_timeout);
+        try self.enqueueOwnedMaybeWait(command, enqueue_wait);
         return command_id;
     }
 
-    fn enqueueOwnedMaybeTimeout(
+    fn enqueueOwnedMaybeWait(
         self: *CommandQueue,
         command: *Command,
-        timeout: ?std.Io.Duration,
+        wait: ?EnqueueWait,
     ) EnqueueTimeoutError!void {
-        if (timeout) |duration| {
-            return self.enqueueOwnedTimeout(command, duration);
+        if (wait) |bounded| {
+            return switch (bounded) {
+                .duration => |duration| self.enqueueOwnedTimeout(
+                    command,
+                    duration,
+                ),
+                .deadline => |deadline| self.enqueueOwnedWithDeadline(
+                    command,
+                    deadline,
+                ),
+            };
         }
         return self.enqueueOwned(command);
     }
@@ -682,6 +823,19 @@ pub const CommandQueue = struct {
         command: *Command,
         timeout: std.Io.Duration,
     ) EnqueueTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.enqueueOwnedWithDeadline(command, .fromNow(self.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
+    fn enqueueOwnedWithDeadline(
+        self: *CommandQueue,
+        command: *Command,
+        deadline: std.Io.Clock.Timestamp,
+    ) EnqueueTimeoutError!void {
+        try validateEnqueueDeadline(self.io, deadline);
         _ = self.async_commands.fetchAdd(1, .monotonic);
         var transferred = false;
         errdefer if (!transferred) {
@@ -699,8 +853,8 @@ pub const CommandQueue = struct {
         try select.concurrent(.put, putOwned, .{ self, command });
         select.concurrent(
             .timeout,
-            waitForEnqueueTimeout,
-            .{ self.io, timeout },
+            waitForEnqueueDeadline,
+            .{ self.io, deadline },
         ) catch |err| {
             while (select.cancel()) |wake| switch (wake) {
                 .put => |result| {
@@ -757,11 +911,11 @@ pub const CommandQueue = struct {
         return self.queue.putOne(self.io, command);
     }
 
-    fn waitForEnqueueTimeout(
+    fn waitForEnqueueDeadline(
         io: std.Io,
-        timeout: std.Io.Duration,
+        deadline: std.Io.Clock.Timestamp,
     ) std.Io.Cancelable!void {
-        try std.Io.sleep(io, timeout, .awake);
+        try deadline.wait(io);
     }
 
     pub fn take(self: *CommandQueue) Error!?*Command {
@@ -1713,7 +1867,7 @@ test "MQTT async publish rejects a full queue without leaking" {
     );
 }
 
-test "MQTT async publish timeout releases an unqueued command" {
+test "MQTT async publish deadline releases an unqueued command" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
     });
@@ -1731,7 +1885,7 @@ test "MQTT async publish timeout releases an unqueued command" {
 
     try std.testing.expectError(
         error.Timeout,
-        queue.publishAsyncTimeout(
+        queue.publishAsyncWithDeadline(
             "queued/timeout",
             "not accepted",
             .{ .properties = &.{.{ .utf8_pair = .{
@@ -1740,7 +1894,10 @@ test "MQTT async publish timeout releases an unqueued command" {
                 .value = "until timeout",
             } }} },
             completion.handler(),
-            .fromMilliseconds(1),
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(1),
+                .clock = .awake,
+            }),
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), queue.async_commands.load(
@@ -1809,7 +1966,80 @@ test "MQTT asynchronous command timeout variants reject expired waits" {
     ));
 }
 
-test "MQTT async publish waits for bounded queue capacity" {
+test "MQTT asynchronous command deadlines reject invalid budgets" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue = try CommandQueue.init(std.testing.allocator, io, 1);
+    defer queue.deinit();
+    var completion: TestCompletion = .{};
+    const handler = completion.handler();
+    const wrong_clock: std.Io.Clock.Timestamp = .{
+        .raw = .zero,
+        .clock = .real,
+    };
+    const expired = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .zero,
+        .clock = .awake,
+    });
+
+    try std.testing.expectError(error.Timeout, queue.publishAsyncWithDeadline(
+        "timed/publish",
+        "payload",
+        .{},
+        handler,
+        wrong_clock,
+    ));
+    try std.testing.expectError(error.Timeout, queue.subscribeAsyncWithDeadline(
+        &.{.{ .topic_filter = "timed/+" }},
+        .{},
+        handler,
+        expired,
+    ));
+    try std.testing.expectError(error.Timeout, queue.unsubscribeAsyncWithDeadline(
+        &.{"timed/+"},
+        .{},
+        handler,
+        wrong_clock,
+    ));
+    try std.testing.expectError(error.Timeout, queue.disconnectAsyncWithDeadline(
+        0,
+        &.{},
+        handler,
+        expired,
+    ));
+    try std.testing.expectError(error.Timeout, queue.acknowledgeAsyncWithDeadline(
+        1,
+        .at_least_once,
+        .{},
+        handler,
+        wrong_clock,
+    ));
+    try std.testing.expectError(
+        error.Timeout,
+        queue.flushPendingAsyncWithDeadline(handler, expired),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        queue.beginReauthenticationAsyncWithDeadline(
+            &.{},
+            handler,
+            wrong_clock,
+        ),
+    );
+    // Deadline validation precedes both identifier allocation and deep-copy
+    // ownership, so rejected calls cannot create hidden completion IDs.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        queue.next_command_id.load(.monotonic),
+    );
+    try std.testing.expectEqual(@as(usize, 0), completion.calls);
+    try std.testing.expectEqual(@as(usize, 0), queue.async_commands.load(
+        .acquire,
+    ));
+}
+
+test "MQTT async publish deadline waits for bounded queue capacity" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
     });
@@ -1829,17 +2059,18 @@ test "MQTT async publish waits for bounded queue capacity" {
         io: std.Io,
         queue: *CommandQueue,
         completion: *TestCompletion,
+        deadline: std.Io.Clock.Timestamp,
         started: std.Io.Event = .unset,
         result: ?EnqueueTimeoutError!u64 = null,
 
         fn run(self: *@This()) void {
             self.started.set(self.io);
-            self.result = self.queue.publishAsyncTimeout(
+            self.result = self.queue.publishAsyncWithDeadline(
                 "queued/second",
                 "second",
                 .{},
                 self.completion.handler(),
-                .fromSeconds(1),
+                self.deadline,
             );
         }
     };
@@ -1847,6 +2078,10 @@ test "MQTT async publish waits for bounded queue capacity" {
         .io = io,
         .queue = &queue,
         .completion = &completion,
+        .deadline = .fromNow(io, .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        }),
     };
     const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
     producer.started.waitUncancelable(io);
@@ -1872,7 +2107,7 @@ test "MQTT async publish waits for bounded queue capacity" {
     try std.testing.expectEqual(second_id, completion.ids[1]);
 }
 
-test "MQTT async publish timed wait observes queue close" {
+test "MQTT async publish deadline observes queue close" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .unlimited,
     });
@@ -1892,17 +2127,18 @@ test "MQTT async publish timed wait observes queue close" {
         io: std.Io,
         queue: *CommandQueue,
         completion: *TestCompletion,
+        deadline: std.Io.Clock.Timestamp,
         started: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
             self.started.set(self.io);
-            _ = self.queue.publishAsyncTimeout(
+            _ = self.queue.publishAsyncWithDeadline(
                 "queued/closed",
                 "not accepted",
                 .{},
                 self.completion.handler(),
-                .fromSeconds(30),
+                self.deadline,
             ) catch |err| {
                 self.err = err;
                 return;
@@ -1914,6 +2150,10 @@ test "MQTT async publish timed wait observes queue close" {
         .io = io,
         .queue = &queue,
         .completion = &completion,
+        .deadline = .fromNow(io, .{
+            .raw = .fromSeconds(30),
+            .clock = .awake,
+        }),
     };
     const thread = try std.Thread.spawn(.{}, Producer.run, .{&producer});
     producer.started.waitUncancelable(io);

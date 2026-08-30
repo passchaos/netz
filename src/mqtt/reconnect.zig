@@ -332,6 +332,24 @@ pub const QueuedRun = struct {
         );
     }
 
+    /// Preserve a caller-owned absolute budget while waiting for queue space.
+    pub fn publishAsyncWithDeadline(
+        self: *QueuedRun,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.publishAsyncWithDeadline(
+            topic,
+            payload,
+            options,
+            completion,
+            deadline,
+        );
+    }
+
     /// Enqueue an owned PUBLISH and route its result into `completions`.
     pub fn publishQueued(
         self: *QueuedRun,
@@ -365,6 +383,23 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn publishQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.publishAsyncWithDeadline(
+            topic,
+            payload,
+            options,
+            completions.handler(),
+            deadline,
+        );
+    }
+
     pub fn subscribeAsync(
         self: *QueuedRun,
         subscriptions: []const mqtt.Subscription,
@@ -390,6 +425,21 @@ pub const QueuedRun = struct {
             options,
             completion,
             timeout,
+        );
+    }
+
+    pub fn subscribeAsyncWithDeadline(
+        self: *QueuedRun,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.subscribeAsyncWithDeadline(
+            subscriptions,
+            options,
+            completion,
+            deadline,
         );
     }
 
@@ -422,6 +472,21 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn subscribeQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        subscriptions: []const mqtt.Subscription,
+        options: runtime.SubscribeOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.subscribeAsyncWithDeadline(
+            subscriptions,
+            options,
+            completions.handler(),
+            deadline,
+        );
+    }
+
     pub fn unsubscribeAsync(
         self: *QueuedRun,
         filters: []const []const u8,
@@ -447,6 +512,21 @@ pub const QueuedRun = struct {
             options,
             completion,
             timeout,
+        );
+    }
+
+    pub fn unsubscribeAsyncWithDeadline(
+        self: *QueuedRun,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.unsubscribeAsyncWithDeadline(
+            filters,
+            options,
+            completion,
+            deadline,
         );
     }
 
@@ -476,6 +556,21 @@ pub const QueuedRun = struct {
             options,
             completions.handler(),
             timeout,
+        );
+    }
+
+    pub fn unsubscribeQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        filters: []const []const u8,
+        options: runtime.UnsubscribeOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.unsubscribeAsyncWithDeadline(
+            filters,
+            options,
+            completions.handler(),
+            deadline,
         );
     }
 
@@ -515,6 +610,21 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn disconnectAsyncWithDeadline(
+        self: *QueuedRun,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.disconnectAsyncWithDeadline(
+            reason_code,
+            properties,
+            completion,
+            deadline,
+        );
+    }
+
     /// Enqueue a graceful disconnect with an awaitable completion.
     pub fn disconnectQueued(
         self: *QueuedRun,
@@ -541,6 +651,21 @@ pub const QueuedRun = struct {
             properties,
             completions.handler(),
             timeout,
+        );
+    }
+
+    pub fn disconnectQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.disconnectAsyncWithDeadline(
+            reason_code,
+            properties,
+            completions.handler(),
+            deadline,
         );
     }
 
@@ -585,6 +710,23 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn acknowledgeAsyncWithDeadline(
+        self: *QueuedRun,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.acknowledgeAsyncWithDeadline(
+            packet_id,
+            qos,
+            options,
+            completion,
+            deadline,
+        );
+    }
+
     /// Enqueue an inbound PUBLISH acknowledgement with an awaitable result.
     pub fn acknowledgeQueued(
         self: *QueuedRun,
@@ -618,6 +760,23 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn acknowledgeQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        packet_id: u16,
+        qos: mqtt.QoS,
+        options: runtime.AcknowledgeOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.acknowledgeAsyncWithDeadline(
+            packet_id,
+            qos,
+            options,
+            completions.handler(),
+            deadline,
+        );
+    }
+
     pub fn flushPending(self: *QueuedRun) CommandQueueError!void {
         return self.queue.flushPending();
     }
@@ -637,6 +796,17 @@ pub const QueuedRun = struct {
         return self.queue.flushPendingAsyncTimeout(completion, timeout);
     }
 
+    pub fn flushPendingAsyncWithDeadline(
+        self: *QueuedRun,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.flushPendingAsyncWithDeadline(
+            completion,
+            deadline,
+        );
+    }
+
     pub fn flushPendingQueued(
         self: *QueuedRun,
         completions: *CompletionQueue,
@@ -652,6 +822,17 @@ pub const QueuedRun = struct {
         return self.flushPendingAsyncTimeout(
             completions.handler(),
             timeout,
+        );
+    }
+
+    pub fn flushPendingQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.flushPendingAsyncWithDeadline(
+            completions.handler(),
+            deadline,
         );
     }
 
@@ -686,6 +867,19 @@ pub const QueuedRun = struct {
         );
     }
 
+    pub fn beginReauthenticationAsyncWithDeadline(
+        self: *QueuedRun,
+        properties: []const mqtt.Property,
+        completion: command_queue.CompletionHandler,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.queue.beginReauthenticationAsyncWithDeadline(
+            properties,
+            completion,
+            deadline,
+        );
+    }
+
     pub fn beginReauthenticationQueued(
         self: *QueuedRun,
         completions: *CompletionQueue,
@@ -707,6 +901,19 @@ pub const QueuedRun = struct {
             properties,
             completions.handler(),
             timeout,
+        );
+    }
+
+    pub fn beginReauthenticationQueuedWithDeadline(
+        self: *QueuedRun,
+        completions: *CompletionQueue,
+        properties: []const mqtt.Property,
+        deadline: std.Io.Clock.Timestamp,
+    ) CommandEnqueueTimeoutError!u64 {
+        return self.beginReauthenticationAsyncWithDeadline(
+            properties,
+            completions.handler(),
+            deadline,
         );
     }
 

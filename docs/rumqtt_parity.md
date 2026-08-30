@@ -1141,12 +1141,15 @@ prompt cancellation during a thirty-second backoff, and multi-step live AUTH
 including callback-produced User Properties and missing-handler failure.
 Native TLS, cleartext WebSocket and authenticated WSS connector tests each
 establish two successive MQTT sessions through the same reconnect client.
-Every owned asynchronous producer operation offers both immediate bounded
-enqueue and a `*AsyncTimeout` form. The latter waits for consumer capacity
-under one duration while retaining deep ownership, reports queue closure
-distinctly, and still reports protocol completion through the original
-correlated callback. This covers both rumqttc-style `try_*` and waiting send
-behavior without introducing another network reader.
+Every owned asynchronous producer operation offers immediate bounded enqueue,
+a `*AsyncTimeout` form, and a `*AsyncWithDeadline` form. The bounded variants
+wait for consumer capacity while retaining deep ownership, report queue closure
+distinctly, and still report protocol completion through the original
+correlated callback. Absolute awake-clock deadlines are also forwarded through
+the managed `QueuedRun` callback and completion-queue conveniences, so a caller
+can share one budget across multiple stages without renewing a relative timeout.
+This covers both rumqttc-style `try_*` and waiting send behavior without
+introducing another network reader.
 
 The public `listener_namespace.Namespace` module defines Mosquitto-compatible
 mount points. It validates literal UTF-8 prefixes, enforces MQTT's u16 wire
