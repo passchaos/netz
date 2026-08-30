@@ -419,6 +419,92 @@ test "HTTP/1 streaming response deadline bounds body delivery" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 streaming informational response shares body deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var request: [4096]u8 = undefined;
+            try readUntilHead(self.io, stream, &request);
+            try writeAll(
+                self.io,
+                stream,
+                "HTTP/1.1 103 Early Hints\r\n\r\n" ++
+                    "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nb",
+            );
+            try std.Io.sleep(self.io, .fromMilliseconds(75), .awake);
+        }
+    };
+    const Sink = struct {
+        informationals: usize = 0,
+        body_bytes: usize = 0,
+
+        fn observe(context: *anyopaque, head: runtime.InformationalResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (head.status != 103) @panic("unexpected informational status");
+            self.informationals += 1;
+        }
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            self.body_bytes += bytes.len;
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        listener.socket.address,
+        .{},
+    );
+    defer client.close();
+    var sink: Sink = .{};
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestStreamingWithInformationalAndTimeout(
+            .{ .host = "localhost" },
+            .{
+                .context = &sink,
+                .on_response = Sink.observe,
+            },
+            .fromMilliseconds(25),
+            &sink,
+            Sink.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), sink.informationals);
+    try std.testing.expectEqual(@as(usize, 1), sink.body_bytes);
+    try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 standalone response reader honors head timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

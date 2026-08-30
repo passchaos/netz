@@ -2920,11 +2920,51 @@ pub const Client = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.requestStreamingWithInformationalAndDeadline(
+            request_options,
+            null,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithInformationalAndDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.response_deadline == null);
         self.response_deadline = deadline;
         defer self.response_deadline = null;
-        return self.requestStreaming(request_options, context, consume);
+        return self.requestStreamingWithInformational(
+            request_options,
+            informational,
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithInformationalAndTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithInformationalAndDeadline(
+            request_options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
     }
 
     /// Streaming response counterpart that enables explicit parser
@@ -4604,11 +4644,49 @@ pub const RequestWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndDeadline(
+            null,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndDeadline(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         _ = try deadline_policy.usableAwake(self.client.io, deadline);
         std.debug.assert(self.client.response_deadline == null);
         self.client.response_deadline = deadline;
         defer self.client.response_deadline = null;
-        return self.readResponseStreaming(context, consume);
+        return self.readResponseStreamingWithInformational(
+            informational,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndDeadline(
+            informational,
+            .fromNow(self.client.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            consume,
+        );
     }
 
     pub fn readResponseStreamingWithParseOptions(
