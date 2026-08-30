@@ -1573,11 +1573,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.runtime.Endpoint,
+        "receiveBytesBatchWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
         "receiveBytesIntoWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.runtime.Endpoint,
+        "receiveBytesIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
         "receiveBytesWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveBytesWithTimeout",
     ));
     try std.testing.expectEqual(
         @as(usize, 128),
@@ -4419,8 +4431,16 @@ test "public modules are reachable" {
         "receiveWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.handshake_inbox.Inbox,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.runtime.DatagramSource,
         "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.DatagramSource,
+        "receiveWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,

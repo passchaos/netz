@@ -228,6 +228,17 @@ pub const Inbox = struct {
         return self.receiveTimeoutInternal(timeout);
     }
 
+    pub fn receiveWithTimeout(
+        self: *Inbox,
+        timeout: std.Io.Duration,
+    ) (Error || std.Io.Event.WaitTimeoutError)!quic.runtime.OwnedBytes {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveWithDeadline(.fromNow(self.io, .{
+            .clock = .awake,
+            .raw = timeout,
+        }));
+    }
+
     pub fn receiveWithDeadline(
         self: *Inbox,
         deadline: std.Io.Clock.Timestamp,
@@ -397,6 +408,14 @@ test "QUIC pending handshake inbox wakes and closes waiters" {
         inbox.datagramSource().receiveWithDeadline(
             .{ .clock = .real, .raw = .zero },
         ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        inbox.receiveWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        inbox.datagramSource().receiveWithTimeout(.zero),
     );
 
     const bytes = try makeLongDatagram(allocator, "server", 'f');

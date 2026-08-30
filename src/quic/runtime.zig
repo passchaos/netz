@@ -729,6 +729,18 @@ pub const Endpoint = struct {
         return self.receiveKernelBytesIntoTimeout(buffer, timeout);
     }
 
+    pub fn receiveBytesIntoWithTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!ReceivedBytesView {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveBytesIntoWithDeadline(buffer, .fromNow(self.io, .{
+            .clock = .awake,
+            .raw = timeout,
+        }));
+    }
+
     pub fn receiveBytesIntoWithDeadline(
         self: *Endpoint,
         buffer: []u8,
@@ -756,6 +768,17 @@ pub const Endpoint = struct {
         defer self.socket_receive_mutex.unlock(self.io);
         if (self.takePendingReceived()) |pending| return pending;
         return self.receiveKernelBytesTimeout(timeout);
+    }
+
+    pub fn receiveBytesWithTimeout(
+        self: *Endpoint,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedBytes {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveBytesWithDeadline(.fromNow(self.io, .{
+            .clock = .awake,
+            .raw = timeout,
+        }));
     }
 
     pub fn receiveBytesWithDeadline(
@@ -793,6 +816,17 @@ pub const Endpoint = struct {
             return ownedBytesAsBatch(pending);
         }
         return self.receiveKernelBytesBatchTimeout(timeout);
+    }
+
+    pub fn receiveBytesBatchWithTimeout(
+        self: *Endpoint,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedBytesBatch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveBytesBatchWithDeadline(.fromNow(self.io, .{
+            .clock = .awake,
+            .raw = timeout,
+        }));
     }
 
     pub fn receiveBytesBatchWithDeadline(
@@ -1740,6 +1774,17 @@ pub const DatagramSource = struct {
         return self.receive_timeout_fn(self.context, timeout);
     }
 
+    pub fn receiveWithTimeout(
+        self: DatagramSource,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedBytes {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveTimeout(.{ .duration = .{
+            .clock = .awake,
+            .raw = timeout,
+        } });
+    }
+
     /// Preserve a caller-owned absolute budget through either an endpoint or
     /// a routed handshake inbox. Sources themselves remain type-erased, so
     /// clock validation belongs to the concrete implementation.
@@ -1923,6 +1968,22 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
     try std.testing.expectError(
         error.Timeout,
         DatagramSource.fromEndpoint(&receiver).receiveWithDeadline(invalid),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesIntoWithTimeout(&buffer, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesBatchWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        DatagramSource.fromEndpoint(&receiver).receiveWithTimeout(.zero),
     );
 
     try sender.sendBytes(receiver.address(), "caller-buffer");
