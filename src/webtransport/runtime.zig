@@ -1602,6 +1602,24 @@ pub const EndpointServer = struct {
         }
     }
 
+    /// Wait for one session event under one relative awake-clock budget.
+    pub fn receiveWithTimeout(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        timeout: std.Io.Duration,
+        stream_buffer: []u8,
+    ) EndpointServerError!EndpointServerEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveWithDeadline(
+            supported_versions,
+            .fromNow(self.h3.server.quic_server.endpoint.io, .{
+                .clock = .awake,
+                .raw = timeout,
+            }),
+            stream_buffer,
+        );
+    }
+
     /// Perform one bounded endpoint iteration. A null result lets a caller
     /// inspect shutdown or maintenance state without a second UDP reader.
     pub fn receiveOnce(

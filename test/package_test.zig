@@ -4524,6 +4524,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeSupervisor,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeSupervisor,
         "connectionCount",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "EndpointServer"));
@@ -4538,7 +4542,15 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.EndpointServer,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.EndpointServer,
         "receiveTransportWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.EndpointServer,
+        "receiveTransportWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.EndpointServer,
@@ -4816,6 +4828,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.EndpointServer,
         "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointServer,
+        "receiveWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.EndpointAcceptedSession,

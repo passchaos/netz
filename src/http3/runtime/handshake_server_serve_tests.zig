@@ -737,6 +737,13 @@ test "HTTP/3 handshake supervisor exposes bounded idle receive" {
             .fromNow(io, .{ .clock = .awake, .raw = .zero }),
         ),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        supervisor.receiveWithTimeout(
+            &.{quic.Version.version_1.wireValue()},
+            .zero,
+        ),
+    );
 }
 
 test "HTTP/3 handshake supervisor bounds and reports failed workers" {

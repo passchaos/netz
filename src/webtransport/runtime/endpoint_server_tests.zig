@@ -15,6 +15,10 @@ test "WebTransport endpoint server exposes stable session API" {
         runtime.EndpointServer,
         "receiveWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
+        "receiveWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "accept"));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "reject"));
     try std.testing.expect(@hasDecl(
@@ -53,6 +57,14 @@ test "WebTransport endpoint server validates receive deadlines" {
         endpoint.receiveWithDeadline(
             &.{quic.Version.version_1.wireValue()},
             .fromNow(io, .{ .clock = .awake, .raw = .zero }),
+            &buffer,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveWithTimeout(
+            &.{quic.Version.version_1.wireValue()},
+            .zero,
             &buffer,
         ),
     );

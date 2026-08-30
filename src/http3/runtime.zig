@@ -3576,6 +3576,19 @@ pub const HandshakeSupervisor = struct {
         }
     }
 
+    /// Wait for one supervisor event under a relative awake-clock budget.
+    pub fn receiveWithTimeout(
+        self: *HandshakeSupervisor,
+        supported_versions: []const u32,
+        timeout: std.Io.Duration,
+    ) HandshakeAdmissionError!HandshakeSupervisorEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveWithDeadline(supported_versions, .fromNow(
+            self.io,
+            .{ .clock = .awake, .raw = timeout },
+        ));
+    }
+
     /// Perform one bounded receive iteration. A null result means the poll
     /// interval elapsed after pending-handshake expiry was serviced.
     pub fn receiveOnce(
@@ -3930,6 +3943,19 @@ pub const EndpointServer = struct {
         }
     }
 
+    /// Wait for one request/lifecycle event under one relative budget.
+    pub fn receiveWithTimeout(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        timeout: std.Io.Duration,
+    ) HandshakeAdmissionError!EndpointServerEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveWithDeadline(supported_versions, .fromNow(
+            self.server.quic_server.endpoint.io,
+            .{ .clock = .awake, .raw = timeout },
+        ));
+    }
+
     /// Perform one bounded endpoint iteration. A null result lets a caller
     /// inspect shutdown or maintenance state without introducing another UDP
     /// receive owner. Buffered request events are returned before socket work.
@@ -4169,6 +4195,22 @@ pub const EndpointServer = struct {
                 poll_interval,
             )) |event| return event;
         }
+    }
+
+    /// Wait for one transport event under one relative awake-clock budget.
+    pub fn receiveTransportWithTimeout(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        timeout: std.Io.Duration,
+    ) HandshakeAdmissionError!EndpointTransportEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveTransportWithDeadline(
+            supported_versions,
+            .fromNow(self.server.quic_server.endpoint.io, .{
+                .clock = .awake,
+                .raw = timeout,
+            }),
+        );
     }
 
     /// Drive the endpoint until `shutdown` is set, exposing established

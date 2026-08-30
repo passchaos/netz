@@ -345,7 +345,8 @@ lightweight protected transport does not own a stateful recovery connection.
    insufficient; QUIC/HTTP/3 state remains intentionally single-owner. The
    typed endpoint receive also accepts one caller-owned absolute deadline; it
    retains that timestamp while routing unrelated connections, completing
-   handshakes, and servicing transport timers.
+   handshakes, and servicing transport timers. Its relative-timeout wrapper
+   converts once at entry and follows the same path.
 2. Expose associated bidi/uni stream APIs on preconfigured protected and
    development runtimes. Protected CONNECT/Capsule lifecycle is now
    long-lived, but the lightweight protected HTTP/3 runtime deliberately lacks

@@ -483,7 +483,9 @@ Its bounded
 adapters retain that single receive owner without busy waiting. The handshake
 supervisor and owning endpoint also expose absolute-deadline receive variants,
 including the transport-only boundary used by WebTransport, so unrelated
-packets and timer servicing cannot renew an outer operation's budget. Expired idle
+packets and timer servicing cannot renew an outer operation's budget. Matching
+one-shot relative-timeout wrappers convert to that deadline once at API entry.
+Expired idle
 or draining connections now emit a typed `closed` event only after their CID
 routes and stable session storage have been reclaimed. A two-client
 Callers may also service a bounded snapshot of all currently due timers in one

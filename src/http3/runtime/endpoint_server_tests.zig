@@ -13,7 +13,15 @@ test "HTTP/3 endpoint server exposes bounded callback loop API" {
     ));
     try std.testing.expect(@hasDecl(
         runtime.EndpointServer,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
         "receiveTransportWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
+        "receiveTransportWithTimeout",
     ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "serveUntil"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeEvent"));
@@ -45,6 +53,14 @@ test "HTTP/3 endpoint server validates receive deadlines" {
             versions,
             .{ .clock = .real, .raw = .zero },
         ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveTransportWithTimeout(versions, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.receiveWithTimeout(versions, .zero),
     );
     try std.testing.expectError(
         error.Timeout,
