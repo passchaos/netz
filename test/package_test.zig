@@ -1967,6 +1967,10 @@ test "public modules are reachable" {
         netz.http3.runtime.ProtectedServer,
         "sendResponseBodyBatchPaced",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodiesPaced",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "finishResponseTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendGoAway"));
     try std.testing.expect(@hasDecl(
@@ -2254,6 +2258,10 @@ test "public modules are reachable" {
     );
     try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.ProtectedConfig,
+        "response_scheduler_max_batch_packets",
+    ));
     try std.testing.expectEqual(
         @as(usize, 128),
         (netz.http3.runtime.HandshakeSessionOptions{}).max_concurrent_request_streams,

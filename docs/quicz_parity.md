@@ -231,7 +231,9 @@ message/frame scratch to complete request/response sequences, streaming heads,
 and trailers. Their paced streaming writers also accept borrowed body-part
 slices, avoiding caller-side concatenation while preserving one final FIN, and
 can batch one DATA contribution per stream through one protected UDP batch while
-committing only the socket-visible prefix. Protected sends synchronously protect and submit the datagrams
+committing only the socket-visible prefix. The lightweight server applies the
+same RFC 9218 urgency/incremental selection to complete response bodies, using
+the configured peer stream window as its sendability bound. Protected sends synchronously protect and submit the datagrams
 before returning, so these borrowing descriptors have the same bounded lifetime;
 Push remains separate because its promise and pushed-response encodings must be
 live together. Three dynamic-QPACK exchanges assert stable backing pointers on

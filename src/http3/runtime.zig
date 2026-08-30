@@ -3128,6 +3128,10 @@ pub const ProtectedConfig = struct {
     max_stream_frame_data: usize = 1200,
     max_informational_responses: usize =
         http3.default_max_informational_responses,
+    /// Maximum number of protected response DATA packets submitted in one
+    /// lightweight multi-stream batch. Zero retains sequential submission.
+    response_scheduler_max_batch_packets: usize =
+        quic.one_rtt.max_batch_packets,
 };
 
 pub const HandshakeSessionOptions = struct {
@@ -9587,6 +9591,229 @@ pub const ProtectedServer = struct {
             ProtectedServer.receiveBatchProgressForSend,
             ProtectedServer.finishBatchResponseStream,
         );
+    }
+
+    /// Send complete response bodies according to RFC 9218 request priority.
+    /// The lightweight runtime has no congestion controller, so eligibility
+    /// is derived from the configured peer stream window and packet-size
+    /// bound; PRIORITY_UPDATE still takes precedence over the request field.
+    pub fn sendResponseBodiesPaced(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        responses: []const ResponseBody,
+    ) Error!void {
+        if (responses.len == 0) return;
+        const allocator = self.quic_server.endpoint.allocator;
+        var response_index = std.AutoHashMapUnmanaged(u62, usize).empty;
+        defer response_index.deinit(allocator);
+        const use_response_index =
+            responses.len > response_scheduler_stack_capacity;
+        if (use_response_index) {
+            try response_index.ensureTotalCapacity(
+                allocator,
+                std.math.cast(u32, responses.len) orelse
+                    return error.ExcessiveLoad,
+            );
+        }
+        var offsets_stack: [response_scheduler_stack_capacity]usize = undefined;
+        const offsets = try stackFirstSlice(
+            usize,
+            allocator,
+            &offsets_stack,
+            responses.len,
+        );
+        defer freeStackFirstSlice(usize, allocator, &offsets_stack, offsets);
+        @memset(offsets, 0);
+        var candidates_stack: [response_scheduler_stack_capacity]response_scheduler.Candidate = undefined;
+        const candidates = try stackFirstSlice(
+            response_scheduler.Candidate,
+            allocator,
+            &candidates_stack,
+            responses.len,
+        );
+        defer freeStackFirstSlice(
+            response_scheduler.Candidate,
+            allocator,
+            &candidates_stack,
+            candidates,
+        );
+        var chunks_stack: [response_scheduler_stack_capacity]BodyChunk = undefined;
+        const chunks = try stackFirstSlice(
+            BodyChunk,
+            allocator,
+            &chunks_stack,
+            responses.len,
+        );
+        defer freeStackFirstSlice(
+            BodyChunk,
+            allocator,
+            &chunks_stack,
+            chunks,
+        );
+
+        for (responses, 0..) |response, index| {
+            if (self.outbound_bodies.find(response.stream_id) == null) {
+                return error.UnexpectedStream;
+            }
+            if (use_response_index) {
+                const slot = response_index.getOrPutAssumeCapacity(
+                    response.stream_id,
+                );
+                if (slot.found_existing) return error.UnexpectedStream;
+                slot.value_ptr.* = index;
+            } else {
+                for (responses[0..index]) |prior| {
+                    if (prior.stream_id == response.stream_id) {
+                        return error.UnexpectedStream;
+                    }
+                }
+            }
+            if (response.data.len == 0) return error.InvalidFrame;
+        }
+
+        const chunk_limit = pacedProtectedBodyChunkLimit(self.config);
+        const max_batch_packets = response_scheduler.batchPacketLimit(
+            self.config.response_scheduler_max_batch_packets,
+            quic.one_rtt.max_batch_packets,
+        );
+        var remaining_responses = responses.len;
+        var next_stream: usize = 0;
+        while (remaining_responses != 0) {
+            self.refreshProtectedResponseCandidates(
+                responses,
+                offsets,
+                candidates,
+                chunk_limit,
+            );
+            const selection = response_scheduler.select(candidates) orelse {
+                try self.receiveBatchProgressForSend();
+                continue;
+            };
+            var chunk_count: usize = 0;
+            var iterator = response_scheduler.Iterator.init(
+                candidates,
+                selection,
+                next_stream,
+            );
+            while (iterator.next()) |index| {
+                const response = responses[index];
+                const count = @min(
+                    candidates[index].remaining,
+                    candidates[index].send_capacity,
+                    chunk_limit,
+                );
+                if (count == 0) continue;
+                const end = offsets[index] + count;
+                chunks[chunk_count] = .{
+                    .stream_id = response.stream_id,
+                    .data = response.data[offsets[index]..end],
+                    .fin = end == response.data.len,
+                };
+                chunk_count += 1;
+                if (chunk_count == max_batch_packets) break;
+            }
+            if (chunk_count == 0) {
+                try self.receiveBatchProgressForSend();
+                continue;
+            }
+            const sent_count = sendProtectedBodyBatchProgress(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+                chunks[0..chunk_count],
+                self,
+                ProtectedServer.finishBatchResponseStream,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveBatchProgressForSend();
+                    continue;
+                },
+                else => return err,
+            };
+            for (chunks[0..sent_count]) |chunk| {
+                const index = if (use_response_index)
+                    response_index.get(chunk.stream_id) orelse
+                        return error.UnexpectedStream
+                else
+                    responseBodyIndex(responses, chunk.stream_id) orelse
+                        return error.UnexpectedStream;
+                offsets[index] += chunk.data.len;
+                if (offsets[index] == responses[index].data.len) {
+                    remaining_responses -= 1;
+                }
+            }
+            if (selection.exclusive_index == null and sent_count != 0) {
+                const last_sent = if (use_response_index)
+                    response_index.get(chunks[sent_count - 1].stream_id) orelse
+                        return error.UnexpectedStream
+                else
+                    responseBodyIndex(
+                        responses,
+                        chunks[sent_count - 1].stream_id,
+                    ) orelse return error.UnexpectedStream;
+                next_stream = (last_sent + 1) % responses.len;
+            }
+        }
+    }
+
+    fn refreshProtectedResponseCandidates(
+        self: *ProtectedServer,
+        responses: []const ResponseBody,
+        offsets: []const usize,
+        candidates: []response_scheduler.Candidate,
+        chunk_limit: usize,
+    ) void {
+        std.debug.assert(responses.len == offsets.len);
+        std.debug.assert(responses.len == candidates.len);
+        for (responses, offsets, candidates) |response, offset, *candidate| {
+            const remaining = response.data.len - offset;
+            if (remaining == 0) {
+                // FIN removes the outbound body entry. Completed candidates
+                // must remain in the fixed scheduler array until every peer
+                // finishes, but are deliberately ineligible for selection.
+                candidate.* = .{
+                    .stream_id = response.stream_id,
+                    .remaining = 0,
+                    .send_capacity = 0,
+                    .priority = .{},
+                };
+                continue;
+            }
+            const entry = self.outbound_bodies.find(response.stream_id).?;
+            const stream_capacity = if (entry.flow_limit) |limit|
+                std.math.cast(usize, limit -| entry.send.next_offset) orelse
+                    std.math.maxInt(usize)
+            else
+                std.math.maxInt(usize);
+            candidate.* = .{
+                .stream_id = response.stream_id,
+                .remaining = remaining,
+                .send_capacity = responseBodySendCapacity(
+                    remaining,
+                    std.math.maxInt(usize),
+                    stream_capacity,
+                    std.math.maxInt(usize),
+                    self.quic_server.endpoint.limits.max_datagram_size,
+                    chunk_limit,
+                ),
+                .priority = self.effectiveResponsePriority(
+                    response.stream_id,
+                ),
+            };
+        }
+    }
+
+    fn effectiveResponsePriority(
+        self: ProtectedServer,
+        stream_id: u62,
+    ) http3.Priority {
+        if (self.control.requestPriorityUpdate(stream_id)) |update| {
+            return update.priority();
+        }
+        return self.request_lifecycle.priority(stream_id);
     }
 
     fn receiveBatchProgressForSend(self: *ProtectedServer) Error!void {
@@ -24098,6 +24325,89 @@ test "HTTP/3 protected body batch sends and rejects duplicate streams" {
     try std.testing.expectEqual(@as(u64, 4), second.frames[0].stream.stream_id);
     try std.testing.expect(first.frames[first.frames.len - 1].stream.fin);
     try std.testing.expect(second.frames[second.frames.len - 1].stream.fin);
+}
+
+test "HTTP/3 protected response scheduler honors request priority" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xc6, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xc7, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc8} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc9} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .response_scheduler_max_batch_packets = 2,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const low_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/low",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "priority", .value = "u=6" }},
+    });
+    const high_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/high",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "priority", .value = "u=1" }},
+    });
+    var first = try server.receiveRequest();
+    defer first.deinit(allocator);
+    var second = try server.receiveRequest();
+    defer second.deinit(allocator);
+    try server.startResponse(first.from, low_id, .{ .status = 200 }, 3);
+    try server.startResponse(first.from, high_id, .{ .status = 200 }, 4);
+    try server.sendResponseBodiesPaced(first.from, &.{
+        .{ .stream_id = low_id, .data = "low" },
+        .{ .stream_id = high_id, .data = "high" },
+    });
+
+    var high = try client.receiveNextResponse();
+    defer high.deinit(allocator);
+    try std.testing.expect(high == .response);
+    try std.testing.expectEqual(high_id, high.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "high",
+        high.response.value.response.body,
+    );
+    var low = try client.receiveNextResponse();
+    defer low.deinit(allocator);
+    try std.testing.expect(low == .response);
+    try std.testing.expectEqual(low_id, low.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "low",
+        low.response.value.response.body,
+    );
 }
 
 test "HTTP/3 protected server streams interleaved requests through small windows" {
