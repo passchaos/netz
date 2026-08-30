@@ -228,7 +228,8 @@ deviation; this small transfer is a
 regression sample rather than an equal-wire quicz result.
 The lightweight preconfigured-key client and server now apply the same retained
 message/frame scratch to complete request/response sequences, streaming heads,
-and trailers. Protected sends synchronously protect and submit the datagrams
+and trailers. Their paced streaming writers also accept borrowed body-part
+slices, avoiding caller-side concatenation while preserving one final FIN. Protected sends synchronously protect and submit the datagrams
 before returning, so these borrowing descriptors have the same bounded lifetime;
 Push remains separate because its promise and pushed-response encodings must be
 live together. Three dynamic-QPACK exchanges assert stable backing pointers on

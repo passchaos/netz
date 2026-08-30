@@ -9448,6 +9448,35 @@ pub const ProtectedServer = struct {
         }
     }
 
+    /// Send one logical response DATA sequence from borrowed slices without
+    /// joining them in caller storage. Empty slices are ignored, and `fin` is
+    /// attached only to the final non-empty contribution.
+    pub fn sendResponseBodyPartsPaced(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        var non_empty: usize = 0;
+        for (parts) |part| non_empty += @intFromBool(part.len != 0);
+        if (non_empty == 0) {
+            try self.sendResponseBodyPaced(to, stream_id, &.{}, fin);
+            return;
+        }
+        var sent: usize = 0;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            sent += 1;
+            try self.sendResponseBodyPaced(
+                to,
+                stream_id,
+                part,
+                fin and sent == non_empty,
+            );
+        }
+    }
+
     fn sendResponseBodyPacedChunk(
         self: *ProtectedServer,
         to: net.IpAddress,
@@ -10251,6 +10280,32 @@ pub const ProtectedClient = struct {
                 fin and end == data.len,
             );
             offset = end;
+        }
+    }
+
+    /// Client counterpart to `sendResponseBodyPartsPaced`; caller slices stay
+    /// borrowed only for each synchronous protected send.
+    pub fn sendRequestBodyPartsPaced(
+        self: *ProtectedClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        var non_empty: usize = 0;
+        for (parts) |part| non_empty += @intFromBool(part.len != 0);
+        if (non_empty == 0) {
+            try self.sendRequestBodyPaced(stream_id, &.{}, fin);
+            return;
+        }
+        var sent: usize = 0;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            sent += 1;
+            try self.sendRequestBodyPaced(
+                stream_id,
+                part,
+                fin and sent == non_empty,
+            );
         }
     }
 
@@ -23215,10 +23270,10 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 server_ptr.outbound_bodies.frame_scratch.capacity;
             const body_frame_ptr = server_ptr.outbound_bodies.frame_scratch
                 .allocatedSlice().ptr;
-            try server_ptr.sendResponseBody(
+            try server_ptr.sendResponseBodyPartsPaced(
                 request.from,
                 request.stream_id,
-                "response-",
+                &.{ "response-", "", "chunks" },
                 false,
             );
             try std.testing.expectError(
@@ -23229,12 +23284,6 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                     "too-long-chunk",
                     true,
                 ),
-            );
-            try server_ptr.sendResponseBody(
-                request.from,
-                request.stream_id,
-                "chunks",
-                false,
             );
             try std.testing.expectEqual(
                 body_frame_capacity,
@@ -23335,12 +23384,15 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     const body_frame_capacity = client.outbound_bodies.frame_scratch.capacity;
     const body_frame_ptr = client.outbound_bodies.frame_scratch
         .allocatedSlice().ptr;
-    try client.sendRequestBody(stream_id, "request-", false);
+    try client.sendRequestBodyPartsPaced(
+        stream_id,
+        &.{ "request-", "", "chunks" },
+        false,
+    );
     try std.testing.expectError(
         error.InvalidContentLength,
         client.sendRequestBody(stream_id, "short", true),
     );
-    try client.sendRequestBody(stream_id, "chunks", false);
     try std.testing.expectEqual(
         body_frame_capacity,
         client.outbound_bodies.frame_scratch.capacity,
