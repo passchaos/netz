@@ -11149,6 +11149,53 @@ pub const ProtectedClient = struct {
         );
     }
 
+    /// Wait for the peer's mandatory SETTINGS while retaining any response
+    /// or push bytes that arrive first for their normal consumers.
+    pub fn receivePeerSettings(
+        self: *ProtectedClient,
+    ) Error!http3.Settings {
+        return self.receivePeerSettingsInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receivePeerSettingsWithTimeout(
+        self: *ProtectedClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!http3.Settings {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePeerSettingsInternal(.fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receivePeerSettingsWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!http3.Settings {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receivePeerSettingsInternal(deadline);
+    }
+
+    fn receivePeerSettingsInternal(
+        self: *ProtectedClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!http3.Settings {
+        while (!self.control.settings.received) {
+            if (deadline) |absolute| {
+                try self.receiveResponsePacketWithDeadline(absolute);
+            } else {
+                try self.receiveResponsePacket();
+            }
+        }
+        return self.control.settings.peer;
+    }
+
     /// Process one protected transport packet for control-stream progress.
     pub fn pollControl(self: *ProtectedClient) Error!void {
         try self.receiveResponsePacket();
@@ -18678,12 +18725,23 @@ test "HTTP/3 protected runtime sends a speculative QPACK request" {
         &server.protected_send,
         server_control_stream_id,
     );
-    while (!client.control.settings.received) {
-        try client.receiveResponsePacket();
-    }
+    try std.testing.expectError(
+        error.Timeout,
+        client.receivePeerSettingsWithDeadline(.{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    const peer_settings = try client.receivePeerSettingsWithTimeout(
+        .fromSeconds(1),
+    );
     try std.testing.expectEqual(
         @as(?u64, 1),
         client.qpack_encode.peer_max_blocked_streams,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        peer_settings.qpack_blocked_streams,
     );
 
     _ = try client.qpack_encode.insertField(
@@ -25026,6 +25084,112 @@ test "HTTP/3 protected client decodes dynamic QPACK response and sends feedback"
     try std.testing.expectEqualStrings("dynamic-client", dynamic_value orelse
         return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(u64, 1), client.qpack_decode.table.insert_count);
+}
+
+test "HTTP/3 protected peer SETTINGS deadline retains early response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xb5, 0x71, 0x72, 0x73 };
+    const server_cid = [_]u8{ 0xb6, 0x71, 0x72, 0x73 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb8} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/settings-race",
+        .authority = "localhost",
+    });
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "before-settings",
+    }).write(&response_bytes, allocator);
+    try sendProtectedFrames(
+        &server.quic_server.endpoint,
+        client.quic_client.address(),
+        server.config.send_keys,
+        server.config.peer_connection_id,
+        &server.next_packet_number,
+        &.{.{ .stream = .{
+            .stream_id = stream_id,
+            .data = response_bytes.items,
+            .fin = true,
+        } }},
+        server.config.max_frames_per_packet,
+        &server.protected_send,
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.receivePeerSettingsWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expect(!client.control.settings.received);
+    try std.testing.expect(client.response_streams.entries.items.len != 0);
+    try std.testing.expect(client.request_lifecycle.contains(stream_id));
+
+    try sendProtectedSettings(
+        &server.quic_server.endpoint,
+        client.quic_client.address(),
+        server.config,
+        &server.control,
+        &server.control_send,
+        &server.qpack_encoder_send,
+        &server.qpack_encoder_prefix_sent,
+        &server.qpack_decoder_send,
+        &server.qpack_decoder_prefix_sent,
+        &server.next_packet_number,
+        &server.protected_send,
+        server_control_stream_id,
+    );
+    _ = try client.receivePeerSettingsWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    var response = try client.receiveResponse(stream_id);
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "before-settings",
+        response.response.body,
+    );
 }
 
 test "HTTP/3 handshake server rejects requests beyond local GOAWAY" {

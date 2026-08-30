@@ -1950,6 +1950,18 @@ test "public modules are reachable" {
         "goAwayRetryDisposition",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "receivePeerSettings",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "receivePeerSettingsWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "receivePeerSettingsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServer,
         "serveConnection",
     ));
