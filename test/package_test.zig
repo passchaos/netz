@@ -620,6 +620,22 @@ test "public modules are reachable" {
         netz.http1.runtime,
         "readResponseFromStreamBufferedForRequestWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "readResponseFromStreamForRequestObservedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "readResponseFromStreamForRequestObservedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "readResponseFromStreamBufferedForRequestObservedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "readResponseFromStreamBufferedForRequestObservedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readRequestFromStreamBuffered"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamForRequest"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "Tunnel"));

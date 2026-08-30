@@ -5102,6 +5102,30 @@ pub fn readResponseFromStreamForRequestWithDeadline(
     request_method: http1.Method,
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
+    return readResponseFromStreamForRequestObservedWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        request_method,
+        null,
+        deadline,
+    );
+}
+
+/// Deadline-bounded response read that exposes every permitted informational
+/// response without giving the final response a renewed budget.
+pub fn readResponseFromStreamForRequestObservedWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    request_method: http1.Method,
+    informational: ?InformationalObserver,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedResponse {
     _ = try deadline_policy.usableAwake(io, deadline);
     return readResponseFromStreamForRequestObservedUntil(
         allocator,
@@ -5110,7 +5134,7 @@ pub fn readResponseFromStreamForRequestWithDeadline(
         limits,
         options,
         request_method,
-        null,
+        informational,
         deadline,
     );
 }
@@ -5132,6 +5156,29 @@ pub fn readResponseFromStreamForRequestWithTimeout(
         limits,
         options,
         request_method,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
+pub fn readResponseFromStreamForRequestObservedWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    request_method: http1.Method,
+    informational: ?InformationalObserver,
+    timeout: std.Io.Duration,
+) Error!OwnedResponse {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readResponseFromStreamForRequestObservedWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        request_method,
+        informational,
         .fromNow(io, .{ .raw = timeout, .clock = .awake }),
     );
 }
@@ -5322,6 +5369,33 @@ pub fn readResponseFromStreamBufferedForRequestWithDeadline(
     request_method: http1.Method,
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedResponse {
+    return readResponseFromStreamBufferedForRequestObservedWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        inbuf,
+        request_method,
+        null,
+        deadline,
+    );
+}
+
+/// Buffered deadline read with informational callbacks. All 1xx responses and
+/// the final response consume one budget, while bytes for a later exchange
+/// remain in the caller-owned input buffer.
+pub fn readResponseFromStreamBufferedForRequestObservedWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    request_method: http1.Method,
+    informational: ?InformationalObserver,
+    deadline: std.Io.Clock.Timestamp,
+) Error!OwnedResponse {
     _ = try deadline_policy.usableAwake(io, deadline);
     return readResponseFromTransportBufferedForRequestObserved(
         allocator,
@@ -5330,7 +5404,7 @@ pub fn readResponseFromStreamBufferedForRequestWithDeadline(
         options,
         inbuf,
         request_method,
-        null,
+        informational,
         null,
         deadline,
     );
@@ -5356,6 +5430,31 @@ pub fn readResponseFromStreamBufferedForRequestWithTimeout(
         inbuf,
         request_method,
         .fromNow(io, .{ .clock = .awake, .raw = timeout }),
+    );
+}
+
+pub fn readResponseFromStreamBufferedForRequestObservedWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    request_method: http1.Method,
+    informational: ?InformationalObserver,
+    timeout: std.Io.Duration,
+) Error!OwnedResponse {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readResponseFromStreamBufferedForRequestObservedWithDeadline(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+        inbuf,
+        request_method,
+        informational,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
     );
 }
 
