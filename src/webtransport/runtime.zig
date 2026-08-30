@@ -147,6 +147,35 @@ pub const ProtectedServer = struct {
         );
     }
 
+    pub fn receiveDatagramWithTimeout(
+        self: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDatagramWithDeadline(.fromNow(
+            self.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedDatagram {
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return receiveProtectedDatagramFromEndpointWithDeadline(
+            &self.h3.quic_server.endpoint,
+            self.h3.config.receive_keys,
+            self.h3.config.local_connection_id.len,
+            &self.h3.expected_packet_number,
+            self.h3.config.max_frames_per_packet,
+            deadline,
+        );
+    }
+
     pub fn sendDatagram(self: *ProtectedServer, to: net.IpAddress, session_id: webtransport.SessionId, payload: []const u8) Error!void {
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         try sendProtectedDatagramFromEndpoint(
@@ -4281,6 +4310,36 @@ pub const ProtectedClientSession = struct {
         );
     }
 
+    pub fn receiveDatagramWithTimeout(
+        self: *ProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedProtectedDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDatagramWithDeadline(.fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *ProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedProtectedDatagram {
+        try self.control.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return receiveProtectedDatagramFromEndpointWithDeadline(
+            &self.h3.quic_client.endpoint,
+            self.h3.config.receive_keys,
+            self.h3.config.local_connection_id.len,
+            &self.h3.expected_packet_number,
+            self.h3.config.max_frames_per_packet,
+            deadline,
+        );
+    }
+
     pub fn datagramsNegotiated(self: ProtectedClientSession) bool {
         webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer) catch return false;
         return true;
@@ -6040,6 +6099,43 @@ fn receiveProtectedDatagramFromEndpoint(
     }
 }
 
+fn receiveProtectedDatagramFromEndpointWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.PacketProtectionKeys,
+    local_connection_id_len: usize,
+    expected_packet_number: *u64,
+    max_frames: usize,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!OwnedProtectedDatagram {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    while (true) {
+        var datagram = try endpoint.receiveBytesTimeout(.{
+            .deadline = deadline,
+        });
+        defer datagram.deinit(endpoint.allocator);
+        var packet = try quic.one_rtt.openReceivedBytes(
+            endpoint,
+            datagram.from,
+            datagram.bytes,
+            keys,
+            local_connection_id_len,
+            expected_packet_number.*,
+            max_frames,
+        );
+        errdefer packet.deinit(endpoint.allocator);
+        expected_packet_number.* = packet.packet.packet_number + 1;
+        for (packet.frames) |frame| {
+            if (frame == .datagram) {
+                const wt = try webtransport.Datagram.parse(
+                    frame.datagram.data,
+                );
+                return .{ .packet = packet, .datagram = wt };
+            }
+        }
+        packet.deinit(endpoint.allocator);
+    }
+}
+
 fn findHeader(headers: []const http3.Qpack.HeaderField, name: []const u8) ?[]const u8 {
     for (headers) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
@@ -6619,6 +6715,16 @@ test "WebTransport protected control receive deadlines preserve parser state" {
     );
     defer client.deinit();
 
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveDatagramWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveDatagramWithDeadline(
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
     var control_bytes: [64]u8 = undefined;
     try std.testing.expectError(
         error.Timeout,

@@ -351,7 +351,9 @@ lightweight protected transport does not own a stateful recovery connection.
    owner. Its existing session-control path now has timeout and absolute-
    deadline receive variants on both endpoint roles. One unchanged awake-clock
    budget spans every HTTP/3 DATA fragment, and parser state survives a timeout
-   between fragments so callers can resume without losing Capsule bytes.
+   between fragments so callers can resume without losing Capsule bytes. The
+   lightweight protected DATAGRAM readers expose matching bounded variants and
+   preserve one deadline while skipping unrelated protected packets.
 3. Expand browser coverage beyond Chromium. The checked-in Chrome gate now
    covers real browser CONNECT, DATAGRAM, bidirectional/unidirectional streams,
    exact mapped RESET_STREAM and STOP_SENDING codes, sibling reuse, and close.
