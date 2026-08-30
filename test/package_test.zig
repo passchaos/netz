@@ -1918,6 +1918,10 @@ test "public modules are reachable" {
         "receivePushEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "readPushData"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "skipPushData",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(
@@ -2153,6 +2157,10 @@ test "public modules are reachable" {
         "receivePushEventWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readPushData"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "skipPushData",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBodyPaced"));

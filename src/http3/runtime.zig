@@ -8349,6 +8349,25 @@ pub const HandshakeClient = struct {
         return entry.reader.?.readData(out);
     }
 
+    pub fn skipPushData(
+        self: *HandshakeClient,
+        push_id: u64,
+    ) Error!usize {
+        const entry = self.push_streams.findByPushId(push_id) orelse
+            return error.UnexpectedStream;
+        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            reader,
+        );
+        const skipped = try reader.skipData();
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            reader,
+        );
+        return skipped;
+    }
+
     pub fn receivePush(
         self: *HandshakeClient,
     ) Error!PushedResponse {
@@ -11219,6 +11238,36 @@ pub const ProtectedClient = struct {
         out: []u8,
     ) Error!usize {
         return self.push_streams.readData(push_id, out);
+    }
+
+    /// Discard currently available push DATA and return its receive-window
+    /// credit without allocating caller storage.
+    pub fn skipPushData(
+        self: *ProtectedClient,
+        push_id: u64,
+    ) Error!usize {
+        const entry = self.push_streams.findByPushId(push_id) orelse
+            return error.UnexpectedStream;
+        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const from = entry.from orelse self.quic_client.peer;
+        try sendProtectedReaderCapacity(
+            &self.quic_client.endpoint,
+            from,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            reader,
+        );
+        const skipped = try reader.skipData();
+        try sendProtectedReaderCapacity(
+            &self.quic_client.endpoint,
+            from,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            reader,
+        );
+        return skipped;
     }
 
     pub fn receivePush(
@@ -22824,12 +22873,10 @@ test "HTTP/3 protected client streams promised push response" {
     var data = try client.receivePushEvent();
     defer data.deinit(allocator);
     try std.testing.expect(data.value == .data_available);
-    var body: [8]u8 = undefined;
     try std.testing.expectEqual(
         @as(usize, 5),
-        try client.readPushData(3, &body),
+        try client.skipPushData(3),
     );
-    try std.testing.expectEqualStrings("asset", body[0..5]);
     var finished = try client.receivePushEvent();
     defer finished.deinit(allocator);
     try std.testing.expect(finished.value == .finished);
@@ -27781,8 +27828,7 @@ test "HTTP/3 handshake client push deadlines preserve progress" {
     try std.testing.expect(client.push_streams.findByPushId(2) != null);
     shared.streaming_timed_out.set(io);
 
-    var body: [40]u8 = undefined;
-    var body_len: usize = 0;
+    var skipped_body_len: usize = 0;
     var finished = false;
     const deadline = std.Io.Clock.Timestamp.fromNow(
         io,
@@ -27794,13 +27840,13 @@ test "HTTP/3 handshake client push deadlines preserve progress" {
         try std.testing.expectEqual(@as(u64, 2), event.push_id);
         switch (event.value) {
             .data_available => {
-                body_len += try client.readPushData(2, body[body_len..]);
+                skipped_body_len += try client.skipPushData(2);
             },
             .finished => finished = true,
             .head, .trailers, .push_promise => return error.TestUnexpectedResult,
         }
     }
-    try std.testing.expectEqualStrings(streaming_body, body[0..body_len]);
+    try std.testing.expectEqual(streaming_body.len, skipped_body_len);
 
     thread.join();
     joined = true;
