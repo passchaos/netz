@@ -1085,7 +1085,8 @@ nonblocking consumption with deep-owned SUBACK/UNSUBACK reason codes and
 properties. A bounded `ClientEventQueue` also offers blocking, relative-
 timeout, absolute-deadline, and nonblocking consumption and transfers complete
 packet events to consumer threads without introducing a
-second socket reader. Further parity work is ergonomic integration with
+second socket reader. Both queues expose their timeout-capable error sets at
+the reconnect module boundary. Further parity work is ergonomic integration with
 application-specific async executors rather than missing operations, event
 delivery, or completion storage. Re-authentication properties are deep-owned
 until the initiating AUTH write completes. The single-owner bounded poll path,

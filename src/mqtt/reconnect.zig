@@ -762,6 +762,8 @@ pub const ClientEvent = union(enum) {
 pub const ClientEventQueue = event_queue.Queue(ClientEvent);
 pub const OwnedClientEvent = ClientEventQueue.OwnedEvent;
 pub const ClientEventQueueError = ClientEventQueue.Error;
+pub const ClientEventQueueReceiveTimeoutError =
+    ClientEventQueue.ReceiveTimeoutError;
 
 /// Managed reconnect worker paired with its event sink. Closing the sink
 /// before joining ensures bounded-queue backpressure cannot deadlock shutdown.
@@ -1210,7 +1212,10 @@ pub const Client = struct {
     ) runtime.Error!runtime.ConnectAttempt {
         return if (deadline) |absolute|
             self.target.connectAttemptWithDeadline(
-                self.allocator, self.io, self.options.value, absolute,
+                self.allocator,
+                self.io,
+                self.options.value,
+                absolute,
             )
         else
             self.connectAttempt();

@@ -2003,6 +2003,10 @@ test "public modules are reachable" {
         "OwnedClientEvent",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "ClientEventQueueReceiveTimeoutError",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.ClientEventQueue,
         "receiveWithDeadline",
     ));
