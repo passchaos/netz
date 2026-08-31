@@ -1165,6 +1165,73 @@ pub const EndpointAcceptedSession = struct {
         return self.h3.established.connection.peerAddress();
     }
 
+    pub fn remoteAddressValidated(self: EndpointAcceptedSession) bool {
+        return self.h3.established.connection.peerAddressValidated();
+    }
+
+    pub fn rttNanos(self: EndpointAcceptedSession) ?u64 {
+        return self.stats().smoothed_rtt_ns;
+    }
+
+    /// Derive TLS 1.3 exporter bytes from the authenticated QUIC/TLS session.
+    /// This borrows only the caller-provided output buffer; no returned state
+    /// outlives `self`.
+    pub fn exportKeyingMaterial(
+        self: *const EndpointAcceptedSession,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        try self.h3.exportKeyingMaterial(label, context, out);
+    }
+
+    /// Return the retained peer certificate chain borrowed from the promoted
+    /// handshake-backed HTTP/3 session. The slices remain valid only until the
+    /// endpoint removes this connection and deinitializes the accepted session.
+    pub fn peerCertificates(
+        self: *const EndpointAcceptedSession,
+    ) ?[]const []const u8 {
+        return self.h3.peerCertificates();
+    }
+
+    /// Return the negotiated ALPN token borrowed from the promoted handshake
+    /// session. Callers must not retain the slice after this accepted session
+    /// is removed from the endpoint.
+    pub fn negotiatedAlpn(self: EndpointAcceptedSession) []const u8 {
+        return self.h3.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: EndpointAcceptedSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.h3.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: EndpointAcceptedSession,
+    ) quic.tls.secret.Hash {
+        return self.h3.negotiatedTranscriptHash();
+    }
+
+    pub fn initiateKeyUpdate(
+        self: *EndpointAcceptedSession,
+    ) EndpointServerError!void {
+        try self.h3.initiateKeyUpdate();
+        try self.refreshTimer();
+    }
+
+    pub fn localKeyUpdateCount(self: EndpointAcceptedSession) u64 {
+        return self.h3.localKeyUpdateCount();
+    }
+
+    pub fn peerKeyUpdateCount(self: EndpointAcceptedSession) u64 {
+        return self.h3.peerKeyUpdateCount();
+    }
+
+    pub fn keyUpdateAwaitingAck(self: EndpointAcceptedSession) bool {
+        return self.h3.keyUpdateAwaitingAck();
+    }
+
     pub fn sendDatagram(
         self: *EndpointAcceptedSession,
         payload: []const u8,
@@ -4617,12 +4684,9 @@ pub const HandshakeClientSession = struct {
     }
 
     fn receiveControlProgressWithDeadline(
-        context: struct {
-            *HandshakeClientSession,
-            std.Io.Clock.Timestamp,
-        },
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        const self, const deadline = context;
         try self.h3.receiveDetachedResponseProgressWithDeadline(
             self.session_id.value,
             deadline,

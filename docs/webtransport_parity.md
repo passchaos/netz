@@ -136,7 +136,13 @@ actual wait for a cumulative `MAX_STREAMS` update. Standalone sessions expose
 retaining cumulative WebTransport registry accounting. The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading
-UDP.
+UDP. It now forwards the same authenticated metadata that is valid on the
+shared promoted connection: peer-path validation, smoothed RTT, TLS exporter
+material, retained peer certificates, negotiated ALPN/cipher suite/transcript
+hash, and QUIC key-update initiation plus local/peer generation counts and the
+outstanding ACK gate. Borrowed ALPN/certificate slices still belong to the
+promoted handshake-backed HTTP/3 session and therefore remain valid only until
+the endpoint removes that accepted connection.
 The multi-connection endpoint preserves HTTP/3 handshake-worker failures as a
 finite typed payload rather than widening them to `anyerror`. In particular,
 an expired shared-endpoint admission is observable as `error.Timeout` with its

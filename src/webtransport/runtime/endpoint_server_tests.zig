@@ -10,6 +10,10 @@ const net = std.Io.net;
 test "WebTransport endpoint server exposes stable session API" {
     try std.testing.expect(@hasDecl(runtime, "EndpointServer"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServerEvent"));
+    try std.testing.expect(@hasDecl(
+        runtime,
+        "EndpointAcceptedSession",
+    ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "receive"));
     try std.testing.expect(@hasDecl(
         runtime.EndpointServer,
@@ -22,9 +26,341 @@ test "WebTransport endpoint server exposes stable session API" {
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "accept"));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "reject"));
     try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "remoteAddressValidated",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "rttNanos",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "negotiatedTranscriptHash",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "initiateKeyUpdate",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "localKeyUpdateCount",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "peerKeyUpdateCount",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "keyUpdateAwaitingAck",
+    ));
+    try std.testing.expect(@hasDecl(
         http3.runtime.EndpointServer,
         "promotedSession",
     ));
+}
+
+test "WebTransport endpoint accepted session forwards authenticated metadata" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const settings = webtransport.defaultSettings(.{});
+
+    var certificate_der_storage: [tls_testing.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der_storage,
+        tls_testing.certificate_base64,
+    );
+    const certificate_der = certificate_der_storage;
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{
+            .handshake = .{
+                .local_connection_id = "wt-meta-server",
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .random = [_]u8{0x21} ** 32,
+                .x25519_secret_key = [_]u8{0x22} ** 32,
+                .handshake_recovery = .{
+                    .initial_pto_ms = 20,
+                    .max_pto_ms = 40,
+                    .max_duration_ms = 2_000,
+                },
+            },
+            .session = .{ .local_settings = settings },
+        },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{
+        .max_pending_handshakes = 1,
+        .max_connections = 1,
+        .inbox_capacity = 8,
+        .handshake_timeout_ms = 2_000,
+    });
+    defer endpoint.deinit();
+
+    const ClientMetadata = struct {
+        session_id: webtransport.SessionId,
+        local_address: net.IpAddress,
+        exporter: [48]u8,
+    };
+
+    const Shared = struct {
+        io: std.Io,
+        server_address: net.IpAddress,
+        public_key: [65]u8,
+        certificate_der: [tls_testing.certificate_der_len]u8,
+        settings: http3.Settings,
+        metadata_ready: std.Io.Event = .unset,
+        peer_close_observed: std.Io.Event = .unset,
+        metadata: ?ClientMetadata = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.metadata_ready.set(self.io);
+                self.peer_close_observed.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var client = try runtime.HandshakeClientSession.connect(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.server_address,
+                .{
+                    .authority = "localhost",
+                    .path = "/endpoint-metadata",
+                    .limits = .{ .http3 = .{
+                        .quic = .{ .max_datagram_size = 4096 },
+                    } },
+                    .h3 = .{
+                        .handshake = .{
+                            .original_destination_connection_id = "wt-meta-origin",
+                            .local_connection_id = "wt-meta-client",
+                            .server_name = "localhost",
+                            .server_auth = .{
+                                .pinned_ecdsa_p256_public_key = self.public_key,
+                            },
+                            .random = [_]u8{0x23} ** 32,
+                            .x25519_secret_key = [_]u8{0x24} ** 32,
+                            .handshake_recovery = .{
+                                .initial_pto_ms = 20,
+                                .max_pto_ms = 40,
+                                .max_duration_ms = 2_000,
+                            },
+                        },
+                        .session = .{ .local_settings = self.settings },
+                    },
+                },
+            );
+            defer client.deinit();
+
+            try std.testing.expectEqual(
+                self.server_address,
+                client.remoteAddress(),
+            );
+            try std.testing.expect(client.remoteAddressValidated());
+            try std.testing.expect(client.rttNanos() != null);
+            try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
+            try std.testing.expectEqual(
+                @TypeOf(client.negotiatedCipherSuite()).aes_128_gcm_sha256,
+                client.negotiatedCipherSuite(),
+            );
+            try std.testing.expectEqual(
+                @TypeOf(client.negotiatedTranscriptHash()).sha256,
+                client.negotiatedTranscriptHash(),
+            );
+            const server_chain = client.peerCertificates() orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), server_chain.len);
+            try std.testing.expectEqualSlices(
+                u8,
+                &self.certificate_der,
+                server_chain[0],
+            );
+            try std.testing.expect(@intFromPtr(server_chain[0].ptr) !=
+                @intFromPtr(&self.certificate_der[0]));
+
+            var client_exporter: [48]u8 = undefined;
+            try client.exportKeyingMaterial(
+                "EXPORTER-netz-webtransport-endpoint",
+                "endpoint-metadata",
+                &client_exporter,
+            );
+            self.metadata = .{
+                .session_id = client.sessionId(),
+                .local_address = client.h3.address(),
+                .exporter = client_exporter,
+            };
+            self.metadata_ready.set(self.io);
+
+            const event = client.receiveSessionEventWithTimeout(
+                .fromSeconds(1),
+            ) catch |err| switch (err) {
+                // The server deliberately initiates a key update immediately
+                // before closing. This test exercises the endpoint-side
+                // metadata mutation, not peer close delivery; either terminal
+                // event or a bounded timeout is sufficient to release the
+                // worker without turning a lost close datagram into a hang.
+                error.Timeout => null,
+                else => return err,
+            };
+            if (event) |value| {
+                try std.testing.expect(value == .closed);
+                try std.testing.expectEqual(@as(u32, 79), value.closed.code);
+                try std.testing.expectEqualStrings(
+                    "endpoint metadata done",
+                    value.closed.reason,
+                );
+            }
+            self.peer_close_observed.set(self.io);
+        }
+    };
+    var shared = Shared{
+        .io = io,
+        .server_address = server.address(),
+        .public_key = public_key,
+        .certificate_der = certificate_der,
+        .settings = settings,
+    };
+    const client_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.metadata_ready.set(io);
+        shared.peer_close_observed.set(io);
+        client_thread.join();
+    };
+
+    const versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    var stream_buffer: [1]u8 = undefined;
+    var accepted_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null;
+    var accepted: ?*runtime.EndpointAcceptedSession = null;
+    const admission_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(3),
+    });
+    while (accepted == null) {
+        var event = try endpoint.receiveWithDeadline(
+            &versions,
+            admission_deadline,
+            &stream_buffer,
+        );
+        defer event.deinit(allocator);
+        switch (event) {
+            .connected => {},
+            .closed => return error.TestUnexpectedResult,
+            .handshake_failed => |failure| return failure.err,
+            .session_request => |handle| {
+                const pending = endpoint.pendingSession(handle) orelse
+                    return error.TestUnexpectedResult;
+                try std.testing.expectEqualStrings(
+                    "/endpoint-metadata",
+                    pending.path(),
+                );
+                const value = try endpoint.accept(handle);
+                accepted_handle = handle;
+                accepted = value;
+            },
+            .session_event, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+
+    const session = accepted.?;
+    try shared.metadata_ready.wait(io);
+    const client_metadata = shared.metadata orelse
+        return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(session.sessionId(), client_metadata.session_id);
+    try std.testing.expectEqual(
+        client_metadata.local_address,
+        session.remoteAddress(),
+    );
+    try std.testing.expect(session.remoteAddressValidated());
+    // A client can complete this local handshake before the server receives an
+    // ACK that yields its first RTT sample. The endpoint accessor must mirror
+    // that optional transport state rather than inventing a measurement.
+    try std.testing.expectEqual(
+        session.stats().smoothed_rtt_ns,
+        session.rttNanos(),
+    );
+    try std.testing.expectEqualStrings("h3", session.negotiatedAlpn());
+    try std.testing.expectEqual(
+        @TypeOf(session.negotiatedCipherSuite()).aes_128_gcm_sha256,
+        session.negotiatedCipherSuite(),
+    );
+    try std.testing.expectEqual(
+        @TypeOf(session.negotiatedTranscriptHash()).sha256,
+        session.negotiatedTranscriptHash(),
+    );
+    try std.testing.expectEqual(
+        @as(?[]const []const u8, null),
+        session.peerCertificates(),
+    );
+    try std.testing.expectEqual(@as(u64, 0), session.localKeyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 0), session.peerKeyUpdateCount());
+    try std.testing.expect(!session.keyUpdateAwaitingAck());
+
+    var server_exporter: [48]u8 = undefined;
+    var client_exporter: [48]u8 = undefined;
+    try session.exportKeyingMaterial(
+        "EXPORTER-netz-webtransport-endpoint",
+        "endpoint-metadata",
+        &server_exporter,
+    );
+    client_exporter = client_metadata.exporter;
+    try std.testing.expectEqualSlices(
+        u8,
+        &server_exporter,
+        &client_exporter,
+    );
+
+    try session.initiateKeyUpdate();
+    try std.testing.expectEqual(@as(u64, 1), session.localKeyUpdateCount());
+    try std.testing.expect(session.keyUpdateAwaitingAck());
+
+    try session.close(79, "endpoint metadata done");
+    try shared.peer_close_observed.wait(io);
+    const handle = accepted_handle orelse return error.TestUnexpectedResult;
+    try std.testing.expect(endpoint.removeConnection(handle));
+
+    client_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "WebTransport endpoint server validates receive deadlines" {
