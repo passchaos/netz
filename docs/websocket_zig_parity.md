@@ -113,6 +113,10 @@ Trailer) are rejected before any request bytes are sent. This supports common
 Authorization and Cookie handshakes without permitting duplicate critical
 fields or ambiguous body framing. The fully encoded request head is also
 checked against `Limits.max_head_bytes` before the first transport write.
+HTTP/1 Upgrade parsing now also threads explicit `Limits.max_request_headers`
+and `Limits.max_response_headers` into every WS/WSS handshake request/response
+parser call, so header-count bounds are independent from the byte budget on
+both server and client paths.
 
 ## Direct frame hot-path evidence
 

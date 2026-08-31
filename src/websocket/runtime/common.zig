@@ -3,6 +3,12 @@ const websocket = @import("../mod.zig");
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
+    /// Maximum number of HTTP/1 request headers accepted while parsing the
+    /// client's Upgrade request on WS and WSS server paths.
+    max_request_headers: usize = 100,
+    /// Maximum number of HTTP/1 response headers accepted while parsing the
+    /// server's 101 response on WS and WSS client paths.
+    max_response_headers: usize = 100,
     max_frame_bytes: usize = 16 * 1024 * 1024,
     max_message_bytes: usize = 16 * 1024 * 1024,
     /// Optional absolute budget for the HTTP/1 Upgrade request/response head.

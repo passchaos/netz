@@ -728,7 +728,11 @@ fn acceptTransport(
     );
     defer head.deinit(allocator);
 
-    var request = try http1.parseRequest(allocator, head.head, .{});
+    var request = try http1.parseRequest(
+        allocator,
+        head.head,
+        http1HandshakeRequestParseOptions(limits),
+    );
     defer request.deinit(allocator);
     try websocket.validateClientHandshake(request);
     try origin_policy.validateHttp1(request.headers, options.allowed_origins);
@@ -2216,7 +2220,11 @@ pub const Client = struct {
             deadline,
         );
         defer head.deinit(allocator);
-        var response = try http1.parseResponse(allocator, head.head, .{});
+        var response = try http1.parseResponse(
+            allocator,
+            head.head,
+            http1HandshakeResponseParseOptions(options.limits),
+        );
         defer response.deinit(allocator);
         if (response.status != 101) return error.InvalidResponse;
         const selected_protocol = try validateServerHandshake(allocator, response, &key, options.protocols);
@@ -5442,6 +5450,18 @@ fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, ma
     );
 }
 
+fn http1HandshakeRequestParseOptions(limits: Limits) http1.ParseOptions {
+    return .{
+        .max_headers = limits.max_request_headers,
+    };
+}
+
+fn http1HandshakeResponseParseOptions(limits: Limits) http1.ParseOptions {
+    return .{
+        .max_headers = limits.max_response_headers,
+    };
+}
+
 fn readHttpHeadFromTransport(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
@@ -5942,7 +5962,11 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
         "Connection: Upgrade\r\n" ++
         "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
         "\r\n";
-    var response = try http1.parseResponse(allocator, split_connection, .{});
+    var response = try http1.parseResponse(
+        allocator,
+        split_connection,
+        http1HandshakeResponseParseOptions(.{}),
+    );
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(?[]u8, null), try validateServerHandshake(allocator, response, client_key, &.{}));
     try std.testing.expectError(error.InvalidSubprotocol, validateServerHandshake(allocator, response, client_key, &.{"chat.v1"}));
@@ -5954,7 +5978,11 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
         "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
         "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
         "\r\n";
-    var duplicate_response = try http1.parseResponse(allocator, duplicate_accept, .{});
+    var duplicate_response = try http1.parseResponse(
+        allocator,
+        duplicate_accept,
+        http1HandshakeResponseParseOptions(.{}),
+    );
     defer duplicate_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_response, client_key, &.{}));
 
@@ -5966,7 +5994,11 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
         "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n" ++
         "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n" ++
         "\r\n";
-    var duplicate_extensions_response = try http1.parseResponse(allocator, duplicate_extensions, .{});
+    var duplicate_extensions_response = try http1.parseResponse(
+        allocator,
+        duplicate_extensions,
+        http1HandshakeResponseParseOptions(.{}),
+    );
     defer duplicate_extensions_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_extensions_response, client_key, &.{}));
 
@@ -5977,7 +6009,11 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
         "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
         "Content-Length: 0\r\n" ++
         "\r\n";
-    var content_length_response = try http1.parseResponse(allocator, content_length_101, .{});
+    var content_length_response = try http1.parseResponse(
+        allocator,
+        content_length_101,
+        http1HandshakeResponseParseOptions(.{}),
+    );
     defer content_length_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, content_length_response, client_key, &.{}));
 
@@ -5988,7 +6024,11 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
         "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
         "Transfer-Encoding: chunked\r\n" ++
         "\r\n";
-    var transfer_encoding_response = try http1.parseResponse(allocator, transfer_encoding_101, .{});
+    var transfer_encoding_response = try http1.parseResponse(
+        allocator,
+        transfer_encoding_101,
+        http1HandshakeResponseParseOptions(.{}),
+    );
     defer transfer_encoding_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, transfer_encoding_response, client_key, &.{}));
 }
@@ -7188,7 +7228,11 @@ test "WebSocket client rejects unoffered subprotocol" {
             defer http_conn.close();
             var head = try readHttpHead(server_ptr.http.allocator, http_conn.io, http_conn.stream, server_ptr.limits.max_head_bytes);
             defer head.deinit(server_ptr.http.allocator);
-            var request = try http1.parseRequest(server_ptr.http.allocator, head.head, .{});
+            var request = try http1.parseRequest(
+                server_ptr.http.allocator,
+                head.head,
+                http1HandshakeRequestParseOptions(server_ptr.limits),
+            );
             defer request.deinit(server_ptr.http.allocator);
             const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
             var response: std.ArrayList(u8) = .empty;
@@ -7242,7 +7286,11 @@ test "WebSocket client rejects HTTP/1.0 upgrade responses" {
             defer http_conn.close();
             var head = try readHttpHead(server_ptr.http.allocator, http_conn.io, http_conn.stream, server_ptr.limits.max_head_bytes);
             defer head.deinit(server_ptr.http.allocator);
-            var request = try http1.parseRequest(server_ptr.http.allocator, head.head, .{});
+            var request = try http1.parseRequest(
+                server_ptr.http.allocator,
+                head.head,
+                http1HandshakeRequestParseOptions(server_ptr.limits),
+            );
             defer request.deinit(server_ptr.http.allocator);
             const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
             const accept = websocket.acceptKey(key);
