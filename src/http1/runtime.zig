@@ -6056,9 +6056,14 @@ fn readMessageBytesWithContext(
     }
 
     const target_len = while (true) {
-        const len = messageTargetLength(bytes.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
+        const len = messageTargetLength(
+            bytes.items,
+            head_end.?,
+            limits.max_head_bytes,
+            limits.max_body_bytes,
+            request_method,
+        ) catch |err| switch (err) {
             error.BufferTooShort => {
-                if (bytes.items.len >= head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
                 // Unknown-length bodies such as chunked framing cannot safely
                 // batch-read without an inbuf: the next read might cross the
                 // terminating chunk into a pipelined message.  Read one byte
@@ -6071,7 +6076,6 @@ fn readMessageBytesWithContext(
                 );
                 if (n == 0) return error.ConnectionClosed;
                 try bytes.appendSlice(allocator, scratch[0..n]);
-                if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
                 continue;
             },
             else => |e| return e,
@@ -6092,7 +6096,6 @@ fn readMessageBytesWithContext(
         );
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
-        if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
     }
     return bytes.toOwnedSlice(allocator);
 }
@@ -6331,11 +6334,20 @@ fn readMessageBytesBufferedWithContext(
         return bytes;
     }
 
+    const body_start = std.math.add(usize, head_end.?, 4) catch
+        return error.HeadersTooLarge;
     const target_len = if (known_target_len) |len| blk: {
-        if (len - (head_end.? + 4) > limits.max_body_bytes) return error.BodyTooLarge;
+        if (len < body_start) return error.InvalidResponse;
+        if (len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
         break :blk len;
     } else while (true) {
-        const len = messageTargetLength(inbuf.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
+        const len = messageTargetLength(
+            inbuf.items,
+            head_end.?,
+            limits.max_head_bytes,
+            limits.max_body_bytes,
+            request_method,
+        ) catch |err| switch (err) {
             error.BufferTooShort => {
                 const n = try readTransportUntil(
                     transport,
@@ -6344,7 +6356,6 @@ fn readMessageBytesBufferedWithContext(
                 );
                 if (n == 0) return error.ConnectionClosed;
                 try inbuf.appendSlice(allocator, scratch[0..n]);
-                if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
                 continue;
             },
             else => |e| return e,
@@ -6365,7 +6376,6 @@ fn readMessageBytesBufferedWithContext(
         );
         if (n == 0) return error.ConnectionClosed;
         try inbuf.appendSlice(allocator, scratch[0..n]);
-        if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
     }
 
     if (inbuf.items.len == target_len) {
@@ -6625,13 +6635,29 @@ fn discardPrefix(list: *std.ArrayList(u8), len: usize) void {
     list.shrinkRetainingCapacity(remaining.len);
 }
 
-fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize, request_method: ?http1.Method) Error!usize {
-    const body_start = head_end + 4;
+fn messageTargetLength(
+    bytes: []const u8,
+    head_end: usize,
+    max_head_bytes: usize,
+    max_body_bytes: usize,
+    request_method: ?http1.Method,
+) Error!usize {
+    const body_start = std.math.add(usize, head_end, 4) catch
+        return error.HeadersTooLarge;
+    if (body_start > bytes.len) return error.BufferTooShort;
     const head = bytes[0..head_end];
     if (responseHeadForbidsBody(head, request_method)) return body_start;
     switch (try transferEncodingState(head)) {
         .none => {},
-        .chunked => return body_start + try chunkedWireLength(bytes[body_start..], max_body_bytes),
+        .chunked => {
+            const wire_len = try chunkedWireLength(
+                bytes[body_start..],
+                max_head_bytes,
+                max_body_bytes,
+            );
+            return std.math.add(usize, body_start, wire_len) catch
+                return error.BodyTooLarge;
+        },
         .non_chunked => {
             if (request_method == null) return error.InvalidTransferEncoding;
             return body_start;
@@ -6639,7 +6665,8 @@ fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize
     }
     if (try contentLengthFromHead(head)) |len| {
         if (len > max_body_bytes) return error.BodyTooLarge;
-        return body_start + len;
+        return std.math.add(usize, body_start, len) catch
+            return error.ContentLengthOverflow;
     }
     return body_start;
 }
@@ -6797,33 +6824,97 @@ fn requestHeadHasBody(head: []const u8) bool {
     return false;
 }
 
-fn chunkedWireLength(body: []const u8, max_body_bytes: usize) Error!usize {
+fn chunkedWireLength(
+    body: []const u8,
+    max_head_bytes: usize,
+    max_body_bytes: usize,
+) Error!usize {
     var pos: usize = 0;
     var decoded_total: usize = 0;
     var extension_bytes: usize = 0;
     while (true) {
-        const line_end = std.mem.indexOf(u8, body[pos..], "\r\n") orelse return error.BufferTooShort;
-        const line = body[pos .. pos + line_end];
-        pos += line_end + 2;
+        const remaining = body[pos..];
+        const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse {
+            // Keep aggregate reads bounded by the same per-line allowance as
+            // the streaming reader. The extra 32 bytes leave room for a full
+            // usize chunk size and syntax around the cumulative extensions.
+            if (remaining.len >= http1.max_chunk_extension_bytes + 32) {
+                return error.ChunkExtensionTooLarge;
+            }
+            return error.BufferTooShort;
+        };
+        const line = remaining[0..line_end];
+        const line_wire_len = std.math.add(usize, line_end, 2) catch
+            return error.ChunkSizeOverflow;
+        const next_pos = std.math.add(usize, pos, line_wire_len) catch
+            return error.ChunkSizeOverflow;
         const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
         if (semi != line.len) {
             extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
             if (extension_bytes > http1.max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
+            try validateAggregateChunkExtension(line[semi + 1 ..]);
         }
-        const size = try http1.parseChunkSize(line[0..semi]);
+        const size = try http1.parseChunkSize(
+            try aggregateChunkSizePart(line[0..semi]),
+        );
         decoded_total = std.math.add(usize, decoded_total, size) catch return error.BodyTooLarge;
         if (decoded_total > max_body_bytes) return error.BodyTooLarge;
+        pos = next_pos;
         if (size == 0) {
-            const trailer_end = std.mem.indexOf(u8, body[pos..], "\r\n") orelse return error.BufferTooShort;
-            if (trailer_end == 0) return pos + 2;
-            const full_end = std.mem.indexOf(u8, body[pos..], "\r\n\r\n") orelse return error.BufferTooShort;
-            return pos + full_end + 4;
+            const trailer_len = try chunkedTrailerWireLength(
+                body[pos..],
+                max_head_bytes,
+            );
+            return std.math.add(usize, pos, trailer_len) catch
+                return error.HeadersTooLarge;
         }
-        if (body.len < pos + size + 2) return error.BufferTooShort;
-        pos += size;
-        if (!std.mem.eql(u8, body[pos .. pos + 2], "\r\n")) return error.InvalidChunk;
-        pos += 2;
+        const data_end = std.math.add(usize, pos, size) catch
+            return error.ChunkSizeOverflow;
+        const required_end = std.math.add(usize, data_end, 2) catch
+            return error.ChunkSizeOverflow;
+        if (body.len < required_end) return error.BufferTooShort;
+        if (!std.mem.eql(u8, body[data_end..required_end], "\r\n")) {
+            return error.InvalidChunk;
+        }
+        pos = required_end;
     }
+}
+
+fn aggregateChunkSizePart(raw_size: []const u8) Error![]const u8 {
+    if (raw_size.len == 0) return error.InvalidChunk;
+    var end: usize = 0;
+    while (end < raw_size.len and std.ascii.isHex(raw_size[end])) : (end += 1) {}
+    if (end == 0) return error.InvalidChunk;
+    for (raw_size[end..]) |byte| {
+        if (byte != ' ' and byte != '\t') return error.InvalidChunk;
+    }
+    return raw_size[0..end];
+}
+
+fn validateAggregateChunkExtension(extension: []const u8) Error!void {
+    for (extension) |byte| {
+        // CR/LF is only valid as the delimiter already removed by the caller.
+        // Rejecting embedded line breaks prevents alternate chunk boundaries.
+        if (byte == '\r' or byte == '\n') return error.InvalidChunk;
+    }
+}
+
+fn chunkedTrailerWireLength(
+    trailers: []const u8,
+    max_head_bytes: usize,
+) Error!usize {
+    if (std.mem.startsWith(u8, trailers, "\r\n")) {
+        if (2 > max_head_bytes) return error.HeadersTooLarge;
+        return 2;
+    }
+    if (std.mem.indexOf(u8, trailers, "\r\n\r\n")) |end| {
+        const len = std.math.add(usize, end, 4) catch
+            return error.HeadersTooLarge;
+        if (len > max_head_bytes) return error.HeadersTooLarge;
+        return len;
+    }
+    if (trailers.len >= max_head_bytes) return error.HeadersTooLarge;
+    return error.BufferTooShort;
 }
 
 fn findHeaderValue(head: []const u8, name: []const u8) ?[]const u8 {
@@ -9378,27 +9469,116 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
 test "HTTP/1 runtime target length rejects ambiguous head framing" {
     const conflicting = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
     const conflicting_head_end = std.mem.indexOf(u8, conflicting, "\r\n\r\n").?;
-    try std.testing.expectError(error.ConflictingContentLength, messageTargetLength(conflicting, conflicting_head_end, 1024, null));
+    try std.testing.expectError(error.ConflictingContentLength, messageTargetLength(conflicting, conflicting_head_end, 1024, 1024, null));
 
     const coalesced = "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello";
     const coalesced_head_end = std.mem.indexOf(u8, coalesced, "\r\n\r\n").?;
-    try std.testing.expectEqual(coalesced.len, try messageTargetLength(coalesced, coalesced_head_end, 1024, null));
+    try std.testing.expectEqual(coalesced.len, try messageTargetLength(coalesced, coalesced_head_end, 1024, 1024, null));
 
     const signed_length = "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello";
     const signed_length_head_end = std.mem.indexOf(u8, signed_length, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidContentLength, messageTargetLength(signed_length, signed_length_head_end, 1024, null));
+    try std.testing.expectError(error.InvalidContentLength, messageTargetLength(signed_length, signed_length_head_end, 1024, 1024, null));
 
     const stacked_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     const stacked_te_head_end = std.mem.indexOf(u8, stacked_te, "\r\n\r\n").?;
-    try std.testing.expectEqual(stacked_te.len, try messageTargetLength(stacked_te, stacked_te_head_end, 1024, null));
+    try std.testing.expectEqual(stacked_te.len, try messageTargetLength(stacked_te, stacked_te_head_end, 1024, 1024, null));
 
     const non_final_chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n";
     const non_final_chunked_head_end = std.mem.indexOf(u8, non_final_chunked, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(non_final_chunked, non_final_chunked_head_end, 1024, null));
+    try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(non_final_chunked, non_final_chunked_head_end, 1024, 1024, null));
 
     const signed_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n";
     const signed_chunk_head_end = std.mem.indexOf(u8, signed_chunk, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidChunk, messageTargetLength(signed_chunk, signed_chunk_head_end, 1024, null));
+    try std.testing.expectError(error.InvalidChunk, messageTargetLength(signed_chunk, signed_chunk_head_end, 1024, 1024, null));
+}
+
+test "HTTP/1 aggregate chunk limits count decoded payload only" {
+    const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const head_end = std.mem.indexOf(u8, head, "\r\n\r\n").?;
+
+    const exact = head ++ "2;ignored=yes\r\nab\r\n3  \r\ncde\r\n0\r\n\r\n";
+    try std.testing.expectEqual(
+        exact.len,
+        try messageTargetLength(exact, head_end, 1024, 5, null),
+    );
+
+    const empty = head ++ "0\r\n\r\n";
+    try std.testing.expectEqual(
+        empty.len,
+        try messageTargetLength(empty, head_end, 1024, 0, null),
+    );
+
+    // The payload is absent: rejection happens immediately after the size line
+    // is parsed, rather than waiting for the declared bytes to arrive.
+    try std.testing.expectError(
+        error.BodyTooLarge,
+        messageTargetLength(head ++ "6\r\n", head_end, 1024, 5, null),
+    );
+}
+
+test "HTTP/1 aggregate chunk framing and trailers have independent limits" {
+    const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const head_end = std.mem.indexOf(u8, head, "\r\n\r\n").?;
+    const trailer_fields = "Digest: abc\r\n\r\n";
+    const trailer = "0\r\nDigest: abc\r\n\r\n";
+    try std.testing.expectEqual(
+        (head ++ trailer).len,
+        try messageTargetLength(
+            head ++ trailer,
+            head_end,
+            trailer_fields.len,
+            0,
+            null,
+        ),
+    );
+    try std.testing.expectError(
+        error.HeadersTooLarge,
+        messageTargetLength(
+            head ++ trailer,
+            head_end,
+            trailer_fields.len - 1,
+            0,
+            null,
+        ),
+    );
+
+    var incomplete: std.ArrayList(u8) = .empty;
+    defer incomplete.deinit(std.testing.allocator);
+    try incomplete.appendSlice(std.testing.allocator, head ++ "1;");
+    try incomplete.appendNTimes(
+        std.testing.allocator,
+        'a',
+        http1.max_chunk_extension_bytes + 30,
+    );
+    try std.testing.expectError(
+        error.ChunkExtensionTooLarge,
+        messageTargetLength(incomplete.items, head_end, 1024, 1, null),
+    );
+}
+
+test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
+    const allocator = std.testing.allocator;
+    const first = "POST /first HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    const second = "GET /second HTTP/1.1\r\nHost: example\r\n\r\n";
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    try inbuf.appendSlice(allocator, first ++ second);
+
+    const bytes = try readMessageBytesBufferedWithContext(
+        allocator,
+        .{ .tcp = .{ .io = undefined, .stream = undefined } },
+        .{ .max_head_bytes = 1024, .max_body_bytes = 5 },
+        .{},
+        &inbuf,
+        null,
+        true,
+        false,
+        null,
+        null,
+    );
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings(first, bytes);
+    try std.testing.expectEqualStrings(second, inbuf.items);
 }
 
 test "HTTP/1 runtime enforces header byte limit at delimiter" {
@@ -9519,6 +9699,67 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
     defer stream.close(io);
     try writeAllToStream(io, stream, "POST /chunked HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nDigest: ok\r\n\r\n" ++
         "POST /second HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nworld");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 non-buffered chunked reader accepts exact and zero body limits" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            const stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+            var exact = try readRequestFromStream(
+                shared.allocator,
+                shared.io,
+                stream,
+                .{ .max_head_bytes = 1024, .max_body_bytes = 5 },
+                .{},
+            );
+            defer exact.deinit(shared.allocator);
+            try std.testing.expectEqualStrings("hello", exact.request.body);
+
+            var empty = try readRequestFromStream(
+                shared.allocator,
+                shared.io,
+                stream,
+                .{ .max_head_bytes = 1024, .max_body_bytes = 0 },
+                .{},
+            );
+            defer empty.deinit(shared.allocator);
+            try std.testing.expectEqual(@as(usize, 0), empty.request.body.len);
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAllToStream(
+        io,
+        stream,
+        "POST /exact HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n" ++
+            "POST /empty HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    );
 
     thread.join();
     if (shared.err) |err| return err;

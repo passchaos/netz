@@ -122,6 +122,15 @@ buffer compaction, and works when every trailer byte arrives in a separate
 transport read. Focused request and response regressions cover both directions,
 matching Hyper's documented response-side obsolete-line-folding behavior.
 
+The aggregate HTTP/1 readers apply `Limits.max_body_bytes` to decoded chunk
+payload only, not chunk-size lines, extensions, CRLF framing, trailers, or
+bytes read ahead from the next pipelined message. Exact-limit and empty chunked
+bodies therefore remain valid, while an oversized chunk is rejected as soon as
+its size line is available. Trailer blocks have their own `max_head_bytes`
+budget, incomplete chunk-size lines use the streaming reader's
+`max_chunk_extension_bytes + 32` bound, and the unbuffered adapter retains
+one-byte reads until it discovers the exact message boundary.
+
 The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the
 general path.
