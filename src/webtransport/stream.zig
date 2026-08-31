@@ -203,26 +203,8 @@ pub const StreamRegistry = struct {
         self: *StreamRegistry,
         direction: StreamDirection,
     ) webtransport.Error!*StreamState {
-        const opened, const limit, const next = switch (direction) {
-            .bidirectional => .{
-                &self.opened_local_bidi,
-                self.max_local_bidi,
-                &self.next_local_bidi,
-            },
-            .unidirectional => .{
-                &self.opened_local_uni,
-                self.max_local_uni,
-                &self.next_local_uni,
-            },
-        };
-        if (opened.* >= limit) return error.StreamLimitExceeded;
-        const stream_id = next.*;
-        next.* = std.math.add(u62, stream_id, 4) catch
-            return error.StreamLimitExceeded;
-        errdefer next.* = stream_id;
-        const stream_state = try self.insert(stream_id, direction, true);
-        opened.* += 1;
-        return stream_state;
+        const stream_id = try self.prepareLocal(direction);
+        return self.commitPreparedLocal(stream_id, direction);
     }
 
     pub fn registerPeer(
@@ -269,6 +251,79 @@ pub const StreamRegistry = struct {
         const stream_state = try self.insert(stream_id, direction, true);
         opened.* += 1;
         return stream_state;
+    }
+
+    /// Reserve registry capacity and validate the cumulative session policy
+    /// before a transport or HTTP/3 stream-ID cursor is consumed. No logical
+    /// registry state changes until `commitPreparedLocal` is called.
+    pub fn prepareLocal(
+        self: *StreamRegistry,
+        direction: StreamDirection,
+    ) webtransport.Error!u62 {
+        const stream_id = switch (direction) {
+            .bidirectional => self.next_local_bidi,
+            .unidirectional => self.next_local_uni,
+        };
+        try self.prepareLocalId(stream_id, direction);
+        return stream_id;
+    }
+
+    /// Preflight an externally shared H3/QUIC stream ID. This is the fallible
+    /// half of registration; a successful call makes the matching commit
+    /// allocation-free.
+    fn prepareLocalId(
+        self: *StreamRegistry,
+        stream_id: u62,
+        direction: StreamDirection,
+    ) webtransport.Error!void {
+        try validateLocalStreamId(self.role, stream_id, direction);
+        if (self.index.contains(stream_id)) return error.DuplicateStream;
+        const opened, const limit = switch (direction) {
+            .bidirectional => .{
+                self.opened_local_bidi,
+                self.max_local_bidi,
+            },
+            .unidirectional => .{
+                self.opened_local_uni,
+                self.max_local_uni,
+            },
+        };
+        if (opened >= limit) return error.StreamLimitExceeded;
+        _ = std.math.add(u62, stream_id, 4) catch
+            return error.StreamLimitExceeded;
+        try self.index.ensureUnusedCapacity(self.allocator, 1);
+        try self.streams.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    /// Commit a successfully prepared local stream without allocation.
+    fn commitPreparedLocal(
+        self: *StreamRegistry,
+        stream_id: u62,
+        direction: StreamDirection,
+    ) *StreamState {
+        std.debug.assert(!self.index.contains(stream_id));
+        const next, const opened = switch (direction) {
+            .bidirectional => .{
+                &self.next_local_bidi,
+                &self.opened_local_bidi,
+            },
+            .unidirectional => .{
+                &self.next_local_uni,
+                &self.opened_local_uni,
+            },
+        };
+        const slot = self.index.getOrPutAssumeCapacity(stream_id);
+        std.debug.assert(!slot.found_existing);
+        const position = self.streams.items.len;
+        self.streams.appendAssumeCapacity(newStreamState(
+            stream_id,
+            direction,
+            true,
+        ));
+        slot.value_ptr.* = position;
+        next.* = stream_id + 4;
+        opened.* += 1;
+        return &self.streams.items[position];
     }
 
     pub fn get(self: *StreamRegistry, stream_id: u62) ?*StreamState {
@@ -422,19 +477,31 @@ pub const StreamRegistry = struct {
         errdefer _ = self.index.remove(stream_id);
         try self.streams.ensureUnusedCapacity(self.allocator, 1);
         const position = self.streams.items.len;
-        self.streams.appendAssumeCapacity(.{
-            .stream_id = stream_id,
-            .direction = direction,
-            .locally_initiated = locally_initiated,
-            // Only the initiator writes/reads the association prefix. The
-            // reverse side of a bidi stream starts with application data.
-            .prefix_sent = !locally_initiated,
-            .prefix_received = locally_initiated,
-        });
+        self.streams.appendAssumeCapacity(newStreamState(
+            stream_id,
+            direction,
+            locally_initiated,
+        ));
         slot.value_ptr.* = position;
         return &self.streams.items[position];
     }
 };
+
+fn newStreamState(
+    stream_id: u62,
+    direction: StreamDirection,
+    locally_initiated: bool,
+) StreamState {
+    return .{
+        .stream_id = stream_id,
+        .direction = direction,
+        .locally_initiated = locally_initiated,
+        // Only the initiator writes/reads the association prefix. The reverse
+        // side of a bidirectional stream starts with application data.
+        .prefix_sent = !locally_initiated,
+        .prefix_received = locally_initiated,
+    };
+}
 
 test "WebTransport stream priority validates send direction and lifecycle" {
     var registry = try StreamRegistry.init(
@@ -467,6 +534,60 @@ test "WebTransport stream priority validates send direction and lifecycle" {
         error.UnknownStream,
         registry.setPriority(100, 1),
     );
+}
+
+test "WebTransport local stream preflight commits without allocation" {
+    const allocator = std.testing.allocator;
+    var registry = try StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{ .max_local_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    const first_id = try registry.prepareLocal(.bidirectional);
+    try std.testing.expectEqual(@as(u62, 4), first_id);
+    try std.testing.expectEqual(@as(usize, 0), registry.streams.items.len);
+    const first = registry.commitPreparedLocal(first_id, .bidirectional);
+    try std.testing.expectEqual(first_id, first.stream_id);
+
+    const second_id = try registry.prepareLocal(.bidirectional);
+    try std.testing.expectEqual(@as(u62, 8), second_id);
+    _ = registry.commitPreparedLocal(second_id, .bidirectional);
+    try std.testing.expectError(
+        error.StreamLimitExceeded,
+        registry.prepareLocal(.bidirectional),
+    );
+}
+
+test "WebTransport external local registration preserves open cursor" {
+    var registry = try StreamRegistry.init(
+        std.testing.allocator,
+        .init(0),
+        .client,
+        .{ .max_local_bidi = 3 },
+    );
+    defer registry.deinit();
+
+    const external = try registry.registerLocal(12, .bidirectional);
+    try std.testing.expectEqual(@as(u62, 12), external.stream_id);
+    const opened = try registry.openLocal(.bidirectional);
+    try std.testing.expectEqual(@as(u62, 4), opened.stream_id);
+
+    var last = try StreamRegistry.init(
+        std.testing.allocator,
+        .init(0),
+        .client,
+        .{ .max_local_bidi = 1 },
+    );
+    defer last.deinit();
+    const maximum_local_bidi: u62 = std.math.maxInt(u62) - 3;
+    const registered = try last.registerLocal(
+        maximum_local_bidi,
+        .bidirectional,
+    );
+    try std.testing.expectEqual(maximum_local_bidi, registered.stream_id);
 }
 
 fn validateSessionId(
