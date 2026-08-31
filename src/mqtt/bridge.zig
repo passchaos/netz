@@ -229,8 +229,11 @@ pub const Bridge = struct {
                 .qos = self.rule.qos,
                 // Preserve the upstream RETAIN bit so retained publications
                 // populate the local broker's retained store as well as live
-                // fanout. The reconnect client owns and replays this option.
-                .retain_as_published = true,
+                // fanout when MQTT 5 supports this subscription option. MQTT
+                // 3.1.1 permits only the QoS bits and clears RETAIN on later
+                // live deliveries, although the initial retained replay keeps
+                // it. The reconnect client owns and replays the exact option.
+                .retain_as_published = self.client.options.value.protocol == .v5,
             }},
             .{},
         );

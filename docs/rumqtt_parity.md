@@ -56,6 +56,10 @@ bounded live and durable Session queues, expiry, commit log, and flush order.
 It has no synthetic publishing identity, so source write ACL and No Local do
 not apply; deployments should treat possession of the Broker pointer as the
 trust boundary.
+For MQTT 5 the bridge requests Retain As Published, so upstream retained state
+can populate the local retained store. MQTT 3.1.1 has no equivalent subscription
+bit: its initial retained replay preserves RETAIN, while later live deliveries
+may arrive with RETAIN cleared by the upstream broker.
 
 The bridge does not add an intermediate unbounded queue. The reconnect event
 itself owns a publication until injection completes, and a remote QoS 1 PUBACK
