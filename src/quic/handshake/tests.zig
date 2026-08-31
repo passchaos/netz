@@ -1553,6 +1553,186 @@ test "QUIC client Initial carries address validation token" {
     try std.testing.expectEqual(quic.address_validation_token.Kind.new_token, validated.kind);
 }
 
+test "QUIC server address validation replay gate marks only valid NEW_TOKEN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const old_secret: quic.address_validation_token.Secret =
+        [_]u8{0x5c} ** quic.address_validation_token.secret_len;
+    const current_secret: quic.address_validation_token.Secret =
+        [_]u8{0x5d} ** quic.address_validation_token.secret_len;
+    const token = try quic.address_validation_token.encode(allocator, old_secret, .{
+        .kind = .new_token,
+        .issued_ns = 1_000,
+        .lifetime_ns = 5_000,
+        .peer_address = "client-path",
+        .nonce = [_]u8{0x5e} ** quic.address_validation_token.nonce_len,
+    });
+    defer allocator.free(token);
+
+    var replay_filter = try quic.address_validation_token.SharedReplayFilter.init(
+        allocator,
+        threaded.io(),
+        8,
+    );
+    defer replay_filter.deinit();
+    const secrets = [_]quic.address_validation_token.Secret{
+        current_secret,
+        old_secret,
+    };
+    const options = handshake.ServerOptions{
+        .local_connection_id = "server",
+        .address_validation_secrets = &secrets,
+        .address_validation_peer = "client-path",
+        .address_validation_now_ns = 1_100,
+        .address_validation_replay_filter = &replay_filter,
+    };
+
+    var invalid = token[0..quic.address_validation_token.token_len].*;
+    invalid[invalid.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        handshake.testing.validateAddressTokenForInitialForTest(
+            allocator,
+            &invalid,
+            "initial-dcid",
+            options,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), replay_filter.entryCount());
+
+    const expired = try quic.address_validation_token.encode(allocator, old_secret, .{
+        .kind = .new_token,
+        .issued_ns = 1_000,
+        .lifetime_ns = 50,
+        .peer_address = "client-path",
+        .nonce = [_]u8{0x5f} ** quic.address_validation_token.nonce_len,
+    });
+    defer allocator.free(expired);
+    try std.testing.expectError(
+        error.InvalidPacket,
+        handshake.testing.validateAddressTokenForInitialForTest(
+            allocator,
+            expired,
+            "initial-dcid",
+            options,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), replay_filter.entryCount());
+
+    var missing_auth = options;
+    missing_auth.address_validation_secrets = &.{};
+    try std.testing.expectError(
+        error.InvalidPacket,
+        handshake.testing.validateAddressTokenForInitialForTest(
+            allocator,
+            token,
+            "initial-dcid",
+            missing_auth,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), replay_filter.entryCount());
+
+    // The previous (rotated) secret remains eligible, but only the first
+    // successful use passes the atomic replay gate.
+    try handshake.testing.validateAddressTokenForInitialForTest(
+        allocator,
+        token,
+        "initial-dcid",
+        options,
+    );
+    try std.testing.expectEqual(@as(usize, 1), replay_filter.entryCount());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        handshake.testing.validateAddressTokenForInitialForTest(
+            allocator,
+            token,
+            "initial-dcid",
+            options,
+        ),
+    );
+}
+
+test "QUIC server Retry replay gate preserves exact CID binding" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0x6a} ** quic.address_validation_token.secret_len;
+    const odcid = "original";
+    const rscid = "retry";
+    const token = try quic.address_validation_token.encodeRetry(allocator, secret, .{
+        .kind = .retry,
+        .issued_ns = 2_000,
+        .lifetime_ns = 5_000,
+        .peer_address = "client-path",
+        .nonce = [_]u8{0x6b} ** quic.address_validation_token.nonce_len,
+    }, odcid, rscid);
+    defer allocator.free(token);
+
+    var replay_filter = try quic.address_validation_token.SharedReplayFilter.init(
+        allocator,
+        threaded.io(),
+        8,
+    );
+    defer replay_filter.deinit();
+    const options = handshake.ServerOptions{
+        .local_connection_id = "server",
+        .address_validation_secrets = &.{secret},
+        .address_validation_peer = "client-path",
+        .address_validation_now_ns = 2_100,
+        .address_validation_replay_filter = &replay_filter,
+        .retry_original_destination_connection_id = odcid,
+        .retry_source_connection_id = rscid,
+    };
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        handshake.testing.validateAddressTokenForInitialForTest(
+            allocator,
+            token,
+            "wrong-original",
+            options,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), replay_filter.entryCount());
+    try handshake.testing.validateAddressTokenForInitialForTest(
+        allocator,
+        token,
+        odcid,
+        options,
+    );
+    try std.testing.expectEqual(@as(usize, 1), replay_filter.entryCount());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        handshake.testing.validateAddressTokenForInitialForTest(
+            allocator,
+            token,
+            odcid,
+            options,
+        ),
+    );
+
+    // Omitting the optional borrowed filter retains the previous stateless
+    // acceptance behavior for deployments that do not opt into replay state.
+    var no_filter = options;
+    no_filter.address_validation_replay_filter = null;
+    try handshake.testing.validateAddressTokenForInitialForTest(
+        allocator,
+        token,
+        odcid,
+        no_filter,
+    );
+    try handshake.testing.validateAddressTokenForInitialForTest(
+        allocator,
+        token,
+        odcid,
+        no_filter,
+    );
+}
+
 test "QUIC integrated handshake succeeds after validated Retry" {
     const allocator = std.testing.allocator;
 
@@ -2000,8 +2180,16 @@ test "QUIC integrated server automatically issues Retry" {
     const server_cid = "server";
     const secret: quic.address_validation_token.Secret =
         [_]u8{0xd1} ** quic.address_validation_token.secret_len;
+    var address_validation_replay_filter =
+        try quic.address_validation_token.SharedReplayFilter.init(
+            allocator,
+            io,
+            8,
+        );
+    defer address_validation_replay_filter.deinit();
     const Shared = struct {
         endpoint: *quic.runtime.Endpoint,
+        address_validation_replay_filter: *quic.address_validation_token.SharedReplayFilter,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -2015,6 +2203,7 @@ test "QUIC integrated server automatically issues Retry" {
                     .nonce = [_]u8{0xd2} **
                         quic.address_validation_token.nonce_len,
                 },
+                .address_validation_replay_filter = shared.address_validation_replay_filter,
                 .random = [_]u8{0xd3} ** 32,
                 .x25519_secret_key = [_]u8{0xd4} ** 32,
             }) catch |err| {
@@ -2033,7 +2222,10 @@ test "QUIC integrated server automatically issues Retry" {
             ping.deinit(shared.endpoint.allocator);
         }
     };
-    var shared = Shared{ .endpoint = &server_endpoint };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .address_validation_replay_filter = &address_validation_replay_filter,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var established = try handshake.connect(
@@ -2051,6 +2243,10 @@ test "QUIC integrated server automatically issues Retry" {
     try established.connection.send(&.{.{ .ping = {} }});
     thread.join();
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        address_validation_replay_filter.entryCount(),
+    );
 }
 
 test "QUIC automatic server Retry discards queued pre-Retry 0-RTT" {

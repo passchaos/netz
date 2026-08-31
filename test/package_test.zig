@@ -4357,6 +4357,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "available_versions"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "address_validation_secrets"));
+    try std.testing.expect(@hasField(
+        netz.quic.handshake.ServerOptions,
+        "address_validation_replay_filter",
+    ));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_original_destination_connection_id"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_source_connection_id"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "version"));
@@ -4666,6 +4670,42 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token.ReplayFilter, "exportSnapshot"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token.ReplayFilter, "initWithSnapshot"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token.ReplayFilter, "entryCount"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token,
+        "SharedReplayFilter",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "init",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "initWithSnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "deinit",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "entryCount",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "contains",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "rememberValidated",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token.SharedReplayFilter,
+        "exportSnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.address_validation_token,
+        "validateAnySecretAndRememberShared",
+    ));
     try std.testing.expect(@hasDecl(netz.quic, "retry_flow"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "issue"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "validate"));

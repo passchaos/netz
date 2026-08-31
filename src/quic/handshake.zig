@@ -122,6 +122,10 @@ pub const ServerOptions = struct {
     address_validation_secrets: []const quic.address_validation_token.Secret = &.{},
     address_validation_peer: []const u8 = &.{},
     address_validation_now_ns: i64 = 0,
+    /// Optional process-local replay gate for successfully authenticated Retry
+    /// and NEW_TOKEN values. The caller retains ownership and must keep the
+    /// filter alive until every accept operation borrowing it has completed.
+    address_validation_replay_filter: ?*quic.address_validation_token.SharedReplayFilter = null,
     /// Retry metadata from the first Initial/Retry exchange.  When set, accept()
     /// validates the Initial token as a Retry token bound to ODCID+RSCID and
     /// advertises both `original_destination_connection_id` and
@@ -1905,6 +1909,20 @@ pub const testing = struct {
     ) Error!ClientOptions {
         return clientOptionsBefore(io, options, deadline);
     }
+
+    pub fn validateAddressTokenForInitialForTest(
+        allocator: std.mem.Allocator,
+        token: []const u8,
+        original_destination_connection_id: []const u8,
+        options: ServerOptions,
+    ) Error!void {
+        return validateAddressTokenForInitial(
+            allocator,
+            token,
+            original_destination_connection_id,
+            options,
+        );
+    }
 };
 
 fn acceptInternal(
@@ -2838,9 +2856,20 @@ fn validateAddressTokenForInitial(
             options.retry_source_connection_id,
             token,
         ) catch return error.InvalidPacket;
+        try rememberValidatedAddressToken(token, options);
         return;
     }
-    if (options.address_validation_secrets.len == 0 or options.address_validation_peer.len == 0) return;
+    if (options.address_validation_secrets.len == 0 or
+        options.address_validation_peer.len == 0)
+    {
+        // A configured replay gate is an explicit request to validate and
+        // consume tokens. Silently accepting one without authentication
+        // material would bypass the security policy the caller opted into.
+        if (options.address_validation_replay_filter != null) {
+            return error.InvalidPacket;
+        }
+        return;
+    }
     _ = quic.address_validation_token.validateAnySecret(
         options.address_validation_secrets,
         .new_token,
@@ -2849,6 +2878,19 @@ fn validateAddressTokenForInitial(
         options.address_validation_peer,
         token,
     ) catch return error.InvalidPacket;
+    try rememberValidatedAddressToken(token, options);
+}
+
+fn rememberValidatedAddressToken(
+    token: []const u8,
+    options: ServerOptions,
+) Error!void {
+    const replay_filter = options.address_validation_replay_filter orelse return;
+    // Authentication, lifetime, address, and (for Retry) exact CID binding
+    // have already succeeded. Keep the atomic replay decision immediately
+    // before TLS parsing/server flight construction, and retain the existing
+    // public InvalidPacket surface for both duplicates and filter failures.
+    replay_filter.rememberValidated(token) catch return error.InvalidPacket;
 }
 
 const ReceivedClientInitial = struct {

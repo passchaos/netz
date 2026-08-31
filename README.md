@@ -204,7 +204,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   whole-flight loss injection tests, HMAC-based
   address-validation token helpers with exact Retry peer bindings for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation,
-  digest-indexed single-lookup replay filtering with disabled-filter fingerprint skips, empty-index membership skips, and export/restore snapshots, Retry datagram issue/validate helpers, client-side Retry
+  digest-indexed single-lookup replay filtering with disabled-filter fingerprint skips, empty-index membership skips, and export/restore snapshots, plus an optional bounded, process-owned shared replay gate for server handshakes. The shared gate authenticates and checks every token binding before atomically remembering its fingerprint, so concurrent Retry or NEW_TOKEN reuse is rejected before TLS processing and server-flight emission. It provides local in-process coverage only, not distributed replay coordination or an external durable store. Retry datagram issue/validate helpers, client-side Retry
   processing that enforces one-Retry/early-Retry rules, automatically resends
   the exact ClientHello under Retry-derived Initial keys, ignores invalid Retry
   injection, suppresses 0-RTT replay, plus an integrated server Retry policy

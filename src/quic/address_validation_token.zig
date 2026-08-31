@@ -48,6 +48,7 @@ pub const Validation = struct {
 };
 
 pub const Error = error{
+    InvalidCapacity,
     InvalidToken,
     TokenExpired,
     TokenNotYetValid,
@@ -363,6 +364,101 @@ pub const ReplayFilter = struct {
     }
 };
 
+/// Owning, thread-safe facade for sharing a `ReplayFilter` between concurrent
+/// token-validation tasks. Every operation on the owned filter is serialized,
+/// including read-only queries and snapshot export, because the underlying
+/// hash map and ring are deliberately not thread-safe on their own.
+///
+/// The supplied `io` is retained by value and must remain usable for the full
+/// lifetime of this wrapper; it drives mutex contention and wakeups. The
+/// allocator supplied at initialization is owned only by the caller and must
+/// outlive the wrapper. Access through this wrapper is serialized, so its use
+/// by the underlying filter does not itself require a thread-safe allocator.
+///
+/// Initialization returns the wrapper by value, but after publishing its
+/// address to other tasks it must not be copied or moved. Callers must quiesce
+/// all operations before `deinit`; the mutex protects filter state, not the
+/// lifetime of the wrapper or of caller-owned token buffers. Snapshots returned
+/// by `exportSnapshot` are independently owned by its allocator and remain
+/// valid after the mutex is released.
+pub const SharedReplayFilter = struct {
+    io: std.Io,
+    filter: ReplayFilter,
+    mutex: std.Io.Mutex = .init,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        max_entries: usize,
+    ) Error!SharedReplayFilter {
+        if (max_entries == 0) return error.InvalidCapacity;
+        return .{
+            .io = io,
+            .filter = .init(allocator, max_entries),
+        };
+    }
+
+    pub fn initWithSnapshot(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        max_entries: usize,
+        snapshot: ReplayFilterSnapshot,
+    ) Error!SharedReplayFilter {
+        if (max_entries == 0) return error.InvalidCapacity;
+        return .{
+            .io = io,
+            .filter = try .initWithSnapshot(
+                allocator,
+                max_entries,
+                snapshot,
+            ),
+        };
+    }
+
+    pub fn deinit(self: *SharedReplayFilter) void {
+        // Synchronization cannot make destruction safe while another caller
+        // still owns `self`; external quiescence is therefore required.
+        self.filter.deinit();
+        self.* = undefined;
+    }
+
+    pub fn entryCount(self: *SharedReplayFilter) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.filter.entryCount();
+    }
+
+    pub fn exportSnapshot(
+        self: *SharedReplayFilter,
+        allocator: std.mem.Allocator,
+    ) Error!ReplayFilterSnapshot {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.filter.exportSnapshot(allocator);
+    }
+
+    pub fn contains(
+        self: *SharedReplayFilter,
+        token: []const u8,
+    ) Error!bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.filter.contains(token);
+    }
+
+    /// Atomically reject an already-seen token or remember its fingerprint.
+    /// The critical section covers both the duplicate check and insertion, so
+    /// exactly one concurrent caller can accept a particular token.
+    pub fn rememberValidated(
+        self: *SharedReplayFilter,
+        token: []const u8,
+    ) Error!void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.filter.rememberValidated(token);
+    }
+};
+
 fn containsFingerprint(fingerprints: []const Fingerprint, wanted: Fingerprint) bool {
     for (fingerprints) |existing| {
         if (vail.crypto.mac.verify(existing, wanted)) return true;
@@ -372,6 +468,31 @@ fn containsFingerprint(fingerprints: []const Fingerprint, wanted: Fingerprint) b
 
 pub fn validateAnySecretAndRemember(secrets: []const Secret, expected_kind: Kind, expected_version: quic.Version, now_ns: i64, peer_address: []const u8, token: []const u8, replay: *ReplayFilter) Error!Validation {
     const validation = try validateAnySecret(secrets, expected_kind, expected_version, now_ns, peer_address, token);
+    try replay.rememberValidated(token);
+    return validation;
+}
+
+/// Authenticate and time-check a token before atomically admitting its
+/// fingerprint through a shared replay filter. Validation itself is stateless
+/// and therefore remains outside the mutex; only the check-and-insert step
+/// requires serialization.
+pub fn validateAnySecretAndRememberShared(
+    secrets: []const Secret,
+    expected_kind: Kind,
+    expected_version: quic.Version,
+    now_ns: i64,
+    peer_address: []const u8,
+    token: []const u8,
+    replay: *SharedReplayFilter,
+) Error!Validation {
+    const validation = try validateAnySecret(
+        secrets,
+        expected_kind,
+        expected_version,
+        now_ns,
+        peer_address,
+        token,
+    );
     try replay.rememberValidated(token);
     return validation;
 }
@@ -663,6 +784,95 @@ test "QUIC address validation replay filter rejects duplicate fingerprints" {
     try std.testing.expect(try replay.contains(token));
     try std.testing.expectEqual(@as(usize, 1), replay.fingerprint_index.count());
     try std.testing.expectError(error.TokenReplay, validateAnySecretAndRemember(&secrets, .retry, .version_1, 10, "peer", token, &replay));
+}
+
+test "shared QUIC address validation replay filter admits one concurrent caller" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .concurrent_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const secret: Secret = [_]u8{0x5a} ** secret_len;
+    const token = try encode(allocator, secret, .{
+        .kind = .retry,
+        .issued_ns = 1,
+        .lifetime_ns = 100,
+        .peer_address = "peer",
+        .nonce = [_]u8{0x6b} ** nonce_len,
+    });
+    defer allocator.free(token);
+    const secrets = [_]Secret{secret};
+    var replay = try SharedReplayFilter.init(allocator, io, 8);
+    defer replay.deinit();
+
+    const contender_count = 8;
+    const Outcome = enum { pending, accepted, replayed, failed };
+    var start: std.Io.Event = .unset;
+    const Contender = struct {
+        fn run(
+            shared: *SharedReplayFilter,
+            keys: []const Secret,
+            encoded: []const u8,
+            start_gate: *std.Io.Event,
+            outcome: *Outcome,
+        ) std.Io.Cancelable!void {
+            try start_gate.wait(shared.io);
+            _ = validateAnySecretAndRememberShared(
+                keys,
+                .retry,
+                .version_1,
+                10,
+                "peer",
+                encoded,
+                shared,
+            ) catch |err| {
+                outcome.* = if (err == error.TokenReplay) .replayed else .failed;
+                return;
+            };
+            outcome.* = .accepted;
+        }
+    };
+
+    var outcomes: [contender_count]Outcome = @splat(.pending);
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    for (&outcomes) |*outcome| {
+        try group.concurrent(io, Contender.run, .{
+            &replay,
+            &secrets,
+            token,
+            &start,
+            outcome,
+        });
+    }
+    start.set(io);
+    try group.await(io);
+
+    var accepted: usize = 0;
+    var replayed: usize = 0;
+    for (outcomes) |outcome| switch (outcome) {
+        .accepted => accepted += 1,
+        .replayed => replayed += 1,
+        .pending, .failed => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), accepted);
+    try std.testing.expectEqual(@as(usize, contender_count - 1), replayed);
+    try std.testing.expectEqual(@as(usize, 1), replay.entryCount());
+}
+
+test "shared QUIC address validation replay filter rejects zero capacity" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidCapacity,
+        SharedReplayFilter.init(
+            std.testing.allocator,
+            threaded.io(),
+            0,
+        ),
+    );
 }
 
 test "QUIC address validation replay filter disabled remember skips fingerprints" {
