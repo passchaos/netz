@@ -270,16 +270,20 @@ test "WebTransport endpoint accepted session forwards authenticated metadata" {
     var stream_buffer: [1]u8 = undefined;
     var accepted_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null;
     var accepted: ?*runtime.EndpointAcceptedSession = null;
-    const admission_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
-        .clock = .awake,
-        .raw = .fromSeconds(3),
-    });
     while (accepted == null) {
-        var event = try endpoint.receiveWithDeadline(
+        if (shared.metadata_ready.isSet() and shared.metadata == null) {
+            client_thread.join();
+            joined = true;
+            if (shared.err) |err| return err;
+            return error.TestUnexpectedResult;
+        }
+        const maybe_event = try endpoint.receiveOnce(
             &versions,
-            admission_deadline,
+            .{ .clock = .awake, .raw = .fromMilliseconds(20) },
             &stream_buffer,
         );
+        if (maybe_event == null) continue;
+        var event = maybe_event.?;
         defer event.deinit(allocator);
         switch (event) {
             .connected => {},
