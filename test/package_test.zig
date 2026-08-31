@@ -1452,6 +1452,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "protocols"));
     try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "enable_permessage_deflate"));
     try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "tcp_nodelay"));
+    try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "extra_headers"));
     try std.testing.expect(@hasField(
         netz.websocket.runtime.ConnectOptions,
         "connect_timeout",

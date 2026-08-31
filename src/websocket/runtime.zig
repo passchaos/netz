@@ -2188,12 +2188,19 @@ pub const Client = struct {
                 .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
             });
         }
-        try writeHttpUpgradeRequest(allocator, transport, .{
-            .method = .GET,
-            .target = options.target,
-            .host = options.host,
-            .headers = headers.items,
-        });
+        try validateHttp1ClientExtraHeadersImpl(options.extra_headers);
+        try headers.appendSlice(allocator, options.extra_headers);
+        try writeHttpUpgradeRequest(
+            allocator,
+            transport,
+            .{
+                .method = .GET,
+                .target = options.target,
+                .host = options.host,
+                .headers = headers.items,
+            },
+            options.limits.max_head_bytes,
+        );
 
         const deadline = deadline_policy.earlier(
             outer_deadline,
@@ -2261,6 +2268,10 @@ pub const ConnectOptions = struct {
     protocols: []const []const u8 = &.{},
     /// Optional browser Origin value for the opening request.
     origin: ?[]const u8 = null,
+    /// Additional opening-handshake fields such as Authorization or Cookie.
+    /// Runtime-owned and body-framing headers are rejected so callers cannot
+    /// create an ambiguous or body-bearing Upgrade request.
+    extra_headers: []const http1.Header = &.{},
     enable_permessage_deflate: bool = false,
     /// Minimum complete message size considered for outbound compression.
     /// Set to zero to attempt every data message or maxInt to receive-only.
@@ -4901,6 +4912,12 @@ pub const H2Server = struct {
 /// Narrow test hook for constructing deliberately split WebSocket frames.
 /// Production callers should use the validated public message APIs.
 pub const testing = struct {
+    pub fn validateHttp1ClientExtraHeaders(
+        headers: []const http1.Header,
+    ) Error!void {
+        return validateHttp1ClientExtraHeadersImpl(headers);
+    }
+
     pub fn writeFrame(
         connection: anytype,
         opcode: websocket.Opcode,
@@ -5357,7 +5374,12 @@ const HttpHead = struct {
     }
 };
 
-fn writeHttpUpgradeRequest(allocator: std.mem.Allocator, transport: RuntimeTransport, options: http1_runtime.RequestOptions) Error!void {
+fn writeHttpUpgradeRequest(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    options: http1_runtime.RequestOptions,
+    max_head_bytes: usize,
+) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
@@ -5370,10 +5392,44 @@ fn writeHttpUpgradeRequest(allocator: std.mem.Allocator, transport: RuntimeTrans
         if (options.host) |host| try headers.append(allocator, .{ .name = "Host", .value = host });
     }
     try http1.validateHostHeaderBlock(options.version, headers.items);
+    // Preflight the exact bodyless request-head size before allocating the
+    // serialization buffer. `extra_headers` is caller-controlled, so checking
+    // only after encoding would not make max_head_bytes a memory bound.
+    var head_len = std.math.add(
+        usize,
+        options.method.string().len,
+        1,
+    ) catch return error.HeadersTooLarge;
+    head_len = std.math.add(usize, head_len, options.target.len) catch
+        return error.HeadersTooLarge;
+    head_len = std.math.add(usize, head_len, 1) catch
+        return error.HeadersTooLarge;
+    head_len = std.math.add(usize, head_len, options.version.string().len) catch
+        return error.HeadersTooLarge;
+    head_len = std.math.add(usize, head_len, 2) catch
+        return error.HeadersTooLarge;
+    for (headers.items) |header| {
+        head_len = std.math.add(usize, head_len, header.name.len) catch
+            return error.HeadersTooLarge;
+        head_len = std.math.add(usize, head_len, 2) catch
+            return error.HeadersTooLarge;
+        head_len = std.math.add(usize, head_len, header.value.len) catch
+            return error.HeadersTooLarge;
+        head_len = std.math.add(usize, head_len, 2) catch
+            return error.HeadersTooLarge;
+        if (head_len > max_head_bytes) return error.HeadersTooLarge;
+    }
+    head_len = std.math.add(usize, head_len, 2) catch
+        return error.HeadersTooLarge;
+    if (head_len > max_head_bytes) return error.HeadersTooLarge;
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try http1.writeRequestChecked(&encoded, allocator, options.method, options.target, options.version, headers.items, options.body);
+    // Upgrade requests never carry a body, so the encoded request is exactly
+    // the head. Enforce the public head limit before exposing any bytes to the
+    // transport; otherwise custom fields could bypass the receive-side bound.
+    std.debug.assert(encoded.items.len == head_len);
     try transport.writeAll(encoded.items);
 }
 
@@ -5529,6 +5585,35 @@ fn optionalH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []c
         found = header.value;
     }
     return found;
+}
+
+fn validateHttp1ClientExtraHeadersImpl(headers: []const http1.Header) Error!void {
+    for (headers) |header| {
+        try http1.validateHeader(header);
+        if (http1ClientOwnedWebSocketHeader(header.name) or
+            http1ClientFramingHeader(header.name))
+        {
+            return error.InvalidHandshake;
+        }
+    }
+}
+
+fn http1ClientOwnedWebSocketHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "host") or
+        std.ascii.eqlIgnoreCase(name, "upgrade") or
+        std.ascii.eqlIgnoreCase(name, "connection") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-key") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-accept") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-version") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-protocol") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-extensions") or
+        std.ascii.eqlIgnoreCase(name, "origin");
+}
+
+fn http1ClientFramingHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "trailer");
 }
 
 fn validateH2ClientExtraHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
@@ -9075,4 +9160,5 @@ test {
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
+    _ = @import("runtime/handshake_header_tests.zig");
 }

@@ -103,6 +103,17 @@ when a distinct policy is required. The audited websocket.zig client also expose
 now covers the same liveness boundary without its POSIX-only nonblocking/poll
 implementation.
 
+HTTP/1 Upgrade clients now also accept typed `ConnectOptions.extra_headers`,
+matching the reference client's custom handshake-header facility without its
+raw string injection surface. The option is shared by WS, WSS, Unix-socket and
+io_uring entry points. Header syntax is validated, and fields owned by the
+runtime (Host, Upgrade, Connection, Origin, WebSocket negotiation fields) or
+capable of adding an HTTP request body (Content-Length, Transfer-Encoding and
+Trailer) are rejected before any request bytes are sent. This supports common
+Authorization and Cookie handshakes without permitting duplicate critical
+fields or ambiguous body framing. The fully encoded request head is also
+checked against `Limits.max_head_bytes` before the first transport write.
+
 ## Direct frame hot-path evidence
 
 Run:
