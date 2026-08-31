@@ -71,11 +71,13 @@ because correctly bridging its two-phase transaction would require additional
 durable inbound state. Running two opposing rules that map back into one
 another can create a deployment-level cycle; the type intentionally models
 only one direction per instance so such a cycle must be configured explicitly.
-The automated in-process interoperability gate runs two loopback brokers and
+The automated in-process integration test runs two loopback brokers and
 exercises `Bridge.connect`/`step` with a retained MQTT 5 QoS 1 publication. It
 verifies the mapped topic prefix, preserved User Property and RETAIN state,
 connection-scoped Topic Alias removal, local Subscription Identifier
-generation, local retained storage, and the remote PUBACK completion barrier.
+generation, local retained storage, and eventual remote PUBACK completion. The
+separate bridge implementation contract keeps that acknowledgement after the
+local publish call; fault-injected ordering remains future coverage.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
