@@ -59,6 +59,7 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     UnexpectedStream,
     GoAwayReceived,
     RequestRejected,
+    ConnectionUnusable,
     ClosedCriticalStream,
     InvalidUri,
     InvalidAlpn,
@@ -2729,6 +2730,11 @@ pub const Client = struct {
     quic_client: quic.runtime.Client,
     limits: Limits = .{},
     next_stream_id: u62 = 0,
+    /// The development request API assembles a response in call-local state.
+    /// Once a request has been committed to the wire, any subsequent failure
+    /// can leave protocol progress or response ownership unavailable to a
+    /// retry, so later requests fail closed instead of risking misassociation.
+    request_unusable: bool = false,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits) Error!Client {
         return .{ .quic_client = try .connect(allocator, io, local_address, server, limits.quic), .limits = limits };
@@ -2747,22 +2753,152 @@ pub const Client = struct {
         return self.requestWithInformational(request_options, null);
     }
 
+    pub fn requestWithTimeout(
+        self: *Client,
+        request_options: http3.Request,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithDeadline(request_options, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn requestWithDeadline(
+        self: *Client,
+        request_options: http3.Request,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedResponse {
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            null,
+            deadline,
+        );
+    }
+
     /// Send a development-runtime request and report each borrowed 1xx head.
     pub fn requestWithInformational(
         self: *Client,
         request_options: http3.Request,
         informational: ?http3.InformationalObserver,
     ) Error!OwnedResponse {
-        const stream_id = self.next_stream_id;
-        self.next_stream_id += 4; // client-initiated bidirectional stream ids.
+        return self.requestWithInformationalInternal(
+            request_options,
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn requestWithInformationalAndTimeout(
+        self: *Client,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithInformationalAndDeadline(
+            request_options,
+            informational,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Bound response receipt with one absolute awake-clock deadline. The
+    /// deadline is validated before allocating a stream ID or sending bytes
+    /// and rechecked before every UDP send plus every response receive. An
+    /// individual UDP syscall still uses the endpoint's ordinary unbounded
+    /// send path. A failure after the first send attempt makes this client
+    /// unusable because response reassembly is intentionally call-local.
+    pub fn requestWithInformationalAndDeadline(
+        self: *Client,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedResponse {
+        const absolute = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.requestWithInformationalInternal(
+            request_options,
+            informational,
+            absolute,
+        );
+    }
+
+    fn requestWithInformationalInternal(
+        self: *Client,
+        request_options: http3.Request,
+        informational: ?http3.InformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedResponse {
+        if (self.request_unusable) return error.ConnectionUnusable;
 
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_client.endpoint.allocator);
         try request_options.write(&encoded, self.quic_client.endpoint.allocator);
 
-        try sendRuntimeStreamMessage(&self.quic_client.endpoint, self.quic_client.peer, stream_id, encoded.items, self.limits.max_stream_frame_data);
+        const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_client.endpoint.allocator);
+        try appendRuntimeStreamMessageFrames(
+            &frames,
+            self.quic_client.endpoint.allocator,
+            stream_id,
+            encoded.items,
+            self.limits.max_stream_frame_data,
+        );
+        std.debug.assert(frames.items.len != 0);
+        if (deadline) |absolute| {
+            // Encoding and frame construction can allocate. Recheck the same
+            // absolute budget before committing anything to the wire.
+            _ = try deadline_policy.usableAwake(
+                self.quic_client.endpoint.io,
+                absolute,
+            );
+        }
 
-        var assembled = try receiveRuntimeStreamBytes(&self.quic_client.endpoint, stream_id, self.limits.max_stream_buffer);
+        var committed = false;
+        errdefer {
+            if (committed) self.request_unusable = true;
+        }
+        for (frames.items) |frame| {
+            if (deadline) |absolute| {
+                _ = try deadline_policy.usableAwake(
+                    self.quic_client.endpoint.io,
+                    absolute,
+                );
+            }
+            if (!committed) {
+                // Advance at the first send attempt. Socket errors cannot
+                // prove that a datagram was invisible to the peer, while all
+                // deterministic local preflight has already succeeded.
+                self.next_stream_id = next_stream_id;
+                committed = true;
+            }
+            try self.quic_client.endpoint.sendFrames(
+                self.quic_client.peer,
+                &.{frame},
+            );
+        }
+        std.debug.assert(committed);
+
+        var assembled = try receiveRuntimeStreamBytesUntil(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            stream_id,
+            self.limits.max_stream_buffer,
+            deadline,
+        );
         errdefer assembled.deinit(self.quic_client.endpoint.allocator);
         try http3.validateResponsePushPromises(.{}, assembled.bytes);
         var response = try http3.decodeResponseWithOptions(
@@ -2825,16 +2961,62 @@ fn sendRuntimeStreamMessage(
     bytes: []const u8,
     max_stream_frame_data: usize,
 ) Error!void {
-    var send_state = quic.stream_state.SendState.init(stream_id);
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
-    try send_state.appendFrames(&frames, endpoint.allocator, bytes, max_stream_frame_data, true);
+    try appendRuntimeStreamMessageFrames(
+        &frames,
+        endpoint.allocator,
+        stream_id,
+        bytes,
+        max_stream_frame_data,
+    );
     for (frames.items) |frame| {
         try endpoint.sendFrames(to, &.{frame});
     }
 }
 
-fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_id: ?u62, max_stream_buffer: usize) Error!RuntimeAssembledStream {
+fn appendRuntimeStreamMessageFrames(
+    frames: *std.ArrayList(quic.Frame),
+    allocator: std.mem.Allocator,
+    stream_id: u62,
+    bytes: []const u8,
+    max_stream_frame_data: usize,
+) Error!void {
+    var send_state = quic.stream_state.SendState.init(stream_id);
+    try send_state.appendFrames(
+        frames,
+        allocator,
+        bytes,
+        max_stream_frame_data,
+        true,
+    );
+}
+
+fn receiveRuntimeStreamBytes(
+    endpoint: *quic.runtime.Endpoint,
+    expected_peer: ?net.IpAddress,
+    expected_stream_id: ?u62,
+    max_stream_buffer: usize,
+) Error!RuntimeAssembledStream {
+    return receiveRuntimeStreamBytesUntil(
+        endpoint,
+        expected_peer,
+        expected_stream_id,
+        max_stream_buffer,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn receiveRuntimeStreamBytesUntil(
+    endpoint: *quic.runtime.Endpoint,
+    expected_peer: ?net.IpAddress,
+    expected_stream_id: ?u62,
+    max_stream_buffer: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!RuntimeAssembledStream {
     var recv: ?quic.stream_state.RecvState = null;
     defer if (recv) |*state| state.deinit();
     var datagrams: std.ArrayList(quic.runtime.OwnedDatagram) = .empty;
@@ -2846,10 +3028,19 @@ fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_i
     var stream_id: ?u62 = expected_stream_id;
 
     while (true) {
-        var datagram = try endpoint.receive();
+        var datagram = if (deadline) |absolute|
+            try endpoint.receiveWithDeadline(absolute)
+        else
+            try endpoint.receive();
         var datagram_owned = true;
         errdefer if (datagram_owned) datagram.deinit(endpoint.allocator);
-        if (from == null) from = datagram.from;
+        if (expected_peer) |peer| {
+            if (!datagram.from.eql(&peer)) {
+                datagram.deinit(endpoint.allocator);
+                datagram_owned = false;
+                continue;
+            }
+        }
 
         var consumed = false;
         for (datagram.frames) |frame| {
@@ -2866,6 +3057,13 @@ fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_i
                 }
             } else {
                 stream_id = incoming_id;
+            }
+            if (from) |source| {
+                if (!datagram.from.eql(&source)) continue;
+            } else {
+                // Bind assembly ownership only after finding a relevant
+                // STREAM frame. Irrelevant datagrams cannot select a peer.
+                from = datagram.from;
             }
             if (recv == null) recv = quic.stream_state.RecvState.init(endpoint.allocator, incoming_id, max_stream_buffer);
             if (recv) |*state| {
@@ -30075,7 +30273,12 @@ test "HTTP/3 dev runtime assembles split STREAM request and response" {
     try client.quic_client.sendFrames(&first);
     try client.quic_client.sendFrames(&second);
 
-    var assembled = try receiveRuntimeStreamBytes(&client.quic_client.endpoint, 0, client.limits.max_stream_buffer);
+    var assembled = try receiveRuntimeStreamBytes(
+        &client.quic_client.endpoint,
+        server.address(),
+        0,
+        client.limits.max_stream_buffer,
+    );
     defer assembled.deinit(allocator);
     try std.testing.expect(assembled.datagrams.len > 1);
     var response = try http3.decodeResponse(allocator, assembled.bytes);
@@ -30158,6 +30361,311 @@ test "HTTP/3 dev client assembles split STREAM response" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/3 dev client deadline validation does not send" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+
+    const request_options: http3.Request = .{
+        .method = "GET",
+        .path = "/must-not-send",
+        .authority = "localhost",
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithDeadline(request_options, .{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndTimeout(
+            request_options,
+            null,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expect(!client.request_unusable);
+    client.next_stream_id = std.math.maxInt(u62) - 3;
+    try std.testing.expectError(
+        error.StreamCreationError,
+        client.request(request_options),
+    );
+    try std.testing.expectEqual(
+        @as(u62, std.math.maxInt(u62) - 3),
+        client.next_stream_id,
+    );
+    try std.testing.expect(!client.request_unusable);
+    client.next_stream_id = 0;
+    client.limits.max_stream_frame_data = 0;
+    try std.testing.expectError(
+        error.InvalidStreamRange,
+        client.request(request_options),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expect(!client.request_unusable);
+
+    // Neither deadline validation nor local frame preflight emitted stream
+    // zero, and the latter did not poison the client.
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_streams.entries.items.len,
+    );
+}
+
+test "HTTP/3 dev client bounded requests deliver informational responses" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var request = try self.server.receiveRequestWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer request.deinit(
+                    self.server.quic_server.endpoint.allocator,
+                );
+                try std.testing.expectEqualStrings(
+                    "/bounded-timeout",
+                    request.request.path,
+                );
+                try self.server.sendResponse(
+                    request.from,
+                    request.stream_id,
+                    .{ .status = 204 },
+                );
+            }
+            {
+                var request = try self.server.receiveRequestWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer request.deinit(
+                    self.server.quic_server.endpoint.allocator,
+                );
+                try std.testing.expectEqualStrings(
+                    "/bounded-informational",
+                    request.request.path,
+                );
+                try self.server.sendResponseWithInformational(
+                    request.from,
+                    request.stream_id,
+                    &.{.{
+                        .status = 103,
+                        .headers = &.{.{
+                            .name = "link",
+                            .value = "</dev.css>",
+                        }},
+                    }},
+                    .{ .status = 200, .body = "bounded final" },
+                );
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+    var unrelated = try quic.runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer unrelated.deinit();
+    var spoofed: std.ArrayList(u8) = .empty;
+    defer spoofed.deinit(allocator);
+    try (http3.Response{
+        .status = 500,
+        .body = "wrong peer",
+    }).write(&spoofed, allocator);
+    try unrelated.sendFrames(client.address(), &.{.{ .stream = .{
+        .stream_id = 0,
+        .data = spoofed.items,
+        .fin = true,
+    } }});
+    // Consume the queued spoof deterministically before the real server can
+    // reply. The bounded request path must discard it and continue waiting.
+    std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    var no_content = try client.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/bounded-timeout",
+        .authority = "localhost",
+    }, .fromSeconds(1));
+    defer no_content.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), no_content.response.status);
+
+    const Observation = struct {
+        count: usize = 0,
+        status: u16 = 0,
+        header_valid: bool = false,
+
+        fn observe(
+            context: *anyopaque,
+            response: InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+            self.status = response.status;
+            for (response.headers) |header| {
+                if (std.mem.eql(u8, header.name, "link") and
+                    std.mem.eql(u8, header.value, "</dev.css>"))
+                {
+                    self.header_valid = true;
+                }
+            }
+        }
+    };
+    var observation: Observation = .{};
+    var response = try client.requestWithInformationalAndDeadline(
+        .{
+            .method = "GET",
+            .path = "/bounded-informational",
+            .authority = "localhost",
+        },
+        .{
+            .context = &observation,
+            .on_response = Observation.observe,
+        },
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), observation.count);
+    try std.testing.expectEqual(@as(u16, 103), observation.status);
+    try std.testing.expect(observation.header_valid);
+    try std.testing.expectEqualStrings(
+        "bounded final",
+        response.response.body,
+    );
+    try std.testing.expect(!client.request_unusable);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 dev client fails closed after partial response timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "response deliberately left incomplete",
+    }).write(&encoded, allocator);
+    const split = encoded.items.len / 2;
+    // Queue an incomplete stream-zero response before the request. This keeps
+    // the test deterministic while exercising the client's actual socket and
+    // call-local STREAM assembly.
+    try server.quic_server.sendFrames(client.address(), &.{.{ .stream = .{
+        .stream_id = 0,
+        .data = encoded.items[0..split],
+    } }});
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithTimeout(.{
+            .method = "GET",
+            .path = "/partial-response",
+            .authority = "localhost",
+        }, .fromMilliseconds(20)),
+    );
+    try std.testing.expect(client.request_unusable);
+    try std.testing.expectEqual(@as(u62, 4), client.next_stream_id);
+
+    // The first request did reach the server; a retry is rejected locally and
+    // cannot allocate or emit stream four.
+    var request = try server.receiveRequestWithTimeout(.fromSeconds(1));
+    defer request.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "/partial-response",
+        request.request.path,
+    );
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.request(.{
+            .method = "GET",
+            .path = "/must-fail-closed",
+            .authority = "localhost",
+        }),
+    );
+    try std.testing.expectEqual(@as(u62, 4), client.next_stream_id);
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
 test "HTTP/3 dev runtime enforces stream reassembly limit" {
     const allocator = std.testing.allocator;
 
@@ -30182,7 +30690,10 @@ test "HTTP/3 dev runtime enforces stream reassembly limit" {
         .data = "too-far",
         .fin = true,
     } }});
-    try std.testing.expectError(error.StreamBufferTooLarge, receiveRuntimeStreamBytes(&receiver, 0, 16));
+    try std.testing.expectError(
+        error.StreamBufferTooLarge,
+        receiveRuntimeStreamBytes(&receiver, sender.address(), 0, 16),
+    );
 }
 
 test "HTTP/3 dev runtime receives requests with std.Io async batch" {
