@@ -271,7 +271,7 @@ pub const StreamRegistry = struct {
     /// Preflight an externally shared H3/QUIC stream ID. This is the fallible
     /// half of registration; a successful call makes the matching commit
     /// allocation-free.
-    fn prepareLocalId(
+    pub fn prepareLocalId(
         self: *StreamRegistry,
         stream_id: u62,
         direction: StreamDirection,
@@ -295,13 +295,15 @@ pub const StreamRegistry = struct {
         try self.streams.ensureUnusedCapacity(self.allocator, 1);
     }
 
-    /// Commit a successfully prepared local stream without allocation.
-    fn commitPreparedLocal(
+    /// Commit a successfully prepared local stream. The intended adjacent
+    /// prepare/commit sequence is allocation-free, but this public boundary
+    /// revalidates all invariants and remains safe if a caller interleaves
+    /// another registry operation or supplies an arbitrary ID.
+    pub fn commitPreparedLocal(
         self: *StreamRegistry,
         stream_id: u62,
         direction: StreamDirection,
-    ) *StreamState {
-        std.debug.assert(!self.index.contains(stream_id));
+    ) webtransport.Error!*StreamState {
         const next, const opened = switch (direction) {
             .bidirectional => .{
                 &self.next_local_bidi,
@@ -312,18 +314,14 @@ pub const StreamRegistry = struct {
                 &self.opened_local_uni,
             },
         };
-        const slot = self.index.getOrPutAssumeCapacity(stream_id);
-        std.debug.assert(!slot.found_existing);
-        const position = self.streams.items.len;
-        self.streams.appendAssumeCapacity(newStreamState(
-            stream_id,
-            direction,
-            true,
-        ));
-        slot.value_ptr.* = position;
-        next.* = stream_id + 4;
+        if (stream_id != next.*) return error.InvalidStreamState;
+        try self.prepareLocalId(stream_id, direction);
+        const advanced = std.math.add(u62, stream_id, 4) catch
+            return error.StreamLimitExceeded;
+        const stream_state = try self.insert(stream_id, direction, true);
+        next.* = advanced;
         opened.* += 1;
-        return &self.streams.items[position];
+        return stream_state;
     }
 
     pub fn get(self: *StreamRegistry, stream_id: u62) ?*StreamState {
@@ -549,12 +547,12 @@ test "WebTransport local stream preflight commits without allocation" {
     const first_id = try registry.prepareLocal(.bidirectional);
     try std.testing.expectEqual(@as(u62, 4), first_id);
     try std.testing.expectEqual(@as(usize, 0), registry.streams.items.len);
-    const first = registry.commitPreparedLocal(first_id, .bidirectional);
+    const first = try registry.commitPreparedLocal(first_id, .bidirectional);
     try std.testing.expectEqual(first_id, first.stream_id);
 
     const second_id = try registry.prepareLocal(.bidirectional);
     try std.testing.expectEqual(@as(u62, 8), second_id);
-    _ = registry.commitPreparedLocal(second_id, .bidirectional);
+    _ = try registry.commitPreparedLocal(second_id, .bidirectional);
     try std.testing.expectError(
         error.StreamLimitExceeded,
         registry.prepareLocal(.bidirectional),

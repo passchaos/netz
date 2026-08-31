@@ -4842,6 +4842,58 @@ pub const HandshakeServerSession = struct {
         return stream_id;
     }
 
+    /// Reserve a server-initiated unidirectional ID in both HTTP/3's shared
+    /// push-stream namespace and the underlying QUIC transport. The caller
+    /// must complete any fallible application bookkeeping before invoking
+    /// this method: a successful transport reservation cannot be rolled back.
+    pub fn openServerUnidirectionalStream(
+        self: *HandshakeServerSession,
+    ) Error!u62 {
+        const expected = self.next_push_stream_id;
+        _ = std.math.add(u62, expected, 4) catch
+            return error.StreamCreationError;
+        if (self.established.connection
+            .nextLocalUnidirectionalStreamId() != expected)
+        {
+            return error.StreamCreationError;
+        }
+        const transport_id = try self.established.connection
+            .openUnidirectionalStream();
+        const stream_id = try self.reserveServerUnidirectionalStreamId();
+        std.debug.assert(stream_id == expected and stream_id == transport_id);
+        return stream_id;
+    }
+
+    pub fn openServerUnidirectionalStreamWithTimeout(
+        self: *HandshakeServerSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openServerUnidirectionalStreamWithDeadline(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn openServerUnidirectionalStreamWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        const expected = self.next_push_stream_id;
+        _ = std.math.add(u62, expected, 4) catch
+            return error.StreamCreationError;
+        if (self.established.connection
+            .nextLocalUnidirectionalStreamId() != expected)
+        {
+            return error.StreamCreationError;
+        }
+        const transport_id = try self.established.connection
+            .openUnidirectionalStreamWithDeadline(deadline);
+        const stream_id = try self.reserveServerUnidirectionalStreamId();
+        std.debug.assert(stream_id == expected and stream_id == transport_id);
+        return stream_id;
+    }
+
     /// Advertise local HTTP/3 settings before waiting for a request.
     ///
     /// Some event-driven clients wait for the server control stream before
@@ -6274,6 +6326,56 @@ pub const HandshakeClient = struct {
             stream_id,
             4,
         ) catch return error.StreamCreationError;
+        return stream_id;
+    }
+
+    /// Reserve a client-initiated bidirectional ID in both HTTP/3's request
+    /// namespace and QUIC. This cohesive operation prevents WebTransport from
+    /// advancing either cursor while leaving the other behind.
+    pub fn openClientBidirectionalStream(
+        self: *HandshakeClient,
+    ) Error!u62 {
+        const expected = self.next_stream_id;
+        _ = std.math.add(u62, expected, 4) catch
+            return error.StreamCreationError;
+        if (self.established.connection
+            .nextLocalBidirectionalStreamId() != expected)
+        {
+            return error.StreamCreationError;
+        }
+        const transport_id = try self.established.connection.openStream();
+        const stream_id = try self.reserveClientBidirectionalStreamId();
+        std.debug.assert(stream_id == expected and stream_id == transport_id);
+        return stream_id;
+    }
+
+    pub fn openClientBidirectionalStreamWithTimeout(
+        self: *HandshakeClient,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openClientBidirectionalStreamWithDeadline(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn openClientBidirectionalStreamWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        const expected = self.next_stream_id;
+        _ = std.math.add(u62, expected, 4) catch
+            return error.StreamCreationError;
+        if (self.established.connection
+            .nextLocalBidirectionalStreamId() != expected)
+        {
+            return error.StreamCreationError;
+        }
+        const transport_id = try self.established.connection
+            .openStreamWithDeadline(deadline);
+        const stream_id = try self.reserveClientBidirectionalStreamId();
+        std.debug.assert(stream_id == expected and stream_id == transport_id);
         return stream_id;
     }
 

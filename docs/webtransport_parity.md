@@ -108,8 +108,8 @@ WebTransport DATAGRAM round trip and transport statistics.
 | --- | --- | --- | --- |
 | CONNECT / SETTINGS | Handshake, protected and dev runtimes; every server exposes a two-phase request object with authority/path/origin/header inspection, custom success headers, and typed 403/404/429 or generic 3xx-5xx rejection. Every client can send validated custom CONNECT headers, retain accepted response metadata, and opt into an attempt API that preserves non-2xx status and headers. Handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session with request inspection and accept/reject methods |
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
-| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop, lifecycle/limits and per-send-stream priority; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
-| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop, lifecycle/limits and send priority; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |
+| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop, lifecycle/limits and per-send-stream priority; standalone sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
+| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop, lifecycle/limits and send priority; standalone sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |
 | Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup; external wtransport consumes netz DRAIN before an exactly validated CLOSE | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN and reports the immediately following CLOSE |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
@@ -122,6 +122,21 @@ absolute application deadline spans unrelated QUIC packets while earlier PTO,
 delayed-ACK, keep-alive, path-validation, idle and close timers continue to
 run; neither transport maintenance nor control traffic renews the caller's
 budget.
+Standalone `HandshakeClientSession` and `AcceptedHandshakeSession` stream opens
+now have matching timeout and absolute-deadline forms. Registry capacity and
+the cumulative per-session WebTransport limit are preflighted before either a
+QUIC or shared HTTP/3 stream-ID cursor advances; successful commit is then
+allocation-free. Client bidirectional IDs remain coordinated with the HTTP/3
+request cursor, and server unidirectional IDs with the HTTP/3 push cursor. An
+invalid/expired deadline consumes neither registry state nor transport ID; the
+focused stateful-preconfigured test also covers successful bounded opens when
+initial transport credit is available. QUIC-level tests separately exercise an
+actual wait for a cumulative `MAX_STREAMS` update. Standalone sessions expose
+`releaseCompletedPeerStream` to return terminal peer stream credit while
+retaining cumulative WebTransport registry accounting. The endpoint-accepted
+variant is deliberately nonblocking: it only inspects buffered state, sends a
+credit update when ready, and refreshes the dispatcher timer without reading
+UDP.
 The multi-connection endpoint preserves HTTP/3 handshake-worker failures as a
 finite typed payload rather than widening them to `anyerror`. In particular,
 an expired shared-endpoint admission is observable as `error.Timeout` with its

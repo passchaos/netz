@@ -1184,13 +1184,21 @@ pub const EndpointAcceptedSession = struct {
 
     pub fn openBidirectionalStream(
         self: *EndpointAcceptedSession,
-    ) Error!u62 {
+    ) EndpointServerError!u62 {
         try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return (try self.streams.openLocal(.bidirectional)).stream_id;
+        const stream_id = try self.streams.prepareLocal(.bidirectional);
+        const transport_id = try self.h3.established.connection.openStream();
+        std.debug.assert(transport_id == stream_id);
+        const committed = (try self.streams.commitPreparedLocal(
+            stream_id,
+            .bidirectional,
+        )).stream_id;
+        try self.refreshTimer();
+        return committed;
     }
 
     pub fn openUnidirectionalStream(
@@ -1201,8 +1209,10 @@ pub const EndpointAcceptedSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        const stream_id = try self.h3.reserveServerUnidirectionalStreamId();
-        const registered = try self.streams.registerLocal(
+        const stream_id = try self.streams.prepareLocal(.unidirectional);
+        const transport_id = try self.h3.openServerUnidirectionalStream();
+        std.debug.assert(transport_id == stream_id);
+        const registered = try self.streams.commitPreparedLocal(
             stream_id,
             .unidirectional,
         );
@@ -1333,6 +1343,22 @@ pub const EndpointAcceptedSession = struct {
             stream_id,
         );
         try self.refreshTimer();
+    }
+
+    /// Nonblocking endpoint variant: inspect buffered terminal state, emit any
+    /// resulting MAX_STREAMS update, and refresh the dispatcher timer without
+    /// performing a UDP receive.
+    pub fn releaseCompletedPeerStream(
+        self: *EndpointAcceptedSession,
+        stream_id: u62,
+    ) EndpointServerError!bool {
+        const stream = self.streams.get(stream_id) orelse
+            return error.UnknownStream;
+        if (stream.locally_initiated) return error.InvalidStreamState;
+        const released = try self.h3.established.connection
+            .releaseCompletedPeerStream(stream_id);
+        try self.refreshTimer();
+        return released;
     }
 
     pub fn resetStream(
@@ -2688,32 +2714,86 @@ pub const AcceptedHandshakeSession = struct {
     pub fn openBidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
-        try self.control.ensureOpen();
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
-        return (try self.streams.openLocal(.bidirectional)).stream_id;
+        return self.openLocalStream(.bidirectional, null);
+    }
+
+    pub fn openBidirectionalStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openBidirectionalStreamWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn openBidirectionalStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        return self.openLocalStream(.bidirectional, deadline);
     }
 
     pub fn openUnidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
+        return self.openLocalStream(.unidirectional, null);
+    }
+
+    pub fn openUnidirectionalStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openUnidirectionalStreamWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn openUnidirectionalStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        return self.openLocalStream(.unidirectional, deadline);
+    }
+
+    fn openLocalStream(
+        self: *AcceptedHandshakeSession,
+        direction: webtransport.StreamDirection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.h3.established.connection.endpoint.io,
+                absolute,
+            );
+        }
         try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        // Server push and WebTransport uni streams share the server-initiated
-        // QUIC stream-ID space. Consume the HTTP/3 session's allocator so a
-        // later push cannot reuse this ID.
-        const stream_id =
-            try self.h3.reserveServerUnidirectionalStreamId();
-        const stream = try self.streams.registerLocal(
+        const stream_id = try self.streams.prepareLocal(direction);
+        const transport_id: u64 = switch (direction) {
+            .bidirectional => if (deadline) |absolute|
+                try self.h3.established.connection
+                    .openStreamWithDeadline(absolute)
+            else
+                try self.h3.established.connection.openStream(),
+            // Server push and WebTransport uni streams share this ID space,
+            // so H3 and QUIC must advance as one indivisible reservation.
+            .unidirectional => if (deadline) |absolute|
+                try self.h3.openServerUnidirectionalStreamWithDeadline(absolute)
+            else
+                try self.h3.openServerUnidirectionalStream(),
+        };
+        std.debug.assert(transport_id == stream_id);
+        return (try self.streams.commitPreparedLocal(
             stream_id,
-            .unidirectional,
-        );
-        return stream.stream_id;
+            direction,
+        )).stream_id;
     }
 
     pub fn sendStream(
@@ -2792,6 +2872,21 @@ pub const AcceptedHandshakeSession = struct {
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
+            stream_id,
+        );
+    }
+
+    /// Return cumulative QUIC stream-count credit after a peer-initiated
+    /// associated stream has reached a terminal state. Registry accounting is
+    /// intentionally retained, so this never replenishes the WT session cap.
+    pub fn releaseCompletedPeerStream(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+    ) Error!bool {
+        const stream = self.streams.get(stream_id) orelse
+            return error.UnknownStream;
+        if (stream.locally_initiated) return error.InvalidStreamState;
+        return self.h3.established.connection.releaseCompletedPeerStream(
             stream_id,
         );
     }
@@ -4067,31 +4162,87 @@ pub const HandshakeClientSession = struct {
     pub fn openBidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
-        try self.control.ensureOpen();
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
-        // HTTP requests and WebTransport bidi streams share client-initiated
-        // QUIC IDs. Advance the HTTP/3 allocator transactionally.
-        const stream_id =
-            try self.h3.reserveClientBidirectionalStreamId();
-        const stream = try self.streams.registerLocal(
-            stream_id,
-            .bidirectional,
-        );
-        return stream.stream_id;
+        return self.openLocalStream(.bidirectional, null);
+    }
+
+    pub fn openBidirectionalStreamWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openBidirectionalStreamWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn openBidirectionalStreamWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        return self.openLocalStream(.bidirectional, deadline);
     }
 
     pub fn openUnidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
+        return self.openLocalStream(.unidirectional, null);
+    }
+
+    pub fn openUnidirectionalStreamWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openUnidirectionalStreamWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn openUnidirectionalStreamWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        return self.openLocalStream(.unidirectional, deadline);
+    }
+
+    fn openLocalStream(
+        self: *HandshakeClientSession,
+        direction: webtransport.StreamDirection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.h3.established.connection.endpoint.io,
+                absolute,
+            );
+        }
         try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return (try self.streams.openLocal(.unidirectional)).stream_id;
+        // Registry capacity and the cumulative WT cap are fallible, so reserve
+        // them before consuming either the H3 or transport stream-ID cursor.
+        const stream_id = try self.streams.prepareLocal(direction);
+        const transport_id: u64 = switch (direction) {
+            .bidirectional => if (deadline) |absolute|
+                try self.h3.openClientBidirectionalStreamWithDeadline(absolute)
+            else
+                try self.h3.openClientBidirectionalStream(),
+            .unidirectional => if (deadline) |absolute|
+                try self.h3.established.connection
+                    .openUnidirectionalStreamWithDeadline(absolute)
+            else
+                try self.h3.established.connection
+                    .openUnidirectionalStream(),
+        };
+        std.debug.assert(transport_id == stream_id);
+        return (try self.streams.commitPreparedLocal(
+            stream_id,
+            direction,
+        )).stream_id;
     }
 
     pub fn sendStream(
@@ -4169,6 +4320,20 @@ pub const HandshakeClientSession = struct {
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
+            stream_id,
+        );
+    }
+
+    /// Return cumulative QUIC MAX_STREAMS credit for one terminal peer
+    /// associated stream without removing its lifetime registry entry.
+    pub fn releaseCompletedPeerStream(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+    ) Error!bool {
+        const stream = self.streams.get(stream_id) orelse
+            return error.UnknownStream;
+        if (stream.locally_initiated) return error.InvalidStreamState;
+        return self.h3.established.connection.releaseCompletedPeerStream(
             stream_id,
         );
     }
@@ -5461,10 +5626,38 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.openBidirectionalStream();
     }
 
+    pub fn openBidirectionalStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        return self.session.openBidirectionalStreamWithTimeout(timeout);
+    }
+
+    pub fn openBidirectionalStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        return self.session.openBidirectionalStreamWithDeadline(deadline);
+    }
+
     pub fn openUnidirectionalStream(
         self: *StatefulProtectedClientSession,
     ) Error!u62 {
         return self.session.openUnidirectionalStream();
+    }
+
+    pub fn openUnidirectionalStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        return self.session.openUnidirectionalStreamWithTimeout(timeout);
+    }
+
+    pub fn openUnidirectionalStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        return self.session.openUnidirectionalStreamWithDeadline(deadline);
     }
 
     pub fn sendStream(
@@ -5512,6 +5705,13 @@ pub const StatefulProtectedClientSession = struct {
         stream_id: u62,
     ) Error!void {
         return self.session.finishStream(stream_id);
+    }
+
+    pub fn releaseCompletedPeerStream(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+    ) Error!bool {
+        return self.session.releaseCompletedPeerStream(stream_id);
     }
 
     pub fn receiveStream(
@@ -7733,9 +7933,46 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         client.address(),
         client.session.h3.address(),
     );
-    const bidi = try client.openBidirectionalStream();
+    const before_invalid_open = client.stats().outgoing_streams_created;
+    const before_invalid_registry = client.session.streams.registered().len;
+    try std.testing.expectError(
+        error.Timeout,
+        client.openBidirectionalStreamWithDeadline(.{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.openUnidirectionalStreamWithTimeout(.zero),
+    );
+    try std.testing.expectEqual(
+        before_invalid_open,
+        client.stats().outgoing_streams_created,
+    );
+    try std.testing.expectEqual(
+        before_invalid_registry,
+        client.session.streams.registered().len,
+    );
+
+    // Practical transport parameters provide immediate credit. Exercise both
+    // bounded directions and verify the QUIC reservation counter advances.
+    const bidi = try client.openBidirectionalStreamWithTimeout(
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(
+        before_invalid_open + 1,
+        client.stats().outgoing_streams_created,
+    );
     try client.sendStream(bidi, "client-bidi", true);
-    const uni = try client.openUnidirectionalStream();
+    const uni = try client.openUnidirectionalStreamWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    try std.testing.expectEqual(
+        before_invalid_open + 2,
+        client.stats().outgoing_streams_created,
+    );
     try client.sendStream(uni, "client-uni", true);
 
     var response_bidi = try client.receiveStream();

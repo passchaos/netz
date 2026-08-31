@@ -1816,6 +1816,17 @@ pub const Connection = struct {
         return self.openLocalStream(.bidirectional);
     }
 
+    /// Peek at the next local stream ID without reserving transport credit.
+    /// Protocol adapters with a second shared namespace use this to reject a
+    /// cursor mismatch before either irreversible reservation is consumed.
+    pub fn nextLocalBidirectionalStreamId(self: Connection) u64 {
+        return self.next_local_bidi_stream_id;
+    }
+
+    pub fn nextLocalUnidirectionalStreamId(self: Connection) u64 {
+        return self.next_local_uni_stream_id;
+    }
+
     /// Wait for peer bidirectional-stream credit until `timeout` expires.
     ///
     /// The relative timeout is converted once to an absolute awake-clock
