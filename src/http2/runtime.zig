@@ -41,6 +41,7 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || erro
     InvalidServeOptions,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error;
+pub const RequestTimeoutError = Error || std.Io.Timeout.Error;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
 
@@ -5603,10 +5604,53 @@ pub const Connection = struct {
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
+        return self.readRequestUntil(null) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Read one complete server request within a relative budget. A timeout
+    /// before stream admission preserves the frame reader; after a HEADERS
+    /// block is claimed, discarded aggregate state makes the connection
+    /// intentionally unusable rather than risking HPACK or DATA desync.
+    pub fn readRequestWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) RequestTimeoutError!OwnedRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readRequestWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readRequestWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) RequestTimeoutError!OwnedRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readRequestUntil(deadline);
+    }
+
+    fn readRequestUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) RequestTimeoutError!OwnedRequest {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending| return pending;
+        var active_stream_id: ?u31 = null;
+        errdefer |err| if (err == error.Timeout) {
+            // Request headers/body/trailers are stack-owned during aggregation.
+            // Once a stream has been admitted, a retry cannot reconstruct that
+            // state, so cancel it and fail the connection closed.
+            if (active_stream_id) |stream_id| {
+                self.failTimedOutRequest(stream_id);
+            }
+        };
         while (true) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             switch (frame.frame.header.frame_type) {
@@ -5617,7 +5661,11 @@ pub const Connection = struct {
                     try self.reservePeerStream(stream_id);
                     errdefer self.releasePeerStream(stream_id);
                     self.last_peer_client_stream_id = stream_id;
-                    const headers = try self.readHeaderBlock(frame.frame);
+                    active_stream_id = stream_id;
+                    const headers = try self.readHeaderBlockUntil(
+                        frame.frame,
+                        deadline,
+                    );
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
                     var trailers: []http2.Hpack.HeaderField = &.{};
@@ -5650,9 +5698,10 @@ pub const Connection = struct {
 
                     if ((!is_connect or is_extended_connect) and (frame.frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
-                            var incoming = try self.readRequestBodyFrame(
+                            var incoming = try self.readRequestBodyFrameUntil(
                                 stream_id,
                                 &body,
+                                deadline,
                             );
                             switch (incoming) {
                                 .direct_data => |end_stream| {
@@ -5667,8 +5716,9 @@ pub const Connection = struct {
                                     if (owned.frame.header.stream_id !=
                                         stream_id)
                                     {
-                                        if (try self.queueCompletePeerRequestFrame(
+                                        if (try self.queueCompletePeerRequestFrameUntil(
                                             owned.frame,
+                                            deadline,
                                         )) continue;
                                         return error.UnexpectedFrame;
                                     }
@@ -5707,8 +5757,9 @@ pub const Connection = struct {
                                                 return error.UnexpectedFrame;
                                             }
                                             trailers =
-                                                try self.readHeaderBlock(
+                                                try self.readHeaderBlockUntil(
                                                     owned.frame,
+                                                    deadline,
                                                 );
                                             try validateHeaderBlock(
                                                 trailers,
@@ -5788,10 +5839,45 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingRequest {
-        return self.readRequestStreamingWithHead(
+        return self.readRequestStreamingWithHeadUntil(
             context,
             ignoreStreamingRequestHead,
             consume,
+            null,
+        );
+    }
+
+    pub fn readRequestStreamingWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readRequestStreamingWithDeadline(
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    /// Stream one server request under a caller-owned absolute awake-clock
+    /// deadline. Partial input remains retryable only until HEADERS admits a
+    /// stream; after that, a read timeout cancels the stream and prevents reuse
+    /// because decoder progress is not retained. Application callback errors
+    /// retain the unbounded API's stream-local cancellation semantics.
+    pub fn readRequestStreamingWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readRequestStreamingWithHeadUntil(
+            context,
+            ignoreStreamingRequestHead,
+            consume,
+            deadline,
         );
     }
 
@@ -5806,6 +5892,56 @@ pub const Connection = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingRequest {
+        return self.readRequestStreamingWithHeadUntil(
+            context,
+            begin,
+            consume,
+            null,
+        );
+    }
+
+    pub fn readRequestStreamingWithHeadAndTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readRequestStreamingWithHeadAndDeadline(
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Deadline-bounded streaming request receive with validated head delivery
+    /// before DATA. The same deadline spans both callbacks and trailers.
+    pub fn readRequestStreamingWithHeadAndDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readRequestStreamingWithHeadUntil(
+            context,
+            begin,
+            consume,
+            deadline,
+        );
+    }
+
+    fn readRequestStreamingWithHeadUntil(
+        self: *Connection,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !StreamingRequest {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending_value| {
             var pending = pending_value;
@@ -5815,18 +5951,12 @@ pub const Connection = struct {
                 context,
                 StreamingRequestHead.fromOwned(pending),
             ) catch |err| {
-                self.sendResetStream(
-                    pending.stream_id,
-                    .cancel,
-                ) catch {};
+                self.cancelPeerRequest(pending.stream_id);
                 return err;
             };
             if (pending.body.len != 0) {
                 consume(context, pending.body) catch |err| {
-                    self.sendResetStream(
-                        pending.stream_id,
-                        .cancel,
-                    ) catch {};
+                    self.cancelPeerRequest(pending.stream_id);
                     return err;
                 };
             }
@@ -5836,8 +5966,22 @@ pub const Connection = struct {
             return result;
         }
 
+        var active_stream_id: ?u31 = null;
+        var read_timed_out = false;
+        // Callbacks may themselves return error.Timeout. Record Timeout only at
+        // deadline-bearing reads so application rejection remains stream-local,
+        // while discarded decoder/body progress after an actual read timeout
+        // still makes the connection fail closed.
+        errdefer if (read_timed_out) {
+            if (active_stream_id) |stream_id| {
+                self.failTimedOutRequest(stream_id);
+            }
+        };
         while (true) {
-            var first = try self.readOwnedFrame();
+            var first = self.readOwnedFrameWithDeadline(deadline) catch |err| {
+                read_timed_out = deadline != null and err == error.Timeout;
+                return err;
+            };
             defer first.deinit(self.allocator);
             if (try self.handleConnectionFrame(first.frame)) continue;
             if (first.frame.header.frame_type == .goaway) continue;
@@ -5854,8 +5998,15 @@ pub const Connection = struct {
             try self.reservePeerStream(stream_id);
             errdefer self.releasePeerStream(stream_id);
             self.last_peer_client_stream_id = stream_id;
+            active_stream_id = stream_id;
 
-            const headers = try self.readHeaderBlock(first.frame);
+            const headers = self.readHeaderBlockUntil(
+                first.frame,
+                deadline,
+            ) catch |err| {
+                read_timed_out = deadline != null and err == error.Timeout;
+                return err;
+            };
             var headers_owned = true;
             errdefer if (headers_owned) freeHeaders(self.allocator, headers);
             try validateHeaderBlock(headers, .request);
@@ -5890,10 +6041,7 @@ pub const Connection = struct {
                 // The peer's request half may already carry END_STREAM, but
                 // this server still owns the response half. Cancel the whole
                 // stream so a rejected head cannot leave the client waiting.
-                self.writeResetStreamFrame(
-                    stream_id,
-                    .cancel,
-                ) catch {};
+                self.cancelPeerRequest(stream_id);
                 return err;
             };
 
@@ -5907,10 +6055,23 @@ pub const Connection = struct {
                 (first.frame.header.flags & flag_end_stream) == 0)
             {
                 while (true) {
-                    const frame = try self.readFrameScratch();
+                    const frame = (self.readBufferedFrameWithDeadline(
+                        deadline,
+                    ) catch |err| {
+                        read_timed_out =
+                            deadline != null and err == error.Timeout;
+                        return err;
+                    }).frame;
                     if (try self.handleConnectionFrame(frame)) continue;
                     if (frame.header.stream_id != stream_id) {
-                        if (try self.queueCompletePeerRequestFrame(frame)) {
+                        if (self.queueCompletePeerRequestFrameUntil(
+                            frame,
+                            deadline,
+                        ) catch |err| {
+                            read_timed_out =
+                                deadline != null and err == error.Timeout;
+                            return err;
+                        }) {
                             continue;
                         }
                         return error.UnexpectedFrame;
@@ -5941,10 +6102,7 @@ pub const Connection = struct {
                                     // Even final request DATA leaves the
                                     // server response half open; terminate it
                                     // when the application rejects the body.
-                                    self.writeResetStreamFrame(
-                                        stream_id,
-                                        .cancel,
-                                    ) catch {};
+                                    self.cancelPeerRequest(stream_id);
                                     return err;
                                 };
                             }
@@ -5957,7 +6115,14 @@ pub const Connection = struct {
                             if ((frame.header.flags & flag_end_stream) == 0) {
                                 return error.UnexpectedFrame;
                             }
-                            trailers = try self.readHeaderBlock(frame);
+                            trailers = self.readHeaderBlockUntil(
+                                frame,
+                                deadline,
+                            ) catch |err| {
+                                read_timed_out =
+                                    deadline != null and err == error.Timeout;
+                                return err;
+                            };
                             trailers_owned = true;
                             try validateHeaderBlock(
                                 trailers,
@@ -6052,11 +6217,7 @@ pub const Connection = struct {
                 // inbound DATA already ended. Cancel the whole batch so a
                 // callback/framing failure cannot strand clients waiting for
                 // responses that this API will never produce.
-                self.writeResetStreamFrame(
-                    streaming_request.stream_id,
-                    .cancel,
-                ) catch {};
-                self.releasePeerStream(streaming_request.stream_id);
+                self.cancelPeerRequest(streaming_request.stream_id);
                 streaming_request.deinit(self.allocator);
             }
         }
@@ -6420,12 +6581,13 @@ pub const Connection = struct {
     /// the final body, so reading there directly avoids one allocation and one
     /// payload copy per frame. Padded DATA and all control/header frames retain
     /// the fully validated owning fallback.
-    fn readRequestBodyFrame(
+    fn readRequestBodyFrameUntil(
         self: *Connection,
         stream_id: u31,
         body: *std.ArrayList(u8),
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!RequestBodyFrame {
-        const borrowed = try self.readBufferedFrame();
+        const borrowed = try self.readBufferedFrameWithDeadline(deadline);
         const header = borrowed.frame.header;
         const is_direct_data = header.frame_type == .data and
             header.stream_id == stream_id and (header.flags & 0x8) == 0;
@@ -6460,17 +6622,34 @@ pub const Connection = struct {
         };
     }
 
-    fn queueCompletePeerRequestFrame(self: *Connection, frame: http2.Frame) Error!bool {
+    fn queueCompletePeerRequestFrameUntil(
+        self: *Connection,
+        frame: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!bool {
         if (frame.header.frame_type != .headers) return false;
         if ((frame.header.flags & flag_end_stream) == 0) return false;
         const stream_id = frame.header.stream_id;
         if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
         if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
         try self.reservePeerStream(stream_id);
-        errdefer self.releasePeerStream(stream_id);
+        var release_stream_on_error = true;
+        errdefer if (release_stream_on_error) {
+            self.releasePeerStream(stream_id);
+        };
         self.last_peer_client_stream_id = stream_id;
 
-        const headers = try self.readHeaderBlock(frame);
+        const headers = self.readHeaderBlockUntil(frame, deadline) catch |err| {
+            if (deadline != null and err == error.Timeout) {
+                // END_STREAM makes this a complete request even though its
+                // HPACK block still needs CONTINUATION. It was admitted above,
+                // so retire it independently from the active request whose
+                // reader will also fail closed.
+                self.cancelPeerRequest(stream_id);
+                release_stream_on_error = false;
+            }
+            return err;
+        };
         errdefer freeHeaders(self.allocator, headers);
         try validateHeaderBlock(headers, .request);
         const empty_body = try self.allocator.alloc(u8, 0);
@@ -8385,6 +8564,45 @@ pub const Connection = struct {
         self.writeResetStreamFrame(stream_id, .cancel) catch {};
         self.releasePeerStream(stream_id);
         self.forgetStreamWindows(stream_id);
+    }
+
+    fn cancelPeerRequest(self: *Connection, stream_id: u31) void {
+        // A transport or reset-history allocation failure must not retain
+        // local ownership of a request the application has abandoned. Some
+        // tests and upgrade paths can surface already-materialized requests
+        // without an active stream, where emitting RST_STREAM would itself be
+        // invalid and may not have a usable transport.
+        if (self.outboundStreamIsActive(stream_id)) {
+            self.writeResetStreamFrame(stream_id, .cancel) catch {};
+        }
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+    }
+
+    fn failTimedOutRequest(self: *Connection, stream_id: u31) void {
+        // Aggregate request state is not retained across calls. Once HEADERS
+        // admits a peer stream, abandoning its decoded fields or received DATA
+        // makes resumption ambiguous, so terminate both the stream and future
+        // connection use rather than exposing partially consumed state.
+        self.aggregate_timeout_unusable = true;
+        // The reader's ordinary error cleanup may already have removed the
+        // active marker before this outer timeout handler runs. The stream was
+        // nevertheless admitted on the wire and must receive CANCEL.
+        self.writeResetStreamFrame(stream_id, .cancel) catch {};
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+
+        // Complete siblings may already have been decoded and queued while
+        // this request's body was in progress. Poisoning the connection makes
+        // those requests unreachable, so cancel and free them as part of the
+        // same fail-closed transition. Entries before the head transferred
+        // ownership to earlier callers and must not be deinitialized here.
+        for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
+            self.cancelPeerRequest(pending.stream_id);
+            pending.deinit(self.allocator);
+        }
+        self.pending_requests.items.len = 0;
+        self.pending_request_head = 0;
     }
 
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {

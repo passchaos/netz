@@ -5,6 +5,8 @@ const tls_testing = @import("../../tls/testing.zig");
 
 const net = std.Io.net;
 const flag_ack: u8 = 0x1;
+const flag_end_stream: u8 = 0x1;
+const flag_end_headers: u8 = 0x4;
 
 fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) !void {
     var written: usize = 0;
@@ -229,6 +231,595 @@ test "HTTP/2 bounded inbound PING preserves a partial frame" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate request timeout preserves a pre-admission frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        prefix_sent: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.timed_out.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try self.prefix_sent.wait(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readRequestWithTimeout(.fromMilliseconds(20)),
+            );
+            self.timed_out.set(self.server.io);
+            var request = try connection.readRequestWithDeadline(.fromNow(
+                self.server.io,
+                .{ .raw = .fromSeconds(1), .clock = .awake },
+            ));
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), request.stream_id);
+            try std.testing.expectEqualStrings("GET", request.method);
+            try std.testing.expectEqualStrings("/", request.path);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    // All three request pseudo-fields use HPACK static-table indexes. Keeping
+    // the final two payload bytes back forces the first read to time out after
+    // its frame header and a partial field block are already buffered.
+    try (http2.Frame{
+        .header = .{
+            .length = 0,
+            .frame_type = .headers,
+            .flags = flag_end_headers | flag_end_stream,
+            .stream_id = 1,
+        },
+        .payload = &.{ 0x82, 0x86, 0x84 },
+    }).write(&encoded, allocator);
+    const split = http2.FrameHeader.encoded_len + 1;
+    try writeAll(io, client.stream, encoded.items[0..split]);
+    shared.prefix_sent.set(io);
+    try shared.timed_out.wait(io);
+    try writeAll(io, client.stream, encoded.items[split..]);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate request deadline cancels admitted stream and fails closed" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        request_prefix_sent: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try self.request_prefix_sent.wait(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readRequestWithDeadline(.fromNow(
+                    self.server.io,
+                    .{ .raw = .fromMilliseconds(20), .clock = .awake },
+                )),
+            );
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                connection.readRequestWithTimeout(.fromSeconds(1)),
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .path = "/aggregate-timeout",
+        .authority = "localhost",
+        .body_length = 4,
+    });
+    defer writer.deinit();
+    try writer.write("a");
+    shared.request_prefix_sent.set(io);
+    var reset = try client.readResetStreamWithTimeout(.fromSeconds(1));
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(writer.stream_id, reset.reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.cancel, reset.reset.error_code);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate request timeout cancels fragmented sibling and active stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        request_frames_sent: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try self.request_frames_sent.wait(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readRequestWithTimeout(.fromMilliseconds(20)),
+            );
+            // The incomplete sibling header block poisons the shared HPACK
+            // state, so retry must fail locally rather than touch transport.
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                connection.readRequestWithTimeout(.fromSeconds(1)),
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    // Stream 1 becomes the active aggregate request and remains open. Stream 3
+    // is a complete sibling request at the HTTP message layer, but its HEADERS
+    // block deliberately omits END_HEADERS and the required CONTINUATION.
+    const request_block = [_]u8{ 0x82, 0x86, 0x84 };
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .headers,
+        flag_end_headers,
+        1,
+        &request_block,
+    );
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .headers,
+        flag_end_stream,
+        3,
+        request_block[0..1],
+    );
+    shared.request_frames_sent.set(io);
+
+    var saw_active = false;
+    var saw_sibling = false;
+    for (0..2) |_| {
+        var reset = try client.readResetStreamWithTimeout(.fromSeconds(1));
+        defer reset.deinit(allocator);
+        try std.testing.expectEqual(
+            http2.ErrorCode.cancel,
+            reset.reset.error_code,
+        );
+        switch (reset.reset.stream_id) {
+            1 => {
+                try std.testing.expect(!saw_active);
+                saw_active = true;
+            },
+            3 => {
+                try std.testing.expect(!saw_sibling);
+                saw_sibling = true;
+            },
+            else => return error.UnexpectedFrame,
+        }
+    }
+    try std.testing.expect(saw_active);
+    try std.testing.expect(saw_sibling);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 streaming request timeout covers body and fails closed" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        request_prefix_sent: std.Io.Event = .unset,
+        head_count: usize = 0,
+        body_bytes: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn begin(self: *@This(), head: runtime.StreamingRequestHead) !void {
+            try std.testing.expectEqualStrings(
+                "/streaming-timeout",
+                head.path,
+            );
+            self.head_count += 1;
+        }
+
+        fn consume(self: *@This(), data: []const u8) !void {
+            self.body_bytes += data.len;
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try self.request_prefix_sent.wait(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readRequestStreamingWithHeadAndTimeout(
+                    .fromMilliseconds(20),
+                    self,
+                    begin,
+                    consume,
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 1), self.head_count);
+            try std.testing.expectEqual(@as(usize, 1), self.body_bytes);
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                connection.readRequestStreamingWithDeadline(
+                    .fromNow(self.server.io, .{
+                        .raw = .fromSeconds(1),
+                        .clock = .awake,
+                    }),
+                    self,
+                    consume,
+                ),
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .path = "/streaming-timeout",
+        .authority = "localhost",
+        .body_length = 4,
+    });
+    defer writer.deinit();
+    try writer.write("a");
+    shared.request_prefix_sent.set(io);
+    var reset = try client.readResetStreamWithTimeout(.fromSeconds(1));
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(writer.stream_id, reset.reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.cancel, reset.reset.error_code);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 bounded streaming request callback errors cancel once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        body_calls: usize = 0,
+        timeout_head_calls: usize = 0,
+        timeout_head_path_ok: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn rejectBody(
+            self: *@This(),
+            data: []const u8,
+        ) error{ConsumerRejected}!void {
+            self.body_calls += 1;
+            _ = data;
+            return error.ConsumerRejected;
+        }
+
+        fn rejectHeadWithTimeout(
+            self: *@This(),
+            head: runtime.StreamingRequestHead,
+        ) error{Timeout}!void {
+            self.timeout_head_calls += 1;
+            self.timeout_head_path_ok =
+                std.mem.eql(u8, "/callback-timeout", head.path);
+            return error.Timeout;
+        }
+
+        fn ignoreBody(_: *@This(), _: []const u8) !void {}
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+
+            try std.testing.expectError(
+                error.ConsumerRejected,
+                connection.readRequestStreamingWithTimeout(
+                    .fromSeconds(1),
+                    self,
+                    rejectBody,
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 1), self.body_calls);
+
+            // A callback is allowed to use the same error name as the I/O
+            // deadline. It is still an application rejection, not evidence
+            // that a deadline-bearing read expired.
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readRequestStreamingWithHeadAndDeadline(
+                    .fromNow(self.server.io, .{
+                        .raw = .fromSeconds(1),
+                        .clock = .awake,
+                    }),
+                    self,
+                    rejectHeadWithTimeout,
+                    ignoreBody,
+                ),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                self.timeout_head_calls,
+            );
+            try std.testing.expect(self.timeout_head_path_ok);
+
+            // Reading and answering a later stream proves neither callback
+            // error poisoned this connection. On the client, the successful
+            // response also proves no duplicate old-stream reset preceded it.
+            var request = try connection.readRequestWithTimeout(
+                .fromSeconds(1),
+            );
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/after-callback", request.path);
+            try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+
+    var body_rejected = try client.startRequest(.{
+        .path = "/callback-error",
+        .authority = "localhost",
+        .body_length = 1,
+    });
+    try body_rejected.finishData("x");
+    {
+        var reset = try client.readResetStreamWithTimeout(.fromSeconds(1));
+        defer reset.deinit(allocator);
+        try std.testing.expectEqual(
+            body_rejected.stream_id,
+            reset.reset.stream_id,
+        );
+        try std.testing.expectEqual(
+            http2.ErrorCode.cancel,
+            reset.reset.error_code,
+        );
+    }
+    body_rejected.deinit();
+    try std.testing.expect(client.isReusable());
+
+    var timeout_rejected = try client.startRequest(.{
+        .path = "/callback-timeout",
+        .authority = "localhost",
+        .body_length = 0,
+    });
+    try timeout_rejected.finish();
+    {
+        var reset = try client.readResetStreamWithTimeout(.fromSeconds(1));
+        defer reset.deinit(allocator);
+        try std.testing.expectEqual(
+            timeout_rejected.stream_id,
+            reset.reset.stream_id,
+        );
+        try std.testing.expectEqual(
+            http2.ErrorCode.cancel,
+            reset.reset.error_code,
+        );
+    }
+    timeout_rejected.deinit();
+    try std.testing.expect(client.isReusable());
+
+    var response = try client.requestWithTimeout(
+        .{ .path = "/after-callback", .authority = "localhost" },
+        .fromSeconds(1),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request readers reject invalid budgets before transport I/O" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var connection = runtime.Connection{
+        .io = threaded.io(),
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+
+    const Callbacks = struct {
+        fn begin(_: *@This(), _: runtime.StreamingRequestHead) !void {}
+        fn consume(_: *@This(), _: []const u8) !void {}
+    };
+    var callbacks: Callbacks = .{};
+    const wrong_clock = std.Io.Clock.Timestamp{
+        .clock = .real,
+        .raw = .zero,
+    };
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestWithDeadline(wrong_clock),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestStreamingWithTimeout(
+            .zero,
+            &callbacks,
+            Callbacks.consume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestStreamingWithDeadline(
+            wrong_clock,
+            &callbacks,
+            Callbacks.consume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestStreamingWithHeadAndTimeout(
+            .zero,
+            &callbacks,
+            Callbacks.begin,
+            Callbacks.consume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestStreamingWithHeadAndDeadline(
+            wrong_clock,
+            &callbacks,
+            Callbacks.begin,
+            Callbacks.consume,
+        ),
+    );
 }
 
 test "HTTP/2 aggregate response timeout cancels stream and fails closed" {

@@ -695,6 +695,17 @@ HPACK, and the final successful response head; timeout cancels the stream and
 makes discarded aggregate state ineligible for pooled reuse. The server reader
 carries one deadline through the complete request header block and preserves a
 partially received frame for retry when no stream has yet been admitted.
+Aggregate and callback-streaming server request readers now provide the same
+relative-timeout and absolute-deadline forms across initial headers, DATA,
+trailers, interleaved connection control, and queued complete sibling requests.
+The head-callback streaming form has matching bounded variants so applications
+can initialize a decoder without granting the body a fresh budget. A timeout
+before any request stream is admitted retains partial frame-reader bytes for a
+later retry. Once HEADERS admits a stream, both readers send
+RST_STREAM(CANCEL), retire its flow-control and priority state, cancel any
+admitted sibling requests made unreachable by the failure, and fail the
+connection closed because stack-owned HPACK/body progress cannot be safely
+reconstructed.
 All public HTTP/1 and HTTP/2 request/response and pool deadline entry points
 reject timestamps outside the awake-clock domain before parsing, writing, or
 reserving pool capacity, matching the constructor deadline contract.
