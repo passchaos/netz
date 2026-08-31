@@ -4,6 +4,7 @@ const wire = @import("../internal/wire.zig");
 pub const runtime = @import("runtime.zig");
 pub const reconnect = @import("reconnect.zig");
 pub const broker = @import("broker.zig");
+pub const bridge = @import("bridge.zig");
 pub const websocket_runtime = @import("websocket_runtime.zig");
 pub const tls_runtime = @import("tls_runtime.zig");
 pub const router = @import("router.zig");
@@ -4249,6 +4250,7 @@ test {
     _ = runtime;
     _ = reconnect;
     _ = broker;
+    _ = bridge;
     _ = websocket_runtime;
     _ = tls_runtime;
     _ = router;

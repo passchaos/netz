@@ -1042,6 +1042,49 @@ pub const Broker = struct {
         try self.appendCommitIfEnabled();
     }
 
+    /// Publish a trusted, transport-independent Application Message.
+    ///
+    /// This is the ingress boundary for broker-owned producers such as an
+    /// inbound bridge. It intentionally has no MQTT client identity, so write
+    /// ACL and No Local checks do not apply to the source; ordinary recipient
+    /// ACLs, retained storage, bounded live/Session queues, expiry, routing,
+    /// and persistence use the exact same path as a released network PUBLISH.
+    ///
+    /// Packet Identifiers and DUP describe a transaction on one Network
+    /// Connection. Callers must therefore remove them before crossing this
+    /// boundary. In particular, forwarding a remote Packet Identifier would
+    /// incorrectly make it meaningful in the local broker.
+    pub fn publishLocal(
+        self: *Broker,
+        publish: mqtt.Publish,
+    ) Error!void {
+        try validateLocalPublish(publish);
+        if (self.payloadTooLarge(publish.payload)) {
+            return error.PacketTooLarge;
+        }
+
+        self.state_mutex.lockUncancelable(self.io);
+        const plan = self.enqueuePublishLocked(
+            null,
+            publish,
+            null,
+            std.Io.Clock.awake.now(self.io),
+        ) catch |err| {
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
+        defer self.allocator.free(plan.storage);
+        self.publish_messages_received +|= 1;
+        self.publish_payload_bytes_received +|= publish.payload.len;
+        self.state_mutex.unlock(self.io);
+
+        // Neither durable I/O nor destination socket writes may hold the
+        // global routing lock. The state mutation is complete at this point,
+        // so journal it before making the publication visible on the wire.
+        try self.appendCommitIfEnabled();
+        try self.flushPlan(plan);
+    }
+
     fn statsLocked(self: *const Broker) Stats {
         var active_connections: usize = 0;
         var live_queued_deliveries: usize = 0;
@@ -4961,6 +5004,33 @@ fn validateProblemInformationProperties(
                 try mqtt.validateUtf8String(value.value);
             },
             else => return error.InvalidProperty,
+        }
+    }
+}
+
+fn validateLocalPublish(publish: mqtt.Publish) Error!void {
+    try mqtt.validateTopicName(publish.topic);
+    try mqtt.validatePublishProperties(publish.properties);
+    if (publish.dup or publish.packet_id != null) {
+        return error.InvalidPacketIdentifier;
+    }
+    for (publish.properties) |property| {
+        // Both values are scoped to a particular MQTT connection. A local
+        // producer must supply the resolved Topic Name and let the broker
+        // generate Subscription Identifiers for each destination.
+        if ((property == .two_byte and
+            property.two_byte.id == .topic_alias) or
+            (property == .varint and
+                property.varint.id == .subscription_identifier))
+        {
+            return error.InvalidProperty;
+        }
+        if (property == .byte and
+            property.byte.id == .payload_format_indicator and
+            property.byte.value == 1 and
+            !std.unicode.utf8ValidateSlice(publish.payload))
+        {
+            return error.InvalidUtf8;
         }
     }
 }

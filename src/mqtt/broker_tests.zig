@@ -490,6 +490,154 @@ test "broker routes QoS 1 across live TCP clients" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker trusted local publication uses normal live routing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "local-injection-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "bridge/in/#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var source_properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = "source",
+        .value = "remote",
+    } }};
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "bridge/in/value",
+        .packet_id = null,
+        .properties = &source_properties,
+        .payload = "forwarded",
+    });
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "bridge/in/value",
+        delivered.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "forwarded",
+        delivered.publish.payload,
+    );
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, delivered.publish.qos);
+    var found_source = false;
+    for (delivered.publish.properties) |property| {
+        if (property == .utf8_pair and
+            property.utf8_pair.id == .user_property and
+            std.mem.eql(u8, property.utf8_pair.key, "source") and
+            std.mem.eql(u8, property.utf8_pair.value, "remote"))
+        {
+            found_source = true;
+        }
+    }
+    try std.testing.expect(found_source);
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+
+    const stats = broker.stats();
+    try std.testing.expectEqual(@as(usize, 1), stats.publish_messages_received);
+    try std.testing.expectEqual(
+        @as(usize, "forwarded".len),
+        stats.publish_payload_bytes_received,
+    );
+
+    try disconnectAll(&.{&subscriber});
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker trusted local publication rejects connection-scoped metadata" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var broker = try Broker.init(allocator, threaded.io(), .{});
+    defer broker.deinit();
+
+    const base = mqtt.Publish{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "bridge/value",
+        .packet_id = null,
+        .payload = "payload",
+    };
+    var invalid = base;
+    invalid.dup = true;
+    try std.testing.expectError(
+        error.InvalidPacketIdentifier,
+        broker.publishLocal(invalid),
+    );
+    invalid = base;
+    invalid.packet_id = 7;
+    try std.testing.expectError(
+        error.InvalidPacketIdentifier,
+        broker.publishLocal(invalid),
+    );
+    invalid = base;
+    var alias_properties = [_]mqtt.Property{.{ .two_byte = .{
+        .id = .topic_alias,
+        .value = 1,
+    } }};
+    invalid.properties = &alias_properties;
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.publishLocal(invalid),
+    );
+    invalid = base;
+    var subscription_properties = [_]mqtt.Property{.{ .varint = .{
+        .id = .subscription_identifier,
+        .value = 1,
+    } }};
+    invalid.properties = &subscription_properties;
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.publishLocal(invalid),
+    );
+    invalid = base;
+    var payload_properties = [_]mqtt.Property{.{ .byte = .{
+        .id = .payload_format_indicator,
+        .value = 1,
+    } }};
+    invalid.properties = &payload_properties;
+    invalid.payload = &.{0xff};
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        broker.publishLocal(invalid),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        broker.stats().publish_messages_received,
+    );
+}
+
 test "transient Session fanout does not consume durable queue bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

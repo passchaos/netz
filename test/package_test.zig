@@ -2349,6 +2349,15 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "qpack_encode"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeServerSession, "qpack_encode"));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
+    try std.testing.expect(@hasDecl(netz.mqtt, "bridge"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Bridge"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Options"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "init"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "connect"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "step"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "run"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Rule, "mapTopicAlloc"));
     try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ReconnectPolicy"));
@@ -2935,6 +2944,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "publishSystemStats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "publishLocal",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "Stats"));
     try std.testing.expect(@hasDecl(netz.mqtt.broker, "LoadRates"));
