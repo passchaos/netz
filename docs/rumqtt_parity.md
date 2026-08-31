@@ -71,9 +71,11 @@ because correctly bridging its two-phase transaction would require additional
 durable inbound state. Running two opposing rules that map back into one
 another can create a deployment-level cycle; the type intentionally models
 only one direction per instance so such a cycle must be configured explicitly.
-Current deterministic coverage exercises rule validation/topic mapping and the
-broker's live trusted-injection path; an automated two-process bridge scenario
-is not yet part of the interoperability gate.
+The automated in-process interoperability gate runs two loopback brokers and
+exercises `Bridge.connect`/`step` with a retained MQTT 5 QoS 1 publication. It
+verifies the mapped topic prefix, preserved User Property and RETAIN state,
+connection-scoped Topic Alias removal, local Subscription Identifier
+generation, local retained storage, and the remote PUBACK completion barrier.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
