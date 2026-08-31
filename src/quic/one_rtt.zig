@@ -1816,13 +1816,108 @@ pub const Connection = struct {
         return self.openLocalStream(.bidirectional);
     }
 
+    /// Wait for peer bidirectional-stream credit until `timeout` expires.
+    ///
+    /// The relative timeout is converted once to an absolute awake-clock
+    /// deadline, so unrelated packets and transport timer wakeups cannot
+    /// extend the caller's bound. A failed wait never advances the stream ID.
+    pub fn openStreamWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openStreamWithDeadline(.fromNow(
+            self.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Wait for peer bidirectional-stream credit under an absolute awake
+    /// deadline while continuing to receive packets and service QUIC timers.
+    pub fn openStreamWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        return self.openLocalStreamWithDeadline(.bidirectional, deadline);
+    }
+
     pub fn openUnidirectionalStream(self: *Connection) Error!u64 {
         return self.openLocalStream(.unidirectional);
+    }
+
+    /// Wait for peer unidirectional-stream credit until `timeout` expires.
+    pub fn openUnidirectionalStreamWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openUnidirectionalStreamWithDeadline(.fromNow(
+            self.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Wait for peer unidirectional-stream credit under an absolute awake
+    /// deadline while continuing to receive packets and service QUIC timers.
+    pub fn openUnidirectionalStreamWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        return self.openLocalStreamWithDeadline(.unidirectional, deadline);
     }
 
     /// Short alias matching common QUIC APIs.
     pub fn openUniStream(self: *Connection) Error!u64 {
         return self.openUnidirectionalStream();
+    }
+
+    pub fn openUniStreamWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        return self.openUnidirectionalStreamWithTimeout(timeout);
+    }
+
+    pub fn openUniStreamWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        return self.openUnidirectionalStreamWithDeadline(deadline);
+    }
+
+    fn openLocalStreamWithDeadline(
+        self: *Connection,
+        direction: StreamDirection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!u64 {
+        // Reject another clock domain before STREAMS_BLOCKED or any socket I/O.
+        // Every retry then reuses this exact timestamp rather than refreshing
+        // a relative timeout after an unrelated packet or transport timer.
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        while (true) {
+            if (self.close_info != null or self.idle_timed_out) {
+                return error.ConnectionClosed;
+            }
+            if (!self.localStreamLimitExceeded(direction)) {
+                // No other owner may mutate a Connection concurrently, so the
+                // immediately following reservation cannot lose this credit.
+                return self.reserveLocalStream(direction);
+            }
+            self.sendStreamsBlockedWithDeadline(
+                direction,
+                deadline,
+            ) catch |err| switch (err) {
+                // Only an ACK can restore congestion credit. Keep receiving
+                // under the caller's deadline, then retry the notification.
+                error.CongestionLimited => {},
+                else => |other| return other,
+            };
+            try self.servicePacketServicingTimersDeadline(deadline);
+        }
     }
 
     fn openLocalStream(
@@ -1832,21 +1927,39 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
-        const next, const limit = switch (direction) {
-            .bidirectional => .{
-                &self.next_local_bidi_stream_id,
-                self.peer_max_streams_bidi,
-            },
-            .unidirectional => .{
-                &self.next_local_uni_stream_id,
-                self.peer_max_streams_uni,
-            },
-        };
-        const stream_id = next.*;
-        if (streamCountForId(stream_id) > limit) {
+        if (self.localStreamLimitExceeded(direction)) {
             try self.sendStreamsBlocked(direction);
             return error.StreamLimitExceeded;
         }
+        return self.reserveLocalStream(direction);
+    }
+
+    fn localStreamLimitExceeded(
+        self: Connection,
+        direction: StreamDirection,
+    ) bool {
+        const stream_id, const limit = switch (direction) {
+            .bidirectional => .{
+                self.next_local_bidi_stream_id,
+                self.peer_max_streams_bidi,
+            },
+            .unidirectional => .{
+                self.next_local_uni_stream_id,
+                self.peer_max_streams_uni,
+            },
+        };
+        return streamCountForId(stream_id) > limit;
+    }
+
+    fn reserveLocalStream(
+        self: *Connection,
+        direction: StreamDirection,
+    ) Error!u64 {
+        const next = switch (direction) {
+            .bidirectional => &self.next_local_bidi_stream_id,
+            .unidirectional => &self.next_local_uni_stream_id,
+        };
+        const stream_id = next.*;
         next.* = std.math.add(u64, stream_id, 4) catch
             return error.StreamLimitExceeded;
         self.outgoing_streams_created_count +|= 1;
@@ -2250,6 +2363,39 @@ pub const Connection = struct {
 
     fn sendTrackedFrames(self: *Connection, frames: []const quic.Frame) Error!void {
         try self.sendTrackedFramesEcn(frames, .not_ect);
+    }
+
+    /// Send internal control frames without allowing pacing sleep to outlive
+    /// an application operation's absolute awake-clock deadline. Congestion
+    /// remains observable so the caller can pump ACK progress before retrying.
+    fn sendTrackedFramesWithDeadline(
+        self: *Connection,
+        frames: []const quic.Frame,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        while (true) {
+            const now_ns = self.monotonicNowNs();
+            if (callerDeadlineExpired(deadline, now_ns)) return error.Timeout;
+            self.sendTrackedFramesEcnAt(
+                frames,
+                .not_ect,
+                now_ns,
+            ) catch |err| switch (err) {
+                error.PacingLimited => {
+                    const pacing_deadline =
+                        self.pacing_blocked_until_ns orelse return err;
+                    const caller_ns = std.math.cast(
+                        u64,
+                        deadline.raw.nanoseconds,
+                    ) orelse std.math.maxInt(u64);
+                    if (pacing_deadline >= caller_ns) return error.Timeout;
+                    try self.waitForPacing(now_ns);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
     }
 
     fn sendTrackedFramesEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
@@ -7156,21 +7302,49 @@ pub const Connection = struct {
     }
 
     fn sendStreamsBlocked(self: *Connection, direction: StreamDirection) Error!void {
+        const frame = self.streamsBlockedFrame(direction) orelse return;
+        try self.sendTrackedFrames(&[_]quic.Frame{frame});
+        self.markStreamsBlockedSent(direction);
+    }
+
+    fn sendStreamsBlockedWithDeadline(
+        self: *Connection,
+        direction: StreamDirection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        const frame = self.streamsBlockedFrame(direction) orelse return;
+        try self.sendTrackedFramesWithDeadline(
+            &[_]quic.Frame{frame},
+            deadline,
+        );
+        self.markStreamsBlockedSent(direction);
+    }
+
+    fn streamsBlockedFrame(
+        self: Connection,
+        direction: StreamDirection,
+    ) ?quic.Frame {
         const frame: quic.Frame = switch (direction) {
             .bidirectional => blk: {
                 if (self.streams_blocked_bidi_at) |blocked_at| {
-                    if (blocked_at == self.peer_max_streams_bidi) return;
+                    if (blocked_at == self.peer_max_streams_bidi) return null;
                 }
                 break :blk .{ .streams_blocked_bidi = .{ .maximum_streams = self.peer_max_streams_bidi } };
             },
             .unidirectional => blk: {
                 if (self.streams_blocked_uni_at) |blocked_at| {
-                    if (blocked_at == self.peer_max_streams_uni) return;
+                    if (blocked_at == self.peer_max_streams_uni) return null;
                 }
                 break :blk .{ .streams_blocked_uni = .{ .maximum_streams = self.peer_max_streams_uni } };
             },
         };
-        try self.sendTrackedFrames(&[_]quic.Frame{frame});
+        return frame;
+    }
+
+    fn markStreamsBlockedSent(
+        self: *Connection,
+        direction: StreamDirection,
+    ) void {
         switch (direction) {
             .bidirectional => self.streams_blocked_bidi_at = self.peer_max_streams_bidi,
             .unidirectional => self.streams_blocked_uni_at = self.peer_max_streams_uni,

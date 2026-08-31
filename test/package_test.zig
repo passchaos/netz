@@ -4504,6 +4504,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "releaseReceivedCapacity"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "openStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "openStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "openUnidirectionalStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "openUnidirectionalStreamWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAckForPacketsIfNeeded"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ackDelayDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "serviceAckDelayTimerAt"));
