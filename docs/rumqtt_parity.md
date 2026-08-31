@@ -75,9 +75,19 @@ The automated in-process integration test runs two loopback brokers and
 exercises `Bridge.connect`/`step` with a retained MQTT 5 QoS 1 publication. It
 verifies the mapped topic prefix, preserved User Property and RETAIN state,
 connection-scoped Topic Alias removal, local Subscription Identifier
-generation, local retained storage, and eventual remote PUBACK completion. The
-separate bridge implementation contract keeps that acknowledgement after the
-local publish call; fault-injected ordering remains future coverage.
+generation, local retained storage, and eventual remote PUBACK completion. A
+second two-broker persistent-session test now fault-injects the bridge just
+before `Broker.publishLocal`, after the reconnect client has already surfaced
+the upstream QoS 1 Packet Identifier but before any local queue, retained
+store, commit-log, or downstream write can change. The bridge therefore
+withholds its upstream PUBACK without leaving a local ghost delivery, then
+reconnects to an upstream Session that reports Session Present and redelivers
+the same Packet Identifier with DUP set. The retry reuses the exact production
+inject-and-ack path, and the test proves completion only by observing the local
+delivery exactly once and then using a bridge PING barrier before checking that
+the upstream inflight transaction has cleared. This fault gate verifies the
+pre-injection acknowledgement boundary; durable commit-log failure handling is
+still a separate transactional concern.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

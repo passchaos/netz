@@ -5,6 +5,10 @@ const broker_mod = @import("../broker.zig");
 const runtime = @import("../runtime.zig");
 
 const Rule = bridge_mod.Rule;
+const session_expiry_properties = [_]mqtt.Property{.{ .four_byte = .{
+    .id = .session_expiry_interval,
+    .value = 60,
+} }};
 
 const BrokerRunner = struct {
     broker: *broker_mod.Broker,
@@ -73,6 +77,29 @@ fn expectSubscriptionIdentifier(
     }
     try std.testing.expectEqual(@as(usize, 1), count);
 }
+
+fn expectNoPublish(
+    connection: *runtime.Connection,
+    timeout: std.Io.Duration,
+) !void {
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readClientPacketEventWithTimeout(timeout),
+    );
+}
+
+const InjectFailure = struct {
+    seen: bool = false,
+    packet_id: u16 = 0,
+
+    fn failOnce(context: *anyopaque, remote: *const mqtt.Publish) bool {
+        const self: *InjectFailure = @ptrCast(@alignCast(context));
+        if (self.seen) return false;
+        self.seen = true;
+        self.packet_id = remote.packet_id.?;
+        return true;
+    }
+};
 
 test "bridge rule validates bounded inbound mappings" {
     try (Rule{
@@ -367,6 +394,275 @@ test "inbound bridge mirrors retained MQTT 5 QoS 1 publication end to end" {
 
     try bridge.client.disconnect(0);
     try subscriber.disconnect(0);
+    try remote_runner.stop(io, remote_thread);
+    remote_joined = true;
+    try local_runner.stop(io, local_thread);
+    local_joined = true;
+}
+
+test "inbound bridge withholds upstream PUBACK until local injection succeeds" {
+    const allocator = std.testing.allocator;
+    const operation_timeout = std.Io.Duration.fromSeconds(2);
+    const short_timeout = std.Io.Duration.fromMilliseconds(150);
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local = try broker_mod.Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 4,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer local.deinit();
+    var local_runner = BrokerRunner{
+        .broker = &local,
+        .accept_concurrency = 1,
+    };
+    const local_thread = try std.Thread.spawn(
+        .{},
+        BrokerRunner.run,
+        .{&local_runner},
+    );
+    var local_joined = false;
+    defer if (!local_joined) {
+        local_runner.shutdown.set(io);
+        local_thread.join();
+    };
+
+    var remote = try broker_mod.Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 4,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer remote.deinit();
+    var remote_runner = BrokerRunner{
+        .broker = &remote,
+        .accept_concurrency = 2,
+    };
+    const remote_thread = try std.Thread.spawn(
+        .{},
+        BrokerRunner.run,
+        .{&remote_runner},
+    );
+    var remote_joined = false;
+    defer if (!remote_joined) {
+        remote_runner.shutdown.set(io);
+        remote_thread.join();
+    };
+
+    var bridge_shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.init(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = "inbound-bridge-retry",
+                .clean_start = false,
+                .properties = &session_expiry_properties,
+                .connect_timeout = operation_timeout,
+                .network_connect_timeout = operation_timeout,
+            },
+            .reconnect_policy = .{
+                .initial_delay = .fromMilliseconds(1),
+                .max_delay = .fromMilliseconds(8),
+            },
+            .rule = .{
+                .filter = "retry/#",
+                .qos = .at_least_once,
+                .local_prefix = "mirror/",
+            },
+        },
+        &bridge_shutdown,
+    );
+    defer bridge.deinit();
+
+    const connected = try bridge.connect();
+    try std.testing.expect(!connected.session_present);
+
+    var upstream_publisher = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        remote.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "bridge-upstream-retry-publisher",
+            .clean_start = false,
+            .properties = &session_expiry_properties,
+        },
+        operation_timeout,
+    );
+    defer upstream_publisher.close();
+    const upstream_packet_id = (try upstream_publisher.writePublish(
+        "retry/device/state",
+        "retry-once",
+        .{
+            .qos = .at_least_once,
+            .properties = &.{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "attempt",
+                .value = "first",
+            } }},
+        },
+    )).?;
+    var upstream_ack = try upstream_publisher.readClientPacketEventWithTimeout(
+        operation_timeout,
+    );
+    defer upstream_ack.deinit(allocator);
+    switch (upstream_ack) {
+        .puback => |ack| {
+            try std.testing.expectEqual(upstream_packet_id, ack.ack.packet_id);
+            try upstream_publisher.applyPubAck(ack.ack);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var first_delivery = (try bridge.client.pollWithTimeout(operation_timeout)).?;
+    defer first_delivery.deinit(allocator);
+    try std.testing.expect(first_delivery == .publish);
+    try std.testing.expect(!first_delivery.publish.publish.dup);
+    var inject_failure = InjectFailure{};
+    try std.testing.expectError(
+        error.TestExpectedError,
+        bridge_mod.testing.injectPublishWithFault(
+            &bridge,
+            &first_delivery.publish.publish,
+            .{
+                .context = &inject_failure,
+                .fail_once = InjectFailure.failOnce,
+            },
+        ),
+    );
+    try std.testing.expect(inject_failure.seen);
+    try std.testing.expectEqual(
+        first_delivery.publish.publish.packet_id.?,
+        inject_failure.packet_id,
+    );
+    try std.testing.expectEqual(@as(usize, 0), local.stats().publish_messages_received);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        remote.stats().session_inflight_messages,
+    );
+
+    bridge.client.disconnectTransport();
+    const reconnected = try bridge.client.connectWithTimeout(operation_timeout);
+    try std.testing.expect(reconnected.session_present);
+
+    var redelivery = (try bridge.client.pollWithTimeout(operation_timeout)).?;
+    defer redelivery.deinit(allocator);
+    try std.testing.expect(redelivery == .publish);
+    try std.testing.expect(redelivery.publish.publish.dup);
+    try std.testing.expectEqual(
+        inject_failure.packet_id,
+        redelivery.publish.publish.packet_id.?,
+    );
+    try std.testing.expectEqualStrings(
+        "retry/device/state",
+        redelivery.publish.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "retry-once",
+        redelivery.publish.publish.payload,
+    );
+
+    var local_subscriber = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        local.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "bridge-local-retry-subscriber",
+            .clean_start = false,
+            .properties = &session_expiry_properties,
+        },
+        operation_timeout,
+    );
+    defer local_subscriber.close();
+    var local_suback = try local_subscriber.subscribe(
+        &.{.{
+            .topic_filter = "mirror/retry/#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer local_suback.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        local_suback.suback.reason_codes[0],
+    );
+    try expectNoPublish(&local_subscriber, short_timeout);
+
+    try bridge_mod.testing.injectPublish(
+        &bridge,
+        &redelivery.publish.publish,
+    );
+
+    var local_event = try local_subscriber.readClientPacketEventWithTimeout(
+        operation_timeout,
+    );
+    defer local_event.deinit(allocator);
+    switch (local_event) {
+        .publish => |delivery| {
+            try std.testing.expectEqualStrings(
+                "mirror/retry/device/state",
+                delivery.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "retry-once",
+                delivery.publish.payload,
+            );
+            try std.testing.expectEqual(
+                mqtt.QoS.at_least_once,
+                delivery.publish.qos,
+            );
+            try std.testing.expect(!delivery.publish.dup);
+            try expectUserProperty(
+                delivery.publish.properties,
+                "attempt",
+                "first",
+            );
+            try local_subscriber.writePubAck(
+                delivery.publish.packet_id.?,
+                0,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try expectNoPublish(&local_subscriber, short_timeout);
+    try std.testing.expectEqual(@as(usize, 1), local.stats().publish_messages_received);
+
+    // A PINGREQ/PINGRESP round trip provides a deterministic barrier after the
+    // bridge's upstream PUBACK and local flush sequence.
+    try bridge.client.connection().?.pingWithTimeout(operation_timeout);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        remote.stats().session_inflight_messages,
+    );
+
+    try bridge.client.disconnect(0);
+    try local_subscriber.disconnect(0);
+    try upstream_publisher.disconnect(0);
     try remote_runner.stop(io, remote_thread);
     remote_joined = true;
     try local_runner.stop(io, local_thread);

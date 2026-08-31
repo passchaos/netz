@@ -8,6 +8,7 @@
 //! its own injected messages back to the source broker.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mqtt = @import("mod.zig");
 const broker_mod = @import("broker.zig");
 const reconnect = @import("reconnect.zig");
@@ -83,6 +84,36 @@ pub const Options = struct {
     reconnect_policy: reconnect.ReconnectPolicy = .{},
     rule: Rule,
 };
+
+pub const testing = if (builtin.is_test) struct {
+    pub const InjectFault = struct {
+        context: *anyopaque,
+        fail_once: *const fn (
+            context: *anyopaque,
+            remote: *const mqtt.Publish,
+        ) bool,
+    };
+
+    /// Route one already-decoded upstream publication through the bridge's
+    /// production injection and acknowledgement ordering. This lets tests
+    /// inspect retransmission metadata such as DUP and Packet Identifier
+    /// before driving the same logic that `step` would otherwise apply.
+    pub fn injectPublish(
+        bridge: *Bridge,
+        remote: *const mqtt.Publish,
+    ) Error!void {
+        try bridge.inject(remote);
+    }
+
+    pub fn injectPublishWithFault(
+        bridge: *Bridge,
+        remote: *const mqtt.Publish,
+        fault: InjectFault,
+    ) (Error || error{TestExpectedError})!void {
+        if (fault.fail_once(fault.context, remote)) return error.TestExpectedError;
+        try bridge.inject(remote);
+    }
+} else struct {};
 
 /// An inbound bridge and its reconnect/session state.
 ///
