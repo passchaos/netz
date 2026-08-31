@@ -303,6 +303,11 @@ pub const Limits = struct {
     /// HEADERS, and duplicate RST_STREAM frames can be discarded without
     /// terminating the connection. Zero disables this tolerance.
     max_reset_stream_history: usize = 64,
+    /// Maximum remotely-reset requests allowed to remain in the pending-accept
+    /// queue. Those requests no longer count toward stream concurrency, so a
+    /// peer can otherwise churn reset-after-HEADERS requests and retain owned
+    /// request allocations until the application reaches them.
+    max_pending_accept_reset_streams: usize = 20,
     /// Absolute budget for DNS resolution plus all TCP connection attempts.
     /// TLS and HTTP/2 handshake timeouts remain independent.
     connect_timeout: ?std.Io.Duration = null,
@@ -3002,8 +3007,10 @@ pub const Connection = struct {
     /// a later call. Fail closed instead of allowing subsequent operations or
     /// pooled reuse against ambiguous connection state.
     aggregate_timeout_unusable: bool = false,
-    pending_requests: std.ArrayList(OwnedRequest) = .empty,
+    pending_accept_reset_overflowed: bool = false,
+    pending_requests: std.ArrayList(PendingRequest) = .empty,
     pending_request_head: usize = 0,
+    pending_accept_reset_streams: usize = 0,
     peer_origins: std.ArrayList([]u8) = .empty,
     peer_origin_index: std.StringHashMapUnmanaged(usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
@@ -3079,6 +3086,7 @@ pub const Connection = struct {
     pub fn isReusable(self: *const Connection) bool {
         return self.role == .client and
             !self.aggregate_timeout_unusable and
+            !self.pending_accept_reset_overflowed and
             self.peer_goaway_last_stream_id == null and
             self.local_goaway_last_stream_id == null and
             self.active_local_streams.items.len == 0 and
@@ -5001,7 +5009,7 @@ pub const Connection = struct {
                     const reset = try http2.ResetStreamPayload.parse(
                         frame.frame,
                     );
-                    self.recordResetStream(reset);
+                    try self.recordResetStream(reset);
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -5206,7 +5214,7 @@ pub const Connection = struct {
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame);
-                    self.recordResetStream(reset);
+                    try self.recordResetStream(reset);
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -5736,7 +5744,7 @@ pub const Connection = struct {
                     if (self.streamIsIdle(reset.stream_id)) {
                         return error.InvalidFrame;
                     }
-                    self.recordResetStream(reset);
+                    try self.recordResetStream(reset);
                     continue;
                 },
                 .goaway => continue,
@@ -5892,6 +5900,20 @@ pub const Connection = struct {
                                     if (owned.frame.header.stream_id !=
                                         stream_id)
                                     {
+                                        if (owned.frame.header.frame_type ==
+                                            .rst_stream)
+                                        {
+                                            const reset = try http2.ResetStreamPayload.parse(
+                                                owned.frame,
+                                            );
+                                            if (self.streamIsIdle(
+                                                reset.stream_id,
+                                            )) {
+                                                return error.InvalidFrame;
+                                            }
+                                            try self.recordResetStream(reset);
+                                            continue;
+                                        }
                                         if (try self.queueCompletePeerRequestFrameUntil(
                                             owned.frame,
                                             deadline,
@@ -5951,7 +5973,7 @@ pub const Connection = struct {
                                             const reset = try http2.ResetStreamPayload.parse(
                                                 owned.frame,
                                             );
-                                            self.recordResetStream(reset);
+                                            try self.recordResetStream(reset);
                                             return error.StreamReset;
                                         },
                                         else => return error.UnexpectedFrame,
@@ -5993,7 +6015,7 @@ pub const Connection = struct {
                     if (self.streamIsIdle(reset.stream_id)) {
                         return error.InvalidFrame;
                     }
-                    self.recordResetStream(reset);
+                    try self.recordResetStream(reset);
                     continue;
                 },
                 .goaway => continue,
@@ -6240,6 +6262,15 @@ pub const Connection = struct {
                     }).frame;
                     if (try self.handleConnectionFrame(frame)) continue;
                     if (frame.header.stream_id != stream_id) {
+                        if (frame.header.frame_type == .rst_stream) {
+                            const reset =
+                                try http2.ResetStreamPayload.parse(frame);
+                            if (self.streamIsIdle(reset.stream_id)) {
+                                return error.InvalidFrame;
+                            }
+                            try self.recordResetStream(reset);
+                            continue;
+                        }
                         if (self.queueCompletePeerRequestFrameUntil(
                             frame,
                             deadline,
@@ -6310,7 +6341,7 @@ pub const Connection = struct {
                             const reset = try http2.ResetStreamPayload.parse(
                                 frame,
                             );
-                            self.recordResetStream(reset);
+                            try self.recordResetStream(reset);
                             return error.StreamReset;
                         },
                         else => return error.UnexpectedFrame,
@@ -6364,6 +6395,11 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !void {
+        if (self.aggregate_timeout_unusable or
+            self.pending_accept_reset_overflowed)
+        {
+            return error.ConnectionClosed;
+        }
         if (self.role != .server) return error.UnexpectedFrame;
         if (requests.len == 0) return;
 
@@ -6556,7 +6592,23 @@ pub const Connection = struct {
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame);
-                    self.recordResetStream(reset);
+                    if (try self.skipBatchStreamingRequestReset(
+                        requests,
+                        expected,
+                        done,
+                        &initialized,
+                        &completed,
+                        reset,
+                    )) continue;
+                    if (self.streamIsIdle(reset.stream_id)) {
+                        return error.InvalidFrame;
+                    }
+                    if (!self.outboundStreamIsActive(reset.stream_id) or
+                        self.wasLocallyReset(reset.stream_id))
+                    {
+                        try self.recordResetStream(reset);
+                        continue;
+                    }
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -6579,6 +6631,47 @@ pub const Connection = struct {
             streaming_request.protocol,
             streaming_request.priority,
         );
+    }
+
+    fn skipBatchStreamingRequestReset(
+        self: *Connection,
+        requests: []StreamingRequest,
+        expected: []?usize,
+        done: []bool,
+        initialized: *usize,
+        completed: *usize,
+        reset: http2.ResetStreamPayload,
+    ) Error!bool {
+        const index = findStreamingRequestIndex(
+            requests[0..initialized.*],
+            reset.stream_id,
+        ) orelse return false;
+        try self.recordResetStream(reset);
+        if (done[index]) {
+            std.debug.assert(completed.* != 0);
+            completed.* -= 1;
+            self.forgetResponseSemantics(reset.stream_id);
+        }
+        requests[index].deinit(self.allocator);
+        if (index + 1 < initialized.*) {
+            @memmove(
+                requests[index .. initialized.* - 1],
+                requests[index + 1 .. initialized.*],
+            );
+            @memmove(
+                expected[index .. initialized.* - 1],
+                expected[index + 1 .. initialized.*],
+            );
+            @memmove(
+                done[index .. initialized.* - 1],
+                done[index + 1 .. initialized.*],
+            );
+        }
+        initialized.* -= 1;
+        requests[initialized.*] = undefined;
+        expected[initialized.*] = null;
+        done[initialized.*] = false;
+        return true;
     }
 
     fn findStreamingRequestIndex(
@@ -6738,11 +6831,22 @@ pub const Connection = struct {
     }
 
     fn popPendingRequest(self: *Connection) ?OwnedRequest {
-        if (self.pending_request_head >= self.pending_requests.items.len) return null;
-        const pending = self.pending_requests.items[self.pending_request_head];
-        self.pending_request_head += 1;
+        while (self.pending_request_head < self.pending_requests.items.len) {
+            const pending = self.pending_requests.items[self.pending_request_head];
+            self.pending_request_head += 1;
+            switch (pending) {
+                .ready => |owned_request| {
+                    self.compactPendingRequestsIfSparse();
+                    return owned_request;
+                },
+                .reset => {
+                    std.debug.assert(self.pending_accept_reset_streams != 0);
+                    self.pending_accept_reset_streams -= 1;
+                },
+            }
+        }
         self.compactPendingRequestsIfSparse();
-        return pending;
+        return null;
     }
 
     const RequestBodyFrame = union(enum) {
@@ -6837,17 +6941,20 @@ pub const Connection = struct {
             var owned = queued_request;
             owned.deinit(self.allocator);
         }
-        if (self.pending_request_head != 0 and
-            self.pending_requests.items.len == self.pending_requests.capacity)
-        {
-            self.compactPendingRequests();
-        }
-        try self.pending_requests.append(self.allocator, queued_request);
+        try self.appendPendingRequest(queued_request, self.allocator);
         return true;
     }
 
     fn pendingRequestCount(self: *const Connection) usize {
         return self.pending_requests.items.len - self.pending_request_head;
+    }
+
+    fn pendingAcceptResetStreamCount(self: *const Connection) usize {
+        return self.pending_accept_reset_streams;
+    }
+
+    fn pendingAcceptResetOverflowed(self: *const Connection) bool {
+        return self.pending_accept_reset_overflowed;
     }
 
     fn compactPendingRequestsIfSparse(self: *Connection) void {
@@ -6870,6 +6977,63 @@ pub const Connection = struct {
         }
         self.pending_requests.items.len = remaining;
         self.pending_request_head = 0;
+    }
+
+    fn appendPendingRequest(
+        self: *Connection,
+        owned_request: OwnedRequest,
+        allocator: std.mem.Allocator,
+    ) !void {
+        if (self.pending_request_head != 0 and
+            self.pending_requests.items.len == self.pending_requests.capacity)
+        {
+            self.compactPendingRequests();
+        }
+        try self.pending_requests.append(allocator, .{ .ready = owned_request });
+    }
+
+    fn markPendingRequestReset(
+        self: *Connection,
+        stream_id: u31,
+    ) bool {
+        for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
+            switch (pending.*) {
+                .ready => |*pending_request| {
+                    if (pending_request.stream_id != stream_id) continue;
+                    var owned = pending_request.*;
+                    owned.deinit(self.allocator);
+                    pending.* = .{ .reset = stream_id };
+                    self.pending_accept_reset_streams += 1;
+                    return self.pending_accept_reset_streams >
+                        self.limits.max_pending_accept_reset_streams;
+                },
+                .reset => |pending_stream_id| {
+                    if (pending_stream_id == stream_id) return false;
+                },
+            }
+        }
+        return false;
+    }
+
+    fn cancelPendingAcceptOverflow(self: *Connection) void {
+        self.aggregate_timeout_unusable = true;
+        self.pending_accept_reset_overflowed = true;
+        for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
+            self.cancelPeerRequest(pending.streamId());
+            pending.deinit(self.allocator);
+        }
+        self.pending_requests.items.len = 0;
+        self.pending_request_head = 0;
+        self.pending_accept_reset_streams = 0;
+    }
+
+    fn handleQueuedSiblingReset(
+        self: *Connection,
+        reset: http2.ResetStreamPayload,
+    ) Error!bool {
+        if (self.streamIsIdle(reset.stream_id)) return error.InvalidFrame;
+        try self.recordResetStream(reset);
+        return true;
     }
 
     fn requestFromHeadersAndBody(
@@ -7523,8 +7687,11 @@ pub const Connection = struct {
                         views,
                         reset.stream_id,
                     ) != null) {
-                        self.recordResetStream(reset);
+                        try self.recordResetStream(reset);
                         return error.StreamReset;
+                    }
+                    if (try self.handleQueuedSiblingReset(reset)) {
+                        continue;
                     }
                     return error.UnexpectedFrame;
                 },
@@ -8207,7 +8374,7 @@ pub const Connection = struct {
                 return error.UnexpectedFrame;
             }
             const reset = try http2.ResetStreamPayload.parse(frame.frame);
-            self.recordResetStream(reset);
+            try self.recordResetStream(reset);
             return .{ .frame = frame, .reset = reset };
         }
     }
@@ -8320,8 +8487,10 @@ pub const Connection = struct {
     fn recordResetStream(
         self: *Connection,
         reset: http2.ResetStreamPayload,
-    ) void {
+    ) Error!void {
         self.last_peer_reset = reset;
+        const pending_accept_overflow =
+            self.role == .server and self.markPendingRequestReset(reset.stream_id);
         // A reset is legal on a reserved stream even though that stream is not
         // counted as active. Preserve a server-side cancellation marker until
         // writePushedResponse observes it; client-side reservations can be
@@ -8337,6 +8506,7 @@ pub const Connection = struct {
                 reset.stream_id,
             );
             self.forgetStreamWindows(reset.stream_id);
+            if (pending_accept_overflow) return self.failPendingAcceptResetOverflow();
             return;
         }
         if (self.role == .client) {
@@ -8347,6 +8517,7 @@ pub const Connection = struct {
                 self.releaseLocalStream(reset.stream_id);
                 self.releasePeerStream(reset.stream_id);
                 self.forgetStreamWindows(reset.stream_id);
+                if (pending_accept_overflow) return self.failPendingAcceptResetOverflow();
                 return;
             }
         }
@@ -8356,6 +8527,17 @@ pub const Connection = struct {
         self.releaseLocalStream(reset.stream_id);
         self.releasePeerStream(reset.stream_id);
         self.forgetStreamWindows(reset.stream_id);
+        if (pending_accept_overflow) return self.failPendingAcceptResetOverflow();
+    }
+
+    fn failPendingAcceptResetOverflow(self: *Connection) Error {
+        self.cancelPendingAcceptOverflow();
+        self.sendGoAway(
+            self.lastPeerProcessedStreamId(),
+            .enhance_your_calm,
+            "too_many_resets",
+        ) catch {};
+        return error.ConnectionGoAway;
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
@@ -8774,11 +8956,12 @@ pub const Connection = struct {
         // same fail-closed transition. Entries before the head transferred
         // ownership to earlier callers and must not be deinitialized here.
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
-            self.cancelPeerRequest(pending.stream_id);
+            self.cancelPeerRequest(pending.streamId());
             pending.deinit(self.allocator);
         }
         self.pending_requests.items.len = 0;
         self.pending_request_head = 0;
+        self.pending_accept_reset_streams = 0;
     }
 
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
@@ -8965,7 +9148,7 @@ pub const Connection = struct {
                     const reset = try http2.ResetStreamPayload.parse(
                         frame.frame,
                     );
-                    self.recordResetStream(reset);
+                    try self.recordResetStream(reset);
                     return error.StreamReset;
                 },
                 else => continue,
@@ -9240,7 +9423,7 @@ pub const Connection = struct {
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame);
-                    self.recordResetStream(reset);
+                    try self.recordResetStream(reset);
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -9868,7 +10051,7 @@ pub const Connection = struct {
                     (self.role == .client and
                         self.push_state.isRemoteReserved(reset.stream_id));
                 if (!reserved_push) return false;
-                self.recordResetStream(reset);
+                try self.recordResetStream(reset);
                 return true;
             },
             .origin => {
@@ -10365,8 +10548,11 @@ pub const Connection = struct {
                         frame.frame,
                     );
                     if (reset.stream_id == stream_id) {
-                        self.recordResetStream(reset);
+                        try self.recordResetStream(reset);
                         return error.StreamReset;
+                    }
+                    if (try self.handleQueuedSiblingReset(reset)) {
+                        continue;
                     }
                     if (self.wasLocallyReset(reset.stream_id)) {
                         continue;
@@ -10747,6 +10933,26 @@ pub const OwnedRequest = struct {
         freeHeaders(allocator, self.headers);
         freeHeaders(allocator, self.trailers);
         allocator.free(self.body);
+        self.* = undefined;
+    }
+};
+
+const PendingRequest = union(enum) {
+    ready: OwnedRequest,
+    reset: u31,
+
+    fn streamId(self: PendingRequest) u31 {
+        return switch (self) {
+            .ready => |request| request.stream_id,
+            .reset => |stream_id| stream_id,
+        };
+    }
+
+    fn deinit(self: *PendingRequest, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .ready => |*request| request.deinit(allocator),
+            .reset => {},
+        }
         self.* = undefined;
     }
 };
@@ -16426,6 +16632,179 @@ test "HTTP/2 pending request queue reuses consumed slots" {
     try std.testing.expectEqual(@as(usize, 0), connection.pending_request_head);
 }
 
+test "HTTP/2 pending request queue skips peer-reset tombstones" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .max_pending_accept_reset_streams = 2 },
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.push_state.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        for (connection.pending_requests.items[connection.pending_request_head..]) |*pending| {
+            pending.deinit(allocator);
+        }
+        connection.pending_requests.deinit(allocator);
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try queueTestPendingRequest(&connection, 1, "/one", allocator);
+    try queueTestPendingRequest(&connection, 3, "/three", allocator);
+    try queueTestPendingRequest(&connection, 5, "/five", allocator);
+
+    try std.testing.expect(!connection.markPendingRequestReset(3));
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingAcceptResetStreamCount());
+    try std.testing.expectEqual(@as(usize, 3), connection.pendingRequestCount());
+
+    var first = connection.popPendingRequest() orelse
+        return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingAcceptResetStreamCount());
+
+    var second = connection.popPendingRequest() orelse
+        return error.TestUnexpectedResult;
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 5), second.stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingAcceptResetStreamCount());
+
+    try std.testing.expect(connection.popPendingRequest() == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_requests.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_request_head);
+}
+
+test "HTTP/2 pending request reset accounting preserves unrelated queue entries" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .max_pending_accept_reset_streams = 4 },
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.push_state.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        for (connection.pending_requests.items[connection.pending_request_head..]) |*pending| {
+            pending.deinit(allocator);
+        }
+        connection.pending_requests.deinit(allocator);
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try queueTestPendingRequest(&connection, 1, "/one", allocator);
+    try queueTestPendingRequest(&connection, 3, "/three", allocator);
+    try queueTestPendingRequest(&connection, 5, "/five", allocator);
+
+    try std.testing.expect(!connection.markPendingRequestReset(3));
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingAcceptResetStreamCount());
+    try std.testing.expect(!connection.markPendingRequestReset(3));
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingAcceptResetStreamCount());
+    try std.testing.expect(!connection.markPendingRequestReset(99));
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingAcceptResetStreamCount());
+
+    for ([_]u31{ 1, 5 }) |expected_stream_id| {
+        var pending = connection.popPendingRequest() orelse
+            return error.TestUnexpectedResult;
+        defer pending.deinit(allocator);
+        try std.testing.expectEqual(expected_stream_id, pending.stream_id);
+    }
+    try std.testing.expect(connection.popPendingRequest() == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingAcceptResetStreamCount());
+}
+
+test "HTTP/2 pending request reset tombstone reuses consumed slot without allocation" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.push_state.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        for (connection.pending_requests.items[connection.pending_request_head..]) |*pending| {
+            pending.deinit(allocator);
+        }
+        connection.pending_requests.deinit(allocator);
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.pending_requests.ensureTotalCapacityPrecise(allocator, 4);
+    try queueTestPendingRequest(&connection, 1, "/one", allocator);
+    try queueTestPendingRequest(&connection, 3, "/three", allocator);
+    try queueTestPendingRequest(&connection, 5, "/five", allocator);
+    try queueTestPendingRequest(&connection, 7, "/seven", allocator);
+    try std.testing.expect(!connection.markPendingRequestReset(3));
+
+    var first = connection.popPendingRequest() orelse
+        return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try queueTestPendingRequest(&connection, 9, "/nine", no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    for ([_]u31{ 5, 7, 9 }) |expected_stream_id| {
+        var pending = connection.popPendingRequest() orelse
+            return error.TestUnexpectedResult;
+        defer pending.deinit(allocator);
+        try std.testing.expectEqual(expected_stream_id, pending.stream_id);
+    }
+    try std.testing.expect(connection.popPendingRequest() == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingAcceptResetStreamCount());
+}
+
 fn queueTestPendingRequest(
     connection: *Connection,
     stream_id: u31,
@@ -16445,13 +16824,297 @@ fn queueTestPendingRequest(
     var request = try connection.requestFromHeadersAndBody(stream_id, headers, body, &.{});
     errdefer request.deinit(connection.allocator);
 
-    if (connection.pending_request_head != 0 and
-        connection.pending_requests.items.len == connection.pending_requests.capacity)
-    {
-        connection.compactPendingRequests();
-    }
-    try connection.pending_requests.append(queue_allocator, request);
+    try connection.appendPendingRequest(request, queue_allocator);
     request = undefined;
+}
+
+test "HTTP/2 readRequest skips queued sibling reset and preserves unrelated request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_pending_accept_reset_streams = 4,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequestWithDeadline(.fromNow(
+                connection.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            ));
+            defer first.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try std.testing.expectEqualStrings("/first", first.path);
+            try std.testing.expectEqualStrings("first-body", first.body);
+
+            var second = try connection.readRequestWithDeadline(.fromNow(
+                connection.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            ));
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u31, 5), second.stream_id);
+            try std.testing.expectEqualStrings("/third", second.path);
+            try std.testing.expectEqualStrings("", second.body);
+            try std.testing.expectEqual(@as(usize, 0), connection.pendingAcceptResetStreamCount());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_pending_accept_reset_streams = 4,
+    });
+    defer client.close();
+
+    try client.writeHeaders(1, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/first" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "10" },
+    }, false);
+    try client.writeHeaders(3, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/second" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.sendResetStream(3, .cancel);
+    try client.writeHeaders(5, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/third" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.writeData(1, "first-body", true);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 readRequestStreaming skips queued sibling reset and preserves unrelated request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_pending_accept_reset_streams = 4,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        first_bytes: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            const SharedState = @This();
+
+            var first = try connection.readRequestStreamingWithDeadline(
+                .fromNow(connection.io, .{
+                    .raw = .fromSeconds(2),
+                    .clock = .awake,
+                }),
+                shared,
+                struct {
+                    fn consume(shared_ptr: *SharedState, chunk: []const u8) Error!void {
+                        shared_ptr.first_bytes += chunk.len;
+                    }
+                }.consume,
+            );
+            defer first.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try std.testing.expectEqual(@as(usize, 10), shared.first_bytes);
+
+            var second = try connection.readRequestStreamingWithDeadline(
+                .fromNow(connection.io, .{
+                    .raw = .fromSeconds(2),
+                    .clock = .awake,
+                }),
+                {},
+                struct {
+                    fn consume(_: void, _: []const u8) Error!void {}
+                }.consume,
+            );
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 5), second.stream_id);
+            try std.testing.expectEqualStrings("/third-streaming", second.path);
+            try std.testing.expectEqual(@as(usize, 0), connection.pendingAcceptResetStreamCount());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_pending_accept_reset_streams = 4,
+    });
+    defer client.close();
+
+    try client.writeHeaders(1, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/first-streaming" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "10" },
+    }, false);
+    try client.writeHeaders(3, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/second-streaming" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.sendResetStream(3, .cancel);
+    try client.writeHeaders(5, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/third-streaming" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.writeData(1, "first-body", true);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 pending accept reset overflow sends ENHANCE_YOUR_CALM GOAWAY" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_pending_accept_reset_streams = 1,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            try std.testing.expectError(
+                error.ConnectionGoAway,
+                connection.readRequestWithDeadline(.fromNow(
+                    connection.io,
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                )),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_pending_accept_reset_streams = 1,
+    });
+    defer client.close();
+
+    try client.writeHeaders(1, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/first-overflow" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "10" },
+    }, false);
+    try client.writeHeaders(3, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/cancel-one" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.sendResetStream(3, .cancel);
+    try client.writeHeaders(5, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/cancel-two" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.sendResetStream(5, .cancel);
+    try client.writeData(1, "first-body", true);
+
+    var goaway = try client.readGoAwayWithDeadline(.fromNow(
+        client.io,
+        .{ .raw = .fromSeconds(2), .clock = .awake },
+    ));
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 5), goaway.goaway.last_stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.enhance_your_calm,
+        goaway.goaway.error_code,
+    );
+    try std.testing.expectEqualStrings(
+        "too_many_resets",
+        goaway.goaway.debug_data,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 readRequest queues complete interleaved peer request" {
@@ -18803,6 +19466,120 @@ test "HTTP/2 request body batch sends bounded parallel bodies" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 request body batch streaming ignores duplicate reset and admits later request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_pending_accept_reset_streams = 4,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        stream_one_bytes: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+
+            var requests: [2]StreamingRequest = undefined;
+            var initialized = false;
+            defer if (initialized) for (&requests) |*request| {
+                request.deinit(shared.server.allocator);
+            };
+
+            const Context = @This();
+            try connection.readRequestBatchStreamingInto(
+                &requests,
+                shared,
+                struct {
+                    fn consume(
+                        context: *Context,
+                        stream_id: u31,
+                        data: []const u8,
+                    ) Error!void {
+                        if (stream_id == 1) context.stream_one_bytes += data.len;
+                    }
+                }.consume,
+            );
+            initialized = true;
+
+            try std.testing.expectEqual(@as(u31, 1), requests[0].stream_id);
+            try std.testing.expectEqualStrings("/first-batch", requests[0].path);
+            try std.testing.expectEqual(@as(usize, 10), requests[0].body_bytes);
+
+            try std.testing.expectEqual(@as(u31, 5), requests[1].stream_id);
+            try std.testing.expectEqualStrings("/replacement-batch", requests[1].path);
+            try std.testing.expectEqual(@as(usize, 0), requests[1].body_bytes);
+
+            try std.testing.expectEqual(@as(usize, 10), shared.stream_one_bytes);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_pending_accept_reset_streams = 4,
+    });
+    defer client.close();
+
+    try client.writeHeaders(1, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/first-batch" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "10" },
+    }, false);
+    try client.writeHeaders(3, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/reset-batch" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.sendResetStream(3, .cancel);
+    // The public API deliberately rejects resetting an already closed stream.
+    // Inject the duplicate peer frame directly to exercise the receiver's
+    // tolerance for a legal retransmission already in flight on the wire.
+    var duplicate_reset: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
+    const encoded_duplicate = try http2.ResetStreamPayload.writeInto(
+        &duplicate_reset,
+        3,
+        .cancel,
+    );
+    try client.transportForIo().writeAll(encoded_duplicate);
+    try client.writeHeaders(5, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/replacement-batch" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.writeData(1, "first-body", true);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 request body batch rejects insufficient credit before write" {
     const allocator = std.testing.allocator;
     var connection = Connection{
@@ -18996,8 +19773,13 @@ test "HTTP/2 streaming pending request cleans up callback failure" {
         .stream = undefined,
         .role = .server,
     };
-    defer connection.pending_requests.deinit(allocator);
-    try connection.pending_requests.append(allocator, .{
+    defer {
+        for (connection.pending_requests.items[connection.pending_request_head..]) |*pending| {
+            pending.deinit(allocator);
+        }
+        connection.pending_requests.deinit(allocator);
+    }
+    try connection.appendPendingRequest(.{
         .stream_id = 1,
         .headers = headers,
         .method = headers[0].value,
@@ -19005,7 +19787,7 @@ test "HTTP/2 streaming pending request cleans up callback failure" {
         .scheme = headers[2].value,
         .authority = null,
         .body = body,
-    });
+    }, allocator);
 
     try std.testing.expectError(
         error.InvalidResponse,

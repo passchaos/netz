@@ -827,6 +827,20 @@ Rust h2's time-based reset retention this stays deterministic under a blocking
 runtime without an always-running timer task. Capacity is reserved before a
 RST_STREAM becomes visible, including batch cancellation, so allocation failure
 cannot leave wire and local reset state inconsistent.
+Remotely reset requests waiting in the server's pending-accept queue are
+tracked separately through `Limits.max_pending_accept_reset_streams`, matching
+Rust h2's defense against reset-after-HEADERS churn that no longer counts
+toward stream concurrency. Once a peer reset for a queued request is consumed,
+netz immediately frees that request's owned headers/body/trailers, leaves a
+small tombstone in accept order so later accepts cannot surface the canceled
+stream, and decrements the accounting only when the application drains past
+that queue position. The default bound is 20. Exceeding it sends
+`GOAWAY(ENHANCE_YOUR_CALM, "too_many_resets")`, marks the connection locally
+unusable, and drops any remaining queued accepts rather than retaining
+unbounded queued-cancel memory. Focused regressions cover queued sibling
+cancellation during aggregate, single-request streaming, and batch-streaming
+request reads, unrelated queue integrity, tombstone slot reuse without
+allocation, and the exact GOAWAY code and debug string on overflow.
 The remaining fixed control helpers expose the same allocation-free boundary:
 PING encodes its complete 17-byte frame and WINDOW_UPDATE its complete 13-byte
 frame into exact caller-owned arrays. Their compatibility writers still grow
