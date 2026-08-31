@@ -1172,6 +1172,34 @@ test "HTTP/2 response deadline rejects a non-awake clock before writing" {
             .zero,
         ),
     );
+    const Callback = struct {
+        fn begin(_: void, _: runtime.StreamingResponseHead) !void {}
+        fn consume(_: void, _: []const u8) !void {}
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestStreamingWithHeadAndTimeout(
+            .{ .path = "/zero-streaming-head", .authority = "localhost" },
+            .zero,
+            {},
+            Callback.begin,
+            Callback.consume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestStreamingWithInformationalAndHeadAndDeadline(
+            .{
+                .path = "/wrong-clock-streaming-head",
+                .authority = "localhost",
+            },
+            null,
+            .{ .clock = .real, .raw = .zero },
+            {},
+            Callback.begin,
+            Callback.consume,
+        ),
+    );
     try std.testing.expectError(
         error.Timeout,
         connection.readResponseWithInformationalAndDeadline(
@@ -1192,6 +1220,18 @@ test "HTTP/2 response deadline rejects a non-awake clock before writing" {
             .zero,
         ),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readResponseStreamingWithHeadAndDeadline(
+            1,
+            "GET",
+            false,
+            .{ .clock = .real, .raw = .zero },
+            {},
+            Callback.begin,
+            Callback.consume,
+        ),
+    );
     var writer = runtime.RequestWriter{
         .connection = &connection,
         .stream_id = 1,
@@ -1210,6 +1250,16 @@ test "HTTP/2 response deadline rejects a non-awake clock before writing" {
     try std.testing.expectError(
         error.Timeout,
         writer.readResponseWithInformationalAndTimeout(null, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        writer.readResponseStreamingWithInformationalAndHeadAndTimeout(
+            null,
+            .zero,
+            {},
+            Callback.begin,
+            Callback.consume,
+        ),
     );
     try std.testing.expect(connection.isReusable());
 }
@@ -1291,7 +1341,7 @@ test "HTTP/2 aggregate response deadline covers header continuations" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 request writer bounds its response" {
+test "HTTP/2 request writer exposes final head within response timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1322,11 +1372,35 @@ test "HTTP/2 request writer bounds its response" {
             var request = try connection.readRequest();
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings("/writer-timeout", request.path);
+            var response = try connection.startResponse(
+                request.stream_id,
+                .{ .headers = &.{.{
+                    .name = "content-length",
+                    .value = "4",
+                }} },
+            );
+            defer response.deinit();
+            try response.write("a");
             var reset = try connection.readResetStreamWithTimeout(
                 .fromSeconds(1),
             );
             defer reset.deinit(self.server.allocator);
             try std.testing.expectEqual(request.stream_id, reset.reset.stream_id);
+        }
+    };
+    const Sink = struct {
+        head_calls: usize = 0,
+        body_bytes: usize = 0,
+
+        fn begin(self: *@This(), head: runtime.StreamingResponseHead) !void {
+            try std.testing.expectEqual(@as(u16, 200), head.status);
+            try std.testing.expectEqual(@as(usize, 0), self.body_bytes);
+            self.head_calls += 1;
+        }
+
+        fn consume(self: *@This(), data: []const u8) !void {
+            try std.testing.expectEqual(@as(usize, 1), self.head_calls);
+            self.body_bytes += data.len;
         }
     };
     var shared = Shared{ .server = &server };
@@ -1349,10 +1423,19 @@ test "HTTP/2 request writer bounds its response" {
     });
     defer writer.deinit();
     try writer.finish();
+    var sink: Sink = .{};
     try std.testing.expectError(
         error.Timeout,
-        writer.readResponseWithTimeout(.fromMilliseconds(20)),
+        writer.readResponseStreamingWithHeadAndTimeout(
+            .fromMilliseconds(20),
+            &sink,
+            Sink.begin,
+            Sink.consume,
+        ),
     );
+    try std.testing.expectEqual(@as(usize, 1), sink.head_calls);
+    try std.testing.expectEqual(@as(usize, 1), sink.body_bytes);
+    try std.testing.expect(!client.isReusable());
 
     thread.join();
     joined = true;
@@ -1513,7 +1596,7 @@ test "HTTP/2 streaming response deadline covers a partial body" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 streaming informational response shares body deadline" {
+test "HTTP/2 streaming informational and final heads share body deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1548,6 +1631,11 @@ test "HTTP/2 streaming informational response shares body deadline" {
                 103,
                 &.{},
             );
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(5),
+                .awake,
+            );
             var response = try connection.startResponse(
                 request.stream_id,
                 .{ .headers = &.{.{
@@ -1556,6 +1644,11 @@ test "HTTP/2 streaming informational response shares body deadline" {
                 }} },
             );
             defer response.deinit();
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(5),
+                .awake,
+            );
             try response.write("b");
             var reset = try connection.readResetStreamWithTimeout(
                 .fromSeconds(1),
@@ -1566,15 +1659,30 @@ test "HTTP/2 streaming informational response shares body deadline" {
     };
     const Sink = struct {
         informationals: usize = 0,
+        final_heads: usize = 0,
         body_bytes: usize = 0,
+        phase: enum { initial, informational, final_head, body } = .initial,
 
         fn observe(context: *anyopaque, head: runtime.StreamingResponseHead) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (head.status != 103) @panic("unexpected informational status");
+            if (self.phase != .initial) @panic("informational ordering");
             self.informationals += 1;
+            self.phase = .informational;
+        }
+
+        fn begin(self: *@This(), head: runtime.StreamingResponseHead) !void {
+            try std.testing.expectEqual(@as(u16, 200), head.status);
+            try std.testing.expectEqual(.informational, self.phase);
+            self.final_heads += 1;
+            self.phase = .final_head;
         }
 
         fn consume(self: *@This(), bytes: []const u8) !void {
+            try std.testing.expect(
+                self.phase == .final_head or self.phase == .body,
+            );
+            self.phase = .body;
             self.body_bytes += bytes.len;
         }
     };
@@ -1593,7 +1701,7 @@ test "HTTP/2 streaming informational response shares body deadline" {
 
     try std.testing.expectError(
         error.Timeout,
-        client.requestStreamingWithInformationalAndTimeout(
+        client.requestStreamingWithInformationalAndHeadAndTimeout(
             .{ .path = "/streaming-informational", .authority = "localhost" },
             .{
                 .context = &sink,
@@ -1601,12 +1709,122 @@ test "HTTP/2 streaming informational response shares body deadline" {
             },
             .fromMilliseconds(25),
             &sink,
+            Sink.begin,
             Sink.consume,
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), sink.informationals);
+    try std.testing.expectEqual(@as(usize, 1), sink.final_heads);
     try std.testing.expectEqual(@as(usize, 1), sink.body_bytes);
+    try std.testing.expectEqual(.body, sink.phase);
     try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 bounded response head callback Timeout stays stream-local" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var rejected = try connection.readRequest();
+            defer rejected.deinit(self.server.allocator);
+            var response = try connection.startResponse(
+                rejected.stream_id,
+                .{ .headers = &.{.{
+                    .name = "content-length",
+                    .value = "1",
+                }} },
+            );
+            defer response.deinit();
+            try response.write("x");
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                rejected.stream_id,
+                reset.reset.stream_id,
+            );
+
+            var next = try connection.readRequestWithTimeout(
+                .fromSeconds(1),
+            );
+            defer next.deinit(self.server.allocator);
+            try connection.writeResponse(next.stream_id, .{ .body = "ok" });
+        }
+    };
+    const Sink = struct {
+        calls: usize = 0,
+
+        fn reject(
+            self: *@This(),
+            head: runtime.StreamingResponseHead,
+        ) error{Timeout}!void {
+            self.calls += 1;
+            if (head.status != 200) @panic("unexpected final status");
+            return error.Timeout;
+        }
+
+        fn consume(_: *@This(), _: []const u8) !void {}
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var sink: Sink = .{};
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestStreamingWithHeadAndTimeout(
+            .{ .path = "/reject-head", .authority = "localhost" },
+            .fromSeconds(1),
+            &sink,
+            Sink.reject,
+            Sink.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    try std.testing.expect(client.isReusable());
+
+    var response = try client.requestWithTimeout(
+        .{ .path = "/after-head-rejection", .authority = "localhost" },
+        .fromSeconds(1),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", response.body);
 
     thread.join();
     joined = true;

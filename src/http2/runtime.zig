@@ -3389,10 +3389,11 @@ pub const Connection = struct {
         comptime consume: anytype,
     ) !StreamingResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.requestStreamingWithDeadline(
+        return self.requestStreamingWithHeadAndDeadline(
             options,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
             context,
+            ignoreStreamingResponseHead,
             consume,
         );
     }
@@ -3404,11 +3405,49 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        return self.requestStreamingWithInformationalAndDeadline(
+        return self.requestStreamingWithHeadAndDeadline(
+            options,
+            deadline,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithHeadAndTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithHeadAndDeadline(
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Send a request and deliver its final response head and body under one
+    /// absolute awake-clock deadline. The head callback always precedes DATA.
+    pub fn requestStreamingWithHeadAndDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.requestStreamingWithInformationalAndHeadAndDeadline(
             options,
             null,
             deadline,
             context,
+            begin,
             consume,
         );
     }
@@ -3421,10 +3460,8 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        _ = try deadline_policy.usableAwake(self.io, deadline);
-        const pending = try self.sendCompleteRequest(options);
-        return self.readResponseStreamingWithHeadUntil(
-            pending,
+        return self.requestStreamingWithInformationalAndHeadAndDeadline(
+            options,
             informational,
             deadline,
             context,
@@ -3442,11 +3479,55 @@ pub const Connection = struct {
         comptime consume: anytype,
     ) !StreamingResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.requestStreamingWithInformationalAndDeadline(
+        return self.requestStreamingWithInformationalAndHeadAndDeadline(
             options,
             informational,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
             context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithInformationalAndHeadAndTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithInformationalAndHeadAndDeadline(
+            options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Observe ordered informational heads and the final head before DATA.
+    /// The deadline is validated before allocating or sending the request.
+    pub fn requestStreamingWithInformationalAndHeadAndDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const pending = try self.sendCompleteRequest(options);
+        return self.readResponseStreamingWithHeadUntil(
+            pending,
+            informational,
+            deadline,
+            context,
+            begin,
             consume,
         );
     }
@@ -3461,12 +3542,13 @@ pub const Connection = struct {
         comptime consume: anytype,
     ) !StreamingResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseStreamingWithDeadline(
+        return self.readResponseStreamingWithHeadAndDeadline(
             stream_id,
             request_method,
             extended_connect,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
             context,
+            ignoreStreamingResponseHead,
             consume,
         );
     }
@@ -3480,13 +3562,57 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        return self.readResponseStreamingWithInformationalAndDeadline(
+        return self.readResponseStreamingWithHeadAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            deadline,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithHeadAndTimeout(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithHeadAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithHeadAndDeadline(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
             stream_id,
             request_method,
             extended_connect,
             null,
             deadline,
             context,
+            begin,
             consume,
         );
     }
@@ -3501,13 +3627,10 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        _ = try deadline_policy.usableAwake(self.io, deadline);
-        return self.readResponseStreamingWithHeadUntil(
-            .{
-                .stream_id = stream_id,
-                .request_method = request_method,
-                .extended_connect = extended_connect,
-            },
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
             informational,
             deadline,
             context,
@@ -3527,13 +3650,66 @@ pub const Connection = struct {
         comptime consume: anytype,
     ) !StreamingResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseStreamingWithInformationalAndDeadline(
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
             stream_id,
             request_method,
             extended_connect,
             informational,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
             context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndHeadAndTimeout(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
+            stream_id,
+            request_method,
+            extended_connect,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Wait for an existing stream while exposing every interim head and the
+    /// final head under the same absolute awake-clock deadline as its body.
+    pub fn readResponseStreamingWithInformationalAndHeadAndDeadline(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readResponseStreamingWithHeadUntil(
+            .{
+                .stream_id = stream_id,
+                .request_method = request_method,
+                .extended_connect = extended_connect,
+            },
+            informational,
+            deadline,
+            context,
+            begin,
             consume,
         );
     }
@@ -8856,12 +9032,12 @@ pub const Connection = struct {
         const stream_id = pending.stream_id;
         defer self.releaseLocalStream(stream_id);
         var completed = false;
-        // The generic callback may contribute an inferred error set, which
-        // prevents reliably inspecting only Timeout in an errdefer. For a
-        // deadline-bounded call, conservatively fail closed on every error:
-        // callback failure already cancels the stream, and parser/I/O failure
-        // likewise cannot preserve the discarded streaming state.
-        defer if (!completed and deadline != null) {
+        var callback_failed = false;
+        // Bounded reads fail closed whenever discarded parser or transport
+        // state makes resumption unsafe. Callback rejection is the exception:
+        // even error.Timeout from a callback remains stream-local because the
+        // reader cancels that stream explicitly without losing wire state.
+        defer if (!completed and deadline != null and !callback_failed) {
             self.failTimedOutResponse(stream_id);
         };
         var headers: ?[]http2.Hpack.HeaderField = null;
@@ -8970,8 +9146,9 @@ pub const Connection = struct {
                             self.writeResetStreamFrame(
                                 stream_id,
                                 .cancel,
-                            ) catch {};
+                            ) catch return err;
                         }
+                        callback_failed = true;
                         return err;
                     };
                     if (responseForbidsBody(
@@ -9039,15 +9216,16 @@ pub const Connection = struct {
                             // callback failures gradually starve siblings.
                             self.releaseConnectionCapacity(
                                 frame.payload.len,
-                            ) catch {};
+                            ) catch return err;
                             if ((frame.header.flags &
                                 flag_end_stream) == 0)
                             {
                                 self.writeResetStreamFrame(
                                     stream_id,
                                     .cancel,
-                                ) catch {};
+                                ) catch return err;
                             }
+                            callback_failed = true;
                             return err;
                         };
                     }
@@ -10966,12 +11144,13 @@ pub const RequestWriter = struct {
         comptime consume: anytype,
     ) !StreamingResponse {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseStreamingWithDeadline(
+        return self.readResponseStreamingWithHeadAndDeadline(
             .fromNow(self.connection.io, .{
                 .raw = timeout,
                 .clock = .awake,
             }),
             context,
+            ignoreStreamingResponseHead,
             consume,
         );
     }
@@ -10982,10 +11161,45 @@ pub const RequestWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        return self.readResponseStreamingWithInformationalAndDeadline(
+        return self.readResponseStreamingWithHeadAndDeadline(
+            deadline,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithHeadAndTimeout(
+        self: *RequestWriter,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithHeadAndDeadline(
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithHeadAndDeadline(
+        self: *RequestWriter,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
             null,
             deadline,
             context,
+            begin,
             consume,
         );
     }
@@ -10995,6 +11209,66 @@ pub const RequestWriter = struct {
         informational: ?InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
         context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
+            informational,
+            deadline,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
+            informational,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndHeadAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
+            informational,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    /// Finish this request while observing every interim head and the final
+    /// head before DATA under a single caller-owned deadline.
+    pub fn readResponseStreamingWithInformationalAndHeadAndDeadline(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
@@ -11011,7 +11285,7 @@ pub const RequestWriter = struct {
             informational,
             deadline,
             context,
-            ignoreStreamingResponseHead,
+            begin,
             consume,
         ) catch |err| {
             self.completed = true;
@@ -11019,25 +11293,6 @@ pub const RequestWriter = struct {
         };
         self.completed = true;
         return response;
-    }
-
-    pub fn readResponseStreamingWithInformationalAndTimeout(
-        self: *RequestWriter,
-        informational: ?InformationalObserver,
-        timeout: std.Io.Duration,
-        context: anytype,
-        comptime consume: anytype,
-    ) !StreamingResponse {
-        if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseStreamingWithInformationalAndDeadline(
-            informational,
-            .fromNow(self.connection.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-            context,
-            consume,
-        );
     }
 
     pub fn readResponseStreamingWithInformational(

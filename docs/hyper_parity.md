@@ -681,6 +681,12 @@ renewal. Aggregate and callback-streaming complete-request, split-response, and
 streaming-request writer variants can retain ordered informational-response
 callbacks under that same budget, so a 1xx response cannot grant extra time to
 the final response head or body.
+The bounded callback-streaming APIs also have final-head variants for complete
+requests, split response reads, and `RequestWriter`. They invoke the final-head
+callback after every observed 1xx head and before the first DATA slice, while
+the original absolute deadline continues through body and trailers. A callback
+that returns `error.Timeout` is treated as an application rejection: it cancels
+only that stream and does not poison an otherwise reusable connection.
 A timeout sends RST_STREAM(CANCEL) best-effort and marks the connection
 unusable because discarded HPACK/body state cannot safely be reconstructed;
 client pools consequently discard that lease. Netz also exposes
