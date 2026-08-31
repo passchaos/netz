@@ -1784,6 +1784,14 @@ test "public modules are reachable" {
         @as(usize, 128),
         (netz.http3.runtime.Limits{}).max_concurrent_request_streams,
     );
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "receiveRequestsConcurrent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ConcurrentServeResult"));

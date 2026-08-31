@@ -2501,14 +2501,63 @@ pub const Server = struct {
     }
 
     pub fn receiveRequest(self: *Server) Error!OwnedRequest {
-        self.request_receive_mutex.lockUncancelable(
+        return self.receiveRequestInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Aggregate the next development-runtime request within one relative
+    /// awake-clock budget. Any partial STREAM state remains owned by the
+    /// server and can be completed by a later receive call.
+    pub fn receiveRequestWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestWithDeadline(.fromNow(
             self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Aggregate the next development-runtime request before `deadline`. The
+    /// original absolute timestamp is reused for every datagram so unrelated
+    /// traffic and fragmented STREAM frames cannot renew the caller's budget.
+    pub fn receiveRequestWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedRequest {
+        const absolute = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
         );
+        return self.receiveRequestInternal(absolute);
+    }
+
+    fn receiveRequestInternal(
+        self: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedRequest {
+        if (deadline != null) {
+            // A bounded receive must not spend an unbounded interval behind
+            // another task that currently owns the shared endpoint reader.
+            if (!self.request_receive_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.request_receive_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+        }
         defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
 
         var assembled = while (true) {
             if (try self.request_streams.takeReady()) |ready| break ready;
-            var datagram = try self.quic_server.receive();
+            var datagram = if (deadline) |absolute|
+                try self.quic_server.receiveWithDeadline(absolute)
+            else
+                try self.quic_server.receive();
             var owned = true;
             defer if (owned) datagram.deinit(
                 self.quic_server.endpoint.allocator,
@@ -29843,6 +29892,98 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expect(response.extra_datagrams.len != 0);
     try std.testing.expectEqualStrings("pong split by dev sender", response.response.body);
+}
+
+test "HTTP/3 dev request deadline validates and resumes a partial STREAM" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+    );
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        },
+    );
+    defer client.deinit();
+
+    // Validation happens before socket progress or request-state mutation.
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithDeadline(.{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithTimeout(.zero),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_streams.entries.items.len,
+    );
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const body = "retained after the bounded receive expires";
+    try (http3.Request{
+        .method = "POST",
+        .path = "/dev-request-deadline",
+        .authority = "localhost",
+        .body = body,
+    }).write(&encoded, allocator);
+    const split = encoded.items.len - body.len + body.len / 2;
+    try client.sendFrames(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = encoded.items[0..split],
+    } }});
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveRequestWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.request_streams.entries.items.len,
+    );
+
+    try client.sendFrames(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = split,
+        .data = encoded.items[split..],
+        .fin = true,
+    } }});
+    var request = try server.receiveRequestWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+    try std.testing.expectEqualStrings(
+        "/dev-request-deadline",
+        request.request.path,
+    );
+    try std.testing.expectEqualStrings(body, request.request.body);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_streams.entries.items.len,
+    );
 }
 
 test "HTTP/3 dev runtime assembles split STREAM request and response" {
