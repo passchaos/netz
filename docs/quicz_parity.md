@@ -175,6 +175,19 @@ probe, then re-arms the same size under an allocator that rejects all new
 allocations; the second exact-size probe succeeds with stable scratch pointers.
 The full 1,610-test suite and both quic-go and s2n-quic transport matrices
 remain green after the change.
+QUIC PMTU handling now also detects path MTU black holes from ordinary
+non-probe loss bursts instead of only explicit probe loss. The implementation
+records the protected datagram size for each sent packet, clears black-hole
+evidence only when an ACK validates a current-MTU-sized packet, collapses one
+contiguous loss episode into one signal, falls back to the base 1200-byte QUIC
+datagram size after the fourth distinct qualifying burst, and rearms probing
+only after a 60-second cooldown. Completed searches separately re-arm a safe
+reprobe after 600 seconds. When PMTU changes, the 1-RTT connection immediately
+retunes congestion and pacing datagram-size assumptions so steady-state burst
+and cwnd heuristics remain coherent with the new path size. Dedicated
+PING/PADDING probes stay outside generic retransmission ownership; their sent
+metadata retains an independent loss timer, so a lost lone probe is retried by
+the PMTU search rather than accidentally resurfacing as an ordinary PTO packet.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
 fills unpredictable bytes, caps responses at 1200 bytes, requires a valid

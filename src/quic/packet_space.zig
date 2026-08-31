@@ -338,10 +338,25 @@ pub const SentPacket = struct {
     lost: bool = false,
     loss_reported: bool = false,
     bytes: usize = 0,
+    /// Full protected datagram size on the wire for this packet.
+    ///
+    /// Recovery and congestion track only payload bytes in `bytes`, but PMTU
+    /// black-hole detection needs the actual protected datagram length to
+    /// determine whether an ordinary packet exercised the validated MTU.
+    datagram_size: usize = 0,
     ecn: EcnCodepoint = .not_ect,
     sent_time_ns: ?u64 = null,
     pmtu_probe_size: ?usize = null,
+    pmtu_probe_epoch: u32 = 0,
+    /// Path-generation marker for ordinary PMTU evidence.
+    ///
+    /// PMTU black-hole heuristics reset when the peer address changes, but ACK
+    /// and loss processing can still drain old-path packets afterward. Keeping
+    /// the path epoch per sent packet lets `one_rtt` ignore stale ordinary
+    /// MTU-sized ACK/loss signals without special-casing probe identity.
+    pmtu_path_epoch: u32 = 0,
     largest_acknowledged_sent: ?u64 = null,
+    lost_generation: u32 = 0,
 };
 
 test "QUIC sent packet metadata stays compact" {
@@ -408,6 +423,7 @@ pub const SentPacketTracker = struct {
     ecn_largest_acknowledged: ?u64 = null,
     sent_ect0_count: u64 = 0,
     sent_ect1_count: u64 = 0,
+    loss_generation: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) SentPacketTracker {
         return .{ .allocator = allocator };
@@ -428,22 +444,134 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentAt(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
-        try self.sentAtWithPmtu(packet_number, ack_eliciting, bytes, ecn, sent_time_ns, null);
+        try self.sentAtWithDatagramSize(packet_number, ack_eliciting, bytes, bytes, ecn, sent_time_ns);
     }
 
     pub fn sentAtWithPmtu(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
-        try self.sentInFlightAtWithPmtu(packet_number, ack_eliciting, ack_eliciting, bytes, ecn, sent_time_ns, pmtu_probe_size);
+        try self.sentInFlightAtWithPmtuAndDatagramSize(
+            packet_number,
+            ack_eliciting,
+            ack_eliciting,
+            bytes,
+            if (pmtu_probe_size) |size| size else bytes,
+            ecn,
+            sent_time_ns,
+            pmtu_probe_size,
+            0,
+        );
+    }
+
+    pub fn sentAtWithPmtuAndDatagramSize(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
+        try self.sentAtWithPmtuAndDatagramSizeAndEpoch(packet_number, ack_eliciting, bytes, datagram_size, ecn, sent_time_ns, pmtu_probe_size, 0);
+    }
+
+    pub fn sentAtWithPmtuAndDatagramSizeAndEpoch(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_probe_epoch: u32) !void {
+        try self.sentInFlightAtWithPmtuAndDatagramSizeAndEpochAndPathEpoch(
+            packet_number,
+            ack_eliciting,
+            ack_eliciting,
+            bytes,
+            datagram_size,
+            ecn,
+            sent_time_ns,
+            pmtu_probe_size,
+            pmtu_probe_epoch,
+            pmtu_probe_epoch,
+        );
+    }
+
+    pub fn sentAtWithDatagramSize(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
+        try self.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            ack_eliciting,
+            bytes,
+            datagram_size,
+            ecn,
+            sent_time_ns,
+            0,
+        );
+    }
+
+    pub fn sentAtWithDatagramSizeAndPathEpoch(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_path_epoch: u32) !void {
+        try self.sentInFlightAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            ack_eliciting,
+            ack_eliciting,
+            bytes,
+            datagram_size,
+            ecn,
+            sent_time_ns,
+            pmtu_path_epoch,
+        );
     }
 
     pub fn sentInFlightAt(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
-        try self.sentInFlightAtWithPmtu(packet_number, ack_eliciting, in_flight, bytes, ecn, sent_time_ns, null);
+        try self.sentInFlightAtWithDatagramSize(packet_number, ack_eliciting, in_flight, bytes, bytes, ecn, sent_time_ns);
     }
 
     pub fn sentInFlightAtWithPmtu(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
-        try self.sentInFlightAtWithMetadata(packet_number, ack_eliciting, in_flight, bytes, ecn, sent_time_ns, pmtu_probe_size, null);
+        try self.sentInFlightAtWithPmtuAndDatagramSize(
+            packet_number,
+            ack_eliciting,
+            in_flight,
+            bytes,
+            if (pmtu_probe_size) |size| size else bytes,
+            ecn,
+            sent_time_ns,
+            pmtu_probe_size,
+            0,
+        );
+    }
+
+    pub fn sentInFlightAtWithDatagramSize(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
+        try self.sentInFlightAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            ack_eliciting,
+            in_flight,
+            bytes,
+            datagram_size,
+            ecn,
+            sent_time_ns,
+            0,
+        );
+    }
+
+    pub fn sentInFlightAtWithPmtuAndDatagramSize(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_probe_epoch: u32) !void {
+        try self.sentInFlightAtWithPmtuAndDatagramSizeAndEpochAndPathEpoch(
+            packet_number,
+            ack_eliciting,
+            in_flight,
+            bytes,
+            datagram_size,
+            ecn,
+            sent_time_ns,
+            pmtu_probe_size,
+            pmtu_probe_epoch,
+            pmtu_probe_epoch,
+        );
+    }
+
+    pub fn sentInFlightAtWithDatagramSizeAndPathEpoch(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_path_epoch: u32) !void {
+        try self.sentInFlightAtWithStoredMetadata(packet_number, ack_eliciting, in_flight, bytes, datagram_size, ecn, sent_time_ns, null, 0, pmtu_path_epoch, null);
+    }
+
+    pub fn sentInFlightAtWithPmtuAndDatagramSizeAndEpochAndPathEpoch(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_probe_epoch: u32, pmtu_path_epoch: u32) !void {
+        try self.sentInFlightAtWithStoredMetadata(packet_number, ack_eliciting, in_flight, bytes, datagram_size, ecn, sent_time_ns, pmtu_probe_size, pmtu_probe_epoch, pmtu_path_epoch, null);
     }
 
     pub fn sentInFlightAtWithMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, largest_acknowledged_sent: ?u64) !void {
+        try self.sentInFlightAtWithExactDatagramMetadata(packet_number, ack_eliciting, in_flight, bytes, bytes, ecn, sent_time_ns, pmtu_probe_size, largest_acknowledged_sent);
+    }
+
+    pub fn sentInFlightAtWithExactDatagramMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, largest_acknowledged_sent: ?u64) !void {
+        try self.sentInFlightAtWithExactDatagramMetadataAndPathEpoch(packet_number, ack_eliciting, in_flight, bytes, datagram_size, ecn, sent_time_ns, pmtu_probe_size, 0, largest_acknowledged_sent);
+    }
+
+    pub fn sentInFlightAtWithExactDatagramMetadataAndPathEpoch(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_path_epoch: u32, largest_acknowledged_sent: ?u64) !void {
+        try self.sentInFlightAtWithStoredMetadata(packet_number, ack_eliciting, in_flight, bytes, datagram_size, ecn, sent_time_ns, pmtu_probe_size, 0, pmtu_path_epoch, largest_acknowledged_sent);
+    }
+
+    fn sentInFlightAtWithStoredMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_probe_epoch: u32, pmtu_path_epoch: u32, largest_acknowledged_sent: ?u64) !void {
         const monotonic_append = self.packets.items.len == 0 or
             packet_number > self.packets.items[self.packets.items.len - 1].packet_number;
         // Packet numbers issued by a QUIC packet number space are normally
@@ -472,9 +600,12 @@ pub const SentPacketTracker = struct {
             .ack_eliciting = ack_eliciting,
             .in_flight = in_flight,
             .bytes = if (in_flight) bytes else 0,
+            .datagram_size = datagram_size,
             .ecn = ecn,
             .sent_time_ns = sent_time_ns,
             .pmtu_probe_size = pmtu_probe_size,
+            .pmtu_probe_epoch = pmtu_probe_epoch,
+            .pmtu_path_epoch = pmtu_path_epoch,
             .largest_acknowledged_sent = largest_acknowledged_sent,
         });
         const index = self.packets.items.len - 1;
@@ -589,34 +720,56 @@ pub const SentPacketTracker = struct {
         packets: usize = 0,
         ack_eliciting_packets: usize = 0,
         bytes: usize = 0,
+        probe_bytes: usize = 0,
         ect0_packets: usize = 0,
         ect1_packets: usize = 0,
         largest_packet_number: ?u64 = null,
         largest_sent_time_ns: ?u64 = null,
         ecn_ce_delta: u64 = 0,
-        largest_pmtu_probe_size: ?usize = null,
+        active_pmtu_probe_packet_number: ?u64 = null,
+        active_pmtu_probe_size: ?usize = null,
+        active_pmtu_probe_epoch: u32 = 0,
+        largest_pmtu_acked_packet_number: ?u64 = null,
+        largest_pmtu_acked_datagram_size: ?usize = null,
+        largest_nonprobe_packet_number: ?u64 = null,
+        largest_nonprobe_datagram_size: ?usize = null,
+        largest_nonprobe_sent_time_ns: ?u64 = null,
+        largest_nonprobe_path_epoch: u32 = 0,
         largest_acknowledged_sent: ?u64 = null,
 
-        fn add(self: *AckResult, other: AckResult) void {
-            self.packets += other.packets;
-            self.ack_eliciting_packets += other.ack_eliciting_packets;
-            self.bytes += other.bytes;
-            self.ect0_packets += other.ect0_packets;
-            self.ect1_packets += other.ect1_packets;
-            if (other.largest_packet_number) |packet_number| self.observe(packet_number, other.largest_sent_time_ns, other.largest_pmtu_probe_size);
-            if (other.largest_acknowledged_sent) |largest_acknowledged| {
-                if (self.largest_acknowledged_sent == null or largest_acknowledged > self.largest_acknowledged_sent.?) {
-                    self.largest_acknowledged_sent = largest_acknowledged;
-                }
-            }
-        }
-
-        fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64, pmtu_probe_size: ?usize) void {
+        fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64) void {
             if (self.largest_packet_number == null or packet_number > self.largest_packet_number.?) {
                 self.largest_packet_number = packet_number;
                 self.largest_sent_time_ns = sent_time_ns;
-                self.largest_pmtu_probe_size = pmtu_probe_size;
             }
+        }
+
+        fn observeAckedPmtu(self: *AckResult, packet_number: u64, datagram_size: usize) void {
+            if (self.largest_pmtu_acked_packet_number == null or packet_number > self.largest_pmtu_acked_packet_number.?) {
+                self.largest_pmtu_acked_packet_number = packet_number;
+                self.largest_pmtu_acked_datagram_size = datagram_size;
+            }
+        }
+
+        fn observeNonProbe(
+            self: *AckResult,
+            packet_number: u64,
+            datagram_size: usize,
+            sent_time_ns: ?u64,
+            path_epoch: u32,
+        ) void {
+            if (self.largest_nonprobe_packet_number == null or packet_number > self.largest_nonprobe_packet_number.?) {
+                self.largest_nonprobe_packet_number = packet_number;
+                self.largest_nonprobe_datagram_size = datagram_size;
+                self.largest_nonprobe_sent_time_ns = sent_time_ns;
+                self.largest_nonprobe_path_epoch = path_epoch;
+            }
+        }
+
+        fn observeActiveProbe(self: *AckResult, packet_number: u64, probe_size: usize, probe_epoch: u32) void {
+            self.active_pmtu_probe_packet_number = packet_number;
+            self.active_pmtu_probe_size = probe_size;
+            self.active_pmtu_probe_epoch = probe_epoch;
         }
     };
 
@@ -713,6 +866,17 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
+        return self.applyAckDetailedForProbe(ack, null, 0, null, null);
+    }
+
+    pub fn applyAckDetailedForProbe(
+        self: *SentPacketTracker,
+        ack: quic.AckFrame,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        pmtu_ack_threshold: ?usize,
+        pmtu_path_epoch: ?u32,
+    ) Error!AckResult {
         if (self.packets.items.len == 0 and
             self.retired_acknowledged_through == null)
         {
@@ -730,7 +894,14 @@ pub const SentPacketTracker = struct {
 
         var acked: AckResult = .{};
         if (precheck.newly_acked_packets != 0) {
-            acked = self.markRanges(decoded.ranges, sorted);
+            acked = self.markRanges(
+                decoded.ranges,
+                sorted,
+                active_probe_packet_number,
+                active_probe_epoch,
+                pmtu_ack_threshold,
+                pmtu_path_epoch,
+            );
         }
         if (ack.ecn_counts) |ecn_counts| {
             if (ecn_validation.update_counts) {
@@ -751,6 +922,10 @@ pub const SentPacketTracker = struct {
         }
         self.compactAcknowledgedPrefix();
         return acked;
+    }
+
+    pub fn currentLossGeneration(self: SentPacketTracker) u32 {
+        return self.loss_generation;
     }
 
     /// Validate that every packet number named by an ACK range was actually
@@ -855,11 +1030,42 @@ pub const SentPacketTracker = struct {
         return self.ecn_validation_failed;
     }
 
+    fn nextLossGeneration(self: *SentPacketTracker) u32 {
+        if (self.loss_generation == std.math.maxInt(u32)) {
+            self.clearLossGenerations();
+            self.loss_generation = 0;
+        }
+        self.loss_generation += 1;
+        return self.loss_generation;
+    }
+
+    fn clearLossGenerations(self: *SentPacketTracker) void {
+        for (self.packets.items) |*packet| {
+            packet.lost_generation = 0;
+        }
+    }
+
     pub fn detectPacketThresholdLoss(self: *SentPacketTracker, largest_acknowledged: u64, packet_threshold: u64) AckResult {
+        return self.detectPacketThresholdLossForProbe(
+            largest_acknowledged,
+            packet_threshold,
+            null,
+            0,
+        );
+    }
+
+    pub fn detectPacketThresholdLossForProbe(
+        self: *SentPacketTracker,
+        largest_acknowledged: u64,
+        packet_threshold: u64,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+    ) AckResult {
         if (packet_threshold == 0 or largest_acknowledged < packet_threshold) return .{};
         const largest_lost = largest_acknowledged - packet_threshold;
 
         var lost: AckResult = .{};
+        const generation = self.nextLossGeneration();
         var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
         if (sorted_packets and self.packets.items.len != 0 and
@@ -878,11 +1084,28 @@ pub const SentPacketTracker = struct {
             }
             if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             packet.lost = true;
+            packet.lost_generation = generation;
             cached_latest_lost = cached_latest_lost or
                 self.latest_ack_eliciting_in_flight_index == index;
             lost.packets += 1;
-            lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
-            lost.bytes += packet.bytes;
+            lost.observe(packet.packet_number, packet.sent_time_ns);
+            if (packet.pmtu_probe_size) |probe_size| {
+                lost.probe_bytes += packet.bytes;
+                if (active_probe_packet_number != null and
+                    packet.packet_number == active_probe_packet_number.? and
+                    packet.pmtu_probe_epoch == active_probe_epoch)
+                {
+                    lost.observeActiveProbe(packet.packet_number, probe_size, packet.pmtu_probe_epoch);
+                }
+            } else {
+                lost.bytes += packet.bytes;
+                lost.observeNonProbe(
+                    packet.packet_number,
+                    packet.datagram_size,
+                    packet.sent_time_ns,
+                    packet.pmtu_path_epoch,
+                );
+            }
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
             }
@@ -892,7 +1115,25 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn detectTimeThresholdLoss(self: *SentPacketTracker, now_ns: u64, loss_delay_ns: u64, largest_acknowledged: ?u64) AckResult {
+        return self.detectTimeThresholdLossForProbe(
+            now_ns,
+            loss_delay_ns,
+            largest_acknowledged,
+            null,
+            0,
+        );
+    }
+
+    pub fn detectTimeThresholdLossForProbe(
+        self: *SentPacketTracker,
+        now_ns: u64,
+        loss_delay_ns: u64,
+        largest_acknowledged: ?u64,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+    ) AckResult {
         var lost: AckResult = .{};
+        const generation = self.nextLossGeneration();
         var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
         if (sorted_packets and self.largestBeforeFirstPacket(largest_acknowledged)) return lost;
@@ -906,17 +1147,45 @@ pub const SentPacketTracker = struct {
                     if (sorted_packets) break;
                     continue;
                 }
+            } else {
+                // Before the first ACK, RFC 9002 does not permit declaring
+                // arbitrary application packets lost by time threshold. The
+                // sole exception here is the explicitly identified DPLPMTUD
+                // probe, whose independent search timer must still progress.
+                if (active_probe_packet_number == null or
+                    packet.packet_number != active_probe_packet_number.? or
+                    packet.pmtu_probe_epoch != active_probe_epoch)
+                {
+                    continue;
+                }
             }
             if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             const sent_time = packet.sent_time_ns orelse continue;
             const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
             if (now_ns < lost_time) continue;
             packet.lost = true;
+            packet.lost_generation = generation;
             cached_latest_lost = cached_latest_lost or
                 self.latest_ack_eliciting_in_flight_index == index;
             lost.packets += 1;
-            lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
-            lost.bytes += packet.bytes;
+            lost.observe(packet.packet_number, packet.sent_time_ns);
+            if (packet.pmtu_probe_size) |probe_size| {
+                lost.probe_bytes += packet.bytes;
+                if (active_probe_packet_number != null and
+                    packet.packet_number == active_probe_packet_number.? and
+                    packet.pmtu_probe_epoch == active_probe_epoch)
+                {
+                    lost.observeActiveProbe(packet.packet_number, probe_size, packet.pmtu_probe_epoch);
+                }
+            } else {
+                lost.bytes += packet.bytes;
+                lost.observeNonProbe(
+                    packet.packet_number,
+                    packet.datagram_size,
+                    packet.sent_time_ns,
+                    packet.pmtu_path_epoch,
+                );
+            }
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
             }
@@ -926,6 +1195,21 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn timeThresholdLossDeadline(self: SentPacketTracker, loss_delay_ns: u64, largest_acknowledged: ?u64) ?u64 {
+        return self.timeThresholdLossDeadlineForProbe(
+            loss_delay_ns,
+            largest_acknowledged,
+            null,
+            0,
+        );
+    }
+
+    pub fn timeThresholdLossDeadlineForProbe(
+        self: SentPacketTracker,
+        loss_delay_ns: u64,
+        largest_acknowledged: ?u64,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+    ) ?u64 {
         var deadline: ?u64 = null;
         const sorted_packets = self.packetsSortedAscending();
         if (sorted_packets and self.largestBeforeFirstPacket(largest_acknowledged)) return null;
@@ -935,6 +1219,11 @@ pub const SentPacketTracker = struct {
                     if (sorted_packets) break;
                     continue;
                 }
+            } else if (active_probe_packet_number == null or
+                packet.packet_number != active_probe_packet_number.? or
+                packet.pmtu_probe_epoch != active_probe_epoch)
+            {
+                continue;
             }
             if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             const sent_time = packet.sent_time_ns orelse continue;
@@ -990,6 +1279,10 @@ pub const SentPacketTracker = struct {
             }
 
             if (packet.acknowledged or !packet.lost) {
+                current = null;
+                continue;
+            }
+            if (packet.pmtu_probe_size != null) {
                 current = null;
                 continue;
             }
@@ -1128,6 +1421,10 @@ pub const SentPacketTracker = struct {
         self: *SentPacketTracker,
         ranges: []const AckedRange,
         sorted_packets: bool,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        pmtu_ack_threshold: ?usize,
+        pmtu_path_epoch: ?u32,
     ) AckResult {
         if (ranges.len == 1 and ranges[0].start == ranges[0].end) {
             const index = self.findPacketIndex(ranges[0].start) orelse
@@ -1138,6 +1435,10 @@ pub const SentPacketTracker = struct {
                 &self.packets.items[index],
                 &result,
                 &cached_latest_acked,
+                active_probe_packet_number,
+                active_probe_epoch,
+                pmtu_ack_threshold,
+                pmtu_path_epoch,
             );
             if (cached_latest_acked) {
                 self.recomputeLatestAckElicitingInFlight();
@@ -1160,6 +1461,10 @@ pub const SentPacketTracker = struct {
                             packet,
                             &result,
                             &cached_latest_acked,
+                            active_probe_packet_number,
+                            active_probe_epoch,
+                            pmtu_ack_threshold,
+                            pmtu_path_epoch,
                         );
                     }
                 }
@@ -1171,7 +1476,15 @@ pub const SentPacketTracker = struct {
 
         for (self.packets.items) |*packet| {
             if (!ackRangesContain(ranges, packet.packet_number)) continue;
-            self.markPacketAcknowledged(packet, &result, &cached_latest_acked);
+            self.markPacketAcknowledged(
+                packet,
+                &result,
+                &cached_latest_acked,
+                active_probe_packet_number,
+                active_probe_epoch,
+                pmtu_ack_threshold,
+                pmtu_path_epoch,
+            );
         }
         if (cached_latest_acked) self.recomputeLatestAckElicitingInFlight();
         self.advanceFirstUnacknowledged();
@@ -1183,6 +1496,10 @@ pub const SentPacketTracker = struct {
         packet: *SentPacket,
         result: *AckResult,
         cached_latest_acked: *bool,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        pmtu_ack_threshold: ?usize,
+        pmtu_path_epoch: ?u32,
     ) void {
         self.observeAcknowledged(packet.packet_number);
         if (packet.acknowledged) return;
@@ -1194,12 +1511,31 @@ pub const SentPacketTracker = struct {
         packet.acknowledged = true;
         cached_latest_acked.* = cached_latest_acked.* or was_cached_latest;
         result.packets += 1;
-        result.observe(
-            packet.packet_number,
-            packet.sent_time_ns,
-            packet.pmtu_probe_size,
-        );
+        result.observe(packet.packet_number, packet.sent_time_ns);
         if (packet.in_flight and !packet.lost) result.bytes += packet.bytes;
+        if (packet.pmtu_probe_size) |probe_size| {
+            if (packet.in_flight and !packet.lost) result.probe_bytes += packet.bytes;
+            if (active_probe_packet_number != null and
+                packet.packet_number == active_probe_packet_number.? and
+                packet.pmtu_probe_epoch == active_probe_epoch)
+            {
+                result.observeActiveProbe(packet.packet_number, probe_size, packet.pmtu_probe_epoch);
+            }
+        } else {
+            result.observeNonProbe(
+                packet.packet_number,
+                packet.datagram_size,
+                packet.sent_time_ns,
+                packet.pmtu_path_epoch,
+            );
+            if (pmtu_ack_threshold) |threshold| {
+                if (packet.datagram_size >= threshold and
+                    (pmtu_path_epoch == null or packet.pmtu_path_epoch == pmtu_path_epoch.?))
+                {
+                    result.observeAckedPmtu(packet.packet_number, packet.datagram_size);
+                }
+            }
+        }
         if (packet.ack_eliciting) {
             result.ack_eliciting_packets += 1;
         }
@@ -1981,6 +2317,58 @@ test "QUIC sent packet tracker compacts cumulative ACK metadata" {
         .first_ack_range = count,
     });
     try std.testing.expectEqual(@as(usize, 1), next.packets);
+}
+
+test "QUIC sent packet tracker preserves non-probe ACK PMTU evidence after compaction" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    const count = SentPacketTracker.compact_acknowledged_threshold + 8;
+    for (0..count) |packet_number| {
+        try sent.sentAtWithDatagramSize(
+            packet_number,
+            true,
+            100,
+            1300,
+            .not_ect,
+            @intCast(packet_number + 1),
+        );
+    }
+    const ack = quic.AckFrame{
+        .largest_acknowledged = count - 1,
+        .ack_delay = 0,
+        .first_ack_range = count - 1,
+    };
+    const result = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(@as(?u64, count - 1), result.largest_nonprobe_packet_number);
+    try std.testing.expectEqual(@as(?usize, 1300), result.largest_nonprobe_datagram_size);
+    try std.testing.expectEqual(@as(usize, 0), sent.packets.items.len);
+}
+
+test "QUIC sent packet tracker ACK PMTU evidence keeps highest qualifying packet" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAtWithDatagramSizeAndPathEpoch(5, true, 100, 1300, .not_ect, 1_000, 7);
+    try sent.sentAtWithDatagramSizeAndPathEpoch(10, true, 100, 1299, .not_ect, 2_000, 7);
+    const result = try sent.applyAckDetailedForProbe(
+        .{
+            .largest_acknowledged = 10,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ranges = &.{.{ .gap = 3, .ack_range_length = 0 }},
+        },
+        null,
+        0,
+        1300,
+        7,
+    );
+    try std.testing.expectEqual(@as(?u64, 5), result.largest_pmtu_acked_packet_number);
+    try std.testing.expectEqual(@as(?usize, 1300), result.largest_pmtu_acked_datagram_size);
+    try std.testing.expectEqual(@as(?u64, 10), result.largest_nonprobe_packet_number);
+    try std.testing.expectEqual(@as(?usize, 1299), result.largest_nonprobe_datagram_size);
 }
 
 test "QUIC sent packet tracker skips packet-threshold scan before first packet" {

@@ -97,6 +97,17 @@ pub const Pacer = struct {
         self.budget = self.maxBurstSize();
         self.last_sent_time_ns = null;
     }
+
+    /// Retune burst accounting after a validated PMTU change.
+    ///
+    /// Pacing stores its burst limit in bytes derived from the path datagram
+    /// size. Recompute the configured burst and clamp any carried budget so a
+    /// PMTU drop cannot leave stale extra credit for oversized bursts.
+    pub fn onMtuUpdate(self: *Pacer, new_max_datagram_size: usize) void {
+        if (new_max_datagram_size == 0 or new_max_datagram_size == self.max_datagram_size) return;
+        self.max_datagram_size = new_max_datagram_size;
+        self.budget = @min(self.budget, self.maxBurstSize());
+    }
 };
 
 test "QUIC pacer permits initial burst and computes exact deadline" {

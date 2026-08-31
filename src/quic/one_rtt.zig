@@ -600,6 +600,7 @@ pub const TimerDeadlineKind = enum {
     ack_delay,
     loss_time,
     pto,
+    pmtu_raise,
     path_validation,
     keep_alive,
     idle_timeout,
@@ -721,6 +722,8 @@ pub const Connection = struct {
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
     pmtud: quic.pmtu.State = .{},
+    pmtu_probe_epoch: u32 = 1,
+    pmtu_path_epoch: u32 = 1,
     packets_sent_count: u64 = 0,
     packets_received_count: u64 = 0,
     packets_lost_count: u64 = 0,
@@ -783,8 +786,16 @@ pub const Connection = struct {
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
-            .congestion = .initWithOptions(config.max_datagram_size, config.congestion_algorithm, config.enable_hystart),
-            .pacer = .init(config.enable_pacing, send_buffer_capacity, config.pacing_max_burst_packets),
+            .congestion = .initWithOptions(
+                if (config.enable_pmtud) quic.pmtu.min_udp_payload_size else config.max_datagram_size,
+                config.congestion_algorithm,
+                config.enable_hystart,
+            ),
+            .pacer = .init(
+                config.enable_pacing,
+                if (config.enable_pmtud) quic.pmtu.min_udp_payload_size else send_buffer_capacity,
+                config.pacing_max_burst_packets,
+            ),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
             .path_validation = .init(endpoint.allocator),
@@ -853,6 +864,7 @@ pub const Connection = struct {
                 .server => .server,
             });
         }
+        connection.applyCurrentPmtuToPath();
         connection.observeConnectionStarted(null);
         connection.observeParametersSet(null);
         return connection;
@@ -1397,13 +1409,15 @@ pub const Connection = struct {
                 std.debug.assert(payload_list.items.len == packet.payload_len);
                 break :blk null;
             };
-            try self.sent.sentInFlightAt(
+            try self.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
                 packet.packet_number,
                 packet.ack_eliciting,
                 packet.in_flight,
                 packet.payload_len,
+                packet.packet_len,
                 .not_ect,
                 sent_time_ns,
+                self.pmtu_path_epoch,
             );
             tracked_sent_count += 1;
 
@@ -2097,6 +2111,12 @@ pub const Connection = struct {
                 .deadline_ns = deadline.deadline_ns,
             });
         }
+        if (self.pmtuProbeDeadline()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .pmtu_raise,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.pathValidationDeadline()) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .path_validation,
@@ -2148,6 +2168,9 @@ pub const Connection = struct {
             },
             .loss_time, .pto => {
                 _ = try self.serviceLossDetectionTimer(now_ns);
+            },
+            .pmtu_raise => {
+                _ = self.servicePmtuTimerAt(now_ns);
             },
             .path_validation => {
                 const expired = try self.checkPathValidationTimeouts(now_ns);
@@ -2582,14 +2605,24 @@ pub const Connection = struct {
         defer self.send_frame_buffer.items.len = 0;
         const payload = recovery_payload orelse self.send_frame_buffer.items;
 
-        try self.sent.sentInFlightAtWithMetadata(
+        try self.sent.sentInFlightAtWithExactDatagramMetadataAndPathEpoch(
             packet_number,
             prepared.is_ack_eliciting,
             prepared.is_in_flight,
             prepared.payload_len,
+            try quic.protection.shortPacketLen(.{
+                .destination_connection_id = self.config.peer_connection_id,
+                .packet_number = packet_number,
+                .packet_number_len = prepared.packet_number_len,
+                .fixed_bit = true,
+                .spin_bit = false,
+                .key_phase = self.send_key_phase.currentKeyPhase(),
+                .payload = payload,
+            }),
             ecn,
             sent_time_ns,
             null,
+            self.pmtu_path_epoch,
             prepared.largest_acknowledged_sent,
         );
         var tracked_sent = true;
@@ -2680,6 +2713,71 @@ pub const Connection = struct {
         return @min(configured, self.pmtud.currentSize());
     }
 
+    fn applyCurrentPmtuToPath(self: *Connection) void {
+        const datagram_size = self.currentSendDatagramSize();
+        self.congestion.onMtuUpdate(datagram_size);
+        self.pacer.onMtuUpdate(datagram_size);
+    }
+
+    fn pmtuProbeEpochBump(self: *Connection) void {
+        self.pmtu_probe_epoch +%= 1;
+        if (self.pmtu_probe_epoch == 0) self.pmtu_probe_epoch = 1;
+    }
+
+    fn pmtuPathEpochBump(self: *Connection) void {
+        self.pmtu_path_epoch +%= 1;
+        if (self.pmtu_path_epoch == 0) self.pmtu_path_epoch = 1;
+    }
+
+    fn reportAckedPmtuEvidence(
+        self: *Connection,
+        acked: quic.packet_space.SentPacketTracker.AckResult,
+    ) void {
+        const packet_number = acked.largest_pmtu_acked_packet_number orelse
+            return;
+        const datagram_size = acked.largest_pmtu_acked_datagram_size orelse
+            return;
+        self.pmtud.onMtuSizedPacketAcked(packet_number, datagram_size);
+    }
+
+    fn reportLostPmtuEvidence(self: *Connection, generation: u32, now_ns: ?u64) void {
+        const now = now_ns orelse return;
+        if (generation == 0) return;
+        var previous_packet_number: ?u64 = null;
+        for (self.sent.packets.items) |packet| {
+            if (packet.lost_generation != generation) continue;
+            // Losses from the retired path must neither count nor bridge a
+            // burst on the current path after migration.
+            if (packet.pmtu_path_epoch != self.pmtu_path_epoch) continue;
+            const new_loss_burst = if (previous_packet_number) |previous|
+                previous +| 1 != packet.packet_number
+            else
+                true;
+            previous_packet_number = packet.packet_number;
+            const result = self.pmtud.onPacketLost(
+                packet.packet_number,
+                packet.datagram_size,
+                packet.pmtu_probe_size != null,
+                new_loss_burst,
+                now,
+            );
+            if (result.mtu_dropped) {
+                self.applyCurrentPmtuToPath();
+                self.pacer.reset();
+            }
+        }
+    }
+
+    pub fn pmtuProbeDeadline(self: Connection) ?u64 {
+        return self.pmtud.probeDeadlineNs();
+    }
+
+    pub fn servicePmtuTimerAt(self: *Connection, now_ns: u64) bool {
+        if (!self.pmtud.serviceRaiseTimer(now_ns, self.config.max_datagram_size)) return false;
+        self.applyCurrentPmtuToPath();
+        return true;
+    }
+
     pub fn sendPmtuProbeAt(self: *Connection, peer_max_udp_payload: usize, sent_time_ns: ?u64) Error!?usize {
         try self.validateNextPacketNumber();
         const probe_size = self.pmtud.probeSize(peer_max_udp_payload) orelse return null;
@@ -2708,10 +2806,24 @@ pub const Connection = struct {
 
         try self.congestion.reserve(payload.len);
         errdefer self.congestion.discard(payload.len);
-        _ = try self.recovery.trackSent(packet_number, payload);
-        errdefer _ = self.recovery.forgetPacketNumber(packet_number);
-        try self.sent.sentAtWithPmtu(packet_number, true, payload.len, .not_ect, sent_time_ns, probe_size);
+        try self.sent.sentInFlightAtWithPmtuAndDatagramSizeAndEpochAndPathEpoch(
+            packet_number,
+            true,
+            true,
+            payload.len,
+            probe_size,
+            .not_ect,
+            sent_time_ns,
+            probe_size,
+            self.pmtu_probe_epoch,
+            self.pmtu_path_epoch,
+        );
         errdefer _ = self.sent.forget(packet_number);
+        // PING/PADDING probes carry no application data that needs recovery.
+        // The sent-packet tracker retains their identity for ACK/loss and
+        // bytes-in-flight accounting. Never enqueue them in generic recovery:
+        // a PTO retransmission would strip probe identity and could not validate
+        // the larger path size even if its copy were acknowledged.
         try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,
             payload,
@@ -2722,7 +2834,12 @@ pub const Connection = struct {
             true,
         );
         self.next_packet_number += 1;
-        self.pmtud.onProbeSent(probe_size);
+        self.pmtud.onProbeSentWithIdentity(
+            packet_number,
+            self.pmtu_probe_epoch,
+            probe_size,
+        );
+        self.applyCurrentPmtuToPath();
         return probe_size;
     }
 
@@ -3049,16 +3166,41 @@ pub const Connection = struct {
     }
 
     pub fn retransmitTimeThresholdLoss(self: *Connection, now_ns: u64, loss_delay_ns: u64) Error!bool {
-        const largest = self.sent.largestAcknowledged() orelse return false;
-        const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
-        if (lost.bytes > 0) {
+        const largest = self.sent.largestAcknowledged();
+        if (largest == null and self.pmtud.active_probe_packet_number == null) {
+            return false;
+        }
+        const lost = self.sent.detectTimeThresholdLossForProbe(
+            now_ns,
+            loss_delay_ns,
+            largest,
+            self.pmtud.active_probe_packet_number,
+            self.pmtud.active_probe_epoch,
+        );
+        if (lost.bytes > 0 or lost.probe_bytes > 0) {
+            const loss_generation = self.sent.currentLossGeneration();
             self.recordPacketsLost(lost.packets);
             self.observeLostPackets(now_ns, "time_threshold");
-            self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
-            if (lost.largest_pmtu_probe_size) |probe_size| {
-                self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
+            self.congestion.onLostAt(
+                lost.bytes,
+                lost.largest_nonprobe_sent_time_ns,
+                now_ns,
+            );
+            self.congestion.discard(lost.probe_bytes);
+            if (lost.active_pmtu_probe_packet_number) |packet_number| {
+                self.pmtud.onProbeLostWithIdentity(
+                    packet_number,
+                    lost.active_pmtu_probe_epoch,
+                    lost.active_pmtu_probe_size.?,
+                    self.config.max_datagram_size,
+                    now_ns,
+                );
             }
-            _ = self.applyPersistentCongestionIfDetected();
+            self.reportLostPmtuEvidence(loss_generation, now_ns);
+            self.applyCurrentPmtuToPath();
+            if (lost.bytes > 0) {
+                _ = self.applyPersistentCongestionIfDetected();
+            }
         }
         var retransmitted = false;
         const scan_count = self.sent.packets.items.len;
@@ -3078,8 +3220,19 @@ pub const Connection = struct {
     }
 
     pub fn timeThresholdLossDeadline(self: Connection, loss_delay_ns: u64) ?u64 {
-        const largest = self.sent.largestAcknowledged() orelse return null;
-        return self.sent.timeThresholdLossDeadline(loss_delay_ns, largest);
+        // Ordinary QUIC loss requires a later ACK. A DPLPMTUD probe has no
+        // retransmittable application data, but a lone probe still needs a
+        // time-threshold deadline so its search state can be retried.
+        const largest = self.sent.largestAcknowledged();
+        if (largest == null and self.pmtud.active_probe_packet_number == null) {
+            return null;
+        }
+        return self.sent.timeThresholdLossDeadlineForProbe(
+            loss_delay_ns,
+            largest,
+            self.pmtud.active_probe_packet_number,
+            self.pmtud.active_probe_epoch,
+        );
     }
 
     pub fn ptoBackoffCount(self: Connection) u8 {
@@ -3111,10 +3264,16 @@ pub const Connection = struct {
     }
 
     pub fn lossDetectionTimerDeadline(self: Connection) ?LossDetectionTimerDeadline {
-        if (self.close_info != null or self.idle_timed_out or self.recovery.pendingCount() == 0) return null;
+        if (self.close_info != null or self.idle_timed_out) return null;
+        const has_recoverable_data = self.recovery.pendingCount() != 0;
+        const has_active_pmtu_probe = self.pmtud.active_probe_packet_number != null;
+        if (!has_recoverable_data and !has_active_pmtu_probe) return null;
 
         const loss_time = self.timeThresholdLossDeadline(self.rtt_stats.lossDelay());
-        const pto_time = self.ptoDeadline();
+        // PMTU probes are intentionally absent from generic recovery, so only
+        // arm PTO when there is retransmittable data. A lone probe is retired
+        // by its time-threshold deadline and then re-armed by PMTU state.
+        const pto_time = if (has_recoverable_data) self.ptoDeadline() else null;
         if (loss_time) |loss_deadline| {
             if (pto_time == null or loss_deadline <= pto_time.?) {
                 return .{ .kind = .loss_time, .deadline_ns = loss_deadline };
@@ -3258,7 +3417,15 @@ pub const Connection = struct {
             tracked_congestion += probe.candidate.payload.len;
             try self.recovery.recordRetransmission(probe.candidate.group_index, probe.packet_number);
             recorded_recovery_count += 1;
-            try self.sent.sentAt(probe.packet_number, true, probe.candidate.payload.len, .not_ect, sent_time_ns);
+            try self.sent.sentAtWithDatagramSizeAndPathEpoch(
+                probe.packet_number,
+                true,
+                probe.candidate.payload.len,
+                probe.packet_len,
+                .not_ect,
+                sent_time_ns,
+                self.pmtu_path_epoch,
+            );
             tracked_sent_count += 1;
         }
 
@@ -3362,7 +3529,15 @@ pub const Connection = struct {
 
         try self.recovery.recordRetransmission(candidate.group_index, packet_number);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
-        try self.sent.sentAt(packet_number, true, candidate.payload.len, .not_ect, sent_time_ns);
+        try self.sent.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            candidate.payload.len,
+            packet_len,
+            .not_ect,
+            sent_time_ns,
+            self.pmtu_path_epoch,
+        );
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacketAt(packet_number, candidate.payload, sent_time_ns, true);
         self.next_packet_number += 1;
@@ -4024,13 +4199,25 @@ pub const Connection = struct {
 
     pub fn beginPeerMigration(self: *Connection, new_peer: net.IpAddress, challenge: [8]u8) Error!void {
         if (self.config.peer_disable_active_migration) return error.ActiveMigrationDisabled;
+        // Queueing the validation challenge can allocate. Perform that
+        // fallible work before committing any path state so an allocation
+        // failure leaves the old peer, PMTU, congestion, and pacing state
+        // intact.
+        try self.queuePathChallenge(challenge);
         self.config.peer = new_peer;
         self.peer_address_validated = false;
         self.peer_address_bytes_received = 0;
         self.peer_address_bytes_sent = 0;
         self.pmtud.resetForPath();
+        self.pmtuProbeEpochBump();
+        self.pmtuPathEpochBump();
+        self.congestion = .initWithOptions(
+            self.currentSendDatagramSize(),
+            self.config.congestion_algorithm,
+            self.config.enable_hystart,
+        );
+        self.applyCurrentPmtuToPath();
         self.pacer.reset();
-        try self.queuePathChallenge(challenge);
     }
 
     pub fn sendPendingPathChallenge(self: *Connection) Error!void {
@@ -5091,13 +5278,29 @@ pub const Connection = struct {
                 _ = self.recovery.forgetPacketNumber(packet_number);
             }
         }
-        try self.sent.sentInFlightAt(
+        const packet_number_len = quic.protection.packetNumberLenForPayload(
+            packet_number,
+            self.sent.largestAcknowledged(),
+            payload.items.len,
+        );
+        const packet_len = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = packet_number,
+            .packet_number_len = packet_number_len,
+            .fixed_bit = true,
+            .spin_bit = false,
+            .key_phase = self.send_key_phase.currentKeyPhase(),
+            .payload = payload.items,
+        });
+        try self.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
             packet_number,
             is_ack_eliciting,
             is_in_flight,
             payload.items.len,
+            packet_len,
             .not_ect,
             null,
+            self.pmtu_path_epoch,
         );
         errdefer _ = self.sent.forget(packet_number);
         if (is_in_flight) {
@@ -6128,6 +6331,16 @@ pub const Connection = struct {
                 self.peer_address_validated = true;
                 self.peer_address_bytes_received = 0;
                 self.peer_address_bytes_sent = 0;
+                self.pmtud.resetForPath();
+                self.pmtuProbeEpochBump();
+                self.pmtuPathEpochBump();
+                self.congestion = .initWithOptions(
+                    self.currentSendDatagramSize(),
+                    self.config.congestion_algorithm,
+                    self.config.enable_hystart,
+                );
+                self.applyCurrentPmtuToPath();
+                self.pacer.reset();
             },
             .new_path => |*new_path| {
                 self.config.peer = new_path.from;
@@ -6140,13 +6353,16 @@ pub const Connection = struct {
                     self.config.peer_max_ack_delay_ms,
                     1_000_000,
                 ) catch quic.rtt.default_max_ack_delay_ns);
+                self.pmtud.resetForPath();
+                self.pmtuProbeEpochBump();
+                self.pmtuPathEpochBump();
                 self.congestion = .initWithOptions(
-                    self.config.max_datagram_size,
+                    self.currentSendDatagramSize(),
                     self.config.congestion_algorithm,
                     self.config.enable_hystart,
                 );
+                self.applyCurrentPmtuToPath();
                 self.pacer.reset();
-                self.pmtud.resetForPath();
                 self.path_validation.deinit();
                 self.path_validation = new_path.path_validation;
             },
@@ -6214,7 +6430,13 @@ pub const Connection = struct {
                     const handshake_done_group =
                         self.handshake_status.recoveryGroupId();
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
-                    const acked = self.sent.applyAckDetailed(frame.ack) catch |err| switch (err) {
+                    const acked = self.sent.applyAckDetailedForProbe(
+                        frame.ack,
+                        self.pmtud.active_probe_packet_number,
+                        self.pmtud.active_probe_epoch,
+                        self.pmtud.currentSize(),
+                        self.pmtu_path_epoch,
+                    ) catch |err| switch (err) {
                         error.InvalidAckFrame => try self.applyAckWithEcnFailure(frame.ack),
                         else => return err,
                     };
@@ -6227,9 +6449,17 @@ pub const Connection = struct {
                         frame.ack.largest_acknowledged,
                     );
                     if (acked.ack_eliciting_packets > 0) self.pto_count = 0;
-                    if (acked.largest_pmtu_probe_size) |probe_size| {
-                        self.pmtud.onProbeAcked(probe_size, self.config.max_datagram_size);
+                    if (acked.active_pmtu_probe_packet_number) |probe_packet_number| {
+                        self.pmtud.onProbeAckedWithIdentity(
+                            probe_packet_number,
+                            acked.active_pmtu_probe_epoch,
+                            acked.active_pmtu_probe_size.?,
+                            self.config.max_datagram_size,
+                            now_ns,
+                        );
+                        self.applyCurrentPmtuToPath();
                     }
+                    self.reportAckedPmtuEvidence(acked);
                     if (acked.ecn_ce_delta > 0) {
                         self.congestion.onExplicitCongestion(now_ns);
                     }
@@ -6244,26 +6474,69 @@ pub const Connection = struct {
                     if (acked.largest_acknowledged_sent) |acknowledged| {
                         self.received.pruneAckedRanges(acknowledged);
                     }
-                    const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
-                    if (lost.bytes > 0) {
+                    const lost = self.sent.detectPacketThresholdLossForProbe(
+                        frame.ack.largest_acknowledged,
+                        quic.packet_space.default_packet_threshold,
+                        self.pmtud.active_probe_packet_number,
+                        self.pmtud.active_probe_epoch,
+                    );
+                    if (lost.bytes > 0 or lost.probe_bytes > 0) {
+                        const loss_generation = self.sent.currentLossGeneration();
                         self.recordPacketsLost(lost.packets);
                         self.observeLostPackets(now_ns, "packet_threshold");
-                        self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
-                        if (lost.largest_pmtu_probe_size) |probe_size| {
-                            self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
+                        self.congestion.onLostAt(
+                            lost.bytes,
+                            lost.largest_nonprobe_sent_time_ns,
+                            now_ns,
+                        );
+                        self.congestion.discard(lost.probe_bytes);
+                        if (lost.active_pmtu_probe_packet_number) |probe_packet_number| {
+                            self.pmtud.onProbeLostWithIdentity(
+                                probe_packet_number,
+                                lost.active_pmtu_probe_epoch,
+                                lost.active_pmtu_probe_size.?,
+                                self.config.max_datagram_size,
+                                now_ns,
+                            );
                         }
-                        _ = self.applyPersistentCongestionIfDetected();
+                        self.reportLostPmtuEvidence(loss_generation, now_ns);
+                        self.applyCurrentPmtuToPath();
+                        if (lost.bytes > 0) {
+                            _ = self.applyPersistentCongestionIfDetected();
+                        }
                     }
                     if (now_ns) |now| {
-                        const timed_lost = self.sent.detectTimeThresholdLoss(now, self.rtt_stats.lossDelay(), frame.ack.largest_acknowledged);
-                        if (timed_lost.bytes > 0) {
+                        const timed_lost = self.sent.detectTimeThresholdLossForProbe(
+                            now,
+                            self.rtt_stats.lossDelay(),
+                            frame.ack.largest_acknowledged,
+                            self.pmtud.active_probe_packet_number,
+                            self.pmtud.active_probe_epoch,
+                        );
+                        if (timed_lost.bytes > 0 or timed_lost.probe_bytes > 0) {
+                            const loss_generation = self.sent.currentLossGeneration();
                             self.recordPacketsLost(timed_lost.packets);
                             self.observeLostPackets(now_ns, "time_threshold");
-                            self.congestion.onLostAt(timed_lost.bytes, timed_lost.largest_sent_time_ns, now);
-                            if (timed_lost.largest_pmtu_probe_size) |probe_size| {
-                                self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
+                            self.congestion.onLostAt(
+                                timed_lost.bytes,
+                                timed_lost.largest_nonprobe_sent_time_ns,
+                                now,
+                            );
+                            self.congestion.discard(timed_lost.probe_bytes);
+                            if (timed_lost.active_pmtu_probe_packet_number) |probe_packet_number| {
+                                self.pmtud.onProbeLostWithIdentity(
+                                    probe_packet_number,
+                                    timed_lost.active_pmtu_probe_epoch,
+                                    timed_lost.active_pmtu_probe_size.?,
+                                    self.config.max_datagram_size,
+                                    now_ns,
+                                );
                             }
-                            _ = self.applyPersistentCongestionIfDetected();
+                            self.reportLostPmtuEvidence(loss_generation, now_ns);
+                            self.applyCurrentPmtuToPath();
+                            if (timed_lost.bytes > 0) {
+                                _ = self.applyPersistentCongestionIfDetected();
+                            }
                         }
                     }
                     self.observeRecoveryMetrics(now_ns);
@@ -7158,7 +7431,13 @@ pub const Connection = struct {
         if (ack.ecn_counts == null or !self.sent.validateAckEcnFrameWouldFail(ack)) return error.InvalidAckFrame;
         var plain_ack = ack;
         plain_ack.ecn_counts = null;
-        const result = try self.sent.applyAckDetailed(plain_ack);
+        const result = try self.sent.applyAckDetailedForProbe(
+            plain_ack,
+            self.pmtud.active_probe_packet_number,
+            self.pmtud.active_probe_epoch,
+            self.pmtud.currentSize(),
+            self.pmtu_path_epoch,
+        );
         self.sent.disableEcnValidation();
         return result;
     }

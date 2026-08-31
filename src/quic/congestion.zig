@@ -393,6 +393,25 @@ pub const Controller = struct {
             self.slow_start_threshold = self.congestion_window;
         }
     }
+
+    /// Retune congestion-controller packet-size heuristics after a validated
+    /// PMTU change.
+    ///
+    /// This controller stores the congestion window in bytes, so a PMTU update
+    /// must not increase the byte window merely because probing succeeded.
+    /// Preserve the existing byte window and only update the datagram-sized
+    /// thresholds that interpret it: utilization tests, NewReno step size, the
+    /// CUBIC byte-to-packet curve, and future minimum/initial window
+    /// calculations used by later congestion events.
+    pub fn onMtuUpdate(self: *Controller, new_max_datagram_size: usize) void {
+        if (new_max_datagram_size == 0 or new_max_datagram_size == self.max_datagram_size) return;
+        self.max_datagram_size = new_max_datagram_size;
+        if (self.algorithm == .cubic) {
+            self.cubic.window_increment = 0;
+            self.cubic.w_est = @floatFromInt(self.congestion_window);
+            self.updateCubicK();
+        }
+    }
 };
 
 fn boundedWindow(value: f64) usize {
