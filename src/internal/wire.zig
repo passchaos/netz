@@ -80,7 +80,15 @@ pub fn trimOws(value: []const u8) []const u8 {
     return std.mem.trim(u8, value, " \t");
 }
 
+/// Header field bytes exactly as supplied by the caller or parsed from the
+/// wire. `name` intentionally preserves the original spelling so HTTP/1 code
+/// can forward or re-emit the field with the same bytes when desired, while
+/// all lookup helpers continue to compare names case-insensitively per RFC
+/// semantics.
 pub const Header = struct {
+    /// Original header field-name bytes. Callers that want a canonical
+    /// comparison should use `eqlName()`/`findHeader()` instead of comparing
+    /// this slice directly.
     name: []const u8,
     value: []const u8,
 

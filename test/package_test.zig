@@ -983,6 +983,30 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(netz.http1.runtime.RequestOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http1.runtime.ResponseOptions, "trailers"));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "HeaderNameCasing",
+    ));
+    try std.testing.expectEqual(
+        netz.http1.runtime.HeaderNameCasing.preserve,
+        (netz.http1.runtime.RequestOptions{}).header_name_casing,
+    );
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.RequestOptions,
+        "header_name_casing",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.ResponseOptions,
+        "header_name_casing",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.StreamingRequestOptions,
+        "header_name_casing",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.StreamingResponseOptions,
+        "header_name_casing",
+    ));
     try std.testing.expect(@hasField(netz.http1.ParseOptions, "allow_obs_fold"));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_frame_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_message_bytes);

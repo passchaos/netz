@@ -84,6 +84,13 @@ benchmark response:
 
 The parser also mirrors Hyper's explicitly opt-in HTTP/1 compatibility
 controls while preserving strict defaults.
+Header field names retain their exact input spelling in both borrowed and
+owned parse results; lookup remains ASCII case-insensitive. Writers expose a
+per-message `HeaderNameCasing` policy: `.preserve` keeps caller spelling, while
+`.title_case` renders each dash-separated component in conventional HTTP/1
+title case without allocating or mutating the supplied fields. The same policy
+applies to generated fields and terminal chunked trailer lines; `Trailer`
+header value tokens remain caller-authored metadata.
 `allow_multiple_spaces_in_request_line_delimiters` accepts repeated ASCII SP
 between method, target and version, and
 `allow_spaces_after_header_name_in_responses` accepts SP/HTAB immediately

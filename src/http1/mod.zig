@@ -3,6 +3,10 @@ const wire = @import("../internal/wire.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const client_pool = @import("client_pool.zig");
+/// HTTP/1 reuses the shared wire header descriptor without canonicalizing field
+/// names. Parsed `Header.name` slices therefore preserve the exact on-wire
+/// spelling, while `header()`, `findHeader()`, and `eqlName()` still treat names
+/// case-insensitively.
 pub const Header = wire.Header;
 
 test {
@@ -1731,6 +1735,74 @@ test "HTTP/1 borrowed request heads parse pipelines without allocation" {
     try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
+test "HTTP/1 parser preserves exact header-name spelling across borrowed and owned heads" {
+    const allocator = std.testing.allocator;
+
+    const request_raw =
+        "GET /case HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "X-BREAD: baguette\r\n" ++
+        "\r\n";
+    var borrowed_request_headers: [4]Header = undefined;
+    const borrowed_request = try parseRequestHead(
+        request_raw,
+        &borrowed_request_headers,
+        .{},
+    );
+    try std.testing.expectEqualStrings("Host", borrowed_request.headers[0].name);
+    try std.testing.expectEqualStrings(
+        "X-BREAD",
+        borrowed_request.headers[1].name,
+    );
+    try std.testing.expectEqualStrings(
+        "baguette",
+        borrowed_request.header("x-bread").?,
+    );
+
+    var owned_request = try parseRequest(allocator, request_raw, .{});
+    defer owned_request.deinit(allocator);
+    try std.testing.expectEqualStrings("Host", owned_request.headers[0].name);
+    try std.testing.expectEqualStrings("X-BREAD", owned_request.headers[1].name);
+    try std.testing.expectEqualStrings(
+        "example.com",
+        owned_request.header("host").?,
+    );
+
+    const response_raw =
+        "HTTP/1.1 200 OK\r\n" ++
+        "ETag: \"abc\"\r\n" ++
+        "x-trace-ID: 42\r\n" ++
+        "\r\n";
+    var borrowed_response_headers: [4]Header = undefined;
+    const borrowed_response = try parseResponseHead(
+        response_raw,
+        &borrowed_response_headers,
+        .{},
+        .{},
+    );
+    try std.testing.expectEqualStrings(
+        "ETag",
+        borrowed_response.headers[0].name,
+    );
+    try std.testing.expectEqualStrings(
+        "x-trace-ID",
+        borrowed_response.headers[1].name,
+    );
+    try std.testing.expectEqualStrings(
+        "\"abc\"",
+        borrowed_response.header("etag").?,
+    );
+
+    var owned_response = try parseResponse(allocator, response_raw, .{});
+    defer owned_response.deinit(allocator);
+    try std.testing.expectEqualStrings("ETag", owned_response.headers[0].name);
+    try std.testing.expectEqualStrings(
+        "x-trace-ID",
+        owned_response.headers[1].name,
+    );
+    try std.testing.expectEqualStrings("42", owned_response.header("X-TRACE-id").?);
+}
+
 test "HTTP/1 borrowed response heads honor method context" {
     const head_response =
         "HTTP/1.1 200 OK\r\n" ++
@@ -2246,6 +2318,43 @@ test "HTTP/1 parser decodes chunked transfer bodies" {
     try std.testing.expectEqualStrings("hello world", req.body);
     try std.testing.expectEqualStrings("sha-256=demo", req.trailers[0].value);
     try std.testing.expectEqual(raw.len - "next".len, req.consumed);
+}
+
+test "HTTP/1 parser preserves exact chunked trailer field-name spelling" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "POST /upload HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n" ++
+        "5\r\nhello\r\n" ++
+        "0\r\n" ++
+        "Digest: sha-256=demo\r\n" ++
+        "X-Trace-ID: 42\r\n" ++
+        "\r\n";
+
+    var req = try parseRequest(allocator, raw, .{});
+    defer req.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), req.trailers.len);
+    try std.testing.expectEqualStrings("Digest", req.trailers[0].name);
+    try std.testing.expectEqualStrings("X-Trace-ID", req.trailers[1].name);
+    try std.testing.expect(req.trailers[1].eqlName("x-trace-id"));
+
+    var parsed_trailers = try parseTrailerFields(
+        allocator,
+        "Digest: sha-256=demo\r\nX-Trace-ID: 42\r\n",
+        .{},
+    );
+    defer parsed_trailers.deinit(allocator);
+    try std.testing.expectEqualStrings("Digest", parsed_trailers.headers[0].name);
+    try std.testing.expectEqualStrings(
+        "X-Trace-ID",
+        parsed_trailers.headers[1].name,
+    );
+    try std.testing.expectEqualStrings("42", wire.findHeader(
+        parsed_trailers.headers,
+        "x-trace-id",
+    ).?);
 }
 
 test "HTTP/1 parser rejects ambiguous body lengths" {

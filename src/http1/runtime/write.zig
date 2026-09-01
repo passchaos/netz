@@ -4,6 +4,14 @@ const wire = @import("../../internal/wire.zig");
 
 pub const Error = http1.Error || error{InvalidResponse};
 
+/// Controls only the spelling of emitted HTTP/1 field names. Header lookup and
+/// validation remain case-insensitive, and `.preserve` retains today's exact
+/// caller-provided bytes.
+pub const HeaderNameCasing = enum {
+    preserve,
+    title_case,
+};
+
 pub const RequestOptions = struct {
     method: http1.Method = .GET,
     target: []const u8 = "/",
@@ -15,6 +23,7 @@ pub const RequestOptions = struct {
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
     trailers: []const http1.Header = &.{},
+    header_name_casing: HeaderNameCasing = .preserve,
 };
 
 pub const ResponseOptions = struct {
@@ -24,6 +33,7 @@ pub const ResponseOptions = struct {
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
     trailers: []const http1.Header = &.{},
+    header_name_casing: HeaderNameCasing = .preserve,
     /// Optional method of the request this response answers. HEAD and
     /// successful CONNECT have method-specific body framing rules that cannot
     /// be inferred from status and headers alone.
@@ -42,6 +52,7 @@ pub const StreamingRequestOptions = struct {
     /// Trailer field names announced in the initial Trailer header. Values are
     /// supplied later to `finishTrailers`; repeated names are announced once.
     trailer_names: []const []const u8 = &.{},
+    header_name_casing: HeaderNameCasing = .preserve,
 };
 
 pub const StreamingResponseOptions = struct {
@@ -53,6 +64,7 @@ pub const StreamingResponseOptions = struct {
     /// ordinary HTTP/1.1 response.
     body_length: ?usize = null,
     trailer_names: []const []const u8 = &.{},
+    header_name_casing: HeaderNameCasing = .preserve,
     request_method: ?http1.Method = null,
 };
 
@@ -72,6 +84,9 @@ pub const StreamingHead = struct {
     /// Optional exact length enforced even when trailers force chunked wire
     /// framing.
     expected_length: ?usize,
+    /// Captured from the start options so a later streaming terminator uses
+    /// the same field-name policy as its request or response head.
+    header_name_casing: HeaderNameCasing,
 };
 
 /// Reusable encoder storage owned by a persistent runtime connection.
@@ -240,6 +255,7 @@ fn prepareStreamingRequest(
             scratch.request_headers.items,
         ),
         .expected_length = expected_length,
+        .header_name_casing = options.header_name_casing,
     };
 }
 
@@ -366,6 +382,7 @@ fn prepareStreamingResponse(
             options.body_length
         else
             fixed_length,
+        .header_name_casing = options.header_name_casing,
     };
 }
 
@@ -457,6 +474,105 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
     );
 }
 
+test "HTTP/1 writer preserves or title-cases request and response fields" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    const preserved = try prepareRequest(allocator, .{
+        .host = "example.com",
+        .headers = &.{.{ .name = "x-TRACE-id", .value = "one" }},
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        preserved.header,
+        "x-TRACE-id: one\r\n",
+    ) != null);
+
+    const request = try prepareRequest(allocator, .{
+        .host = "example.com",
+        .headers = &.{.{ .name = "x-TRACE-id", .value = "one" }},
+        .header_name_casing = .title_case,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "X-Trace-Id: one\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "Host: example.com\r\n",
+    ) != null);
+
+    const response = try prepareResponse(allocator, .{
+        .headers = &.{.{ .name = "cOnTeNt-TyPe", .value = "text/plain" }},
+        .body = "ok",
+        .header_name_casing = .title_case,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        response.header,
+        "Content-Type: text/plain\r\n",
+    ) != null);
+}
+
+test "HTTP/1 title-case policy applies to merged chunked trailers" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    const message = try prepareResponse(allocator, .{
+        .headers = &.{.{
+            .name = "transfer-encoding",
+            .value = "chunked",
+        }},
+        .body = "ok",
+        .trailers = &.{
+            .{ .name = "x-checkSUM", .value = "one" },
+            .{ .name = "X-CHECKsum", .value = "two" },
+        },
+        .header_name_casing = .title_case,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        message.header,
+        "Transfer-Encoding: chunked\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        message.header,
+        "0\r\nX-Checksum: one, two\r\n\r\n",
+    ) != null);
+
+    const streaming_head = try prepareStreamingResponse(allocator, .{
+        .headers = &.{.{
+            .name = "transfer-encoding",
+            .value = "chunked",
+        }},
+        .trailer_names = &.{"x-checksum"},
+        .header_name_casing = .title_case,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        streaming_head.head,
+        "Transfer-Encoding: chunked\r\n",
+    ) != null);
+    const end = try streaming.prepareEndWithCasing(
+        allocator,
+        &.{
+            .{ .name = "x-checkSUM", .value = "one" },
+            .{ .name = "X-CHECKsum", .value = "two" },
+        },
+        &scratch,
+        streaming_head.header_name_casing,
+    );
+    try std.testing.expectEqualStrings(
+        "0\r\nX-Checksum: one, two\r\n\r\n",
+        end,
+    );
+}
+
 /// Validate and encode a request, borrowing an unframed body when possible.
 pub fn prepareRequest(
     allocator: std.mem.Allocator,
@@ -532,6 +648,7 @@ pub fn prepareRequest(
             allocator,
             &chunks,
             options.trailers,
+            options.header_name_casing,
         );
         return .{ .header = scratch.encoded.items, .body = &.{} };
     }
@@ -558,6 +675,7 @@ pub fn prepareResponse(
             allocator,
             &chunks,
             options.trailers,
+            options.header_name_casing,
         );
         return .{ .header = scratch.encoded.items, .body = &.{} };
     }
@@ -613,6 +731,7 @@ pub fn prepareResponseParts(
                     allocator,
                     &chunks,
                     response.trailers,
+                    response.header_name_casing,
                 );
                 const chunk_start = scratch.batch_encoded.items.len;
                 try scratch.batch_encoded.appendSlice(
@@ -714,7 +833,12 @@ fn encodeResponseHead(
         try encoded.appendSlice(allocator, options.reason);
     }
     try encoded.appendSlice(allocator, "\r\n");
-    try writeHeaderLines(encoded, allocator, scratch.headers.items);
+    try writeHeaderLines(
+        encoded,
+        allocator,
+        scratch.headers.items,
+        options.header_name_casing,
+    );
     try encoded.appendSlice(allocator, "\r\n");
 }
 
@@ -730,7 +854,12 @@ fn encodeRequestHead(
     try encoded.append(allocator, ' ');
     try encoded.appendSlice(allocator, options.version.string());
     try encoded.appendSlice(allocator, "\r\n");
-    try writeHeaderLines(encoded, allocator, scratch.headers.items);
+    try writeHeaderLines(
+        encoded,
+        allocator,
+        scratch.headers.items,
+        options.header_name_casing,
+    );
     try encoded.appendSlice(allocator, "\r\n");
 }
 
@@ -748,7 +877,12 @@ fn encodeStreamingResponseHead(
         try encoded.appendSlice(allocator, options.reason);
     }
     try encoded.appendSlice(allocator, "\r\n");
-    try writeHeaderLines(encoded, allocator, scratch.headers.items);
+    try writeHeaderLines(
+        encoded,
+        allocator,
+        scratch.headers.items,
+        options.header_name_casing,
+    );
     try encoded.appendSlice(allocator, "\r\n");
 }
 
@@ -1123,10 +1257,31 @@ fn appendDecimal(
     try list.appendSlice(allocator, rendered);
 }
 
+fn appendHeaderNameAssumeCapacity(
+    list: *std.ArrayList(u8),
+    name: []const u8,
+    casing: HeaderNameCasing,
+) void {
+    switch (casing) {
+        .preserve => list.appendSliceAssumeCapacity(name),
+        .title_case => {
+            var capitalize = true;
+            for (name) |byte| {
+                list.appendAssumeCapacity(if (capitalize)
+                    std.ascii.toUpper(byte)
+                else
+                    std.ascii.toLower(byte));
+                capitalize = byte == '-';
+            }
+        },
+    }
+}
+
 fn writeHeaderLines(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     headers: []const http1.Header,
+    casing: HeaderNameCasing,
 ) Error!void {
     var rendered_len: usize = 0;
     for (headers) |header| {
@@ -1154,7 +1309,7 @@ fn writeHeaderLines(
     }
     try list.ensureUnusedCapacity(allocator, rendered_len);
     for (headers) |header| {
-        list.appendSliceAssumeCapacity(header.name);
+        appendHeaderNameAssumeCapacity(list, header.name, casing);
         list.appendSliceAssumeCapacity(": ");
         list.appendSliceAssumeCapacity(header.value);
         list.appendSliceAssumeCapacity("\r\n");
@@ -1165,6 +1320,7 @@ fn writeMergedHeaderLines(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     headers: []const http1.Header,
+    casing: HeaderNameCasing,
 ) Error!void {
     var written = try std.ArrayList(bool).initCapacity(
         allocator,
@@ -1176,7 +1332,8 @@ fn writeMergedHeaderLines(
     for (headers, 0..) |header, index| {
         if (written.items[index]) continue;
         try http1.validateHeader(header);
-        try list.appendSlice(allocator, header.name);
+        try list.ensureUnusedCapacity(allocator, header.name.len);
+        appendHeaderNameAssumeCapacity(list, header.name, casing);
         try list.appendSlice(allocator, ": ");
         try list.appendSlice(allocator, header.value);
         written.items[index] = true;
@@ -1202,6 +1359,7 @@ fn encodeChunked(
     allocator: std.mem.Allocator,
     chunks: []const []const u8,
     trailers: []const http1.Header,
+    casing: HeaderNameCasing,
 ) Error!void {
     try http1.validateTrailers(trailers);
     for (chunks) |chunk| {
@@ -1219,7 +1377,7 @@ fn encodeChunked(
         try list.appendSlice(allocator, "\r\n");
     }
     try list.appendSlice(allocator, "0\r\n");
-    try writeMergedHeaderLines(list, allocator, trailers);
+    try writeMergedHeaderLines(list, allocator, trailers, casing);
     try list.appendSlice(allocator, "\r\n");
 }
 
@@ -1258,10 +1416,29 @@ pub const streaming = struct {
         trailers: []const http1.Header,
         scratch: *Scratch,
     ) Error![]const u8 {
+        return prepareEndWithCasing(
+            allocator,
+            trailers,
+            scratch,
+            .preserve,
+        );
+    }
+
+    pub fn prepareEndWithCasing(
+        allocator: std.mem.Allocator,
+        trailers: []const http1.Header,
+        scratch: *Scratch,
+        casing: HeaderNameCasing,
+    ) Error![]const u8 {
         scratch.encoded.clearRetainingCapacity();
         try http1.validateTrailers(trailers);
         try scratch.encoded.appendSlice(allocator, "0\r\n");
-        try writeMergedHeaderLines(&scratch.encoded, allocator, trailers);
+        try writeMergedHeaderLines(
+            &scratch.encoded,
+            allocator,
+            trailers,
+            casing,
+        );
         try scratch.encoded.appendSlice(allocator, "\r\n");
         return scratch.encoded.items;
     }

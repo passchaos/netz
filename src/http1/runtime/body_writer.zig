@@ -102,6 +102,7 @@ pub fn Writer(comptime RuntimeError: type) type {
         framing: runtime_write.streaming.Framing,
         expected_length: ?usize,
         announced_trailers: []const http1.Header,
+        header_name_casing: runtime_write.HeaderNameCasing,
         reusable_after_finish: bool,
         release_on_finish: bool,
         body_finished: bool = false,
@@ -133,6 +134,7 @@ pub fn Writer(comptime RuntimeError: type) type {
                 .framing = prepared.framing,
                 .expected_length = prepared.expected_length,
                 .announced_trailers = announced_trailers,
+                .header_name_casing = prepared.header_name_casing,
                 .reusable_after_finish = prepared.reusable_after_finish,
                 .release_on_finish = release_on_finish,
             };
@@ -263,10 +265,11 @@ pub fn Writer(comptime RuntimeError: type) type {
                 },
                 .chunked => {
                     try self.validateAnnouncedTrailers(trailers);
-                    const end = try runtime_write.streaming.prepareEnd(
+                    const end = try runtime_write.streaming.prepareEndWithCasing(
                         self.allocator,
                         trailers,
                         self.scratch,
+                        self.header_name_casing,
                     );
                     try self.writeParts(&.{end});
                 },

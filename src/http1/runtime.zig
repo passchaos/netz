@@ -4374,6 +4374,7 @@ pub const OwnedResponse = struct {
 
 pub const RequestOptions = runtime_write.RequestOptions;
 pub const ResponseOptions = runtime_write.ResponseOptions;
+pub const HeaderNameCasing = runtime_write.HeaderNameCasing;
 pub const StreamingRequestOptions =
     runtime_write.streaming.RequestOptions;
 pub const StreamingResponseOptions =
