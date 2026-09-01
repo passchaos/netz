@@ -40,6 +40,94 @@ pub const RequestOptions = struct {
     request_body_size: usize,
 };
 
+/// Decode the exact `StreamingOutputCallRequest` subset emitted by the
+/// canonical FullDuplexCall interoperability cases.
+///
+/// A response-parameters field is represented by a non-null `response_size`,
+/// including when the embedded proto3 size has its default value of zero.
+pub fn decodeStreamingOutputCallRequest(input: []const u8) Error!RequestOptions {
+    if (input.len > max_payload_size + 64) return error.MessageTooLarge;
+
+    var reader = Reader{ .input = input };
+    var response_type_seen = false;
+    var parameters_seen = false;
+    var payload_seen = false;
+    var result = RequestOptions{
+        .response_size = null,
+        .request_body_size = 0,
+    };
+
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        switch (tag.field_number) {
+            1 => {
+                if (tag.wire_type != .varint) return error.UnsupportedWireType;
+                if (response_type_seen) return error.DuplicateField;
+                response_type_seen = true;
+                if (try reader.readVarint() != 0) {
+                    return error.InvalidPayloadType;
+                }
+            },
+            2 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                // The fixture deliberately supports one response per request,
+                // matching what the C++ FullDuplexCall implementation reads.
+                if (parameters_seen) return error.DuplicateField;
+                parameters_seen = true;
+                const parameters = try reader.readBytes(32);
+                const decoded = try decodeResponseParameters(parameters);
+                result.response_size = decoded.size;
+                result.interval_us = decoded.interval_us;
+            },
+            3 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (payload_seen) return error.DuplicateField;
+                payload_seen = true;
+                const payload = try reader.readBytes(max_payload_size + 16);
+                result.request_body_size = try decodeZeroPayload(payload);
+            },
+            else => return error.UnsupportedField,
+        }
+    }
+    if (!payload_seen) return error.MissingPayload;
+    return result;
+}
+
+/// Encode a canonical `StreamingOutputCallResponse` containing a zero-filled
+/// `Payload.body`. The default COMPRESSABLE type is omitted.
+pub fn encodeStreamingOutputCallResponseAlloc(
+    allocator: std.mem.Allocator,
+    body_size: usize,
+) Error![]u8 {
+    if (body_size > max_payload_size) return error.MessageTooLarge;
+
+    const payload_len = if (body_size == 0)
+        0
+    else
+        try lengthDelimitedFieldLen(body_size);
+    const encoded_len = try lengthDelimitedFieldLen(payload_len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+
+    var cursor: usize = 0;
+    encoded[cursor] = fieldKey(1, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, payload_len);
+    if (body_size != 0) {
+        encoded[cursor] = fieldKey(2, .length_delimited);
+        cursor += 1;
+        writeVarint(encoded, &cursor, body_size);
+        @memset(encoded[cursor..][0..body_size], 0);
+        cursor += body_size;
+    }
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
+}
+
 /// Encode the exact `StreamingOutputCallRequest` subset used by the gate.
 ///
 /// `response_type` and `Payload.type` are proto3's zero-valued COMPRESSABLE
@@ -229,7 +317,49 @@ const Reader = struct {
     }
 };
 
-fn validatePayload(input: []const u8, expected_body_size: usize) Error!void {
+const DecodedResponseParameters = struct {
+    size: u32 = 0,
+    interval_us: u32 = 0,
+};
+
+fn decodeResponseParameters(input: []const u8) Error!DecodedResponseParameters {
+    var reader = Reader{ .input = input };
+    var size_seen = false;
+    var interval_seen = false;
+    var result = DecodedResponseParameters{};
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        switch (tag.field_number) {
+            1 => {
+                if (tag.wire_type != .varint) return error.UnsupportedWireType;
+                if (size_seen) return error.DuplicateField;
+                size_seen = true;
+                const size = try reader.readVarint();
+                // The schema type is int32. Negative int32 values use a
+                // ten-byte sign-extended varint and are invalid fixture sizes.
+                if (size > std.math.maxInt(i32)) return error.InvalidArgument;
+                if (size > max_payload_size) return error.MessageTooLarge;
+                result.size = @intCast(size);
+            },
+            2 => {
+                if (tag.wire_type != .varint) return error.UnsupportedWireType;
+                if (interval_seen) return error.DuplicateField;
+                interval_seen = true;
+                const interval = try reader.readVarint();
+                if (interval > std.math.maxInt(i32) or
+                    interval > max_interval_us)
+                {
+                    return error.InvalidArgument;
+                }
+                result.interval_us = @intCast(interval);
+            },
+            else => return error.UnsupportedField,
+        }
+    }
+    return result;
+}
+
+fn decodeZeroPayload(input: []const u8) Error!usize {
     var reader = Reader{ .input = input };
     var type_seen = false;
     var body_seen = false;
@@ -243,8 +373,6 @@ fn validatePayload(input: []const u8, expected_body_size: usize) Error!void {
                 }
                 if (type_seen) return error.DuplicateField;
                 type_seen = true;
-                // PayloadType.COMPRESSABLE is the only value used by the
-                // canonical tests and has enum value zero.
                 if (try reader.readVarint() != 0) {
                     return error.InvalidPayloadType;
                 }
@@ -260,12 +388,17 @@ fn validatePayload(input: []const u8, expected_body_size: usize) Error!void {
             else => return error.UnsupportedField,
         }
     }
-    // Proto3 omits an empty bytes field, so a missing body is the canonical
-    // encoding of the expected zero-length payload.
-    if (body.len != expected_body_size) return error.UnexpectedPayloadSize;
     for (body) |byte| {
         if (byte != 0) return error.NonZeroPayload;
     }
+    return body.len;
+}
+
+fn validatePayload(input: []const u8, expected_body_size: usize) Error!void {
+    const body_size = try decodeZeroPayload(input);
+    // Proto3 omits an empty bytes field, so a missing body is the canonical
+    // encoding of the expected zero-length payload.
+    if (body_size != expected_body_size) return error.UnexpectedPayloadSize;
 }
 
 fn lengthDelimitedFieldLen(payload_len: usize) Error!usize {
@@ -346,6 +479,108 @@ test "encodes sleeping request without response parameters" {
                 .interval_us = 1,
                 .request_body_size = 0,
             },
+        ),
+    );
+}
+
+test "decodes canonical streaming request subset" {
+    const ping_pong = try decodeStreamingOutputCallRequest(
+        &.{ 0x12, 0x05, 0x08, 0x05, 0x10, 0xac, 0x02, 0x1a, 0x05, 0x12, 0x03, 0, 0, 0 },
+    );
+    try std.testing.expectEqual(@as(?u32, 5), ping_pong.response_size);
+    try std.testing.expectEqual(@as(u32, 300), ping_pong.interval_us);
+    try std.testing.expectEqual(@as(usize, 3), ping_pong.request_body_size);
+
+    const sleeping = try decodeStreamingOutputCallRequest(
+        &.{ 0x1a, 0x04, 0x12, 0x02, 0, 0 },
+    );
+    try std.testing.expectEqual(@as(?u32, null), sleeping.response_size);
+    try std.testing.expectEqual(@as(u32, 0), sleeping.interval_us);
+    try std.testing.expectEqual(@as(usize, 2), sleeping.request_body_size);
+
+    // Explicit proto3 defaults remain valid and preserve the presence of the
+    // response-parameters message, which distinguishes size zero from none.
+    const defaults = try decodeStreamingOutputCallRequest(
+        &.{ 0x08, 0x00, 0x12, 0x04, 0x08, 0x00, 0x10, 0x00, 0x1a, 0x02, 0x08, 0x00 },
+    );
+    try std.testing.expectEqual(@as(?u32, 0), defaults.response_size);
+    try std.testing.expectEqual(@as(usize, 0), defaults.request_body_size);
+}
+
+test "request decoding rejects malformed and unsupported fields" {
+    try std.testing.expectError(
+        error.MissingPayload,
+        decodeStreamingOutputCallRequest(&.{}),
+    );
+    try std.testing.expectError(
+        error.TruncatedMessage,
+        decodeStreamingOutputCallRequest(&.{ 0x1a, 0x02, 0x12 }),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        decodeStreamingOutputCallRequest(&.{ 0x1a, 0x00, 0x1a, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        decodeStreamingOutputCallRequest(&.{ 0x12, 0x00, 0x12, 0x00, 0x1a, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.UnsupportedField,
+        decodeStreamingOutputCallRequest(&.{ 0x22, 0x00, 0x1a, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.UnsupportedField,
+        decodeStreamingOutputCallRequest(&.{ 0x12, 0x02, 0x18, 0x00, 0x1a, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.InvalidPayloadType,
+        decodeStreamingOutputCallRequest(&.{ 0x08, 0x01, 0x1a, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.NonZeroPayload,
+        decodeStreamingOutputCallRequest(&.{ 0x1a, 0x03, 0x12, 0x01, 0x01 }),
+    );
+}
+
+test "request decoding enforces response parameter bounds" {
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        decodeStreamingOutputCallRequest(
+            &.{ 0x12, 0x04, 0x08, 0x81, 0x80, 0x20, 0x1a, 0x00 },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        decodeStreamingOutputCallRequest(
+            &.{ 0x12, 0x05, 0x10, 0xc1, 0x96, 0xb1, 0x02, 0x1a, 0x00 },
+        ),
+    );
+}
+
+test "encodes canonical streaming response" {
+    const encoded = try encodeStreamingOutputCallResponseAlloc(
+        std.testing.allocator,
+        3,
+    );
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x0a, 0x05, 0x12, 0x03, 0, 0, 0 },
+        encoded,
+    );
+    try validateStreamingOutputCallResponse(encoded, 3);
+
+    const empty = try encodeStreamingOutputCallResponseAlloc(
+        std.testing.allocator,
+        0,
+    );
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualSlices(u8, &.{ 0x0a, 0x00 }, empty);
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        encodeStreamingOutputCallResponseAlloc(
+            std.testing.allocator,
+            max_payload_size + 1,
         ),
     );
 }
