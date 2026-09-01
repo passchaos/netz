@@ -87,6 +87,47 @@ Run all codec/runtime and end-to-end tests:
 zig build test
 ```
 
+Run the focused process-boundary gate against the audited upstream gRPC C++
+interop server:
+
+```sh
+zig build interop-grpc-cpp -Doptimize=ReleaseFast
+```
+
+By default the gate verifies `~/Work/grpc` is at
+`03d65cc67c450ccbb58a8a45627c4da83a886ccd`, builds
+`//test/cpp/interop:interop_server` with Bazel, starts it with insecure
+credentials on a temporary loopback port, and bounds both readiness and client
+execution. Set `GRPC_ROOT` to use the same pinned source revision elsewhere, or
+set `GRPC_CPP_INTEROP_SERVER` to an already-built server executable. `BAZEL`
+may select a non-default Bazel/Bazelisk executable; the script verifies it
+matches upstream's checked-in `.bazelversion`. The harness is reproducible even
+when a host lacks that exact Bazel release, but such a host cannot establish an
+external pass until the pinned tool or a prebuilt server is supplied.
+On the current development host the client and fixture codec compile, but the
+external run remains unconfirmed: its installed Bazel 9.2 rejects an upstream
+dependency that still uses an implicitly available `cc_library`, while the
+downloaded pinned Bazel 8.7.0 blocked in installation extraction. These are
+recorded toolchain blockers rather than a claimed interoperability pass.
+
+The netz client exercises upstream's canonical `FullDuplexCall` contract:
+
+- ping-pong alternation with request sizes 27182, 8, 1828, and 45904 bytes
+  and corresponding zero-filled responses of 31415, 9, 2653, and 58979
+  bytes, followed by an OK half-close;
+- echoed `x-grpc-test-echo-initial` initial metadata and raw
+  `x-grpc-test-echo-trailing-bin` trailing metadata on a large duplex call;
+- `RST_STREAM(CANCEL)` after the first response, followed by a successful empty
+  duplex RPC on the same HTTP/2 channel; and
+- a short `grpc-timeout` while the C++ service waits for another request, with
+  a typed `DEADLINE_EXCEEDED` terminal result.
+
+`tools/interop/grpc_cpp_messages.zig` encodes and validates only the bounded
+subset of `grpc.testing.StreamingOutputCallRequest`/`Response` needed by these
+cases. It pins its field-number assumptions to the audited source revision and
+strictly rejects malformed, non-canonical, oversized, or unexpected protobuf
+input; it is a fixture codec, not a replacement for generated `pbz` bindings.
+
 The test suite covers message truncation/limits, invalid compressed flags,
 timeout/status parsing, non-shortening timeout rounding, status-message
 encoding, gzip/deflate round trips, decompression limits, raw-deflate and
@@ -117,10 +158,12 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    channels. The TLS path enforces `h2` ALPN and retains certificate-
    verification policy; h2c and TLS tests exchange multiple unary calls on one
    connection, and the owning h2c wrappers also compose multi-message request
-   and response streams. External upstream gRPC client/server interop is still
-   needed beyond netz's HTTP/2 Hyper gate.
-3. Add cancellation/deadline policy, retry policy, health checking,
-   reflection, and conformance/interop runners.
+   and response streams. A focused grpc-cpp gate is now available for external
+   server checks of full duplex, metadata, cancellation/channel reuse, and
+   deadline propagation. A broader upstream matrix (including netz serving an
+   upstream client and TLS) remains future work.
+3. Add higher-level application cancellation/deadline policy, retry policy,
+   health checking, reflection, and broader conformance/interop runners.
 
 The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature

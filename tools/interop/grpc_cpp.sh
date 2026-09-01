@@ -6,6 +6,7 @@ grpc_root=${GRPC_ROOT:-"$HOME/Work/grpc"}
 expected_grpc_commit=03d65cc67c450ccbb58a8a45627c4da83a886ccd
 bazel_bin=${BAZEL:-}
 server=${GRPC_CPP_INTEROP_SERVER:-}
+build_timeout=${GRPC_CPP_BUILD_TIMEOUT:-20m}
 work=$(mktemp -d)
 server_pid=
 
@@ -37,6 +38,15 @@ on_exit() {
 }
 trap on_exit EXIT
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo 'python3 not found; required to reserve a loopback port' >&2
+  exit 127
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo 'timeout not found; required to bound the external gate' >&2
+  exit 127
+fi
+
 if [[ -z "$server" ]]; then
   if [[ ! -f "$grpc_root/test/cpp/interop/interop_server.cc" ]]; then
     echo "upstream gRPC checkout not found under $grpc_root" >&2
@@ -49,16 +59,32 @@ if [[ -z "$server" ]]; then
     exit 1
   fi
   if [[ -z "$bazel_bin" ]]; then
-    if command -v bazel >/dev/null 2>&1; then
-      bazel_bin=bazel
-    elif command -v bazelisk >/dev/null 2>&1; then
+    # Bazelisk honors upstream's checked-in .bazelversion. Prefer it over an
+    # unrelated host Bazel that may be too new for pinned dependencies.
+    if command -v bazelisk >/dev/null 2>&1; then
       bazel_bin=bazelisk
+    elif command -v bazel >/dev/null 2>&1; then
+      bazel_bin=bazel
     else
       echo 'bazel/bazelisk not found; required to build grpc-cpp interop_server' >&2
       exit 127
     fi
   fi
-  (cd "$grpc_root" && "$bazel_bin" build \
+  required_bazel_version=$(tr -d '[:space:]' <"$grpc_root/.bazelversion")
+  actual_bazel_version="$(
+    cd "$grpc_root"
+    timeout 60s "$bazel_bin" --batch version 2>/dev/null |
+      sed -n 's/^Build label: //p' | head -n 1
+  )" || {
+    echo "failed to query $bazel_bin within 60 seconds" >&2
+    exit 1
+  }
+  if [[ "$actual_bazel_version" != "$required_bazel_version" ]]; then
+    echo "gRPC requires Bazel $required_bazel_version (found ${actual_bazel_version:-unknown})" >&2
+    echo 'set BAZEL to that executable or install Bazelisk' >&2
+    exit 1
+  fi
+  (cd "$grpc_root" && timeout "$build_timeout" "$bazel_bin" build \
     --compilation_mode=opt //test/cpp/interop:interop_server)
   server="$grpc_root/bazel-bin/test/cpp/interop/interop_server"
 fi
@@ -66,15 +92,6 @@ if [[ ! -x "$server" ]]; then
   echo "grpc-cpp interop server is not executable: $server" >&2
   exit 127
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-  echo 'python3 not found; required to reserve a loopback port' >&2
-  exit 127
-fi
-if ! command -v timeout >/dev/null 2>&1; then
-  echo 'timeout not found; required to bound the external gate' >&2
-  exit 127
-fi
-
 port=$(python3 - <<'PY'
 import socket
 with socket.socket() as sock:
@@ -97,8 +114,21 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 if ! grep -Fq "Server listening on 0.0.0.0:$port" "$work/server.log"; then
-  echo 'timed out waiting for grpc-cpp interop server readiness' >&2
-  exit 1
+  # Abseil may suppress INFO logs in some builds. A successful TCP connect is
+  # an equivalent readiness signal and avoids coupling the gate to verbosity.
+  if ! python3 - "$port" <<'PY'
+import socket
+import sys
+try:
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+  then
+    echo 'timed out waiting for grpc-cpp interop server readiness' >&2
+    exit 1
+  fi
 fi
 
 timeout 30s "$client" "$port" >"$work/client.log" 2>&1
