@@ -41,6 +41,12 @@ existing HTTP/2 runtime:
   ownership for decoded request and response messages,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
+- step-driven bidirectional streams whose single owner alternates request and
+  response progress without racing the connection frame reader, including a
+  server reply before request FIN and a later client message on the same RPC,
+- callback-borrowed decoded messages with owned initial/trailing metadata,
+  resumable byte-exact writes when flow control exposes a peer event, and
+  independently tracked request/response half closes,
 - validated final request/response HEADERS callbacks before the first DATA
   bytes, so message encoding is known before incremental decoding,
 - bounded incremental reassembly when the five-byte gRPC prefix or payload
@@ -58,6 +64,9 @@ existing HTTP/2 runtime:
 - typed unary and streaming client responses for peer `RST_STREAM`, preserving
   the HTTP/2 reason while mapping REFUSED_STREAM, CANCEL, ENHANCE_YOUR_CALM, and
   INADEQUATE_SECURITY to the gRPC status codes required by the protocol.
+- typed duplex terminal events for both `grpc-status` trailers (including a
+  true trailers-only early response) and peer `RST_STREAM`; a terminal early
+  response closes the still-open upload before yielding the owned result.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -88,7 +97,11 @@ HTTP 503 response without `grpc-status`. Stream tests sweep every byte split
 across three coalesced messages, split a prefix across separate HTTP/2 writes,
 force large gzip/deflate messages across small DATA frames in both directions,
 verify independent compressed members, and require RST_STREAM(INTERNAL_ERROR)
-for an incomplete request message. The early-return test gives exactly one
+for an incomplete request message. The duplex test sends client message one,
+observes the server's reply while the request half remains open, then sends
+client message two and completes both halves. A second duplex test covers an
+early trailers-only PERMISSION_DENIED response and proves subsequent writes are
+rejected. The sequential early-return test gives exactly one
 framed message send credit, then verifies that the next write receives a
 trailers-only CANCELLED response with decoded `grpc-message` and without
 sending the second message, matching the request-stream behavior covered by
@@ -96,12 +109,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
 
 ## Remaining work before broad gRPC parity
 
-1. Add an interleaved full-duplex scheduler. The current blocking API supports
-   multiple client-streamed messages followed by multiple server-streamed
-   messages on one call, but deliberately finishes the request half before
-   reading the response half. Early server status during a flow-control-blocked
-   upload is now exposed as typed gRPC response; the remaining gap is
-   simultaneous bidi message progress rather than early-return correctness.
+1. Build generated service/client bindings on `pbz`, including declarative
+   method shapes, application cancellation, and async/concurrent scheduling
+   policies above the intentionally single-owner duplex step loop.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-
@@ -109,10 +119,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    connection, and the owning h2c wrappers also compose multi-message request
    and response streams. External upstream gRPC client/server interop is still
    needed beyond netz's HTTP/2 Hyper gate.
-3. Build generated service/client bindings on `pbz`, including unary and all
-   streaming method shapes.
-4. Add cancellation/deadline enforcement, retry policy, health checking,
+3. Add cancellation/deadline policy, retry policy, health checking,
    reflection, and conformance/interop runners.
 
-The current tests establish unary plus sequential client/server message
-streaming, not full gRPC Core feature parity.
+The current tests establish unary, sequential streaming, and single-owner
+step-driven bidirectional streaming; this is still not broad gRPC Core feature
+parity.

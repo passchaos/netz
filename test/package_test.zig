@@ -56,6 +56,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Client,
+        "startDuplex",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Client,
         "negotiatedAlpn",
     ));
     try std.testing.expect(@hasDecl(
@@ -81,6 +85,18 @@ test "public modules are reachable" {
         "startStreamingResponse",
     ));
     try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "acceptDuplex",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "acceptDuplexWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "acceptDuplexWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.grpc,
         "MessageStreamDecoder",
     ));
@@ -100,6 +116,17 @@ test "public modules are reachable" {
         netz.grpc,
         "startStreamingResponse",
     ));
+    try std.testing.expect(@hasDecl(netz.grpc, "startDuplex"));
+    try std.testing.expect(@hasDecl(netz.grpc, "acceptDuplex"));
+    try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "writeMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "resumeMessage"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.ClientDuplex,
+        "readResponseEvent",
+    ));
+    try std.testing.expect(@hasDecl(netz.grpc.ServerDuplex, "readRequestEvent"));
+    try std.testing.expect(@hasDecl(netz.grpc.ServerDuplex, "writeMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc.ServerDuplex, "finishOk"));
     try std.testing.expect(@hasDecl(
         netz.grpc.StreamingClientWriter,
         "writeMessage",

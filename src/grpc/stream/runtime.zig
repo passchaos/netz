@@ -3,10 +3,9 @@
 //! The HTTP/2 runtime owns connection flow control and stream cancellation.
 //! This layer validates gRPC metadata before DATA, reassembles arbitrary
 //! five-byte-prefix/payload splits, applies compression independently per
-//! message, and validates terminal grpc-status trailers. The current blocking
-//! transport completes the request half before consuming response messages;
-//! it supports client-streaming and server-streaming sequences, not interleaved
-//! full-duplex bidi scheduling.
+//! message, and validates terminal grpc-status trailers. This file keeps the
+//! sequential API; `duplex.zig` layers a single-owner step driver over the same
+//! metadata builders and codec policy.
 
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
@@ -242,6 +241,24 @@ pub fn startClient(
     };
 }
 
+/// Start the HTTP/2 request and transfer it to the step-driven duplex owner.
+/// Kept here so sequential and duplex calls cannot drift in their gRPC header
+/// construction or compression negotiation.
+pub fn startClientDuplexTransport(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+) Error!http2.runtime.ClientDuplexStream {
+    var writer = try startClient(connection, allocator, options);
+    errdefer writer.deinit();
+    const transport = try writer.transport.beginDuplex();
+    // beginDuplex has transferred both HTTP/2 halves and made the writer
+    // inert. Marking this local value undefined documents that it must not run
+    // its cancellation deinitializer after the transfer.
+    writer = undefined;
+    return transport;
+}
+
 fn resetResponse(
     allocator: std.mem.Allocator,
     reset: http2.ResetStreamPayload,
@@ -373,57 +390,15 @@ pub const ServerWriter = struct {
         trailing_metadata: []const http2.Hpack.HeaderField,
         trailing_binary_metadata: []const metadata.BinaryMetadata,
     ) Error!void {
-        try call.validateCustomMetadata(trailing_metadata);
-        try call.validateCustomBinaryMetadata(trailing_binary_metadata);
-        var binary = try metadata.encodeFieldsAlloc(
+        var fields = try terminalFields(
             self.allocator,
+            status,
+            status_message,
+            trailing_metadata,
             trailing_binary_metadata,
         );
-        defer binary.deinit();
-        var status_buffer: [2]u8 = undefined;
-        const status_value = std.fmt.bufPrint(
-            &status_buffer,
-            "{d}",
-            .{@intFromEnum(status)},
-        ) catch unreachable;
-        const encoded_message = if (status_message) |message|
-            try wire.encodeStatusMessageAlloc(self.allocator, message)
-        else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(encoded_message);
-
-        var storage: [16]http2.Hpack.HeaderField = undefined;
-        const count = std.math.add(
-            usize,
-            std.math.add(
-                usize,
-                trailing_metadata.len,
-                binary.fields.len,
-            ) catch return error.MessageTooLarge,
-            1 + @intFromBool(status_message != null),
-        ) catch return error.MessageTooLarge;
-        const buffer = if (count <= storage.len)
-            storage[0..count]
-        else
-            try self.allocator.alloc(http2.Hpack.HeaderField, count);
-        defer if (buffer.ptr != storage[0..].ptr) {
-            self.allocator.free(buffer);
-        };
-        var trailers: std.ArrayList(http2.Hpack.HeaderField) =
-            .initBuffer(buffer);
-        trailers.appendAssumeCapacity(.{
-            .name = "grpc-status",
-            .value = status_value,
-        });
-        if (status_message != null) {
-            trailers.appendAssumeCapacity(.{
-                .name = "grpc-message",
-                .value = encoded_message,
-            });
-        }
-        trailers.appendSliceAssumeCapacity(trailing_metadata);
-        trailers.appendSliceAssumeCapacity(binary.fields);
-        try self.transport.finishTrailers(trailers.items);
+        defer fields.deinit();
+        try self.transport.finishTrailers(fields.fields);
     }
 
     pub fn finishOk(self: *ServerWriter) Error!void {
@@ -444,50 +419,25 @@ pub fn startResponse(
         options.initial_binary_metadata,
     );
     defer binary.deinit();
-    const algorithm = if (options.request_accepted_encodings.contains(
-        options.compression,
-    ))
-        options.compression
-    else
-        .identity;
+    const algorithm = responseAlgorithm(options);
 
     var storage: [16]http2.Hpack.HeaderField = undefined;
-    const count = std.math.add(
-        usize,
-        std.math.add(
-            usize,
-            options.initial_metadata.len,
-            binary.fields.len,
-        ) catch return error.MessageTooLarge,
-        3,
-    ) catch return error.MessageTooLarge;
-    const buffer = if (count <= storage.len)
-        storage[0..count]
-    else
-        try allocator.alloc(http2.Hpack.HeaderField, count);
+    const buffer = try responseHeaderBuffer(
+        allocator,
+        &storage,
+        options,
+        binary.fields.len,
+    );
     defer if (buffer.ptr != storage[0..].ptr) allocator.free(buffer);
-    var headers: std.ArrayList(http2.Hpack.HeaderField) =
-        .initBuffer(buffer);
-    headers.appendAssumeCapacity(.{
-        .name = "content-type",
-        .value = "application/grpc+proto",
-    });
-    if (algorithm != .identity) {
-        headers.appendAssumeCapacity(.{
-            .name = "grpc-encoding",
-            .value = algorithm.name(),
-        });
-    }
+    var headers: std.ArrayList(http2.Hpack.HeaderField) = .initBuffer(buffer);
     var accept_buffer: [32]u8 = undefined;
-    headers.appendAssumeCapacity(.{
-        .name = "grpc-accept-encoding",
-        .value = try compression.formatAcceptEncodingInto(
-            &accept_buffer,
-            options.accepted_encodings,
-        ),
-    });
-    headers.appendSliceAssumeCapacity(options.initial_metadata);
-    headers.appendSliceAssumeCapacity(binary.fields);
+    try appendResponseHeaders(
+        &headers,
+        &accept_buffer,
+        options,
+        algorithm,
+        binary.fields,
+    );
 
     return .{
         .allocator = allocator,
@@ -502,6 +452,209 @@ pub fn startResponse(
             .max_message_size = options.max_message_size,
         },
     };
+}
+
+pub fn startDuplexResponse(
+    transport: *http2.runtime.ServerDuplexStream,
+    allocator: std.mem.Allocator,
+    options: ResponseOptions,
+) Error!void {
+    try call.validateCustomMetadata(options.initial_metadata);
+    try call.validateCustomBinaryMetadata(options.initial_binary_metadata);
+    var binary = try metadata.encodeFieldsAlloc(
+        allocator,
+        options.initial_binary_metadata,
+    );
+    defer binary.deinit();
+    const algorithm = responseAlgorithm(options);
+
+    var storage: [16]http2.Hpack.HeaderField = undefined;
+    const buffer = try responseHeaderBuffer(
+        allocator,
+        &storage,
+        options,
+        binary.fields.len,
+    );
+    defer if (buffer.ptr != storage[0..].ptr) allocator.free(buffer);
+    var headers: std.ArrayList(http2.Hpack.HeaderField) = .initBuffer(buffer);
+    var accept_buffer: [32]u8 = undefined;
+    try appendResponseHeaders(
+        &headers,
+        &accept_buffer,
+        options,
+        algorithm,
+        binary.fields,
+    );
+    try transport.startResponse(.{ .status = 200, .headers = headers.items });
+}
+
+fn responseAlgorithm(options: ResponseOptions) compression.Algorithm {
+    return if (options.request_accepted_encodings.contains(options.compression))
+        options.compression
+    else
+        .identity;
+}
+
+fn responseHeaderBuffer(
+    allocator: std.mem.Allocator,
+    stack: []http2.Hpack.HeaderField,
+    options: ResponseOptions,
+    binary_count: usize,
+) Error![]http2.Hpack.HeaderField {
+    const count = std.math.add(
+        usize,
+        std.math.add(usize, options.initial_metadata.len, binary_count) catch
+            return error.MessageTooLarge,
+        3,
+    ) catch return error.MessageTooLarge;
+    return if (count <= stack.len) stack[0..count] else allocator.alloc(http2.Hpack.HeaderField, count);
+}
+
+fn appendResponseHeaders(
+    headers: *std.ArrayList(http2.Hpack.HeaderField),
+    accept_buffer: *[32]u8,
+    options: ResponseOptions,
+    algorithm: compression.Algorithm,
+    binary_fields: []const http2.Hpack.HeaderField,
+) Error!void {
+    headers.appendAssumeCapacity(.{
+        .name = "content-type",
+        .value = "application/grpc+proto",
+    });
+    if (algorithm != .identity) {
+        headers.appendAssumeCapacity(.{
+            .name = "grpc-encoding",
+            .value = algorithm.name(),
+        });
+    }
+    headers.appendAssumeCapacity(.{
+        .name = "grpc-accept-encoding",
+        .value = try compression.formatAcceptEncodingInto(
+            accept_buffer,
+            options.accepted_encodings,
+        ),
+    });
+    headers.appendSliceAssumeCapacity(options.initial_metadata);
+    headers.appendSliceAssumeCapacity(binary_fields);
+}
+
+const TerminalFields = struct {
+    allocator: std.mem.Allocator,
+    fields: []http2.Hpack.HeaderField,
+    status_value: []u8,
+    encoded_message: []u8,
+    binary: metadata.EncodedFields,
+
+    fn deinit(self: *TerminalFields) void {
+        self.binary.deinit();
+        self.allocator.free(self.encoded_message);
+        self.allocator.free(self.status_value);
+        self.allocator.free(self.fields);
+        self.* = undefined;
+    }
+};
+
+fn terminalFields(
+    allocator: std.mem.Allocator,
+    status: wire.Status,
+    status_message: ?[]const u8,
+    trailing_metadata: []const http2.Hpack.HeaderField,
+    trailing_binary_metadata: []const metadata.BinaryMetadata,
+) Error!TerminalFields {
+    try call.validateCustomMetadata(trailing_metadata);
+    try call.validateCustomBinaryMetadata(trailing_binary_metadata);
+    var binary = try metadata.encodeFieldsAlloc(
+        allocator,
+        trailing_binary_metadata,
+    );
+    errdefer binary.deinit();
+    var status_buffer: [2]u8 = undefined;
+    const status_text = std.fmt.bufPrint(
+        &status_buffer,
+        "{d}",
+        .{@intFromEnum(status)},
+    ) catch unreachable;
+    const status_value = try allocator.dupe(u8, status_text);
+    errdefer allocator.free(status_value);
+    const encoded_message = if (status_message) |message|
+        try wire.encodeStatusMessageAlloc(allocator, message)
+    else
+        try allocator.alloc(u8, 0);
+    errdefer allocator.free(encoded_message);
+    const count = std.math.add(
+        usize,
+        std.math.add(usize, trailing_metadata.len, binary.fields.len) catch
+            return error.MessageTooLarge,
+        @as(usize, 1) + @intFromBool(status_message != null),
+    ) catch return error.MessageTooLarge;
+    const fields = try allocator.alloc(http2.Hpack.HeaderField, count);
+    var list: std.ArrayList(http2.Hpack.HeaderField) = .initBuffer(fields);
+    list.appendAssumeCapacity(.{ .name = "grpc-status", .value = status_value });
+    if (status_message != null) {
+        list.appendAssumeCapacity(.{
+            .name = "grpc-message",
+            .value = encoded_message,
+        });
+    }
+    list.appendSliceAssumeCapacity(trailing_metadata);
+    list.appendSliceAssumeCapacity(binary.fields);
+    return .{
+        .allocator = allocator,
+        .fields = fields,
+        .status_value = status_value,
+        .encoded_message = encoded_message,
+        .binary = binary,
+    };
+}
+
+pub fn finishDuplexTrailers(
+    transport: *http2.runtime.ServerDuplexStream,
+    allocator: std.mem.Allocator,
+    status: wire.Status,
+    status_message: ?[]const u8,
+    trailing_metadata: []const http2.Hpack.HeaderField,
+    trailing_binary_metadata: []const metadata.BinaryMetadata,
+) Error!void {
+    var fields = try terminalFields(
+        allocator,
+        status,
+        status_message,
+        trailing_metadata,
+        trailing_binary_metadata,
+    );
+    defer fields.deinit();
+    try transport.finishResponseTrailers(fields.fields);
+}
+
+pub fn finishDuplexHeadersOnly(
+    transport: *http2.runtime.ServerDuplexStream,
+    allocator: std.mem.Allocator,
+    status: wire.Status,
+    status_message: ?[]const u8,
+    trailing_metadata: []const http2.Hpack.HeaderField,
+    trailing_binary_metadata: []const metadata.BinaryMetadata,
+) Error!void {
+    var terminal = try terminalFields(
+        allocator,
+        status,
+        status_message,
+        trailing_metadata,
+        trailing_binary_metadata,
+    );
+    defer terminal.deinit();
+    const count = std.math.add(usize, terminal.fields.len, 1) catch
+        return error.MessageTooLarge;
+    const headers = try allocator.alloc(http2.Hpack.HeaderField, count);
+    defer allocator.free(headers);
+    headers[0] = .{
+        .name = "content-type",
+        .value = "application/grpc+proto",
+    };
+    @memcpy(headers[1..], terminal.fields);
+    try transport.finishResponseHeaders(.{
+        .status = 200,
+        .headers = headers,
+    });
 }
 
 fn ClientResponseBridge(
@@ -665,13 +818,13 @@ fn ServerRequestBridge(
     };
 }
 
-const ParsedResponseTerminal = struct {
+pub const ParsedResponseTerminal = struct {
     status: wire.Status,
     status_message: []u8,
     encoding: ?[]const u8,
 };
 
-fn parseResponseTerminal(
+pub fn parseResponseTerminal(
     allocator: std.mem.Allocator,
     http_status: u16,
     headers: []const http2.Hpack.HeaderField,

@@ -8,6 +8,7 @@ const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
 const streaming = @import("stream/runtime.zig");
+const duplex = @import("stream/duplex.zig");
 
 const net = std.Io.net;
 
@@ -83,6 +84,21 @@ pub const Client = struct {
         options: streaming.RequestOptions,
     ) streaming.Error!streaming.ClientWriter {
         return streaming.startClient(
+            &self.connection,
+            self.connection.allocator,
+            options,
+        );
+    }
+
+    /// Start a bidirectional message stream and transfer exclusive connection
+    /// read ownership to it.  Do not start another RPC or call a connection
+    /// reader until the returned value reaches both terminal halves or is
+    /// deinitialized.
+    pub fn startDuplex(
+        self: *Client,
+        options: streaming.RequestOptions,
+    ) duplex.Error!duplex.ClientDuplex {
+        return duplex.startDuplex(
             &self.connection,
             self.connection.allocator,
             options,
@@ -233,6 +249,43 @@ pub const ServerConnection = struct {
             self.max_message_size,
             context,
             consume,
+        );
+    }
+
+    /// Accept a bidirectional gRPC call.  The returned value owns the request
+    /// metadata and is the connection's sole frame reader until both halves
+    /// end or it is deinitialized.
+    pub fn acceptDuplex(
+        self: *ServerConnection,
+    ) duplex.Error!duplex.ServerDuplex {
+        return duplex.acceptDuplex(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+        );
+    }
+
+    pub fn acceptDuplexWithTimeout(
+        self: *ServerConnection,
+        timeout: std.Io.Duration,
+    ) !duplex.ServerDuplex {
+        return duplex.acceptDuplexWithTimeout(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            timeout,
+        );
+    }
+
+    pub fn acceptDuplexWithDeadline(
+        self: *ServerConnection,
+        deadline: std.Io.Clock.Timestamp,
+    ) !duplex.ServerDuplex {
+        return duplex.acceptDuplexWithDeadline(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            deadline,
         );
     }
 

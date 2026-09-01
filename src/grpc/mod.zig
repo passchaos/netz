@@ -1,5 +1,5 @@
-//! gRPC wire semantics plus unary and sequential message streams over the
-//! netz HTTP/2 runtime.
+//! gRPC wire semantics plus unary, sequential, and full-duplex message streams
+//! over the netz HTTP/2 runtime.
 //!
 //! Protobuf payloads remain opaque bytes at this layer. Applications can use
 //! `pbz` or another codec without coupling HTTP/2 transport state to a schema
@@ -53,6 +53,19 @@ pub const readStreamingRequest = stream.readRequest;
 pub const StreamingResponseOptions = stream.ResponseOptions;
 pub const StreamingServerWriter = stream.ServerWriter;
 pub const startStreamingResponse = stream.startResponse;
+pub const DuplexWriteResult = stream.WriteResult;
+pub const DuplexMessageProgress = stream.MessageProgress;
+pub const DuplexResponseHead = stream.DuplexResponseHead;
+pub const DuplexResponse = stream.DuplexResponse;
+pub const ClientDuplexEvent = stream.ClientDuplexEvent;
+pub const ClientDuplex = stream.ClientDuplex;
+pub const startDuplex = stream.startDuplex;
+pub const DuplexRequestTerminal = stream.DuplexRequestTerminal;
+pub const ServerDuplexEvent = stream.ServerDuplexEvent;
+pub const ServerDuplex = stream.ServerDuplex;
+pub const acceptDuplex = stream.acceptDuplex;
+pub const acceptDuplexWithTimeout = stream.acceptDuplexWithTimeout;
+pub const acceptDuplexWithDeadline = stream.acceptDuplexWithDeadline;
 
 pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
