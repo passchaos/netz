@@ -223,6 +223,19 @@ additionally verifies multi-generation replay, atomic compaction, torn-tail
 truncation, committed corruption rejection, and transactional broker-state
 preservation when the newest image cannot decode.
 
+Journal and change-count autosave are independent durability backends. Every
+recorded durable boundary attempts an eligible autosave even when journal
+encoding, append, or fsync fails, while still returning the journal error before
+the corresponding protocol acknowledgement becomes visible. Normal MQTT 5
+DISCONNECT persists Will cancellation/scheduling and Session Expiry overrides at
+that boundary rather than relying on later socket cleanup. Registration errors
+also journal durable cleanup already performed by expiry or Clean Start. A due
+Will is retried only while no publication effect escaped; once retained or
+durable Session state changes, the Will is consumed and that partial prefix is
+persisted, preventing duplicate delivery on a later deadline pass. Focused
+tests cover journal-failure autosave fallback, graceful Session removal
+recovery, failed Clean Start cleanup, and post-mutation Will failure handling.
+
 ## Equal-wire live broker comparison
 
 `examples/bench_mqtt_broker.zig` is one external MQTT 5 TCP client workload,

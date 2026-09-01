@@ -361,10 +361,25 @@ const RoutePlan = struct {
     has_matching_subscriber: bool,
 };
 
+const WillPublishProgress = struct {
+    /// Any snapshot-visible mutation, including unrelated expiry pruning.
+    persistent_changed: bool = false,
+    /// The Will changed retained state or entered at least one durable Session
+    /// queue. Once true, retrying the claimed Will could duplicate delivery.
+    publication_effect_committed: bool = false,
+};
+
 const Registration = struct {
     subscriber_id: router_mod.SubscriberId,
     replaced_owner_id: ?router_mod.SubscriberId,
     persistent_changed: bool,
+};
+
+const RegistrationProgress = struct {
+    /// Net durable change left after a failed registration is rolled back.
+    /// New provisional Session/Will objects do not count because abort removes
+    /// them; expiry pruning and replacement of prior durable state do.
+    rollback_changed: bool = false,
 };
 
 const EncodedSessionPacket = struct {
@@ -1118,8 +1133,7 @@ pub const Broker = struct {
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         state_locked = false;
-        try self.appendCommitIfEnabled();
-        self.finishPersistentChange(persistent_changed);
+        try self.finalizePersistentChange(true, persistent_changed);
     }
 
     /// Publish a trusted, transport-independent Application Message.
@@ -1157,6 +1171,7 @@ pub const Broker = struct {
             null,
             std.Io.Clock.awake.now(self.io),
             &persistent_changed,
+            null,
         ) catch |err| {
             return err;
         };
@@ -1170,8 +1185,10 @@ pub const Broker = struct {
         // Neither durable I/O nor destination socket writes may hold the
         // global routing lock. The state mutation is complete at this point,
         // so journal it before making the publication visible on the wire.
-        if (persistent_changed) try self.appendCommitIfEnabled();
-        self.finishPersistentChange(persistent_changed);
+        try self.finalizePersistentChange(
+            persistent_changed,
+            persistent_changed,
+        );
         try self.flushPlan(plan);
     }
 
@@ -1262,6 +1279,7 @@ pub const Broker = struct {
                 },
                 null,
                 std.Io.Clock.awake.now(self.io),
+                null,
                 null,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
@@ -1430,13 +1448,39 @@ pub const Broker = struct {
         if (changed) self.autosavePersistentChangesIfNeeded();
     }
 
+    /// Persist an already-recorded durable transition through every enabled
+    /// backend. Journal failures remain synchronous errors because callers may
+    /// be waiting to expose an MQTT acknowledgement, but they must not suppress
+    /// an independently configured best-effort autosave. `append_commit` is
+    /// separate from `changed`: retransmission selection is journaled for its
+    /// wire state even when it does not alter the snapshot representation.
+    fn finalizePersistentChange(
+        self: *Broker,
+        append_commit: bool,
+        changed: bool,
+    ) Error!void {
+        defer self.finishPersistentChange(changed);
+        if (append_commit) try self.appendCommitIfEnabled();
+    }
+
+    /// Variant for callers that already own `persistence_mutex`. The global
+    /// lock order remains persistence then state for both journal and autosave
+    /// capture. Callers must have released `state_mutex` before entering.
+    fn finalizePersistentChangeLocked(
+        self: *Broker,
+        append_commit: bool,
+        changed: bool,
+    ) Error!void {
+        defer self.finishPersistentChangeLocked(changed);
+        if (append_commit) try self.appendCommitIfEnabledLocked();
+    }
+
     /// Preserve a partially completed durable transition without replacing the
     /// operation's original error. Both persistence mechanisms are retried on
     /// later mutations if their best-effort write fails here.
     fn finishPartialPersistentChange(self: *Broker, changed: bool) void {
         if (!changed) return;
-        self.appendCommitIfEnabled() catch {};
-        self.autosavePersistentChangesIfNeeded();
+        self.finalizePersistentChange(true, true) catch {};
     }
 
     fn finishPersistentChangeLocked(self: *Broker, changed: bool) void {
@@ -1448,8 +1492,7 @@ pub const Broker = struct {
         changed: bool,
     ) void {
         if (!changed) return;
-        self.appendCommitIfEnabledLocked() catch {};
-        self.autosavePersistentChangesIfNeededLocked();
+        self.finalizePersistentChangeLocked(true, true) catch {};
     }
 
     fn sessionIsPersistentLocked(
@@ -2244,14 +2287,19 @@ pub const Broker = struct {
                 return null;
             };
         }
+        var registration_progress: RegistrationProgress = .{};
         const registration = self.register(
             index,
             effective_connect,
             listener_authorization.access_control,
+            &registration_progress,
         ) catch |err| {
-            // Registration can prune expired durable Sessions before a later
-            // allocation fails. Retry any checkpoint made due by that work.
-            self.autosavePersistentChangesIfNeeded();
+            // Registration can delete durable state before a later allocation
+            // fails. `register` records that partial transition; persist it to
+            // both configured backends without replacing the original error.
+            self.finishPartialPersistentChange(
+                registration_progress.rollback_changed,
+            );
             return err;
         };
         const subscriber_id = registration.subscriber_id;
@@ -2274,17 +2322,29 @@ pub const Broker = struct {
             self.abortRegistration(
                 index,
                 subscriber_id,
-                registration.persistent_changed,
+                registration_progress.rollback_changed,
             );
+            // The failed append may nevertheless have left a complete record
+            // containing provisional state. Always append the rolled-back
+            // image; only genuine net changes advance change-count autosave.
+            self.finalizePersistentChange(
+                true,
+                registration_progress.rollback_changed,
+            ) catch {};
             return err;
         };
         var accepted = pending.finish(accept_options) catch |err| {
             self.abortRegistration(
                 index,
                 subscriber_id,
-                registration.persistent_changed,
+                registration_progress.rollback_changed,
             );
-            self.finishPartialPersistentChange(registration.persistent_changed);
+            // The provisional record was synced before CONNACK. Append the
+            // rollback even when it restores the original in-memory state.
+            self.finalizePersistentChange(
+                true,
+                registration_progress.rollback_changed,
+            ) catch {};
             return err;
         };
         pending_owned = false;
@@ -2340,6 +2400,7 @@ pub const Broker = struct {
         slot_index: usize,
         connect: mqtt.Connect,
         listener_access_control: ?ListenerAccessControlHandler,
+        progress: *RegistrationProgress,
     ) Error!Registration {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
@@ -2376,7 +2437,10 @@ pub const Broker = struct {
         // identities atomically from the broker's point of view.
         const expired_count = self.pruneExpiredSessionRoutesLocked(now);
         var persistent_changed = expired_count != 0;
-        errdefer self.recordPersistentChangeLocked(persistent_changed);
+        progress.rollback_changed = persistent_changed;
+        errdefer {
+            self.recordPersistentChangeLocked(persistent_changed);
+        }
         var effective_connect = connect;
         if (connect.client_id.len == 0) {
             effective_connect.client_id = self.assignClientIdLocked(
@@ -2398,6 +2462,7 @@ pub const Broker = struct {
         // Clean Start may remove the previous Session before allocating its
         // replacement, so carry that durable deletion through any later error.
         persistent_changed = persistent_changed or previous_session_persistent;
+        progress.rollback_changed = persistent_changed;
         const previous_route_id = if (previous_session_handle) |handle|
             self.sessions.routeId(handle) catch null
         else
@@ -2493,6 +2558,11 @@ pub const Broker = struct {
             // will release both records after publication.
             std.debug.assert(previous_handle != null);
         }
+        // A previous Will canceled or made due by this CONNECT survives abort
+        // as a real lifecycle change. This conservative flag may journal an
+        // already-due Will again, but never misses a cancellation/schedule.
+        progress.rollback_changed = progress.rollback_changed or
+            accepted_will.previous != .no_will;
         slot.will_handle = accepted_will.current;
         if (accepted_will.current) |handle| {
             self.will_publishers.putAssumeCapacityNoClobber(
@@ -2907,23 +2977,29 @@ pub const Broker = struct {
         if (slot.session_handle == null) {
             _ = self.pending_qos2.removePublisher(id);
         }
-        slot.active = false;
         slot.clearQueue();
-        self.recordPersistentChangeLocked(persistent_changed);
-        self.state_mutex.unlock(self.io);
-        state_locked = false;
-        self.deadline_driver.notify(self.io);
-        // Persist disconnect, Session expiry, and Will scheduling before an
-        // orderly close becomes observable to the peer.
-        if (persistent_changed) try self.appendCommitIfEnabled();
-        self.finishPersistentChange(persistent_changed);
-        if (slot.connection) |*value| value.close();
+        // Publish an idle slot only after every field from the old generation
+        // has been detached. `claimSlot` observes this state under the same
+        // mutex, so it can never reserve a slot that still owns a connection.
+        var connection = slot.connection;
         slot.connection = null;
         slot.will_handle = null;
         slot.session_handle = null;
         slot.session_present = false;
         slot.session_persistent = false;
         slot.listener_access_control = null;
+        slot.active = false;
+        self.recordPersistentChangeLocked(persistent_changed);
+        self.state_mutex.unlock(self.io);
+        state_locked = false;
+        self.deadline_driver.notify(self.io);
+        defer if (connection) |*value| value.close();
+        // Persist disconnect, Session expiry, and Will scheduling before an
+        // orderly close becomes observable to the peer.
+        try self.finalizePersistentChange(
+            persistent_changed,
+            persistent_changed,
+        );
     }
 
     fn handleDisconnect(
@@ -3002,7 +3078,10 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         state_locked = false;
         self.deadline_driver.notify(self.io);
-        self.finishPersistentChange(persistent_changed);
+        try self.finalizePersistentChange(
+            persistent_changed,
+            persistent_changed,
+        );
     }
 
     fn handleSubscribe(
@@ -3148,8 +3227,10 @@ pub const Broker = struct {
         state_locked = false;
         // SUBACK makes the subscription durable from the peer's perspective.
         // The journal must reach disk before that acknowledgement is emitted.
-        if (persistent_changed) try self.appendCommitIfEnabled();
-        self.finishPersistentChange(persistent_changed);
+        try self.finalizePersistentChange(
+            persistent_changed,
+            persistent_changed,
+        );
         try connection.writeSubAck(
             subscribe.packet_id,
             reasons,
@@ -3343,8 +3424,10 @@ pub const Broker = struct {
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         state_locked = false;
-        if (persistent_changed) try self.appendCommitIfEnabled();
-        self.finishPersistentChange(persistent_changed);
+        try self.finalizePersistentChange(
+            persistent_changed,
+            persistent_changed,
+        );
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         try connection.writeUnsubAck(
@@ -3527,11 +3610,10 @@ pub const Broker = struct {
 
         // A successful PUBREC promises that this QoS 2 transaction survives a
         // reconnect. Establish the durability point before sending PUBREC.
-        if (persistent_publisher and record_changed) {
-            try self.appendCommitIfEnabled();
-        }
-        self.finishPersistentChange(
-            persistent_publisher and record_changed,
+        const durable_changed = persistent_publisher and record_changed;
+        try self.finalizePersistentChange(
+            durable_changed,
+            durable_changed,
         );
 
         // Mosquitto stores the inbound QoS 2 base message before PUBREC and
@@ -3633,8 +3715,10 @@ pub const Broker = struct {
         // `routeReleasedPublish` journals the routed state before returning.
         // If Message Expiry discarded the Application Message instead, the
         // pending inbound transaction removal is still a durable mutation.
-        if (persistent_changed) try self.appendCommitIfEnabledLocked();
-        self.finishPersistentChangeLocked(persistent_changed);
+        try self.finalizePersistentChangeLocked(
+            persistent_changed,
+            persistent_changed,
+        );
         // Socket delivery is intentionally delayed until after the atomic
         // pending-QoS2 removal/routing persistence transaction above.
         self.persistence_mutex.unlock(self.io);
@@ -3696,6 +3780,7 @@ pub const Broker = struct {
             source_client_id,
             std.Io.Clock.awake.now(self.io),
             &persistent_changed,
+            null,
         ) catch |err| {
             if (outer_changed) |changed| {
                 changed.* = changed.* or persistent_changed;
@@ -3717,11 +3802,10 @@ pub const Broker = struct {
         // therefore recover a state no older than that observable boundary.
         // PUBREL owns the surrounding transaction and appends once after
         // combining inbound removal with any routing mutations.
-        if (count_persistent_change and persistent_changed) {
-            try self.appendCommitIfEnabled();
-        }
-        self.finishPersistentChange(
-            count_persistent_change and persistent_changed,
+        const recorded_change = count_persistent_change and persistent_changed;
+        try self.finalizePersistentChange(
+            recorded_change,
+            recorded_change,
         );
 
         if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
@@ -3758,6 +3842,7 @@ pub const Broker = struct {
         source_client_id: ?[]const u8,
         now: std.Io.Timestamp,
         persistent_changed: ?*bool,
+        publication_effect_committed: ?*bool,
     ) Error!RoutePlan {
         if (self.pruneExpiredSessionRoutesLocked(now) != 0) {
             if (persistent_changed) |changed| changed.* = true;
@@ -3774,6 +3859,7 @@ pub const Broker = struct {
         ) catch |err| return err;
         if (retained_result != .ignored) {
             if (persistent_changed) |changed| changed.* = true;
+            if (publication_effect_committed) |committed| committed.* = true;
         }
         const matches = self.router.matchAllocForPublisher(
             self.allocator,
@@ -3878,15 +3964,28 @@ pub const Broker = struct {
                 continue;
             }
             const changed = persistent_changed orelse &ignored_persistent_change;
-            try self.enqueueSessionDeliveryManyLocked(
+            var route_persistent_changed = false;
+            var route_enqueued = false;
+            self.enqueueSessionDeliveryManyLocked(
                 handle,
                 session_plan.identifiersFor(route),
                 route.retain,
                 route.qos,
                 publish,
                 now,
-                changed,
-            );
+                &route_persistent_changed,
+                &route_enqueued,
+            ) catch |err| {
+                changed.* = changed.* or route_persistent_changed;
+                if (publication_effect_committed) |committed| {
+                    committed.* = committed.* or route_enqueued;
+                }
+                return err;
+            };
+            changed.* = changed.* or route_persistent_changed;
+            if (publication_effect_committed) |committed| {
+                committed.* = committed.* or route_enqueued;
+            }
             if (online) {
                 route.output_subscriber_id =
                     sessionSubscriberId(route.route_id);
@@ -4124,6 +4223,7 @@ pub const Broker = struct {
             publish,
             now,
             persistent_changed,
+            null,
         );
     }
 
@@ -4136,7 +4236,9 @@ pub const Broker = struct {
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
         persistent_changed: *bool,
+        publication_enqueued: ?*bool,
     ) Error!void {
+        if (publication_enqueued) |enqueued| enqueued.* = false;
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         try properties.ensureTotalCapacity(
@@ -4187,9 +4289,11 @@ pub const Broker = struct {
                 return err;
             },
         };
-        _ = result;
         persistent_changed.* = persistent_changed.* or
             (snapshot_changed and self.sessionIsPersistentLocked(handle));
+        if (publication_enqueued) |enqueued| {
+            enqueued.* = result == .queued;
+        }
     }
 
     fn handleSessionAckLocked(
@@ -4439,8 +4543,7 @@ pub const Broker = struct {
                 &take_changed,
             ) catch |err| {
                 if (take_changed) {
-                    try self.appendCommitIfEnabled();
-                    self.finishPersistentChange(true);
+                    try self.finalizePersistentChange(true, true);
                 }
                 return err;
             };
@@ -4448,8 +4551,7 @@ pub const Broker = struct {
                 // Commit logs retain their historical behavior of recording
                 // every selected Session packet, including retransmissions.
                 // Change autosave advances only for snapshot-visible changes.
-                try self.appendCommitIfEnabled();
-                self.finishPersistentChange(take_changed);
+                try self.finalizePersistentChange(true, take_changed);
             }
             if (maybe_packet) |packet_value| {
                 var packet = packet_value;
@@ -4480,8 +4582,7 @@ pub const Broker = struct {
                         self.recordPersistentChangeLocked(persistent_changed);
                         self.state_mutex.unlock(self.io);
                         if (persistent_changed) {
-                            try self.appendCommitIfEnabled();
-                            self.finishPersistentChange(true);
+                            try self.finalizePersistentChange(true, true);
                         }
                         self.recordPublishDropped();
                         continue;
@@ -4536,8 +4637,10 @@ pub const Broker = struct {
                         error.SessionNotFound => {},
                         else => return err,
                     };
-                    if (persistent_changed) try self.appendCommitIfEnabled();
-                    self.finishPersistentChange(persistent_changed);
+                    try self.finalizePersistentChange(
+                        persistent_changed,
+                        persistent_changed,
+                    );
                 }
                 continue;
             }
@@ -4757,23 +4860,24 @@ pub const Broker = struct {
             const now = std.Io.Clock.awake.now(self.io);
             const expired_count = self.pruneExpiredSessionRoutesLocked(now);
             var published_any = false;
+            var persistent_changed = expired_count != 0;
             self.publishDueWillsLocked(
                 now,
                 &published_any,
+                &persistent_changed,
             ) catch |err| {
-                // Completed Wills from earlier iterations remain committed;
-                // the failing claim itself has been returned to the heap.
-                const persistent_changed = published_any or
-                    expired_count != 0;
                 self.recordPersistentChangeLocked(persistent_changed);
                 self.state_mutex.unlock(self.io);
                 if (persistent_changed) {
-                    self.appendCommitIfEnabled() catch {};
-                    self.finishPersistentChange(true);
+                    self.finalizePersistentChange(true, true) catch {};
                 }
+                // A prior Will, or a failing Will with a partially committed
+                // publication, may already have populated live/durable queues.
+                // Preserve the original route error while making that prefix
+                // observable exactly once.
+                if (published_any) self.flushAllSlots() catch {};
                 return err;
             };
-            const persistent_changed = published_any or expired_count != 0;
             self.recordPersistentChangeLocked(persistent_changed);
             // `$SYS` publication itself uses the state lock and ordinary
             // routing. Decide whether it is due here, but advance the next
@@ -4810,8 +4914,10 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
 
             if (published_any or expired_count != 0) {
-                self.appendCommitIfEnabled() catch |err| return err;
-                self.finishPersistentChange(persistent_changed);
+                try self.finalizePersistentChange(
+                    persistent_changed,
+                    persistent_changed,
+                );
             }
             if (published_any) {
                 self.flushAllSlots() catch |err| return err;
@@ -4847,15 +4953,30 @@ pub const Broker = struct {
         self: *Broker,
         now: std.Io.Timestamp,
         published_any: *bool,
+        persistent_changed: *bool,
     ) Error!void {
         while (self.wills.pollOneDue(now)) |handle| {
-            self.publishWillLocked(handle, now) catch |err| {
-                // `pollOneDue` removes the entry from its heap. Roll that
-                // claim back when routing cannot commit, otherwise the Will
-                // becomes unreachable and every live snapshot stays busy.
-                self.wills.retryDue(handle) catch {};
+            var progress: WillPublishProgress = .{};
+            self.publishWillLocked(handle, now, &progress) catch |err| {
+                persistent_changed.* = persistent_changed.* or
+                    progress.persistent_changed;
+                if (progress.publication_effect_committed) {
+                    // Some Will effect is already durable. Retrying would add
+                    // a second copy to every Session reached before the error.
+                    self.wills.releaseDue(handle) catch unreachable;
+                    _ = self.will_publishers.remove(handle);
+                    persistent_changed.* = true;
+                    published_any.* = true;
+                } else {
+                    // No Will effect escaped, so preserve its original deadline
+                    // and retry on the next driver turn.
+                    self.wills.retryDue(handle) catch unreachable;
+                }
                 return err;
             };
+            self.wills.releaseDue(handle) catch unreachable;
+            _ = self.will_publishers.remove(handle);
+            persistent_changed.* = true;
             published_any.* = true;
         }
     }
@@ -4870,7 +4991,9 @@ pub const Broker = struct {
         self: *Broker,
         handle: will_mod.Handle,
         now: std.Io.Timestamp,
+        progress: *WillPublishProgress,
     ) Error!void {
+        progress.* = .{};
         const will = try self.wills.view(handle);
         const publisher_id = self.will_publishers.get(handle) orelse null;
         var properties: std.ArrayList(mqtt.Property) = .empty;
@@ -4912,29 +5035,186 @@ pub const Broker = struct {
                     // A denied Will is consumed, not postponed. This mirrors
                     // Mosquitto's publication-time write ACL and prevents a
                     // later policy change from resurrecting the same Will.
-                    try self.wills.releaseDue(handle);
-                    _ = self.will_publishers.remove(handle);
                     return;
                 }
             }
         }
-        var persistent_changed = false;
         const plan = try self.enqueuePublishLocked(
             publisher_id,
             publish,
             will.client_id,
             now,
-            &persistent_changed,
+            &progress.persistent_changed,
+            &progress.publication_effect_committed,
         );
         defer self.allocator.free(plan.storage);
-        try self.wills.releaseDue(handle);
-        _ = self.will_publishers.remove(handle);
 
         // The state lock cannot be held across socket writes. Queue ownership
         // is committed at this point; the timer loop releases the lock before
         // flushing all active slots below.
     }
 };
+
+test "MQTT Will route failure consumes a partially committed publication" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+        },
+        .retained = .{ .max_messages = 1 },
+    });
+    defer broker.deinit();
+    const now = std.Io.Clock.awake.now(io);
+
+    const handle = try broker.wills.set(
+        "partial-will",
+        .{
+            .topic = "will/partial",
+            .payload = "committed-once",
+            .qos = .at_least_once,
+            .retain = true,
+        },
+        60,
+    );
+    try broker.will_publishers.put(allocator, handle, null);
+    _ = broker.wills.close(handle, .session_ended, now) catch unreachable;
+
+    // Fail the route-plan allocation only. The retained store and router own
+    // their original allocator, while match allocation uses Broker.allocator.
+    try broker.router.subscribe(1, .{ .topic_filter = "will/#" });
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    broker.allocator = failing.allocator();
+    var published_any = false;
+    var persistent_changed = false;
+    const result = broker.publishDueWillsLocked(
+        now,
+        &published_any,
+        &persistent_changed,
+    );
+    broker.allocator = allocator;
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expect(published_any);
+    try std.testing.expect(persistent_changed);
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+    var retained_storage: [1]retained_mod.Match = undefined;
+    const retained = try broker.retained.matchInto(
+        "will/partial",
+        now,
+        &retained_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retained.len);
+    try std.testing.expectEqualStrings(
+        "committed-once",
+        retained[0].payload,
+    );
+    try std.testing.expect(broker.wills.pollOneDue(now) == null);
+}
+
+test "MQTT failed Clean Start journals the durable deletion" {
+    const backing = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(backing, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var failing = std.testing.FailingAllocator.init(backing, .{});
+    var broker = try Broker.init(failing.allocator(), io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+        },
+        .session = .{ .max_sessions = 2 },
+    });
+    defer broker.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const now = std.Io.Clock.awake.now(io);
+    const old = try broker.sessions.open(
+        "failed-clean-start",
+        false,
+        60,
+        now,
+    );
+    _ = try broker.sessions.setSubscription(
+        old.handle,
+        .{ .topic_filter = "failed/clean/#", .qos = .at_least_once },
+        null,
+    );
+    _ = try broker.router.subscribeWithIdentifierStatus(
+        sessionSubscriberId(old.route_id),
+        .{ .topic_filter = "failed/clean/#", .qos = .at_least_once },
+        null,
+    );
+    _ = try broker.pending_qos2.record(
+        sessionSubscriberId(old.route_id),
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "failed/clean/inbound",
+            .packet_id = 91,
+            .properties = &.{},
+            .payload = "must-not-return",
+        },
+        now,
+    );
+    try broker.sessions.disconnect(old.handle, null, now);
+    try broker.createCommitLog(tmp.dir, "failed-clean.log", .{});
+
+    // Reserve the connection queue before arming failure so registration
+    // reaches the allocation immediately after Clean Start removes the old
+    // durable Session. The out-progress bit must survive that error.
+    const slot_index = try broker.claimSlot();
+    try broker.slots[slot_index].queue.ensureTotalCapacity(
+        broker.allocator,
+        broker.options.limits.max_queued_deliveries_per_connection,
+    );
+    var progress: RegistrationProgress = .{};
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        broker.register(
+            slot_index,
+            .{
+                .protocol = .v5,
+                .clean_start = true,
+                .keep_alive_seconds = 30,
+                .client_id = "failed-clean-start",
+            },
+            null,
+            &progress,
+        ),
+    );
+    try std.testing.expect(progress.rollback_changed);
+    failing.fail_index = std.math.maxInt(usize);
+    broker.finishPartialPersistentChange(progress.rollback_changed);
+
+    var restored = try Broker.init(backing, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+        },
+    });
+    defer restored.deinit();
+    try restored.restoreCommitLog(tmp.dir, "failed-clean.log", .{});
+    try std.testing.expect(restored.sessions.find(
+        "failed-clean-start",
+        std.Io.Clock.awake.now(io),
+    ) == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        restored.router.subscriptionCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        restored.pending_qos2.count(),
+    );
+}
 
 const ClientTask = struct {
     broker: *Broker,
@@ -5035,13 +5315,13 @@ const ClientTask = struct {
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
                     if (session_ack.persistent_changed) {
-                        task.broker.appendCommitIfEnabled() catch |err| {
+                        task.broker.finalizePersistentChange(
+                            true,
+                            true,
+                        ) catch |err| {
                             slot.writer_mutex.unlock(task.broker.io);
                             return err;
                         };
-                        task.broker.finishPersistentChange(
-                            session_ack.persistent_changed,
-                        );
                     }
                     if (!session_ack.owned) connection.applyPubAck(
                         owned.ack,
@@ -5073,13 +5353,13 @@ const ClientTask = struct {
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
                     if (session_ack.persistent_changed) {
-                        task.broker.appendCommitIfEnabled() catch |err| {
+                        task.broker.finalizePersistentChange(
+                            true,
+                            true,
+                        ) catch |err| {
                             slot.writer_mutex.unlock(task.broker.io);
                             return err;
                         };
-                        task.broker.finishPersistentChange(
-                            session_ack.persistent_changed,
-                        );
                     }
                     if (!session_ack.owned) connection.applyPubRec(
                         owned.ack,
@@ -5121,13 +5401,13 @@ const ClientTask = struct {
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
                     if (session_ack.persistent_changed) {
-                        task.broker.appendCommitIfEnabled() catch |err| {
+                        task.broker.finalizePersistentChange(
+                            true,
+                            true,
+                        ) catch |err| {
                             slot.writer_mutex.unlock(task.broker.io);
                             return err;
                         };
-                        task.broker.finishPersistentChange(
-                            session_ack.persistent_changed,
-                        );
                     }
                     if (!session_ack.owned) connection.applyPubComp(
                         owned.ack,

@@ -500,6 +500,58 @@ test "MQTT persistent change autosave failure is best effort and retryable" {
     _ = try tmp.dir.statFile(io, "missing/checkpoint.db", .{});
 }
 
+test "MQTT journal failure still services change autosave" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "fallback.db",
+        1,
+    );
+    defer broker.deinit();
+
+    // The initial empty snapshot fits, but any retained publication makes the
+    // next journal record exceed this deliberately tiny record bound.
+    try broker.createCommitLog(tmp.dir, "broker.log", .{
+        .max_record_bytes = 128,
+        .max_file_bytes = 4096,
+    });
+    try std.testing.expectError(
+        error.CommitRecordTooLarge,
+        broker.publishLocal(.{
+            .dup = false,
+            .qos = .at_most_once,
+            .retain = true,
+            .topic = "autosave/journal-failure",
+            .packet_id = null,
+            .properties = &.{},
+            .payload = "this durable mutation must reach the independent autosave",
+        }),
+    );
+    _ = try tmp.dir.statFile(io, "fallback.db", .{});
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "fallback.db");
+    var storage: [1]mqtt.retained.Match = undefined;
+    const matches = try restored.retained.matchInto(
+        "autosave/journal-failure",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqualStrings(
+        "this durable mutation must reach the independent autosave",
+        matches[0].payload,
+    );
+}
+
 test "MQTT persistent change autosave counts durable Session enqueue" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1041,6 +1093,116 @@ test "MQTT broker commit log persists acknowledgement boundaries" {
         @as(usize, 1),
         (try restored.sessions.stats(handle)).queued_count,
     );
+}
+
+test "MQTT broker commit log persists graceful Session removal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 8,
+        } },
+    );
+    var source_owned = true;
+    defer if (source_owned) source.deinit();
+    try source.createCommitLog(tmp.dir, "disconnect.log", .{});
+
+    var serve = struct {
+        broker: *Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(1) catch |err| {
+                self.err = err;
+            };
+        }
+    }{ .broker = &source };
+    const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
+    var joined = false;
+    defer if (!joined) {
+        for (source.slots) |*slot| {
+            if (slot.connection) |*connection| connection.shutdown() catch {};
+        }
+        thread.join();
+    };
+
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    var client = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        source.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "journal-disconnect",
+            .clean_start = false,
+            .properties = &expiry,
+            .will = delayedWill(30, false),
+        },
+    );
+    var client_owned = true;
+    defer if (client_owned) client.close();
+    var suback = try client.subscribe(
+        &.{.{
+            .topic_filter = "journal/disconnect/#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    suback.deinit(allocator);
+    const remove_session = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 0,
+    } }};
+    try client.writeDisconnectWithProperties(0, &remove_session);
+    while (true) {
+        var scratch: [1]u8 = undefined;
+        var bufs = [_][]u8{&scratch};
+        const read_result = client.transport.tcp.io.vtable.netRead(
+            client.transport.tcp.io.userdata,
+            client.transport.tcp.stream.socket.handle,
+            &bufs,
+        );
+        if (read_result) |count| {
+            if (count == 0) break;
+        } else |err| switch (err) {
+            error.SocketUnconnected, error.ConnectionResetByPeer => break,
+            else => return err,
+        }
+    }
+    client.close();
+    client_owned = false;
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+    source.deinit();
+    source_owned = false;
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreCommitLog(tmp.dir, "disconnect.log", .{});
+    try std.testing.expect(restored.sessions.find(
+        "journal-disconnect",
+        std.Io.Clock.awake.now(io),
+    ) == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        restored.router.subscriptionCount(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), restored.wills.count());
 }
 
 test "MQTT snapshot deducts downtime from message and Session expiry" {
