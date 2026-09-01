@@ -1235,6 +1235,19 @@ pub const Hpack = struct {
             self.* = undefined;
         }
 
+        /// Deep-copy compression state for speculative validation. A caller
+        /// can decode queued field sections without advancing the live
+        /// connection table, then later decode their retained wire bytes once.
+        pub fn clone(
+            self: Decoder,
+            allocator: std.mem.Allocator,
+        ) !Decoder {
+            return .{
+                .dynamic_table = try self.dynamic_table.clone(allocator),
+                .max_dynamic_table_size = self.max_dynamic_table_size,
+            };
+        }
+
         pub fn setMaxDynamicTableSize(self: *Decoder, allocator: std.mem.Allocator, max_size: usize) void {
             self.max_dynamic_table_size = max_size;
             if (self.dynamic_table.size_limit > max_size) self.dynamic_table.setLimit(allocator, max_size);

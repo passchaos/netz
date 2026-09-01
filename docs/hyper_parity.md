@@ -980,6 +980,18 @@ keep-alive, cancellation and GOAWAY gate remains green.
    completes stream 7, and Hyper refuses a subsequent request. Both cases run
    over h2c and certificate-verified TLS, so this is peer-visible draining
    evidence rather than inference from local GOAWAY tests.
+   The connection API also exposes Hyper/h2-style two-phase graceful shutdown:
+   `gracefulShutdown`, `gracefulShutdownWithTimeout`, and
+   `gracefulShutdownWithDeadline` first send `GOAWAY(2^31-1, NO_ERROR)`, wait
+   for the exact fixed shutdown-PING acknowledgement while preserving
+   interleaved application frames, and then narrow GOAWAY to the highest
+   validated and admitted peer stream. If a lower local GOAWAY already exists,
+   it remains the upper bound rather than being widened. A bounded wait keeps
+   its original awake-clock deadline and an ACK-read timeout can be retried
+   without resending either the first GOAWAY or the PING. The deadline covers
+   that synchronization read; transport writes retain their blocking contract,
+   and a write error is terminal because an unknown frame prefix may have
+   reached the peer. Callers must give shutdown exclusive frame-reader access.
    `zig build interop-http2-h2-push -Doptimize=ReleaseFast` adds direct
    server-push evidence with Hyper's audited low-level h2 dependency, because
    Hyper's high-level client intentionally sends SETTINGS_ENABLE_PUSH=0. In

@@ -58,6 +58,9 @@ const default_max_header_list_size: usize = 16 * 1024;
 // occupies the first pair and leaves room for three DATA frames.
 const max_data_frames_per_write: usize = 4;
 const max_data_frames_with_headers: usize = 3;
+const graceful_shutdown_ping_payload = [8]u8{
+    0x0b, 0x7b, 0xa2, 0xf0, 0x8b, 0x9b, 0xfe, 0x54,
+};
 
 const DataSliceCursor = struct {
     slices: []const []const u8,
@@ -2977,6 +2980,18 @@ pub const Connection = struct {
     /// DATA semantics remain owned by the eventual request/response reader.
     pending_application_frames: std.ArrayList(OwnedFrame) = .empty,
     pending_application_frame_head: usize = 0,
+    /// New request streams seen by the graceful-shutdown PING pump are
+    /// admitted before the final GOAWAY boundary is selected, but their raw
+    /// HEADERS remain queued so HPACK is decoded exactly once in wire order.
+    graceful_preadmitted_peer_streams: std.ArrayList(u31) = .empty,
+    /// Highest request stream ID admitted before graceful preadmission began.
+    /// It lets an allocation failure undo only speculative admissions without
+    /// resurrecting streams that ordinary application reads had accepted.
+    graceful_preadmit_base_stream_id: ?u31 = null,
+    /// Shadow HPACK state advances across preadmission checks in exact wire
+    /// order. The live decoder remains untouched until queued frames are later
+    /// delivered to the application request reader.
+    graceful_preadmit_decoder: ?http2.Hpack.Decoder = null,
     /// Scratch readers expose borrowed slices. When their next frame comes
     /// from the owning pending queue, retain that allocation until the next
     /// connection read invalidates the borrow.
@@ -3002,6 +3017,15 @@ pub const Connection = struct {
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
+    /// Two-phase server shutdown sends its maximum GOAWAY exactly once, then
+    /// resumes the fixed PING barrier after a bounded wait times out.
+    graceful_shutdown_phase: enum {
+        open,
+        synchronizing,
+        synchronized,
+        complete,
+        failed,
+    } = .open,
     /// An aggregate request/response timeout may leave a partially decoded
     /// HPACK block or DATA sequence whose ownership cannot be reconstructed by
     /// a later call. Fail closed instead of allowing subsequent operations or
@@ -3071,6 +3095,10 @@ pub const Connection = struct {
         }
         for (self.pending_application_frames.items[self.pending_application_frame_head..]) |*frame| frame.deinit(self.allocator);
         self.pending_application_frames.deinit(self.allocator);
+        self.graceful_preadmitted_peer_streams.deinit(self.allocator);
+        if (self.graceful_preadmit_decoder) |*decoder| {
+            decoder.deinit(self.allocator);
+        }
         if (self.pending_application_overflow) |*frame| {
             frame.deinit(self.allocator);
         }
@@ -5689,11 +5717,8 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
-                    if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
-                    if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
-                    try self.reservePeerStream(stream_id);
+                    try self.claimPeerRequestStream(stream_id);
                     errdefer self.releasePeerStream(stream_id);
-                    self.last_peer_client_stream_id = stream_id;
                     active_stream_id = stream_id;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
 
@@ -5840,11 +5865,8 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
-                    if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
-                    if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
-                    try self.reservePeerStream(stream_id);
+                    try self.claimPeerRequestStream(stream_id);
                     errdefer self.releasePeerStream(stream_id);
-                    self.last_peer_client_stream_id = stream_id;
                     active_stream_id = stream_id;
                     const headers = try self.readHeaderBlockUntil(
                         frame.frame,
@@ -6188,14 +6210,8 @@ pub const Connection = struct {
             }
 
             const stream_id = first.frame.header.stream_id;
-            if (!clientInitiatedStreamId(stream_id) or
-                stream_id <= self.last_peer_client_stream_id)
-            {
-                return error.InvalidFrame;
-            }
-            try self.reservePeerStream(stream_id);
+            try self.claimPeerRequestStream(stream_id);
             errdefer self.releasePeerStream(stream_id);
-            self.last_peer_client_stream_id = stream_id;
             active_stream_id = stream_id;
 
             const headers = self.readHeaderBlockUntil(
@@ -6483,17 +6499,11 @@ pub const Connection = struct {
                         return error.UnexpectedFrame;
                     }
                     const stream_id = frame.header.stream_id;
-                    if (!clientInitiatedStreamId(stream_id) or
-                        stream_id <= self.last_peer_client_stream_id)
-                    {
-                        return error.InvalidFrame;
-                    }
-                    try self.reservePeerStream(stream_id);
+                    try self.claimPeerRequestStream(stream_id);
                     var stream_reserved = true;
                     errdefer if (stream_reserved) {
                         self.releasePeerStream(stream_id);
                     };
-                    self.last_peer_client_stream_id = stream_id;
 
                     const headers = try self.readHeaderBlock(frame);
                     var headers_owned = true;
@@ -6696,6 +6706,20 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!frame_io.BorrowedFrame {
+        while (true) {
+            const frame = try self.readBufferedFrameRawWithDeadline(deadline);
+            if (try self.discardFrameAboveGracefulBoundaryUntil(
+                frame.frame,
+                deadline,
+            )) continue;
+            return frame;
+        }
+    }
+
+    fn readBufferedFrameRawWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!frame_io.BorrowedFrame {
         // A scratch borrow lasts until the next read. Release the owning frame
         // retained for the previous borrow before replacing its storage.
         if (self.borrowed_pending_frame) |*previous| {
@@ -6738,6 +6762,23 @@ pub const Connection = struct {
     }
 
     fn readOwnedFrameWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedFrame {
+        while (true) {
+            var frame = try self.readOwnedFrameRawWithDeadline(deadline);
+            if (try self.discardFrameAboveGracefulBoundaryUntil(
+                frame.frame,
+                deadline,
+            )) {
+                frame.deinit(self.allocator);
+                continue;
+            }
+            return frame;
+        }
+    }
+
+    fn readOwnedFrameRawWithDeadline(
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
@@ -6822,12 +6863,144 @@ pub const Connection = struct {
         try self.pending_application_frames.append(self.allocator, frame);
     }
 
+    fn ensurePendingApplicationFrameCapacity(
+        self: *Connection,
+    ) Error!void {
+        if (self.pendingApplicationFrameCount() >=
+            self.limits.max_pending_ping_frames)
+        {
+            return error.MessageTooLarge;
+        }
+        if (self.pending_application_frame_head != 0 and
+            self.pending_application_frames.items.len ==
+                self.pending_application_frames.capacity)
+        {
+            self.compactPendingApplicationFrames();
+        }
+        try self.pending_application_frames.ensureUnusedCapacity(
+            self.allocator,
+            1,
+        );
+    }
+
     fn recoverPendingApplicationFrameAfterQueueFailure(
         self: *Connection,
         frame: OwnedFrame,
     ) void {
         std.debug.assert(self.pending_application_overflow == null);
         self.pending_application_overflow = frame;
+    }
+
+    fn gracefulPreadmittedIndex(
+        self: *const Connection,
+        stream_id: u31,
+    ) ?usize {
+        for (self.graceful_preadmitted_peer_streams.items, 0..) |id, index| {
+            if (id == stream_id) return index;
+        }
+        return null;
+    }
+
+    /// Claim an initial request HEADERS frame. The graceful PING pump may have
+    /// already reserved the stream so its admission is reflected in the final
+    /// GOAWAY; in that case the eventual request reader consumes only the
+    /// marker and must not reserve or advance the stream a second time.
+    fn claimPeerRequestStream(
+        self: *Connection,
+        stream_id: u31,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
+        if (self.gracefulPreadmittedIndex(stream_id)) |index| {
+            _ = self.graceful_preadmitted_peer_streams.orderedRemove(index);
+            return;
+        }
+        if (stream_id <= self.last_peer_client_stream_id) {
+            return error.InvalidFrame;
+        }
+        try self.reservePeerStream(stream_id);
+        self.last_peer_client_stream_id = stream_id;
+    }
+
+    fn rollbackGracefulPreadmissions(self: *Connection) void {
+        for (self.graceful_preadmitted_peer_streams.items) |stream_id| {
+            self.releasePeerStream(stream_id);
+            self.forgetStreamWindows(stream_id);
+        }
+        self.graceful_preadmitted_peer_streams.clearRetainingCapacity();
+        if (self.graceful_preadmit_base_stream_id) |base| {
+            self.last_peer_client_stream_id = base;
+        }
+        self.graceful_preadmit_base_stream_id = null;
+        self.clearGracefulPreadmitDecoder();
+    }
+
+    /// Admit a request stream observed after phase-one GOAWAY but before the
+    /// synchronization ACK. Its HEADERS remains encoded in the pending queue,
+    /// preserving connection-wide HPACK order for the application reader.
+    fn preadmitGracefulPeerRequest(
+        self: *Connection,
+        frame: http2.Frame,
+    ) Error!bool {
+        if (self.role != .server or
+            self.graceful_shutdown_phase != .synchronizing or
+            frame.header.frame_type != .headers)
+        {
+            return false;
+        }
+        const stream_id = frame.header.stream_id;
+        if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
+        if (self.local_goaway_last_stream_id) |last| {
+            if (stream_id > last) return false;
+        }
+        // HEADERS on an existing stream are trailers, not a new request.
+        if (stream_id <= self.last_peer_client_stream_id) return false;
+        // Only a complete field section can be validated without consuming
+        // more transport frames before this frame itself is queued. Keep the
+        // fragmented block losslessly queued, but fail shutdown rather than
+        // publishing a final boundary that incorrectly declares it retryable.
+        if ((frame.header.flags & flag_end_headers) == 0) {
+            return error.ResponseAvailable;
+        }
+        const started_shadow = self.graceful_preadmit_decoder == null;
+        if (started_shadow) {
+            self.graceful_preadmit_decoder =
+                try self.hpack_decoder.clone(self.allocator);
+            self.graceful_preadmit_base_stream_id =
+                self.last_peer_client_stream_id;
+        }
+        errdefer if (started_shadow and
+            self.graceful_preadmitted_peer_streams.items.len == 0)
+        {
+            self.graceful_preadmit_base_stream_id = null;
+            self.clearGracefulPreadmitDecoder();
+        };
+        const parsed = try http2.HeadersPayload.parse(frame);
+        const headers = try self.graceful_preadmit_decoder.?
+            .decodeBlockOwnedWithLimit(
+            self.allocator,
+            parsed.header_block,
+            self.limits.max_header_fields,
+            self.limits.max_header_list_size,
+        );
+        defer freeHeaders(self.allocator, headers);
+        try validateHeaderBlock(headers, .request);
+        _ = try requestHeaderLookup(headers);
+        try self.graceful_preadmitted_peer_streams.ensureUnusedCapacity(
+            self.allocator,
+            1,
+        );
+        try self.reservePeerStream(stream_id);
+        self.graceful_preadmitted_peer_streams.appendAssumeCapacity(stream_id);
+        self.last_peer_client_stream_id = stream_id;
+        return true;
+    }
+
+    fn clearGracefulPreadmitDecoder(self: *Connection) void {
+        if (self.graceful_preadmit_decoder) |*decoder| {
+            decoder.deinit(self.allocator);
+        }
+        self.graceful_preadmit_decoder = null;
     }
 
     fn popPendingRequest(self: *Connection) ?OwnedRequest {
@@ -6910,14 +7083,11 @@ pub const Connection = struct {
         if (frame.header.frame_type != .headers) return false;
         if ((frame.header.flags & flag_end_stream) == 0) return false;
         const stream_id = frame.header.stream_id;
-        if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
-        if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
-        try self.reservePeerStream(stream_id);
+        try self.claimPeerRequestStream(stream_id);
         var release_stream_on_error = true;
         errdefer if (release_stream_on_error) {
             self.releasePeerStream(stream_id);
         };
-        self.last_peer_client_stream_id = stream_id;
 
         const headers = self.readHeaderBlockUntil(frame, deadline) catch |err| {
             if (deadline != null and err == error.Timeout) {
@@ -7979,6 +8149,9 @@ pub const Connection = struct {
     /// payload. Use `pingWithTimeout` for liveness probes against peers that
     /// may remain connected without ever answering.
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
+        if (std.mem.eql(u8, &data, &graceful_shutdown_ping_payload)) {
+            return error.InvalidFrame;
+        }
         return self.pingUntil(data, null);
     }
 
@@ -7995,6 +8168,9 @@ pub const Connection = struct {
         timeout: std.Io.Duration,
     ) Error![8]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (std.mem.eql(u8, &data, &graceful_shutdown_ping_payload)) {
+            return error.InvalidFrame;
+        }
         const deadline = std.Io.Clock.Timestamp.fromNow(
             self.io,
             .{ .raw = timeout, .clock = .awake },
@@ -8012,7 +8188,151 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error![8]u8 {
         const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        if (std.mem.eql(u8, &data, &graceful_shutdown_ping_payload)) {
+            return error.InvalidFrame;
+        }
         return self.pingUntil(data, absolute);
+    }
+
+    /// Complete the recommended two-phase HTTP/2 server shutdown handshake.
+    /// Existing streams remain usable; the final GOAWAY rejects later request
+    /// stream IDs beyond the synchronized processing boundary. This call must
+    /// be the connection's sole frame reader for its duration.
+    pub fn gracefulShutdown(self: *Connection) Error!void {
+        return self.gracefulShutdownUntil(null);
+    }
+
+    pub fn gracefulShutdownWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (self.graceful_shutdown_phase == .failed) {
+            return error.ConnectionClosed;
+        }
+        if (self.graceful_shutdown_phase == .complete or
+            self.graceful_shutdown_phase == .synchronized)
+        {
+            return self.gracefulShutdownUntil(null);
+        }
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.gracefulShutdownUntil(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Use one absolute awake-clock budget for the synchronization ACK. Frame
+    /// writes retain the transport's blocking semantics; a write error is
+    /// terminal because an unknown frame prefix may already be on the wire.
+    pub fn gracefulShutdownWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (self.graceful_shutdown_phase == .failed) {
+            return error.ConnectionClosed;
+        }
+        if (self.graceful_shutdown_phase == .complete or
+            self.graceful_shutdown_phase == .synchronized)
+        {
+            return self.gracefulShutdownUntil(null);
+        }
+        return self.gracefulShutdownUntil(
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
+    }
+
+    fn gracefulShutdownUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (self.graceful_shutdown_phase == .failed) {
+            return error.ConnectionClosed;
+        }
+        if (self.graceful_shutdown_phase == .complete) return;
+
+        if (self.graceful_shutdown_phase == .open) {
+            if (self.local_goaway_last_stream_id == null) {
+                self.sendGoAway(
+                    std.math.maxInt(u31),
+                    .no_error,
+                    &.{},
+                ) catch |err| {
+                    // Stream writes expose no committed-byte count. An error
+                    // can therefore leave a partial frame (or TLS record) on
+                    // the wire; replaying it would corrupt framing.
+                    self.graceful_shutdown_phase = .failed;
+                    return err;
+                };
+            }
+            if (self.pending_application_overflow != null) {
+                return error.MessageTooLarge;
+            }
+            writeFrameTransport(
+                self.allocator,
+                self.transportForIo(),
+                .ping,
+                0,
+                0,
+                &graceful_shutdown_ping_payload,
+            ) catch |err| {
+                self.graceful_shutdown_phase = .failed;
+                return err;
+            };
+            // `.synchronizing` means one complete probe is outstanding. Only
+            // a read timeout is resumable; no retry can ever retransmit it.
+            self.graceful_shutdown_phase = .synchronizing;
+        }
+
+        if (self.graceful_shutdown_phase == .synchronizing) {
+            _ = self.waitForPingAckUntil(
+                graceful_shutdown_ping_payload,
+                deadline,
+            ) catch |err| {
+                if (err == error.Timeout) return err;
+                if (err == error.MessageTooLarge or
+                    err == error.ResponseAvailable)
+                {
+                    self.rollbackGracefulPreadmissions();
+                    // The next frame is retained, but the connection-level
+                    // PING ACK may still be in flight. Require the application
+                    // to drain and restart shutdown explicitly rather than
+                    // silently choosing a boundary from rolled-back state.
+                    self.graceful_shutdown_phase = .failed;
+                    return err;
+                }
+                // A failed PING response/control write is indistinguishable
+                // from a partially committed frame and cannot be retried.
+                self.graceful_shutdown_phase = .failed;
+                return err;
+            };
+            // Keep this distinct from `.complete`: if the final GOAWAY write
+            // begins, no later call may wait for an ACK already consumed.
+            self.graceful_shutdown_phase = .synchronized;
+            self.clearGracefulPreadmitDecoder();
+            self.graceful_preadmit_base_stream_id = null;
+        }
+        const boundary = @min(
+            self.local_goaway_last_stream_id orelse std.math.maxInt(u31),
+            self.lastPeerProcessedStreamId(),
+        );
+        self.sendGoAway(
+            boundary,
+            .no_error,
+            &.{},
+        ) catch |err| {
+            self.graceful_shutdown_phase = .failed;
+            return err;
+        };
+        self.graceful_shutdown_phase = .complete;
+        // Markers are needed only to let already-queued HEADERS bypass the
+        // monotonic admission check. They stay until those requests are read.
+    }
+
+    pub fn gracefulShutdownComplete(self: Connection) bool {
+        return self.graceful_shutdown_phase == .complete;
     }
 
     /// Run one inactivity-triggered keep-alive cycle on this blocking
@@ -8106,6 +8426,17 @@ pub const Connection = struct {
             return error.MessageTooLarge;
         }
         try writeFrameTransport(self.allocator, self.transportForIo(), .ping, 0, 0, &data);
+        return self.waitForPingAckUntil(data, deadline);
+    }
+
+    /// Wait for an already-written PING without emitting another copy. This is
+    /// used by retryable graceful-shutdown deadlines so timeout retries do not
+    /// create multiple indistinguishable synchronization probes.
+    fn waitForPingAckUntil(
+        self: *Connection,
+        data: [8]u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error![8]u8 {
         while (true) {
             // Do not consume the pending queue here: those frames predate this
             // PING and waiting on them would cycle them back into that queue.
@@ -8142,15 +8473,23 @@ pub const Connection = struct {
             };
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
-            self.queuePendingApplicationFrame(frame) catch |err| {
-                // The current frame was removed from the wire as well, so
-                // retain it even when allocating the queue slot fails. A
-                // subsequent protocol read can still recover it instead of
-                // observing a silent gap in HPACK or stream ordering.
+            self.ensurePendingApplicationFrameCapacity() catch |err| {
                 self.recoverPendingApplicationFrameAfterQueueFailure(frame);
                 frame_owned = false;
                 return err;
             };
+            _ = self.preadmitGracefulPeerRequest(
+                frame.frame,
+            ) catch |err| {
+                // Admission can allocate after the frame has left transport.
+                // Preserve it as the next application frame on every failure.
+                self.recoverPendingApplicationFrameAfterQueueFailure(frame);
+                frame_owned = false;
+                return err;
+            };
+            // Capacity was secured before mutating stream admission, so this
+            // append cannot strand a preadmitted stream on allocation error.
+            self.pending_application_frames.appendAssumeCapacity(frame);
             frame_owned = false;
         }
     }
@@ -8484,6 +8823,50 @@ pub const Connection = struct {
         return true;
     }
 
+    /// RFC 9113 permits a peer to race stream creation against the final
+    /// GOAWAY. Frames above that boundary are ignored rather than turning a
+    /// graceful drain into a connection failure. HEADERS must still be HPACK
+    /// decoded so connection-wide compression state remains synchronized. DATA
+    /// still consumes connection credit, which is immediately released because
+    /// no application will ever own that payload.
+    fn discardFrameAboveGracefulBoundaryUntil(
+        self: *Connection,
+        frame: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!bool {
+        if (self.role != .server or
+            self.graceful_shutdown_phase != .complete or
+            frame.header.stream_id == 0 or
+            !clientInitiatedStreamId(frame.header.stream_id) or
+            frame.header.stream_id <=
+                (self.local_goaway_last_stream_id orelse return false))
+        {
+            return false;
+        }
+        switch (frame.header.frame_type) {
+            .headers => {
+                const headers = try self.readHeaderBlockRawUntil(
+                    frame,
+                    deadline,
+                );
+                freeHeaders(self.allocator, headers);
+            },
+            .data => {
+                _ = try http2.DataPayload.parse(frame);
+                try self.recv_connection_window.receive(frame.payload.len);
+                try self.releaseConnectionCapacity(frame.payload.len);
+            },
+            .rst_stream => _ = try http2.ResetStreamPayload.parse(frame),
+            .window_update => _ = try http2.WindowUpdatePayload.parse(frame),
+            .priority => _ = try http2.PriorityPayload.parse(frame),
+            // A bare CONTINUATION is invalid regardless of GOAWAY. Valid
+            // continuations are consumed by the HEADERS branch above.
+            .continuation => return error.UnexpectedFrame,
+            else => {},
+        }
+        return true;
+    }
+
     fn recordResetStream(
         self: *Connection,
         reset: http2.ResetStreamPayload,
@@ -8794,6 +9177,12 @@ pub const Connection = struct {
     }
 
     fn reservePeerStream(self: *Connection, stream_id: u31) Error!void {
+        if (self.role == .server and
+            self.graceful_shutdown_phase == .complete and
+            stream_id > (self.local_goaway_last_stream_id orelse 0))
+        {
+            return error.ConnectionGoAway;
+        }
         const was_priority_reserved =
             self.priority_state.containsIdleRequest(stream_id);
         if (self.limits.max_concurrent_streams) |max_streams| {
@@ -10136,6 +10525,23 @@ pub const Connection = struct {
         first: http2.Frame,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error![]http2.Hpack.HeaderField {
+        return self.readHeaderBlockMaybeRawUntil(first, deadline, false);
+    }
+
+    fn readHeaderBlockRawUntil(
+        self: *Connection,
+        first: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error![]http2.Hpack.HeaderField {
+        return self.readHeaderBlockMaybeRawUntil(first, deadline, true);
+    }
+
+    fn readHeaderBlockMaybeRawUntil(
+        self: *Connection,
+        first: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+        raw_continuations: bool,
+    ) Error![]http2.Hpack.HeaderField {
         if (first.header.frame_type != .headers) return error.UnexpectedFrame;
         const first_headers = try http2.HeadersPayload.parse(first);
         if (first_headers.priority) |priority| {
@@ -10159,7 +10565,10 @@ pub const Connection = struct {
             var continuation_count: usize = 0;
             const max_continuations = self.maxContinuationFrames();
             while ((flags & flag_end_headers) == 0) {
-                var frame = try self.readOwnedFrameWithDeadline(deadline);
+                var frame = if (raw_continuations)
+                    try self.readOwnedFrameRawWithDeadline(deadline)
+                else
+                    try self.readOwnedFrameWithDeadline(deadline);
                 defer frame.deinit(self.allocator);
                 if (frame.frame.header.frame_type != .continuation or
                     frame.frame.header.stream_id != first.header.stream_id)
@@ -14374,6 +14783,707 @@ test "HTTP/2 readWindowUpdate handles interleaved PING" {
     try std.testing.expectEqual(@as(u31, 0), update.window_update.stream_id);
     try std.testing.expectEqual(@as(u31, 777), update.window_update.increment);
     try std.testing.expectEqual(@as(i64, default_flow_window + 777), client.send_connection_window.value);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 graceful shutdown sends maximum GOAWAY ping and final boundary" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            connection.last_peer_client_stream_id = 3;
+            try connection.gracefulShutdown();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var first = try client.readGoAway();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(std.math.maxInt(u31), first.goaway.last_stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.no_error, first.goaway.error_code);
+
+    const shutdown_payload = [_]u8{ 0x0b, 0x7b, 0xa2, 0xf0, 0x8b, 0x9b, 0xfe, 0x54 };
+    const observed = try client.readPing();
+    try std.testing.expectEqualSlices(u8, &shutdown_payload, &observed);
+
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 3), final.goaway.last_stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.no_error, final.goaway.error_code);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 graceful shutdown admits request HEADERS before final GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        path: ?[]u8 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try connection.gracefulShutdown();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            self.path = try self.server.allocator.dupe(u8, request.path);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    defer if (shared.path) |path| allocator.free(path);
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+
+    var first = try client.readGoAway();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(std.math.maxInt(u31), first.goaway.last_stream_id);
+    var ping_frame = try client.readOwnedFrame();
+    defer ping_frame.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.ping, ping_frame.frame.header.frame_type);
+    const ping_data = (try http2.PingPayload.parse(ping_frame.frame)).data;
+    try std.testing.expectEqualSlices(
+        u8,
+        &graceful_shutdown_ping_payload,
+        &ping_data,
+    );
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/during-shutdown" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "localhost" },
+    });
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .headers,
+        flag_end_headers | flag_end_stream,
+        1,
+        block.items,
+    );
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .ping,
+        flag_ack,
+        0,
+        &graceful_shutdown_ping_payload,
+    );
+
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), final.goaway.last_stream_id);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("/during-shutdown", shared.path.?);
+}
+
+test "HTTP/2 graceful shutdown preadmits dependent HPACK blocks in order" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try connection.gracefulShutdown();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/one", first.path);
+            try std.testing.expectEqualStrings("/two", second.path);
+            try std.testing.expectEqualStrings(
+                "shared",
+                findHeader(second.headers, "x-dynamic").?,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    var initial = try client.readGoAway();
+    defer initial.deinit(allocator);
+    var ping_frame = try client.readOwnedFrame();
+    defer ping_frame.deinit(allocator);
+
+    var encoder = http2.Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    const block_one = try allocator.dupe(u8, try encoder.encodeBlockRetained(
+        allocator,
+        &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":path", .value = "/one" },
+            .{ .name = ":scheme", .value = "http" },
+            .{ .name = "x-dynamic", .value = "shared" },
+        },
+    ));
+    defer allocator.free(block_one);
+    const block_two = try allocator.dupe(u8, try encoder.encodeBlockRetained(
+        allocator,
+        &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":path", .value = "/two" },
+            .{ .name = ":scheme", .value = "http" },
+            .{ .name = "x-dynamic", .value = "shared" },
+        },
+    ));
+    defer allocator.free(block_two);
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 1, block_one);
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 3, block_two);
+    try writeFrame(allocator, io, client.stream, .ping, flag_ack, 0, &graceful_shutdown_ping_payload);
+
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 3), final.goaway.last_stream_id);
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 graceful shutdown ignores stale PING ACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try connection.gracefulShutdown();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    var first = try client.readGoAway();
+    defer first.deinit(allocator);
+    var ping_frame = try client.readOwnedFrame();
+    defer ping_frame.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.ping, ping_frame.frame.header.frame_type);
+
+    const stale = [_]u8{ 1, 3, 3, 7, 0, 0, 0, 1 };
+    try writeFrame(allocator, io, client.stream, .ping, flag_ack, 0, &stale);
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .ping,
+        flag_ack,
+        0,
+        &graceful_shutdown_ping_payload,
+    );
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 0), final.goaway.last_stream_id);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 graceful shutdown rejects client role before writing" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(error.UnexpectedFrame, connection.gracefulShutdown());
+    try std.testing.expectEqual(@as(?u31, null), connection.local_goaway_last_stream_id);
+}
+
+test "HTTP/2 graceful shutdown reserves its synchronization PING" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(
+        error.InvalidFrame,
+        connection.ping(graceful_shutdown_ping_payload),
+    );
+}
+
+test "HTTP/2 completed graceful shutdown ignores expired wait budgets" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+        .graceful_shutdown_phase = .complete,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try connection.gracefulShutdownWithTimeout(.zero);
+    try connection.gracefulShutdownWithDeadline(.{
+        .raw = .zero,
+        .clock = .real,
+    });
+}
+
+test "HTTP/2 graceful shutdown write failure is terminal" {
+    const FailingWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(header.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var writer: FailingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = FailingWriter.write;
+    const io = std.Io{ .userdata = &writer, .vtable = &vtable };
+    var connection = Connection{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(error.NetworkDown, connection.gracefulShutdown());
+    const writes = writer.writes;
+    try std.testing.expectError(error.ConnectionClosed, connection.gracefulShutdown());
+    try std.testing.expectEqual(writes, writer.writes);
+}
+
+test "HTTP/2 graceful shutdown synchronized phase ignores expired deadline" {
+    const RecordingWriter = struct {
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            splat: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var total = header.len;
+            for (data[0 .. data.len - 1]) |part| total += part.len;
+            total += data[data.len - 1].len * splat;
+            self.bytes.appendSlice(std.testing.allocator, header) catch {
+                return error.SystemResources;
+            };
+            for (data[0 .. data.len - 1]) |part| {
+                self.bytes.appendSlice(std.testing.allocator, part) catch {
+                    return error.SystemResources;
+                };
+            }
+            var repeated: usize = 0;
+            while (repeated < splat) : (repeated += 1) {
+                self.bytes.appendSlice(
+                    std.testing.allocator,
+                    data[data.len - 1],
+                ) catch return error.SystemResources;
+            }
+            return total;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    defer writer.bytes.deinit(std.testing.allocator);
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+        .local_goaway_last_stream_id = std.math.maxInt(u31),
+        .graceful_shutdown_phase = .synchronized,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try connection.gracefulShutdownWithDeadline(.{
+        .raw = .zero,
+        .clock = .real,
+    });
+    try std.testing.expect(connection.gracefulShutdownComplete());
+    const frame = try http2.Frame.parse(writer.bytes.items);
+    try std.testing.expectEqual(http2.FrameType.goaway, frame.header.frame_type);
+    try std.testing.expectEqual(
+        @as(u31, 0),
+        (try http2.GoAwayPayload.parse(frame)).last_stream_id,
+    );
+}
+
+test "HTTP/2 graceful shutdown timeout resumes one outstanding ping" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        io: std.Io,
+        first_ping_seen: std.Io.Event = .unset,
+        allow_ack: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+                shared.first_ping_seen.set(shared.io);
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            // The client side drives graceful shutdown in this white-box test;
+            // it needs a server-role connection without a second frame reader.
+            var connection = try shared.server.accept();
+            defer connection.close();
+            // The peer SETTINGS ACK is the final handshake frame queued by
+            // Client.connect; consume it before observing shutdown frames.
+            while (true) {
+                var frame = try readFrame(
+                    shared.server.allocator,
+                    shared.io,
+                    connection.stream,
+                    shared.server.limits,
+                );
+                defer frame.deinit(shared.server.allocator);
+                if (frame.frame.header.frame_type == .settings and
+                    (frame.frame.header.flags & flag_ack) != 0)
+                {
+                    break;
+                }
+            }
+            var first = try readFrame(
+                shared.server.allocator,
+                shared.io,
+                connection.stream,
+                shared.server.limits,
+            );
+            defer first.deinit(shared.server.allocator);
+            try std.testing.expectEqual(http2.FrameType.goaway, first.frame.header.frame_type);
+            var ping = try readFrame(
+                shared.server.allocator,
+                shared.io,
+                connection.stream,
+                shared.server.limits,
+            );
+            defer ping.deinit(shared.server.allocator);
+            try std.testing.expectEqual(http2.FrameType.ping, ping.frame.header.frame_type);
+            try std.testing.expectEqual(@as(u8, 0), ping.frame.header.flags & flag_ack);
+            shared.first_ping_seen.set(shared.io);
+            try shared.allow_ack.wait(shared.io);
+            try writeFrame(
+                shared.server.allocator,
+                shared.io,
+                connection.stream,
+                .ping,
+                flag_ack,
+                0,
+                ping.frame.payload,
+            );
+            var final = try readFrame(
+                shared.server.allocator,
+                shared.io,
+                connection.stream,
+                shared.server.limits,
+            );
+            defer final.deinit(shared.server.allocator);
+            try std.testing.expectEqual(http2.FrameType.goaway, final.frame.header.frame_type);
+            try std.testing.expectEqual(@as(u31, 0), (try http2.GoAwayPayload.parse(final.frame)).last_stream_id);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.allow_ack.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    client.role = .server;
+    try std.testing.expectError(
+        error.Timeout,
+        client.gracefulShutdownWithTimeout(.fromMilliseconds(20)),
+    );
+    try shared.first_ping_seen.wait(io);
+    shared.allow_ack.set(io);
+    try client.gracefulShutdownWithTimeout(.fromSeconds(1));
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 graceful shutdown narrows an existing local GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try connection.sendGoAway(7, .no_error, "draining");
+            try connection.gracefulShutdown();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+
+    var first = try client.readGoAway();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 7), first.goaway.last_stream_id);
+    const ping_data = try client.readPing();
+    try std.testing.expectEqualSlices(
+        u8,
+        &graceful_shutdown_ping_payload,
+        &ping_data,
+    );
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 0), final.goaway.last_stream_id);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 graceful shutdown ignores streams above final boundary" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try connection.gracefulShutdown();
+            // Stream 1 is above the final zero boundary. Its HEADERS must be
+            // decoded and ignored so the following connection PING remains
+            // usable rather than surfacing ConnectionGoAway.
+            const observed = try connection.readPing();
+            try std.testing.expectEqualSlices(
+                u8,
+                &[_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 },
+                &observed,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    var first = try client.readGoAway();
+    defer first.deinit(allocator);
+    _ = try client.readPing();
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 0), final.goaway.last_stream_id);
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/too-late" },
+        .{ .name = ":scheme", .value = "http" },
+    });
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .headers,
+        flag_end_headers | flag_end_stream,
+        1,
+        block.items,
+    );
+    const payload = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    try writeFrame(allocator, io, client.stream, .ping, 0, 0, &payload);
+    while (true) {
+        var frame = try client.readOwnedFrame();
+        defer frame.deinit(allocator);
+        if (frame.frame.header.frame_type != .ping) continue;
+        try std.testing.expect((frame.frame.header.flags & flag_ack) != 0);
+        break;
+    }
 
     thread.join();
     if (shared.err) |err| return err;
