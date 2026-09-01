@@ -5,6 +5,7 @@ const mqtt = context.mqtt_mod;
 const ServeState = context.ServeStateType;
 const testBroker = context.testBrokerFn;
 const connectWithOptions = context.connectWithOptionsFn;
+const disconnectAll = context.disconnectAllFn;
 const joinServer = context.joinServerFn;
 const waitForPeerClose = context.waitForPeerCloseFn;
 
@@ -24,6 +25,16 @@ fn connectV311(
             .client_id = client_id,
             .clean_start = clean_session,
         },
+    );
+}
+
+fn expectNoClientPacket(
+    connection: *context.runtime_mod.Connection,
+    timeout: std.Io.Duration,
+) !void {
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readClientPacketEventWithTimeout(timeout),
     );
 }
 
@@ -518,6 +529,177 @@ test "broker enforces unsubscribe and outgoing delivery access control" {
     try subscriber.disconnect(0);
     try publisher.disconnect(0);
     try allowed_reader.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker returns mixed MQTT 5 SUBACK reasons for ACL denial and subscription quota" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            subscription: mqtt.Subscription,
+        ) bool {
+            return !std.mem.eql(
+                u8,
+                subscription.topic_filter,
+                "quota/v5/denied",
+            );
+        }
+    };
+    var policy_context: u8 = 0;
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .session = .{ .max_subscriptions_per_session = 1 },
+            .access_control = .{
+                .context = &policy_context,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "quota-v5-publisher" },
+    );
+    defer publisher.close();
+    var subscriber = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "quota-v5-subscriber" },
+    );
+    defer subscriber.close();
+
+    try publisher.publish(
+        "quota/v5/denied",
+        "denied-retained",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+    try publisher.publish(
+        "quota/v5/allowed",
+        "allowed-retained",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+    try publisher.publish(
+        "quota/v5/overflow",
+        "overflow-retained",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+
+    var suback = try subscriber.subscribe(
+        &.{
+            .{ .topic_filter = "quota/v5/denied", .qos = .at_least_once },
+            .{ .topic_filter = "quota/v5/allowed", .qos = .at_least_once },
+            .{ .topic_filter = "quota/v5/overflow", .qos = .at_least_once },
+        },
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x87, 0x01, 0x97 },
+        suback.suback.reason_codes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        broker.router.subscriptionCount(),
+    );
+
+    var retained = try subscriber.readPublish();
+    defer retained.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "quota/v5/allowed",
+        retained.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "allowed-retained",
+        retained.publish.payload,
+    );
+    try std.testing.expect(retained.publish.retain);
+    try subscriber.writePubAck(retained.publish.packet_id.?, 0);
+    try expectNoClientPacket(
+        &subscriber,
+        std.Io.Duration.fromMilliseconds(50),
+    );
+
+    var unsuback = try subscriber.unsubscribe(
+        &.{"quota/v5/allowed"},
+        .{},
+    );
+    defer unsuback.deinit(allocator);
+    var reused_suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "quota/v5/overflow",
+            .qos = .at_least_once,
+            .retain_handling = 2,
+        }},
+        .{},
+    );
+    defer reused_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{0x01},
+        reused_suback.suback.reason_codes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        broker.router.subscriptionCount(),
+    );
+
+    try publisher.publish(
+        "quota/v5/overflow",
+        "overflow-live",
+        .{ .qos = .at_least_once },
+    );
+
+    var live = try subscriber.readPublish();
+    defer live.deinit(allocator);
+    try std.testing.expectEqualStrings("quota/v5/overflow", live.publish.topic);
+    try std.testing.expectEqualStrings("overflow-live", live.publish.payload);
+    try std.testing.expect(!live.publish.retain);
+    try subscriber.writePubAck(live.publish.packet_id.?, 0);
+    try expectNoClientPacket(
+        &subscriber,
+        std.Io.Duration.fromMilliseconds(50),
+    );
+
+    try subscriber.ping();
+    try disconnectAll(&.{ &publisher, &subscriber });
     try joinServer(thread, &joined, &serve);
 }
 
@@ -1279,6 +1461,280 @@ test "broker downgrades MQTT 3.1.1 QoS 2 quota rejection handshake" {
     defer held_pubcomp.deinit(allocator);
     try held.disconnect(0);
     try rejected.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker returns mixed MQTT 3.1.1 SUBACK results for subscription quota" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .session = .{ .max_subscriptions_per_session = 1 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var publisher = try connectV311(
+        allocator,
+        io,
+        broker,
+        "quota-v311-publisher",
+        true,
+    );
+    defer publisher.close();
+    var subscriber = try connectV311(
+        allocator,
+        io,
+        broker,
+        "quota-v311-subscriber",
+        true,
+    );
+    defer subscriber.close();
+
+    try publisher.publish(
+        "quota/v311/allowed",
+        "allowed-retained",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+    try publisher.publish(
+        "quota/v311/overflow",
+        "overflow-retained",
+        .{ .qos = .at_least_once, .retain = true },
+    );
+
+    var suback = try subscriber.subscribe(
+        &.{
+            .{ .topic_filter = "quota/v311/allowed", .qos = .at_least_once },
+            .{ .topic_filter = "quota/v311/overflow", .qos = .at_least_once },
+        },
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x80 },
+        suback.suback.reason_codes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        broker.router.subscriptionCount(),
+    );
+
+    var retained = try subscriber.readPublish();
+    defer retained.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "quota/v311/allowed",
+        retained.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "allowed-retained",
+        retained.publish.payload,
+    );
+    try std.testing.expect(retained.publish.retain);
+    try subscriber.writePubAck(retained.publish.packet_id.?, 0);
+    try expectNoClientPacket(
+        &subscriber,
+        std.Io.Duration.fromMilliseconds(50),
+    );
+
+    try publisher.publish(
+        "quota/v311/allowed",
+        "allowed-live",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "quota/v311/overflow",
+        "overflow-live",
+        .{ .qos = .at_least_once },
+    );
+
+    var live = try subscriber.readPublish();
+    defer live.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "quota/v311/allowed",
+        live.publish.topic,
+    );
+    try std.testing.expectEqualStrings("allowed-live", live.publish.payload);
+    try std.testing.expect(!live.publish.retain);
+    try subscriber.writePubAck(live.publish.packet_id.?, 0);
+    try expectNoClientPacket(
+        &subscriber,
+        std.Io.Duration.fromMilliseconds(50),
+    );
+
+    try subscriber.ping();
+    try disconnectAll(&.{ &publisher, &subscriber });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker preserves existing subscription replacement at capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        fn publish(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            _: mqtt.Publish,
+        ) bool {
+            return true;
+        }
+
+        fn subscribe(
+            _: *anyopaque,
+            _: mqtt.Connect,
+            subscription: mqtt.Subscription,
+        ) bool {
+            return !std.mem.eql(
+                u8,
+                subscription.topic_filter,
+                "quota/replacement/denied",
+            );
+        }
+    };
+    var policy_context: u8 = 0;
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .session = .{ .max_subscriptions_per_session = 1 },
+            .access_control = .{
+                .context = &policy_context,
+                .authorize_publish = Policy.publish,
+                .authorize_subscribe = Policy.subscribe,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "quota-replacement-publisher" },
+    );
+    defer publisher.close();
+    var subscriber = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "quota-replacement-subscriber" },
+    );
+    defer subscriber.close();
+
+    var initial_suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "quota/replacement/existing",
+            .qos = .at_most_once,
+        }},
+        .{},
+    );
+    defer initial_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{0x00},
+        initial_suback.suback.reason_codes,
+    );
+
+    var replacement_suback = try subscriber.subscribe(
+        &.{
+            .{
+                .topic_filter = "quota/replacement/existing",
+                .qos = .at_least_once,
+                .retain_handling = 2,
+            },
+            .{
+                .topic_filter = "quota/replacement/denied",
+                .qos = .at_least_once,
+            },
+            .{
+                .topic_filter = "quota/replacement/new",
+                .qos = .at_least_once,
+            },
+        },
+        .{},
+    );
+    defer replacement_suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x87, 0x97 },
+        replacement_suback.suback.reason_codes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        broker.router.subscriptionCount(),
+    );
+
+    try publisher.publish(
+        "quota/replacement/existing",
+        "existing-live",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "quota/replacement/denied",
+        "denied-live",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "quota/replacement/new",
+        "new-live",
+        .{ .qos = .at_least_once },
+    );
+
+    var live = try subscriber.readPublish();
+    defer live.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "quota/replacement/existing",
+        live.publish.topic,
+    );
+    try std.testing.expectEqualStrings("existing-live", live.publish.payload);
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, live.publish.qos);
+    try subscriber.writePubAck(live.publish.packet_id.?, 0);
+    try expectNoClientPacket(
+        &subscriber,
+        std.Io.Duration.fromMilliseconds(50),
+    );
+
+    try subscriber.ping();
+    try disconnectAll(&.{ &publisher, &subscriber });
     try joinServer(thread, &joined, &serve);
 }
 

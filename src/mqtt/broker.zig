@@ -3095,8 +3095,20 @@ pub const Broker = struct {
                 session_handle,
                 granted,
                 subscription_identifier,
-            ) catch |err| {
-                return err;
+            ) catch |err| switch (err) {
+                // MQTT lets one SUBSCRIBE packet carry several filters. Hitting
+                // the per-session subscription cap for one new filter must not
+                // tear down the connection or hide earlier successes in the
+                // same packet. Existing filters still reach the in-place
+                // replacement path inside `setSubscription`, so only truly new
+                // over-limit filters land here.
+                error.SubscriptionLimitExceeded => {
+                    reasons[index] = subscriptionQuotaExceededReason(
+                        connection.protocol,
+                    );
+                    continue;
+                },
+                else => return err,
             };
             persistent_changed = persistent_changed or !unchanged;
             const route_id = try self.sessions.routeId(session_handle);
@@ -5616,6 +5628,14 @@ fn subscriptionDeniedReason(protocol: mqtt.ProtocolVersion) u8 {
     // MQTT 3.1.1 uses the generic SUBACK failure byte. MQTT 5 can expose the
     // precise Not Authorized reason without terminating the connection.
     return if (protocol == .v5) 0x87 else 0x80;
+}
+
+fn subscriptionQuotaExceededReason(protocol: mqtt.ProtocolVersion) u8 {
+    // MQTT 5 can distinguish the broker's configured subscription-capacity
+    // bound from ACL denial. MQTT 3.1.1 exposes only the generic SUBACK
+    // failure byte while still allowing other filters in the packet to
+    // succeed.
+    return if (protocol == .v5) 0x97 else 0x80;
 }
 
 fn unsubscribeDeniedReason(protocol: mqtt.ProtocolVersion) u8 {
