@@ -1260,6 +1260,22 @@ pub const Limits = struct {
     /// `send_body` path instead of requiring one whole message to fit in a
     /// single UDP frame datagram.
     max_stream_frame_data: usize = 1200,
+    /// Development-runtime retained raw QUIC datagram count.
+    ///
+    /// Streaming request/response readers in this lightweight runtime own the
+    /// shared UDP socket. Packets that also carry QUIC DATAGRAM frames must be
+    /// retained here after their STREAM/RESET frames are parsed so protocol
+    /// adapters such as WebTransport can later observe the datagram without
+    /// racing the socket or losing mixed packets.
+    max_queued_runtime_datagrams: usize = 16,
+    /// Development-runtime retained raw QUIC datagram byte budget.
+    ///
+    /// The queue owns whole parsed UDP packets, not only DATAGRAM payloads, so
+    /// the byte limit is charged against each retained packet's raw receive
+    /// storage. Oldest-drop semantics match QUIC DATAGRAM unreliability and
+    /// prevent a slow adapter from turning the shared reader into an unbounded
+    /// packet cache.
+    max_queued_runtime_datagram_bytes: usize = 64 * 1024,
     /// Maximum number of 1xx response heads accepted on one request or push
     /// stream before the final response. The bound applies in aggregate and
     /// incremental modes even when the application ignores those heads. This
@@ -2730,12 +2746,22 @@ fn findQpackStaticName(name: []const u8) ?u64 {
 pub const Server = struct {
     quic_server: quic.runtime.Server,
     limits: Limits = .{},
+    /// Serializes ownership of the UDP receive loop. It is deliberately not
+    /// held while a response is sent, so an accept waiter cannot block an
+    /// established session's outbound control traffic.
     request_receive_mutex: std.Io.Mutex = .init,
+    /// Protects the per-peer parser, lifecycle, and retained-DATAGRAM state.
+    /// Receive loops take this only while polling or applying one packet.
+    peer_state_mutex: std.Io.Mutex = .init,
     request_streams: DevelopmentRequestStreamSet,
     /// The development endpoint may receive stream zero from many peers. Each
     /// peer therefore owns an independent HTTP/3 parser/lifecycle namespace;
     /// keying only by stream ID would merge unrelated clients.
     streaming_peers: DevelopmentServerPeerSet,
+    runtime_datagrams: DevelopmentRetainedDatagramQueue,
+    /// Monotonic development-runtime mode flag. Both reads and writes are
+    /// protected by `peer_state_mutex`; receive ownership alone is not enough
+    /// because response and nonblocking poll APIs may inspect it concurrently.
     streaming_mode: bool = false,
     response_send_mutex: std.Io.Mutex = .init,
 
@@ -2760,10 +2786,16 @@ pub const Server = struct {
                 limits.max_stream_buffer,
                 limits.max_concurrent_request_streams,
             ),
+            .runtime_datagrams = .init(
+                allocator,
+                limits.max_queued_runtime_datagrams,
+                limits.max_queued_runtime_datagram_bytes,
+            ),
         };
     }
 
     pub fn deinit(self: *Server) void {
+        self.runtime_datagrams.deinit();
         self.streaming_peers.deinit();
         self.request_streams.deinit();
         self.quic_server.deinit();
@@ -2813,7 +2845,6 @@ pub const Server = struct {
         self: *Server,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedRequest {
-        if (self.streaming_mode) return error.UnexpectedStream;
         if (deadline != null) {
             // A bounded receive must not spend an unbounded interval behind
             // another task that currently owns the shared endpoint reader.
@@ -2826,6 +2857,15 @@ pub const Server = struct {
             );
         }
         defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+        {
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+            defer self.peer_state_mutex.unlock(
+                self.quic_server.endpoint.io,
+            );
+            if (self.streaming_mode) return error.UnexpectedStream;
+        }
 
         var assembled = while (true) {
             if (try self.request_streams.takeReady()) |ready| break ready;
@@ -2856,8 +2896,9 @@ pub const Server = struct {
     }
 
     /// Receive one event from the persistent cleartext request-stream parser.
-    /// Once selected, streaming and aggregate receives cannot be mixed on the
-    /// same endpoint because both APIs own the same UDP reader.
+    /// The first streaming receive adopts any aggregate-mode partial streams
+    /// before it reads more UDP packets, so a timed-out aggregate receive does
+    /// not strand its bytes when a protocol adapter takes over the endpoint.
     pub fn receiveRequestEvent(self: *Server) Error!StreamingRequestEvent {
         return self.receiveRequestEventInternal(null) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -2887,14 +2928,157 @@ pub const Server = struct {
         return self.receiveRequestEventInternal(deadline);
     }
 
-    fn receiveRequestEventInternal(
+    /// Wait for the initial HEADERS of the next request without repeatedly
+    /// surfacing unread DATA from already-active streams. Protocol adapters
+    /// use this while accepting additional long-lived CONNECT sessions.
+    pub fn receiveRequestHead(self: *Server) Error!StreamingRequestEvent {
+        return self.receiveRequestHeadInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveRequestHeadWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestHeadInternal(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveRequestHeadWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveRequestHeadInternal(deadline);
+    }
+
+    fn receiveRequestHeadInternal(
         self: *Server,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
-        if (self.request_streams.entries.items.len != 0) {
-            return error.UnexpectedStream;
+        try self.lockRequestReceive(deadline);
+        defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+        try self.enterStreamingMode();
+        while (true) {
+            const ready = blk: {
+                self.peer_state_mutex.lockUncancelable(
+                    self.quic_server.endpoint.io,
+                );
+                defer self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                break :blk self.streaming_peers.pollRequestHead();
+            };
+            if (try ready) |event| {
+                return event;
+            }
+            var datagram = if (deadline) |absolute|
+                try self.quic_server.receiveWithDeadline(absolute)
+            else
+                try self.quic_server.receive();
+            defer datagram.deinit(self.quic_server.endpoint.allocator);
+            {
+                self.peer_state_mutex.lockUncancelable(
+                    self.quic_server.endpoint.io,
+                );
+                defer self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                try self.processDevelopmentRequestDatagram(&datagram);
+            }
         }
-        self.streaming_mode = true;
+    }
+
+    pub fn receiveRequestEventFor(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!StreamingRequestEvent {
+        return self.receiveRequestEventForInternal(from, stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveRequestEventForWithTimeout(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestEventForInternal(from, stream_id, .fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveRequestEventForWithDeadline(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveRequestEventForInternal(from, stream_id, deadline);
+    }
+
+    fn receiveRequestEventForInternal(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        try self.lockRequestReceive(deadline);
+        defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+        try self.enterStreamingMode();
+        while (true) {
+            const ready = blk: {
+                self.peer_state_mutex.lockUncancelable(
+                    self.quic_server.endpoint.io,
+                );
+                defer self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                break :blk self.streaming_peers.pollRequestEventFor(
+                    from,
+                    stream_id,
+                );
+            };
+            if (try ready) |event| return event;
+            var datagram = if (deadline) |absolute|
+                try self.quic_server.receiveWithDeadline(absolute)
+            else
+                try self.quic_server.receive();
+            defer datagram.deinit(self.quic_server.endpoint.allocator);
+            {
+                self.peer_state_mutex.lockUncancelable(
+                    self.quic_server.endpoint.io,
+                );
+                defer self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                try self.processDevelopmentRequestDatagram(&datagram);
+            }
+        }
+    }
+
+    fn lockRequestReceive(
+        self: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (deadline != null) {
             if (!self.request_receive_mutex.tryLock()) {
                 return error.ConcurrencyUnavailable;
@@ -2904,23 +3088,147 @@ pub const Server = struct {
                 self.quic_server.endpoint.io,
             );
         }
+    }
+
+    /// Enter streaming mode while the caller owns `request_receive_mutex`.
+    ///
+    /// Aggregate receives retain partial request streams across deadlines. A
+    /// later long-lived CONNECT adapter must be able to take over that same
+    /// endpoint without either rejecting the call or abandoning those bytes.
+    /// Transfer every aggregate receive state into the per-peer incremental
+    /// parser before publishing the mode switch. The transfer is transactional
+    /// under allocation failure, and `peer_state_mutex` owns both the flag and
+    /// the destination parser state observed by response/poll APIs.
+    fn enterStreamingMode(self: *Server) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        try self.streaming_peers.adoptBufferedRequests(&self.request_streams);
+        self.streaming_mode = true;
+    }
+
+    fn receiveRequestEventInternal(
+        self: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        try self.lockRequestReceive(deadline);
         defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+        try self.enterStreamingMode();
 
         while (true) {
-            if (try self.pollRequestEvent()) |event| return event;
+            const ready = blk: {
+                self.peer_state_mutex.lockUncancelable(
+                    self.quic_server.endpoint.io,
+                );
+                defer self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                break :blk self.streaming_peers.pollRequestEvent();
+            };
+            if (try ready) |event| {
+                return event;
+            }
             var datagram = if (deadline) |absolute|
                 try self.quic_server.receiveWithDeadline(absolute)
             else
                 try self.quic_server.receive();
             defer datagram.deinit(self.quic_server.endpoint.allocator);
-            try self.processDevelopmentRequestDatagram(&datagram);
+            {
+                self.peer_state_mutex.lockUncancelable(
+                    self.quic_server.endpoint.io,
+                );
+                defer self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                try self.processDevelopmentRequestDatagram(&datagram);
+            }
         }
     }
 
     /// Return an already-buffered request event without reading UDP.
     pub fn pollRequestEvent(self: *Server) Error!?StreamingRequestEvent {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
         if (!self.streaming_mode) return null;
         return self.streaming_peers.pollRequestEvent();
+    }
+
+    /// Return one retained raw QUIC datagram without reading UDP.
+    ///
+    /// Development STREAM/Capsule readers remain the sole endpoint receive
+    /// owner. Packets that also carry QUIC DATAGRAM frames are queued here
+    /// after their stream frames are parsed so adapters such as WebTransport
+    /// can observe datagrams without racing the socket or losing mixed-frame
+    /// packets.
+    pub fn pollDatagram(self: *Server) ?quic.runtime.OwnedDatagram {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        return self.runtime_datagrams.pop();
+    }
+
+    pub fn receiveDatagram(self: *Server) Error!quic.runtime.OwnedDatagram {
+        return self.receiveDatagramInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveDatagramWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDatagramInternal(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveDatagramInternal(deadline);
+    }
+
+    fn receiveDatagramInternal(
+        self: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        try self.lockRequestReceive(deadline);
+        defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+        try self.enterStreamingMode();
+        while (true) {
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+            if (self.runtime_datagrams.pop()) |datagram| {
+                self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+                return datagram;
+            }
+            self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+            var datagram = if (deadline) |absolute|
+                try self.quic_server.receiveWithDeadline(absolute)
+            else
+                try self.quic_server.receive();
+            defer datagram.deinit(self.quic_server.endpoint.allocator);
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+            defer self.peer_state_mutex.unlock(
+                self.quic_server.endpoint.io,
+            );
+            try self.processDevelopmentRequestDatagram(&datagram);
+        }
     }
 
     pub fn readRequestData(
@@ -2929,6 +3237,10 @@ pub const Server = struct {
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
         return self.streaming_peers.readRequestData(from, stream_id, out);
     }
 
@@ -2937,6 +3249,10 @@ pub const Server = struct {
         from: net.IpAddress,
         stream_id: u62,
     ) Error!usize {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
         return self.streaming_peers.skipRequestData(from, stream_id);
     }
 
@@ -2973,6 +3289,10 @@ pub const Server = struct {
                 frame.stream,
             );
         }
+        try retainDevelopmentDatagramFrames(
+            &self.runtime_datagrams,
+            datagram.*,
+        );
     }
 
     pub fn receiveRequestsConcurrent(self: *Server, count: usize) Error!OwnedRequestBatch {
@@ -3065,6 +3385,51 @@ pub const Server = struct {
         try sendRuntimeStreamMessage(&self.quic_server.endpoint, to, stream_id, encoded.items, self.limits.max_stream_frame_data);
     }
 
+    /// Emit one informational response on an admitted streaming request. The
+    /// next final response continues at the recorded stream offset.
+    pub fn sendInformationalResponse(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.InformationalResponse,
+    ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        const peer = self.streaming_peers.find(to) orelse
+            return error.UnexpectedStream;
+        if (peer.unusable) return error.ConnectionUnusable;
+        if (!self.streaming_mode or !peer.lifecycle.contains(stream_id) or
+            peer.outbound_bodies.find(stream_id) != null)
+        {
+            return error.UnexpectedStream;
+        }
+        self.response_send_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
+        peer.stream_send_scratch.reset();
+        try response.writeDynamic(
+            &peer.stream_send_scratch.encoded,
+            self.quic_server.endpoint.allocator,
+            development_settings,
+            stream_id,
+            &peer.qpack_encode,
+        );
+        try sendRuntimeResponsePrefix(
+            &self.quic_server.endpoint,
+            to,
+            &peer.stream_send_scratch,
+            stream_id,
+            self.limits.max_stream_frame_data,
+            &peer.response_send_offsets,
+        ) catch |err| {
+            peer.unusable = true;
+            return err;
+        };
+    }
+
     pub fn startResponse(
         self: *Server,
         to: net.IpAddress,
@@ -3072,6 +3437,12 @@ pub const Server = struct {
         response: http3.Response,
         body_length: ?usize,
     ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(
+            self.quic_server.endpoint.io,
+        );
         const peer = self.streaming_peers.find(to) orelse
             return error.UnexpectedStream;
         if (peer.unusable) return error.ConnectionUnusable;
@@ -3102,13 +3473,17 @@ pub const Server = struct {
             null
         else
             streaming.expected_length;
+        const response_prefix_offset = peer.response_send_offsets.get(
+            stream_id,
+        ) orelse 0;
         errdefer peer.qpack_encode.abandonStream(stream_id);
         var send_attempted = false;
-        sendRuntimeStreamingHead(
+        sendRuntimeStreamingHeadAtOffset(
             &self.quic_server.endpoint,
             to,
             &peer.stream_send_scratch,
             stream_id,
+            response_prefix_offset,
             expected_length,
             body_allowed,
             self.limits.max_stream_frame_data,
@@ -3122,6 +3497,7 @@ pub const Server = struct {
             }
             return err;
         };
+        _ = peer.response_send_offsets.remove(stream_id);
         if (!body_allowed or expected_length == 0) {
             peer.lifecycle.markFinished(stream_id);
             peer.finishSendIfExchangeComplete(stream_id);
@@ -3135,6 +3511,12 @@ pub const Server = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(
+            self.quic_server.endpoint.io,
+        );
         const peer = self.streaming_peers.find(to) orelse
             return error.UnexpectedStream;
         if (peer.unusable) return error.ConnectionUnusable;
@@ -3179,6 +3561,12 @@ pub const Server = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(
+            self.quic_server.endpoint.io,
+        );
         const peer = self.streaming_peers.find(to) orelse
             return error.UnexpectedStream;
         const body = peer.outbound_bodies.find(stream_id);
@@ -3206,6 +3594,25 @@ pub const Server = struct {
             local_final_size,
             send_reset,
         );
+    }
+
+    /// Retire a development request without emitting RESET_STREAM or
+    /// STOP_SENDING. Protocol adapters use this after a final non-success
+    /// response has already closed the response direction.
+    pub fn finishRequest(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(
+            self.quic_server.endpoint.io,
+        );
+        if (!self.streaming_peers.retireRequest(from, stream_id)) {
+            return error.UnexpectedStream;
+        }
     }
 };
 
@@ -3274,6 +3681,7 @@ pub const Client = struct {
     qpack_decode: QpackDecodeState,
     qpack_encode: QpackEncodeState,
     outbound_bodies: OutboundBodySet,
+    runtime_datagrams: DevelopmentRetainedDatagramQueue,
     stream_send_scratch: StreamMessageSendScratch = .{},
     streaming_mode: bool = false,
     /// The development request API assembles a response in call-local state.
@@ -3317,11 +3725,17 @@ pub const Client = struct {
                 allocator,
                 limits.max_concurrent_request_streams,
             ),
+            .runtime_datagrams = .init(
+                allocator,
+                limits.max_queued_runtime_datagrams,
+                limits.max_queued_runtime_datagram_bytes,
+            ),
         };
     }
 
     pub fn deinit(self: *Client) void {
         self.stream_send_scratch.deinit(self.quic_client.endpoint.allocator);
+        self.runtime_datagrams.deinit();
         self.outbound_bodies.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
@@ -3660,7 +4074,7 @@ pub const Client = struct {
         }
         defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
 
-        if (try self.pollResponseEvent(stream_id)) |event| return event;
+        if (try self.pollResponseEventUnlocked(stream_id)) |event| return event;
         while (true) {
             var datagram = if (deadline) |absolute|
                 try self.quic_client.receiveWithDeadline(absolute)
@@ -3669,12 +4083,23 @@ pub const Client = struct {
             defer datagram.deinit(self.quic_client.endpoint.allocator);
             if (!datagram.from.eql(&self.quic_client.peer)) continue;
             try self.processDevelopmentResponseDatagram(&datagram);
-            if (try self.pollResponseEvent(stream_id)) |event| return event;
+            if (try self.pollResponseEventUnlocked(stream_id)) |event| return event;
         }
     }
 
     /// Return an already-buffered response event without reading UDP.
     pub fn pollResponseEvent(
+        self: *Client,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
+        return self.pollResponseEventUnlocked(stream_id);
+    }
+
+    fn pollResponseEventUnlocked(
         self: *Client,
         stream_id: u62,
     ) Error!?StreamingEvent {
@@ -3710,17 +4135,94 @@ pub const Client = struct {
         return event;
     }
 
+    /// Return one retained raw QUIC datagram without reading UDP.
+    pub fn pollDatagram(self: *Client) ?quic.runtime.OwnedDatagram {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
+        return self.runtime_datagrams.pop();
+    }
+
+    pub fn receiveDatagram(self: *Client) Error!quic.runtime.OwnedDatagram {
+        return self.receiveDatagramInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveDatagramWithTimeout(
+        self: *Client,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDatagramInternal(.fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *Client,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveDatagramInternal(deadline);
+    }
+
+    fn receiveDatagramInternal(
+        self: *Client,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        if (deadline != null) {
+            if (!self.response_receive_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.response_receive_mutex.lockUncancelable(
+                self.quic_client.endpoint.io,
+            );
+        }
+        defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
+        self.streaming_mode = true;
+        while (true) {
+            if (self.runtime_datagrams.pop()) |datagram| return datagram;
+            var datagram = if (deadline) |absolute|
+                try self.quic_client.receiveWithDeadline(absolute)
+            else
+                try self.quic_client.receive();
+            defer datagram.deinit(self.quic_client.endpoint.allocator);
+            if (!datagram.from.eql(&self.quic_client.peer)) continue;
+            try self.processDevelopmentResponseDatagram(&datagram);
+        }
+    }
+
     pub fn readResponseData(
         self: *Client,
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         return entry.reader.readData(out);
     }
 
     pub fn skipResponseData(self: *Client, stream_id: u62) Error!usize {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         return entry.reader.skipData();
@@ -3731,6 +4233,12 @@ pub const Client = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
         const body = self.outbound_bodies.find(stream_id);
         if (body == null and !self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
@@ -3750,6 +4258,28 @@ pub const Client = struct {
             local_final_size,
             send_reset,
         );
+    }
+
+    /// Release local bookkeeping after the final response for a streaming
+    /// request whose request direction the adapter no longer intends to use.
+    /// No cancellation frame is emitted.
+    pub fn finishRequest(self: *Client, stream_id: u62) Error!void {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
+        const exists = self.request_lifecycle.contains(stream_id) or
+            self.outbound_bodies.find(stream_id) != null or
+            self.streaming_responses.contains(stream_id) or
+            bufferedHasResponse(self.response_streams, stream_id);
+        if (!exists) return error.UnexpectedStream;
+        self.response_streams.remove(stream_id);
+        self.streaming_responses.remove(stream_id);
+        self.qpack_encode.abandonStream(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
     }
 
     fn processDevelopmentResponseDatagram(
@@ -3783,6 +4313,10 @@ pub const Client = struct {
             )) continue;
             try self.response_streams.insert(datagram.from, frame.stream);
         }
+        try retainDevelopmentDatagramFrames(
+            &self.runtime_datagrams,
+            datagram.*,
+        );
     }
 };
 
@@ -3837,6 +4371,49 @@ fn sendRuntimeStreamMessage(
     }
 }
 
+fn retainDevelopmentDatagramFrames(
+    queue: *DevelopmentRetainedDatagramQueue,
+    packet: quic.runtime.OwnedDatagram,
+) Error!void {
+    for (packet.frames) |frame| switch (frame) {
+        .datagram => {
+            // Normalize each QUIC DATAGRAM frame into its own owned packet. A
+            // caller consumes one application datagram per receive, even when
+            // the transport coalesced several frames with STREAM progress.
+            var retained = try cloneDevelopmentDatagramFrame(
+                queue.allocator,
+                packet.from,
+                packet.ecn,
+                frame,
+            );
+            errdefer retained.deinit(queue.allocator);
+            try queue.push(&retained);
+        },
+        else => {},
+    };
+}
+
+fn cloneDevelopmentDatagramFrame(
+    allocator: std.mem.Allocator,
+    from: net.IpAddress,
+    ecn: quic.packet_space.EcnCodepoint,
+    frame: quic.Frame,
+) Error!quic.runtime.OwnedDatagram {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try frame.write(&encoded, allocator);
+    const bytes = try encoded.toOwnedSlice(allocator);
+    errdefer allocator.free(bytes);
+    const frames = try allocator.alloc(quic.Frame, 1);
+    errdefer allocator.free(frames);
+    var parsed = try quic.parseFrameOwned(allocator, bytes);
+    errdefer parsed.deinitOwned(allocator);
+    std.debug.assert(parsed.consumed == bytes.len);
+    frames[0] = parsed.frame;
+    parsed.frame = undefined;
+    return .{ .from = from, .bytes = bytes, .ecn = ecn, .frames = frames };
+}
+
 fn sendRuntimeStreamingHead(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -3848,11 +4425,41 @@ fn sendRuntimeStreamingHead(
     bodies: *OutboundBodySet,
     send_attempted: ?*bool,
 ) Error!void {
+    return sendRuntimeStreamingHeadAtOffset(
+        endpoint,
+        to,
+        scratch,
+        stream_id,
+        0,
+        expected_length,
+        body_allowed,
+        max_stream_frame_data,
+        bodies,
+        send_attempted,
+    );
+}
+
+/// Send a final response head after zero or more informational heads already
+/// advanced the bidirectional stream. The retained offset prevents a fresh
+/// `SendState` from emitting overlapping bytes and an inconsistent final size.
+fn sendRuntimeStreamingHeadAtOffset(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    initial_offset: u64,
+    expected_length: ?usize,
+    body_allowed: bool,
+    max_stream_frame_data: usize,
+    bodies: *OutboundBodySet,
+    send_attempted: ?*bool,
+) Error!void {
     const body_open = body_allowed and
         (expected_length == null or expected_length.? != 0);
     try bodies.reserveOpen(stream_id);
 
     var send = quic.stream_state.SendState.init(stream_id);
+    send.next_offset = initial_offset;
     scratch.frames.clearRetainingCapacity();
     try send.appendFrames(
         &scratch.frames,
@@ -3872,6 +4479,40 @@ fn sendRuntimeStreamingHead(
         if (send_attempted) |attempted| attempted.* = true;
         try endpoint.sendFrames(to, &.{frame});
     }
+}
+
+/// Send a non-final response prefix and retain the next stream offset for the
+/// subsequent informational or final response head. The map is updated only
+/// after every frame is successfully sent; a partial socket failure makes the
+/// peer unusable at the caller because the exact visible prefix is unknowable.
+fn sendRuntimeResponsePrefix(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    max_stream_frame_data: usize,
+    offsets: *std.AutoHashMapUnmanaged(u62, u64),
+) Error!void {
+    const slot = try offsets.getOrPut(endpoint.allocator, stream_id);
+    const previous_offset = if (slot.found_existing) slot.value_ptr.* else 0;
+    errdefer {
+        if (!slot.found_existing) _ = offsets.remove(stream_id);
+    }
+
+    var send = quic.stream_state.SendState.init(stream_id);
+    send.next_offset = previous_offset;
+    scratch.frames.clearRetainingCapacity();
+    try send.appendFrames(
+        &scratch.frames,
+        endpoint.allocator,
+        scratch.encoded.items,
+        max_stream_frame_data,
+        false,
+    );
+    for (scratch.frames.items) |frame| {
+        try endpoint.sendFrames(to, &.{frame});
+    }
+    slot.value_ptr.* = send.next_offset;
 }
 
 fn sendRuntimeRequestCancellation(
@@ -4078,6 +4719,290 @@ pub const OwnedRequest = struct {
     }
 };
 
+const DevelopmentRetainedDatagramQueue = struct {
+    allocator: std.mem.Allocator,
+    datagrams: std.ArrayList(quic.runtime.OwnedDatagram) = .empty,
+    head: usize = 0,
+    queued_bytes: usize = 0,
+    max_count: usize,
+    max_bytes: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_count: usize,
+        max_bytes: usize,
+    ) DevelopmentRetainedDatagramQueue {
+        return .{
+            .allocator = allocator,
+            .max_count = max_count,
+            .max_bytes = max_bytes,
+        };
+    }
+
+    fn deinit(self: *DevelopmentRetainedDatagramQueue) void {
+        for (self.datagrams.items[self.head..]) |*datagram| {
+            datagram.deinit(self.allocator);
+        }
+        self.datagrams.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn count(self: DevelopmentRetainedDatagramQueue) usize {
+        return self.datagrams.items.len - self.head;
+    }
+
+    fn compact(self: *DevelopmentRetainedDatagramQueue) void {
+        if (self.head == 0) return;
+        const remaining = self.count();
+        if (remaining != 0) {
+            @memmove(
+                self.datagrams.items[0..remaining],
+                self.datagrams.items[self.head..],
+            );
+        }
+        self.datagrams.items.len = remaining;
+        self.head = 0;
+    }
+
+    fn dropOldest(self: *DevelopmentRetainedDatagramQueue) void {
+        var dropped = self.datagrams.items[self.head];
+        self.queued_bytes -= dropped.bytes.len;
+        dropped.deinit(self.allocator);
+        self.head += 1;
+        if (self.head == self.datagrams.items.len) {
+            self.datagrams.clearRetainingCapacity();
+            self.head = 0;
+        } else if (self.head >= self.datagrams.items.len / 2) {
+            self.compact();
+        }
+    }
+
+    fn push(
+        self: *DevelopmentRetainedDatagramQueue,
+        datagram: *quic.runtime.OwnedDatagram,
+    ) Error!void {
+        // A successful call always consumes `datagram`. Disabled retention or
+        // an individually oversized packet is an intentional unreliable-
+        // DATAGRAM drop rather than an ownership exception for the caller.
+        if (self.max_count == 0 or self.max_bytes == 0) {
+            datagram.deinit(self.allocator);
+            return;
+        }
+        // Configurations smaller than a legal incoming packet cannot honor
+        // their own byte bound. Surface that mismatch instead of silently
+        // dropping a syntactically valid DATAGRAM after consuming the socket.
+        if (datagram.bytes.len > self.max_bytes) return error.ExcessiveLoad;
+        if (self.head != 0 and self.datagrams.items.len == self.datagrams.capacity) {
+            self.compact();
+        }
+        try self.datagrams.ensureUnusedCapacity(self.allocator, 1);
+        while (self.count() >= self.max_count or
+            self.queued_bytes > self.max_bytes - datagram.bytes.len)
+        {
+            self.dropOldest();
+        }
+        self.datagrams.appendAssumeCapacity(datagram.*);
+        self.queued_bytes += datagram.bytes.len;
+        datagram.* = undefined;
+    }
+
+    fn pop(self: *DevelopmentRetainedDatagramQueue) ?quic.runtime.OwnedDatagram {
+        if (self.count() == 0) return null;
+        const datagram = self.datagrams.items[self.head];
+        self.queued_bytes -= datagram.bytes.len;
+        self.head += 1;
+        if (self.head == self.datagrams.items.len) {
+            self.datagrams.clearRetainingCapacity();
+            self.head = 0;
+        }
+        return datagram;
+    }
+};
+
+test "HTTP/3 development datagram queue bounds count bytes and ownership" {
+    const allocator = std.testing.allocator;
+
+    var queue = DevelopmentRetainedDatagramQueue.init(allocator, 3, 8);
+    defer queue.deinit();
+
+    var first = try ownedDevelopmentDatagramForTest(allocator, "one");
+    try queue.push(&first);
+    var second = try ownedDevelopmentDatagramForTest(allocator, "two");
+    try queue.push(&second);
+    var third = try ownedDevelopmentDatagramForTest(allocator, "three");
+    try queue.push(&third);
+
+    // The byte limit evicts "one" while the count limit still has room.
+    var retained = queue.pop() orelse return error.TestUnexpectedResult;
+    defer retained.deinit(allocator);
+    try std.testing.expectEqualStrings("two", retained.bytes);
+    var retained_last = queue.pop() orelse return error.TestUnexpectedResult;
+    defer retained_last.deinit(allocator);
+    try std.testing.expectEqualStrings("three", retained_last.bytes);
+    try std.testing.expect(queue.pop() == null);
+
+    var count_bounded = DevelopmentRetainedDatagramQueue.init(allocator, 2, 100);
+    defer count_bounded.deinit();
+    var count_first = try ownedDevelopmentDatagramForTest(allocator, "1");
+    try count_bounded.push(&count_first);
+    var count_second = try ownedDevelopmentDatagramForTest(allocator, "2");
+    try count_bounded.push(&count_second);
+    var count_third = try ownedDevelopmentDatagramForTest(allocator, "3");
+    try count_bounded.push(&count_third);
+    var count_retained = count_bounded.pop() orelse
+        return error.TestUnexpectedResult;
+    defer count_retained.deinit(allocator);
+    try std.testing.expectEqualStrings("2", count_retained.bytes);
+    var count_retained_last = count_bounded.pop() orelse
+        return error.TestUnexpectedResult;
+    defer count_retained_last.deinit(allocator);
+    try std.testing.expectEqualStrings("3", count_retained_last.bytes);
+    try std.testing.expect(count_bounded.pop() == null);
+
+    // Disabled and individually oversized queues consume and drop ownership.
+    var disabled = DevelopmentRetainedDatagramQueue.init(allocator, 0, 7);
+    defer disabled.deinit();
+    var dropped_disabled = try ownedDevelopmentDatagramForTest(allocator, "x");
+    try disabled.push(&dropped_disabled);
+    try std.testing.expect(disabled.pop() == null);
+
+    var oversized = DevelopmentRetainedDatagramQueue.init(allocator, 2, 2);
+    defer oversized.deinit();
+    var rejected_oversized = try ownedDevelopmentDatagramForTest(allocator, "big");
+    defer rejected_oversized.deinit(allocator);
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        oversized.push(&rejected_oversized),
+    );
+    try std.testing.expect(oversized.pop() == null);
+}
+
+test "HTTP/3 development datagram routing splits coalesced frames" {
+    const allocator = std.testing.allocator;
+    var queue = DevelopmentRetainedDatagramQueue.init(allocator, 4, 1024);
+    defer queue.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (quic.Frame{ .datagram = .{ .data = "first" } }).write(
+        &encoded,
+        allocator,
+    );
+    try (quic.Frame{ .datagram = .{ .data = "second" } }).write(
+        &encoded,
+        allocator,
+    );
+    const packet_bytes = try allocator.dupe(u8, encoded.items);
+    const packet_frames = try allocator.alloc(quic.Frame, 2);
+    var cursor: usize = 0;
+    for (packet_frames) |*slot| {
+        const parsed = try quic.parseFrame(packet_bytes[cursor..]);
+        slot.* = parsed.frame;
+        cursor += parsed.consumed;
+    }
+    var packet: quic.runtime.OwnedDatagram = .{
+        .from = .{ .ip4 = .loopback(443) },
+        .bytes = packet_bytes,
+        .frames = packet_frames,
+    };
+    defer packet.deinit(allocator);
+
+    try retainDevelopmentDatagramFrames(&queue, packet);
+    var first = queue.pop() orelse return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    var second = queue.pop() orelse return error.TestUnexpectedResult;
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "first",
+        first.frames[0].datagram.data,
+    );
+    try std.testing.expectEqualStrings(
+        "second",
+        second.frames[0].datagram.data,
+    );
+    try std.testing.expect(queue.pop() == null);
+}
+
+fn ownedDevelopmentDatagramForTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !quic.runtime.OwnedDatagram {
+    return .{
+        .from = .{ .ip4 = .loopback(443) },
+        .bytes = try allocator.dupe(u8, bytes),
+        .frames = try allocator.alloc(quic.Frame, 0),
+    };
+}
+
+test "HTTP/3 dev streaming adoption preserves partial aggregate request" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(8443) };
+    var buffered = DevelopmentRequestStreamSet.init(allocator, 4096, 4);
+    defer buffered.deinit();
+    var peers = DevelopmentServerPeerSet.init(allocator, 4096, 4);
+    defer peers.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const body = "aggregate state survives streaming takeover";
+    try (http3.Request{
+        .method = "POST",
+        .path = "/adopt-partial",
+        .authority = "localhost",
+        .body = body,
+    }).write(&encoded, allocator);
+    const split = encoded.items.len - body.len + body.len / 2;
+
+    const partial = try buffered.getOrCreate(from, 0);
+    try partial.receive.insert(.{
+        .stream_id = 0,
+        .data = encoded.items[0..split],
+    });
+    try peers.adoptBufferedRequests(&buffered);
+    try std.testing.expectEqual(@as(usize, 0), buffered.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), peers.totalRetained());
+
+    try peers.insert(from, .{
+        .stream_id = 0,
+        .offset = split,
+        .data = encoded.items[split..],
+        .fin = true,
+    });
+    var head_event = (try peers.pollRequestHead()) orelse
+        return error.TestUnexpectedResult;
+    defer head_event.deinit(allocator);
+    try std.testing.expect(head_event == .message);
+    try std.testing.expect(head_event.message.value == .head);
+    try std.testing.expectEqualStrings(
+        "/adopt-partial",
+        head_event.message.value.head.request.path,
+    );
+
+    var received: [64]u8 = undefined;
+    var received_len: usize = 0;
+    var finished = false;
+    while (!finished) {
+        var event = (try peers.pollRequestEventFor(from, 0)) orelse
+            return error.TestUnexpectedResult;
+        defer event.deinit(allocator);
+        switch (event) {
+            .reset => return error.TestUnexpectedResult,
+            .message => |message| switch (message.value) {
+                .data_available => {
+                    received_len += try peers.readRequestData(
+                        from,
+                        0,
+                        received[received_len..],
+                    );
+                },
+                .finished => finished = true,
+                else => return error.TestUnexpectedResult,
+            },
+        }
+    }
+    try std.testing.expectEqualStrings(body, received[0..received_len]);
+}
+
 /// Cleartext development-runtime request assembly keyed by both peer address
 /// and stream ID. UDP clients all start at stream zero, so the stream ID alone
 /// cannot identify a request when one server endpoint serves several peers.
@@ -4250,6 +5175,7 @@ const DevelopmentServerPeerSet = struct {
         qpack_decode: QpackDecodeState,
         qpack_encode: QpackEncodeState,
         outbound_bodies: OutboundBodySet,
+        response_send_offsets: std.AutoHashMapUnmanaged(u62, u64) = .empty,
         stream_send_scratch: StreamMessageSendScratch = .{},
         unusable: bool = false,
 
@@ -4278,6 +5204,7 @@ const DevelopmentServerPeerSet = struct {
 
         fn deinit(self: *Peer, allocator: std.mem.Allocator) void {
             self.stream_send_scratch.deinit(allocator);
+            self.response_send_offsets.deinit(allocator);
             self.outbound_bodies.deinit();
             self.qpack_encode.deinit();
             self.qpack_decode.deinit();
@@ -4313,6 +5240,20 @@ const DevelopmentServerPeerSet = struct {
                 self.streaming_requests.contains(stream_id)) return;
             const body = self.outbound_bodies.find(stream_id) orelse return;
             if (body.send.fin_sent) _ = self.outbound_bodies.finish(stream_id);
+        }
+
+        fn takeUnadmittedReset(self: *Peer) ?StreamingRequestSet.Reset {
+            var reset_index = self.streaming_requests.reset_head;
+            while (reset_index < self.streaming_requests.resets.items.len) : (reset_index += 1) {
+                const reset = self.streaming_requests.resets.items[reset_index];
+                if (self.lifecycle.contains(reset.stream_id)) continue;
+                self.streaming_requests.removeResetPreservingOrder(
+                    reset_index,
+                );
+                self.streaming_requests.compactResetQueueIfSparse();
+                return reset;
+            }
+            return null;
         }
     };
 
@@ -4380,6 +5321,119 @@ const DevelopmentServerPeerSet = struct {
         return peer;
     }
 
+    /// Move all partial aggregate request streams into incremental readers.
+    /// Capacity for every destination allocation is reserved first, so an OOM
+    /// leaves the source set untouched and the caller can retry the transition.
+    fn adoptBufferedRequests(
+        self: *DevelopmentServerPeerSet,
+        buffered: *DevelopmentRequestStreamSet,
+    ) Error!void {
+        if (buffered.entries.items.len == 0) return;
+        if (self.totalRetained() >
+            self.max_streams -| buffered.entries.items.len)
+        {
+            return error.ExcessiveLoad;
+        }
+        for (buffered.entries.items) |entry| {
+            if (self.find(entry.from)) |peer| {
+                const stream_id: u62 = @intCast(entry.receive.stream_id);
+                if (peer.request_streams.contains(stream_id) or
+                    peer.streaming_requests.contains(stream_id))
+                {
+                    return error.UnexpectedStream;
+                }
+            }
+        }
+
+        var additional_peers: usize = 0;
+        for (buffered.entries.items, 0..) |entry, index| {
+            var already_counted = self.find(entry.from) != null;
+            if (!already_counted) {
+                for (buffered.entries.items[0..index]) |prior| {
+                    if (prior.from.eql(&entry.from)) {
+                        already_counted = true;
+                        break;
+                    }
+                }
+            }
+            if (!already_counted) additional_peers += 1;
+        }
+        try self.peers.ensureUnusedCapacity(
+            self.allocator,
+            additional_peers,
+        );
+
+        // Construct all missing peers before touching the source stream set.
+        // These allocations are the only ones not covered by per-peer reserve.
+        const original_peer_count = self.peers.items.len;
+        errdefer {
+            while (self.peers.items.len > original_peer_count) {
+                const peer = self.peers.pop().?;
+                peer.deinit(self.allocator);
+                self.allocator.destroy(peer);
+            }
+        }
+        for (buffered.entries.items) |entry| {
+            if (self.find(entry.from) != null) continue;
+            const peer = try self.allocator.create(Peer);
+            errdefer self.allocator.destroy(peer);
+            peer.* = .init(
+                self.allocator,
+                entry.from,
+                self.max_stream_buffer,
+                self.max_streams,
+            );
+            self.peers.appendAssumeCapacity(peer);
+        }
+
+        for (self.peers.items) |peer| {
+            var incoming: usize = 0;
+            for (buffered.entries.items) |entry| {
+                if (entry.from.eql(&peer.address)) incoming += 1;
+            }
+            if (incoming == 0) continue;
+            if (peer.retainedCount() + incoming > self.max_streams) {
+                return error.ExcessiveLoad;
+            }
+            try peer.streaming_requests.entries.ensureUnusedCapacity(
+                self.allocator,
+                incoming,
+            );
+            try peer.streaming_requests.entry_index.ensureUnusedCapacity(
+                self.allocator,
+                @intCast(incoming),
+            );
+        }
+
+        // No operation below can fail: the two destination containers were
+        // fully reserved above. Preserve aggregate insertion order while
+        // transferring each receive buffer exactly once.
+        for (buffered.entries.items) |*entry| {
+            const stream_id: u62 = @intCast(entry.receive.stream_id);
+            const peer = self.find(entry.from) orelse unreachable;
+            std.debug.assert(!peer.request_streams.contains(stream_id));
+            std.debug.assert(!peer.streaming_requests.contains(stream_id));
+            const slot = peer.streaming_requests.entry_index
+                .getOrPutAssumeCapacity(stream_id);
+            std.debug.assert(!slot.found_existing);
+            _ = peer.streaming_requests.appendEntryAssumeCapacity(.{
+                .reader = .{
+                    .allocator = self.allocator,
+                    .receive = entry.receive,
+                    .settings = development_settings,
+                    .kind = .request,
+                },
+                .from = entry.from,
+            }, slot.value_ptr);
+            for (entry.datagrams.items) |*datagram| {
+                datagram.deinit(self.allocator);
+            }
+            entry.datagrams.deinit(self.allocator);
+            entry.* = undefined;
+        }
+        buffered.entries.clearRetainingCapacity();
+    }
+
     fn insert(
         self: *DevelopmentServerPeerSet,
         from: net.IpAddress,
@@ -4435,6 +5489,29 @@ const DevelopmentServerPeerSet = struct {
     fn pollRequestEvent(
         self: *DevelopmentServerPeerSet,
     ) Error!?StreamingRequestEvent {
+        return self.pollRequestEventMatching(null, null, false);
+    }
+
+    fn pollRequestHead(
+        self: *DevelopmentServerPeerSet,
+    ) Error!?StreamingRequestEvent {
+        return self.pollRequestEventMatching(null, null, true);
+    }
+
+    fn pollRequestEventFor(
+        self: *DevelopmentServerPeerSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!?StreamingRequestEvent {
+        return self.pollRequestEventMatching(from, stream_id, false);
+    }
+
+    fn pollRequestEventMatching(
+        self: *DevelopmentServerPeerSet,
+        from: ?net.IpAddress,
+        stream_id: ?u62,
+        head_only: bool,
+    ) Error!?StreamingRequestEvent {
         if (self.peers.items.len == 0) return null;
         var index = if (self.last_peer_index) |last|
             (last + 1) % self.peers.items.len
@@ -4443,23 +5520,51 @@ const DevelopmentServerPeerSet = struct {
         var remaining = self.peers.items.len;
         while (remaining != 0) : (remaining -= 1) {
             const peer = self.peers.items[index];
-            if (peer.streaming_requests.takeFirstReset()) |reset| {
-                peer.lifecycle.markFinished(reset.stream_id);
-                _ = peer.outbound_bodies.finish(reset.stream_id);
-                peer.qpack_encode.abandonStream(reset.stream_id);
+            if (from != null and !peer.address.eql(&from.?)) {
+                index = (index + 1) % self.peers.items.len;
+                continue;
+            }
+            // A targeted receive owns only its stream's terminal event. An
+            // untargeted receive preserves the reset queue's FIFO order.
+            if (head_only) {
+                // Admission has no public reset event to return. Drain every
+                // abandoned pre-head stream before polling headers so a burst
+                // of reset-only traffic cannot pin bounded stream slots or
+                // force this call to wait for an unrelated future datagram.
+                while (peer.takeUnadmittedReset()) |reset| {
+                    peer.lifecycle.markFinished(reset.stream_id);
+                    _ = peer.outbound_bodies.finish(reset.stream_id);
+                    peer.qpack_encode.abandonStream(reset.stream_id);
+                }
+            } else if (if (stream_id) |target|
+                peer.streaming_requests.takeReset(target)
+            else
+                peer.streaming_requests.takeFirstReset()) |reset_event|
+            {
+                peer.lifecycle.markFinished(reset_event.stream_id);
+                _ = peer.outbound_bodies.finish(reset_event.stream_id);
+                peer.qpack_encode.abandonStream(reset_event.stream_id);
                 self.last_peer_index = index;
                 return .{ .reset = .{
-                    .from = reset.from,
-                    .stream_id = reset.stream_id,
-                    .application_error_code = reset.application_error_code,
+                    .from = reset_event.from,
+                    .stream_id = reset_event.stream_id,
+                    .application_error_code = reset_event.application_error_code,
                 } };
             }
-            if (try peer.streaming_requests.nextRequest(
+            if (peer.streaming_requests.mightProduceRequestHead(
+                &peer.request_streams,
+                stream_id,
+            )) {
+                try peer.lifecycle.prepareMarkReceived();
+            }
+            if (try peer.streaming_requests.nextMatchingEvent(
                 &peer.request_streams,
                 peer.qpack_decode.table,
                 0,
+                stream_id,
+                head_only,
             )) |ready| {
-                const stream_id: u62 = @intCast(
+                const ready_stream_id: u62 = @intCast(
                     ready.entry.reader.receive.stream_id,
                 );
                 if (ready.event == .head) {
@@ -4467,15 +5572,18 @@ const DevelopmentServerPeerSet = struct {
                         .request => |request| requestPriority(request.headers),
                         .response => .{},
                     };
-                    try peer.lifecycle.markReceived(stream_id, priority);
+                    peer.lifecycle.markReceivedAssumeCapacity(
+                        ready_stream_id,
+                        priority,
+                    );
                 } else if (ready.event == .finished) {
-                    peer.streaming_requests.remove(stream_id);
-                    peer.finishSendIfExchangeComplete(stream_id);
+                    peer.streaming_requests.remove(ready_stream_id);
+                    peer.finishSendIfExchangeComplete(ready_stream_id);
                 }
                 self.last_peer_index = index;
                 return .{ .message = .{
                     .from = peer.address,
-                    .stream_id = stream_id,
+                    .stream_id = ready_stream_id,
                     .value = ready.event,
                 } };
             }
@@ -4493,6 +5601,28 @@ const DevelopmentServerPeerSet = struct {
             index = (index + 1) % self.peers.items.len;
         }
         return null;
+    }
+
+    /// Remove all state associated with one request while the caller holds
+    /// the development server's receive-state mutex.
+    fn retireRequest(
+        self: *DevelopmentServerPeerSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) bool {
+        const peer = self.find(from) orelse return false;
+        const existed = peer.lifecycle.contains(stream_id) or
+            peer.request_streams.contains(stream_id) or
+            peer.streaming_requests.contains(stream_id) or
+            peer.outbound_bodies.find(stream_id) != null;
+        if (!existed) return false;
+        peer.request_streams.remove(stream_id);
+        peer.streaming_requests.remove(stream_id);
+        peer.qpack_encode.abandonStream(stream_id);
+        _ = peer.response_send_offsets.remove(stream_id);
+        peer.lifecycle.markFinished(stream_id);
+        _ = peer.outbound_bodies.finish(stream_id);
+        return true;
     }
 
     fn readRequestData(
@@ -15431,6 +16561,23 @@ const StreamingMessageSet = struct {
         }
     }
 
+    fn mightProduceRequestHead(
+        self: *StreamingMessageSet,
+        buffered: *RequestStreamSet,
+        target_stream_id: ?u62,
+    ) bool {
+        if (target_stream_id) |stream_id| {
+            if (self.find(stream_id)) |entry| {
+                return entry.reader.phase == .initial_headers;
+            }
+            return buffered.contains(stream_id);
+        }
+        for (self.entries.items) |entry| {
+            if (entry.reader.phase == .initial_headers) return true;
+        }
+        return buffered.entries.items.len != 0;
+    }
+
     fn prepareReset(
         self: *StreamingMessageSet,
         from: net.IpAddress,
@@ -15490,6 +16637,20 @@ const StreamingMessageSet = struct {
             stream_id,
             application_error_code,
         );
+    }
+
+    /// Remove the queued reset for exactly `stream_id`. Targeted request
+    /// consumers must not steal an unrelated stream's terminal event merely
+    /// because both streams belong to the same UDP peer.
+    fn takeReset(
+        self: *StreamingMessageSet,
+        stream_id: u62,
+    ) ?Reset {
+        const index = self.reset_index.get(stream_id) orelse return null;
+        const reset = self.resets.items[index];
+        self.removeResetPreservingOrder(index);
+        self.compactResetQueueIfSparse();
+        return reset;
     }
 
     fn recordNewResetAssumeCapacity(
@@ -15575,9 +16736,64 @@ const StreamingMessageSet = struct {
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
     ) Error!?ReadyEvent {
+        return self.nextMatchingEvent(
+            buffered,
+            table,
+            max_blocked_streams,
+            null,
+            false,
+        );
+    }
+
+    fn nextMatchingEvent(
+        self: *StreamingMessageSet,
+        buffered: *RequestStreamSet,
+        table: http3.Qpack.DynamicTable,
+        max_blocked_streams: u64,
+        target_stream_id: ?u62,
+        head_only: bool,
+    ) Error!?ReadyEvent {
         if (self.kind != .request) return error.UnexpectedStream;
+        if (target_stream_id) |stream_id| {
+            const entry = self.find(stream_id) orelse blk: {
+                if (!buffered.contains(stream_id)) return null;
+                break :blk try self.activateRequest(buffered, stream_id);
+            };
+            const event = entry.reader.next(table) catch |err| switch (err) {
+                error.QpackBlocked => {
+                    if (max_blocked_streams == 0) {
+                        return error.QpackDecompressionFailed;
+                    }
+                    return null;
+                },
+                else => return err,
+            };
+            const value = event orelse return null;
+            return .{ .entry = entry, .event = value };
+        }
         try self.activateBufferedRequests(buffered);
-        return self.nextEvent(table, max_blocked_streams);
+        if (!head_only) return self.nextEvent(table, max_blocked_streams);
+
+        // Existing streams with unread DATA must not prevent an accept loop
+        // from waiting for another request head. Only initial-header readers
+        // are polled here, so their parser state can advance without creating
+        // duplicate readiness notifications for active sessions.
+        var blocked_streams: u64 = 0;
+        for (self.entries.items) |*entry| {
+            if (entry.reader.phase != .initial_headers) continue;
+            const event = entry.reader.next(table) catch |err| switch (err) {
+                error.QpackBlocked => {
+                    blocked_streams += 1;
+                    if (blocked_streams > max_blocked_streams) {
+                        return error.QpackDecompressionFailed;
+                    }
+                    continue;
+                },
+                else => return err,
+            };
+            if (event) |value| return .{ .entry = entry, .event = value };
+        }
+        return null;
     }
 
     fn nextEvent(
@@ -15695,6 +16911,23 @@ const StreamingMessageSet = struct {
         } else if (lowest == last_index) {
             self.lowest_reset_index = index;
         }
+    }
+
+    fn removeResetPreservingOrder(
+        self: *StreamingMessageSet,
+        index: usize,
+    ) void {
+        std.debug.assert(index >= self.reset_head);
+        const removed_stream_id = self.resets.items[index].stream_id;
+        _ = self.reset_index.remove(removed_stream_id);
+        var moved_index = index;
+        while (moved_index + 1 < self.resets.items.len) : (moved_index += 1) {
+            const moved = self.resets.items[moved_index + 1];
+            self.resets.items[moved_index] = moved;
+            self.reset_index.getPtr(moved.stream_id).?.* = moved_index;
+        }
+        _ = self.resets.pop();
+        self.recomputeLowestReset();
     }
 
     fn rebuildResetIndexAssumeCapacity(self: *StreamingMessageSet) void {
@@ -16733,14 +17966,25 @@ const ServerRequestLifecycle = struct {
         stream_id: u62,
         initial_priority: http3.Priority,
     ) Error!void {
-        const slot = try self.active_stream_index.getOrPut(
-            self.allocator,
-            stream_id,
-        );
-        if (slot.found_existing) return error.UnexpectedStream;
-        errdefer _ = self.active_stream_index.remove(stream_id);
+        if (self.contains(stream_id)) return error.UnexpectedStream;
+        try self.prepareMarkReceived();
+        self.markReceivedAssumeCapacity(stream_id, initial_priority);
+    }
+
+    fn prepareMarkReceived(self: *ServerRequestLifecycle) Error!void {
+        try self.active_stream_index.ensureUnusedCapacity(self.allocator, 1);
+        try self.active_streams.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    fn markReceivedAssumeCapacity(
+        self: *ServerRequestLifecycle,
+        stream_id: u62,
+        initial_priority: http3.Priority,
+    ) void {
+        const slot = self.active_stream_index.getOrPutAssumeCapacity(stream_id);
+        std.debug.assert(!slot.found_existing);
         const index = self.active_streams.items.len;
-        try self.active_streams.append(self.allocator, .{
+        self.active_streams.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .priority = initial_priority,
         });
@@ -23524,6 +24768,65 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
     try std.testing.expect(requests.takeFirstReset() == null);
     try std.testing.expectEqual(@as(usize, 0), requests.resetCount());
     try std.testing.expectEqual(@as(usize, 0), requests.reset_index.count());
+}
+
+test "HTTP/3 targeted request reset preserves unrelated FIFO entries" {
+    const allocator = std.testing.allocator;
+    var requests = StreamingRequestSet.init(allocator, 3, 512, .{}, .request);
+    defer requests.deinit();
+
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    for ([_]u62{ 0, 4, 8 }) |stream_id| {
+        try requests.prepareReset(from, stream_id, 0, false);
+        requests.recordResetAssumeCapacity(
+            from,
+            stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        );
+    }
+
+    const targeted = requests.takeReset(4) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 4), targeted.stream_id);
+    try std.testing.expect(!requests.contains(4));
+    try std.testing.expect(requests.contains(0));
+    try std.testing.expect(requests.contains(8));
+
+    const first = requests.takeFirstReset() orelse
+        return error.TestUnexpectedResult;
+    const second = requests.takeFirstReset() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 0), first.stream_id);
+    try std.testing.expectEqual(@as(u62, 8), second.stream_id);
+}
+
+test "HTTP/3 head polling retires only unadmitted resets" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    var peers = DevelopmentServerPeerSet.init(allocator, 512, 3);
+    defer peers.deinit();
+    const peer = try peers.getOrCreate(from);
+
+    try peer.lifecycle.markReceived(0, .{});
+    for ([_]u62{ 0, 4 }) |stream_id| {
+        try peer.streaming_requests.prepareReset(from, stream_id, 0, false);
+        peer.streaming_requests.recordResetAssumeCapacity(
+            from,
+            stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        );
+    }
+
+    try std.testing.expect((try peers.pollRequestHead()) == null);
+    try std.testing.expect(peer.streaming_requests.contains(0));
+    try std.testing.expect(!peer.streaming_requests.contains(4));
+    try std.testing.expectEqual(@as(usize, 1), peer.retainedCount());
+
+    const reset = (try peers.pollRequestEventFor(from, 0)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(@as(u62, 0), reset.reset.stream_id);
+    try std.testing.expectEqual(@as(usize, 0), peer.retainedCount());
 }
 
 test "HTTP/3 streaming message set indexes active readers" {

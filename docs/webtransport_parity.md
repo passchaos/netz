@@ -113,6 +113,26 @@ WebTransport DATAGRAM round trip and transport statistics.
 | Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup; external wtransport consumes netz DRAIN before an exactly validated CLOSE | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN and reports the immediately following CLOSE |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
+The cleartext development client/server now keep the Extended CONNECT request
+and response directions open after acceptance and expose the same incremental
+Capsule control surface used by the lightweight protected runtime. Clients and
+servers can send and receive caller-buffer session DATA, DRAIN, detailed CLOSE,
+and clean FIN; receive operations have relative-timeout and absolute awake-clock
+deadline forms. Partial HTTP/3 frames and partial capsules remain resumable
+after timeout, malformed control capsules cancel the CONNECT stream with
+H3_MESSAGE_ERROR, and server receive routing includes the peer address so two
+development clients may independently use request stream zero. This is a
+deterministic development/test transport only: it provides no QUIC handshake,
+authentication, encryption, congestion recovery, or associated WebTransport
+bidi/uni stream APIs. Production users should use the handshake-backed runtime.
+The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
+and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
+when a packet also advances a control stream—in configurable count and raw-byte
+budgets with oldest-drop semantics. A disabled queue intentionally drops
+unreliable DATAGRAMs, while a packet exceeding a nonzero byte budget is
+rejected explicitly; a slow consumer therefore cannot starve control progress
+or create an unbounded queue.
+
 Authenticated client/server sessions also expose timeout- and absolute-deadline
 bounded DATAGRAM, DATAGRAM batch, incremental stream, whole-FIN stream,
 DRAIN/CLOSE, and peer connection-close receive calls. A bounded batch uses one

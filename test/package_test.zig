@@ -1829,6 +1829,10 @@ test "public modules are reachable" {
         @as(usize, 128),
         (netz.http3.runtime.Limits{}).max_concurrent_request_streams,
     );
+    try std.testing.expectEqual(
+        @as(usize, 16),
+        (netz.http3.runtime.Limits{}).max_queued_runtime_datagrams,
+    );
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Server,
         "receiveRequestWithTimeout",
@@ -1848,6 +1852,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Server,
         "receiveRequestEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestHeadWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestEventForWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "finishRequest",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Server,
@@ -1908,6 +1928,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Client,
         "receiveResponseEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "receiveDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "finishRequest",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Client,
@@ -5416,12 +5444,116 @@ test "public modules are reachable" {
         "receiveDatagramWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveSessionRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveSessionRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "receiveSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "drain",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "receiveSessionEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "sessionId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "remoteAddress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingSession,
+        "sessionId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.RejectedSession,
+        "sessionId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "SessionDataRead",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
         "receiveDatagramWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
         "receiveDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "drain",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveSessionEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveSessionEventWithDeadline",
     ));
     try std.testing.expect(@hasField(
         netz.webtransport.runtime.HandshakeUriConnectOptions,
