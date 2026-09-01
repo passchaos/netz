@@ -509,6 +509,7 @@ test "gRPC request and response message streams cross HTTP2 DATA frames" {
 
 test "gRPC duplex interleaves a response before request FIN" {
     const allocator = std.testing.allocator;
+    const fragmented_response = "fragmented-response-" ** 8;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -566,7 +567,7 @@ test "gRPC duplex interleaves a response before request FIN" {
             });
             try std.testing.expectEqual(
                 duplex.WriteResult.complete,
-                try stream.writeMessage("ack-one"),
+                try stream.writeMessage(fragmented_response),
             );
 
             var second = try stream.readRequestEvent(self, consume);
@@ -592,7 +593,10 @@ test "gRPC duplex interleaves a response before request FIN" {
         count: usize = 0,
 
         fn consume(self: *@This(), message: codec.DecodedMessage) !void {
-            const expected = if (self.count == 0) "ack-one" else "ack-two";
+            const expected = if (self.count == 0)
+                fragmented_response
+            else
+                "ack-two";
             try std.testing.expectEqualStrings(expected, message.payload);
             self.count += 1;
         }
@@ -630,12 +634,21 @@ test "gRPC duplex interleaves a response before request FIN" {
         "interleaved",
         headerValue(head.initial_metadata.headers, "x-duplex").?,
     );
-    var first_reply = try stream.readResponseEvent(
-        &collector,
-        Collector.consume,
-    );
-    defer first_reply.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), first_reply.messages.count);
+    var saw_fragment_only_progress = false;
+    while (collector.count == 0) {
+        var first_reply = try stream.readResponseEvent(
+            &collector,
+            Collector.consume,
+        );
+        defer first_reply.deinit(allocator);
+        const progress = first_reply.messages;
+        // Message progress is scoped to one HTTP/2 DATA event. A frame can
+        // advance an incomplete gRPC message without invoking the callback.
+        saw_fragment_only_progress = saw_fragment_only_progress or
+            progress.count == 0;
+        try std.testing.expect(progress.count <= 1);
+    }
+    try std.testing.expect(saw_fragment_only_progress);
     try std.testing.expect(!stream.requestFinished());
 
     try std.testing.expectEqual(

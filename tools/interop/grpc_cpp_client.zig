@@ -316,9 +316,12 @@ fn readEvent(
             break :blk .metadata;
         },
         .messages => |progress| blk: {
-            if (progress.count == 0 or
-                observer.message_count - before != progress.count)
-            {
+            // A grpc-cpp response larger than its HTTP/2 DATA frame size is
+            // delivered across several transport events.  Those leading
+            // fragments make decoder progress without completing a logical
+            // gRPC message, so a zero count is valid; only disagreement with
+            // the callback count indicates broken progress accounting.
+            if (observer.message_count - before != progress.count) {
                 return error.InvalidMessageProgress;
             }
             break :blk .messages;

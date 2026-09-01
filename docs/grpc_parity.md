@@ -104,11 +104,22 @@ may select a non-default Bazel/Bazelisk executable; the script verifies it
 matches upstream's checked-in `.bazelversion`. The harness is reproducible even
 when a host lacks that exact Bazel release, but such a host cannot establish an
 external pass until the pinned tool or a prebuilt server is supplied.
-On the current development host the client and fixture codec compile, but the
-external run remains unconfirmed: its installed Bazel 9.2 rejects an upstream
-dependency that still uses an implicitly available `cc_library`, while the
-downloaded pinned Bazel 8.7.0 blocked in installation extraction. These are
-recorded toolchain blockers rather than a claimed interoperability pass.
+
+On 2026-09-02 the full gate passed against upstream commit
+`03d65cc67c450ccbb58a8a45627c4da83a886ccd` using Bazel 8.7.0 and GCC on
+Linux x86_64. The pinned Bazel output root was placed on tmpfs because this
+host's disk-backed extraction stalled in journal waits; that is a host build
+performance workaround, not a protocol exception. The successful command was:
+
+```sh
+BAZEL=/tmp/bazel87-netz CC=/usr/bin/gcc GRPC_CPP_BUILD_TIMEOUT=3m \
+  timeout 5m zig build interop-grpc-cpp -Doptimize=ReleaseFast
+```
+
+The independent C++ server build completed all 3492 Bazel actions and the
+process-boundary client reported all four scenarios below as successful. Large
+responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
+progress events that contain a message fragment but no completed gRPC message.
 
 The netz client exercises upstream's canonical `FullDuplexCall` contract:
 
