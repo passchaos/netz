@@ -721,6 +721,18 @@ synchronous invocation, preserving the single-owner transport invariant.
    workloads still need equal worker scheduling and lower tail variance before
    the whole quicz benchmark surface can be considered surpassed.
 
+## Development HTTP/3 streaming
+
+The cleartext development runtime now supports persistent incremental request
+and response streams. Clients can start a request, send DATA chunks, and
+consume response head/DATA/trailer/finish events; servers expose the symmetric
+peer-aware event, body-read, response-head, and response-body APIs. Nullable
+body lengths keep Extended CONNECT streams open, timeout and deadline calls
+retain parser state, per-stream buffers and the global server stream count
+remain bounded, and server stream identity includes the UDP peer so different
+clients may both use stream zero safely. This is a deterministic development
+facility, not a replacement for authenticated handshake-backed HTTP/3.
+
 ## Next recommended work
 
 1. Rebuild the raw QUIC comparison with equivalent endpoint CPU placement,

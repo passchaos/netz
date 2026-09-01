@@ -10,6 +10,14 @@ const response_scheduler = @import("runtime/response_scheduler.zig");
 
 const net = std.Io.net;
 
+// The cleartext runtime intentionally has no HTTP/3 control stream. Its
+// historical aggregate codec accepts Extended CONNECT, so its incremental
+// parser must model that same capability instead of the default disabled
+// SETTINGS value. Dynamic QPACK remains disabled by the zero-capacity state.
+const development_settings: http3.Settings = .{
+    .enable_connect_protocol = true,
+};
+
 pub const InformationalResponseHead = http3.InformationalResponseHead;
 pub const InformationalObserver = http3.InformationalObserver;
 
@@ -2724,13 +2732,30 @@ pub const Server = struct {
     limits: Limits = .{},
     request_receive_mutex: std.Io.Mutex = .init,
     request_streams: DevelopmentRequestStreamSet,
+    /// The development endpoint may receive stream zero from many peers. Each
+    /// peer therefore owns an independent HTTP/3 parser/lifecycle namespace;
+    /// keying only by stream ID would merge unrelated clients.
+    streaming_peers: DevelopmentServerPeerSet,
+    streaming_mode: bool = false,
     response_send_mutex: std.Io.Mutex = .init,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        var quic_server = try quic.runtime.Server.bind(
+            allocator,
+            io,
+            bind_address,
+            limits.quic,
+        );
+        errdefer quic_server.deinit();
         return .{
-            .quic_server = try .bind(allocator, io, bind_address, limits.quic),
+            .quic_server = quic_server,
             .limits = limits,
             .request_streams = .init(
+                allocator,
+                limits.max_stream_buffer,
+                limits.max_concurrent_request_streams,
+            ),
+            .streaming_peers = .init(
                 allocator,
                 limits.max_stream_buffer,
                 limits.max_concurrent_request_streams,
@@ -2739,6 +2764,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        self.streaming_peers.deinit();
         self.request_streams.deinit();
         self.quic_server.deinit();
         self.* = undefined;
@@ -2787,6 +2813,7 @@ pub const Server = struct {
         self: *Server,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedRequest {
+        if (self.streaming_mode) return error.UnexpectedStream;
         if (deadline != null) {
             // A bounded receive must not spend an unbounded interval behind
             // another task that currently owns the shared endpoint reader.
@@ -2826,6 +2853,126 @@ pub const Server = struct {
             .bytes = owned_parts.bytes,
             .request = request,
         };
+    }
+
+    /// Receive one event from the persistent cleartext request-stream parser.
+    /// Once selected, streaming and aggregate receives cannot be mixed on the
+    /// same endpoint because both APIs own the same UDP reader.
+    pub fn receiveRequestEvent(self: *Server) Error!StreamingRequestEvent {
+        return self.receiveRequestEventInternal(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveRequestEventWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveRequestEventInternal(.fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveRequestEventWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveRequestEventInternal(deadline);
+    }
+
+    fn receiveRequestEventInternal(
+        self: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (self.request_streams.entries.items.len != 0) {
+            return error.UnexpectedStream;
+        }
+        self.streaming_mode = true;
+        if (deadline != null) {
+            if (!self.request_receive_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.request_receive_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+        }
+        defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+
+        while (true) {
+            if (try self.pollRequestEvent()) |event| return event;
+            var datagram = if (deadline) |absolute|
+                try self.quic_server.receiveWithDeadline(absolute)
+            else
+                try self.quic_server.receive();
+            defer datagram.deinit(self.quic_server.endpoint.allocator);
+            try self.processDevelopmentRequestDatagram(&datagram);
+        }
+    }
+
+    /// Return an already-buffered request event without reading UDP.
+    pub fn pollRequestEvent(self: *Server) Error!?StreamingRequestEvent {
+        if (!self.streaming_mode) return null;
+        return self.streaming_peers.pollRequestEvent();
+    }
+
+    pub fn readRequestData(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        return self.streaming_peers.readRequestData(from, stream_id, out);
+    }
+
+    pub fn skipRequestData(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!usize {
+        return self.streaming_peers.skipRequestData(from, stream_id);
+    }
+
+    fn processDevelopmentRequestDatagram(
+        self: *Server,
+        datagram: *const quic.runtime.OwnedDatagram,
+    ) Error!void {
+        for (datagram.frames) |frame| {
+            if (frame == .reset_stream and
+                (try messageStreamDisposition(
+                    frame.reset_stream.stream_id,
+                )) == .request_response)
+            {
+                const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+                // A reset for a stream that this peer never opened is not an
+                // application event. In particular, do not let an unrelated
+                // datagram consume one slot from the bounded request set.
+                try self.streaming_peers.recordReset(
+                    datagram.from,
+                    stream_id,
+                    frame.reset_stream.application_error_code,
+                );
+                continue;
+            }
+            if (frame != .stream) continue;
+            if ((try messageStreamDisposition(
+                frame.stream.stream_id,
+            )) == .ignore) continue;
+            if (frame.stream.stream_id % 4 != 0) {
+                return error.UnexpectedStream;
+            }
+            try self.streaming_peers.insert(
+                datagram.from,
+                frame.stream,
+            );
+        }
     }
 
     pub fn receiveRequestsConcurrent(self: *Server, count: usize) Error!OwnedRequestBatch {
@@ -2917,6 +3064,149 @@ pub const Server = struct {
         defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
         try sendRuntimeStreamMessage(&self.quic_server.endpoint, to, stream_id, encoded.items, self.limits.max_stream_frame_data);
     }
+
+    pub fn startResponse(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+    ) Error!void {
+        const peer = self.streaming_peers.find(to) orelse
+            return error.UnexpectedStream;
+        if (peer.unusable) return error.ConnectionUnusable;
+        if (!self.streaming_mode or !peer.lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        self.response_send_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
+        peer.stream_send_scratch.reset();
+        const streaming = try response.writeStreamingHeadDynamic(
+            &peer.stream_send_scratch.encoded,
+            self.quic_server.endpoint.allocator,
+            development_settings,
+            stream_id,
+            body_length,
+            &peer.qpack_encode,
+        );
+        // Successful Extended CONNECT keeps HTTP/3 DATA enabled even though
+        // it intentionally has no Content-Length and remains open until the
+        // adapted protocol closes it.
+        const keep_extended_connect_open = response.extended_connect and
+            response.status >= 200 and response.status < 300;
+        const body_allowed = streaming.body_allowed or
+            keep_extended_connect_open;
+        const expected_length = if (keep_extended_connect_open)
+            null
+        else
+            streaming.expected_length;
+        errdefer peer.qpack_encode.abandonStream(stream_id);
+        var send_attempted = false;
+        sendRuntimeStreamingHead(
+            &self.quic_server.endpoint,
+            to,
+            &peer.stream_send_scratch,
+            stream_id,
+            expected_length,
+            body_allowed,
+            self.limits.max_stream_frame_data,
+            &peer.outbound_bodies,
+            &send_attempted,
+        ) catch |err| {
+            if (send_attempted) {
+                peer.unusable = true;
+            } else {
+                _ = peer.outbound_bodies.finish(stream_id);
+            }
+            return err;
+        };
+        if (!body_allowed or expected_length == 0) {
+            peer.lifecycle.markFinished(stream_id);
+            peer.finishSendIfExchangeComplete(stream_id);
+        }
+    }
+
+    pub fn sendResponseBody(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        const peer = self.streaming_peers.find(to) orelse
+            return error.UnexpectedStream;
+        if (peer.unusable) return error.ConnectionUnusable;
+        if (peer.outbound_bodies.find(stream_id) == null) {
+            return error.UnexpectedStream;
+        }
+        if (peer.outbound_bodies.find(stream_id).?.send.fin_sent) {
+            return error.UnexpectedStream;
+        }
+        self.response_send_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
+        var send_attempted = false;
+        sendRuntimeBodyChunk(
+            &self.quic_server.endpoint,
+            to,
+            &peer.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.limits.max_stream_frame_data,
+            &send_attempted,
+        ) catch |err| {
+            if (send_attempted) peer.unusable = true;
+            return err;
+        };
+        if (fin) {
+            peer.lifecycle.markFinished(stream_id);
+            peer.finishSendIfExchangeComplete(stream_id);
+        }
+    }
+
+    /// Abort both directions of a development request stream. If no response
+    /// has started, the local final size is zero; otherwise the retained send
+    /// state supplies the exact offset required by RESET_STREAM. Cleanup is
+    /// committed before the control datagram is sent because a socket error
+    /// cannot make a malformed application protocol stream usable again.
+    pub fn cancelRequest(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        const peer = self.streaming_peers.find(to) orelse
+            return error.UnexpectedStream;
+        const body = peer.outbound_bodies.find(stream_id);
+        if (body == null and !peer.lifecycle.contains(stream_id) and
+            !peer.request_streams.contains(stream_id) and
+            !peer.streaming_requests.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        const local_final_size = if (body) |entry| entry.send.next_offset else 0;
+        const send_reset = if (body) |entry|
+            !entry.send.fin_sent
+        else
+            peer.lifecycle.contains(stream_id);
+        peer.request_streams.remove(stream_id);
+        peer.streaming_requests.remove(stream_id);
+        peer.qpack_encode.abandonStream(stream_id);
+        peer.lifecycle.markFinished(stream_id);
+        _ = peer.outbound_bodies.finish(stream_id);
+        try sendRuntimeRequestCancellation(
+            &self.quic_server.endpoint,
+            to,
+            stream_id,
+            application_error_code,
+            local_final_size,
+            send_reset,
+        );
+    }
 };
 
 const RequestTask = struct {
@@ -2977,6 +3267,15 @@ pub const Client = struct {
     quic_client: quic.runtime.Client,
     limits: Limits = .{},
     next_stream_id: u62 = 0,
+    response_receive_mutex: std.Io.Mutex = .init,
+    response_streams: ResponseStreamSet,
+    streaming_responses: StreamingResponseSet,
+    request_lifecycle: ClientRequestLifecycle,
+    qpack_decode: QpackDecodeState,
+    qpack_encode: QpackEncodeState,
+    outbound_bodies: OutboundBodySet,
+    stream_send_scratch: StreamMessageSendScratch = .{},
+    streaming_mode: bool = false,
     /// The development request API assembles a response in call-local state.
     /// Once a request has been committed to the wire, any subsequent failure
     /// can leave protocol progress or response ownership unavailable to a
@@ -2984,10 +3283,51 @@ pub const Client = struct {
     request_unusable: bool = false,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits) Error!Client {
-        return .{ .quic_client = try .connect(allocator, io, local_address, server, limits.quic), .limits = limits };
+        var quic_client = try quic.runtime.Client.connect(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits.quic,
+        );
+        errdefer quic_client.deinit();
+        return .{
+            .quic_client = quic_client,
+            .limits = limits,
+            .response_streams = .init(
+                allocator,
+                limits.max_stream_buffer,
+                limits.max_concurrent_request_streams,
+            ),
+            .streaming_responses = .initWithInformationalLimit(
+                allocator,
+                limits.max_concurrent_request_streams,
+                limits.max_stream_buffer,
+                limits.max_informational_responses,
+                development_settings,
+                .response,
+            ),
+            .request_lifecycle = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
+            .qpack_decode = .init(allocator, 0, limits.max_stream_buffer),
+            .qpack_encode = .init(allocator, 0, limits.max_stream_buffer),
+            .outbound_bodies = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
+        };
     }
 
     pub fn deinit(self: *Client) void {
+        self.stream_send_scratch.deinit(self.quic_client.endpoint.allocator);
+        self.outbound_bodies.deinit();
+        self.qpack_encode.deinit();
+        self.qpack_decode.deinit();
+        self.request_lifecycle.deinit();
+        self.streaming_responses.deinit();
+        self.response_streams.deinit();
         self.quic_client.deinit();
         self.* = undefined;
     }
@@ -3087,6 +3427,7 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedResponse {
         if (self.request_unusable) return error.ConnectionUnusable;
+        if (self.streaming_mode) return error.UnexpectedStream;
 
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_client.endpoint.allocator);
@@ -3169,6 +3510,280 @@ pub const Client = struct {
             .response = response,
         };
     }
+
+    /// Start a persistent cleartext request stream. `body_length == null`
+    /// leaves the message body FIN-delimited, which is required by long-lived
+    /// development CONNECT-style protocols.
+    pub fn startRequest(
+        self: *Client,
+        request_options: http3.Request,
+        body_length: ?usize,
+    ) Error!u62 {
+        if (self.request_unusable) return error.ConnectionUnusable;
+        const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
+        try self.request_lifecycle.open(
+            stream_id,
+            request_options.method,
+            requestHasProtocol(request_options.headers),
+        );
+        var send_attempted = false;
+        errdefer {
+            if (send_attempted) {
+                // A failed UDP send cannot prove non-observation. Retire this
+                // request ID and retain its stream state rather than risk
+                // associating a later request with a late response.
+                self.next_stream_id = next_stream_id;
+                self.streaming_mode = true;
+            } else {
+                _ = self.request_lifecycle.finish(stream_id) catch false;
+                _ = self.outbound_bodies.finish(stream_id);
+                self.qpack_encode.abandonStream(stream_id);
+            }
+        }
+        self.stream_send_scratch.reset();
+        const streaming = try request_options.writeStreamingHeadDynamic(
+            &self.stream_send_scratch.encoded,
+            self.quic_client.endpoint.allocator,
+            development_settings,
+            stream_id,
+            body_length,
+            &self.qpack_encode,
+        );
+        sendRuntimeStreamingHead(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            &self.stream_send_scratch,
+            stream_id,
+            streaming.expected_length,
+            streaming.body_allowed,
+            self.limits.max_stream_frame_data,
+            &self.outbound_bodies,
+            &send_attempted,
+        ) catch |err| {
+            if (send_attempted) {
+                self.request_unusable = true;
+            }
+            return err;
+        };
+        self.next_stream_id = next_stream_id;
+        self.streaming_mode = true;
+        return stream_id;
+    }
+
+    pub fn sendRequestBody(
+        self: *Client,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (self.request_unusable) return error.ConnectionUnusable;
+        if (self.outbound_bodies.find(stream_id) == null) {
+            return error.UnexpectedStream;
+        }
+        if (self.outbound_bodies.find(stream_id).?.send.fin_sent) {
+            return error.UnexpectedStream;
+        }
+        var send_attempted = false;
+        sendRuntimeBodyChunk(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.limits.max_stream_frame_data,
+            &send_attempted,
+        ) catch |err| {
+            if (send_attempted) self.request_unusable = true;
+            return err;
+        };
+    }
+
+    pub fn receiveResponseEvent(
+        self: *Client,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        return self.receiveResponseEventInternal(stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveResponseEventWithTimeout(
+        self: *Client,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveResponseEventInternal(
+            stream_id,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveResponseEventWithDeadline(
+        self: *Client,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveResponseEventInternal(stream_id, deadline);
+    }
+
+    fn receiveResponseEventInternal(
+        self: *Client,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        if (!self.streaming_mode or
+            !self.request_lifecycle.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        if (deadline != null) {
+            if (!self.response_receive_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.response_receive_mutex.lockUncancelable(
+                self.quic_client.endpoint.io,
+            );
+        }
+        defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
+
+        if (try self.pollResponseEvent(stream_id)) |event| return event;
+        while (true) {
+            var datagram = if (deadline) |absolute|
+                try self.quic_client.receiveWithDeadline(absolute)
+            else
+                try self.quic_client.receive();
+            defer datagram.deinit(self.quic_client.endpoint.allocator);
+            if (!datagram.from.eql(&self.quic_client.peer)) continue;
+            try self.processDevelopmentResponseDatagram(&datagram);
+            if (try self.pollResponseEvent(stream_id)) |event| return event;
+        }
+    }
+
+    /// Return an already-buffered response event without reading UDP.
+    pub fn pollResponseEvent(
+        self: *Client,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        if (self.response_streams.takeReset(stream_id)) |code| {
+            _ = try self.request_lifecycle.finish(stream_id);
+            _ = self.outbound_bodies.finish(stream_id);
+            self.qpack_encode.abandonStream(stream_id);
+            self.streaming_responses.remove(stream_id);
+            return if (code == http3.ApplicationErrorCode.request_rejected)
+                error.RequestRejected
+            else
+                error.RequestCancelled;
+        }
+        const entry = try self.streaming_responses.activateResponse(
+            &self.response_streams,
+            stream_id,
+        );
+        self.request_lifecycle.applyResponseReaderSemantics(
+            stream_id,
+            &entry.reader,
+        );
+        const event = (try entry.reader.next(self.qpack_decode.table)) orelse
+            return null;
+        if (event == .finished) {
+            _ = try self.request_lifecycle.finish(stream_id);
+            _ = self.outbound_bodies.finish(stream_id);
+            self.qpack_encode.abandonStream(stream_id);
+            self.streaming_responses.remove(stream_id);
+        }
+        return event;
+    }
+
+    pub fn readResponseData(
+        self: *Client,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.readData(out);
+    }
+
+    pub fn skipResponseData(self: *Client, stream_id: u62) Error!usize {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.skipData();
+    }
+
+    pub fn cancelRequest(
+        self: *Client,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        const body = self.outbound_bodies.find(stream_id);
+        if (body == null and !self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        const local_final_size = if (body) |entry| entry.send.next_offset else 0;
+        const send_reset = if (body) |entry| !entry.send.fin_sent else false;
+        self.response_streams.remove(stream_id);
+        self.streaming_responses.remove(stream_id);
+        self.qpack_encode.abandonStream(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
+        try sendRuntimeRequestCancellation(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            stream_id,
+            application_error_code,
+            local_final_size,
+            send_reset,
+        );
+    }
+
+    fn processDevelopmentResponseDatagram(
+        self: *Client,
+        datagram: *const quic.runtime.OwnedDatagram,
+    ) Error!void {
+        for (datagram.frames) |frame| {
+            if (frame == .reset_stream and
+                (try messageStreamDisposition(
+                    frame.reset_stream.stream_id,
+                )) == .request_response)
+            {
+                const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+                if (!self.request_lifecycle.contains(stream_id)) continue;
+                try self.response_streams.recordReset(
+                    stream_id,
+                    frame.reset_stream.application_error_code,
+                );
+                continue;
+            }
+            if (frame != .stream) continue;
+            if ((try messageStreamDisposition(
+                frame.stream.stream_id,
+            )) == .ignore) continue;
+            const stream_id: u62 = @intCast(frame.stream.stream_id);
+            if (stream_id % 4 != 0) return error.UnexpectedStream;
+            if (!self.request_lifecycle.contains(stream_id)) continue;
+            if (try self.streaming_responses.insert(
+                datagram.from,
+                frame.stream,
+            )) continue;
+            try self.response_streams.insert(datagram.from, frame.stream);
+        }
+    }
 };
 
 const RuntimeAssembledStream = struct {
@@ -3219,6 +3834,110 @@ fn sendRuntimeStreamMessage(
     );
     for (frames.items) |frame| {
         try endpoint.sendFrames(to, &.{frame});
+    }
+}
+
+fn sendRuntimeStreamingHead(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    expected_length: ?usize,
+    body_allowed: bool,
+    max_stream_frame_data: usize,
+    bodies: *OutboundBodySet,
+    send_attempted: ?*bool,
+) Error!void {
+    const body_open = body_allowed and
+        (expected_length == null or expected_length.? != 0);
+    try bodies.reserveOpen(stream_id);
+
+    var send = quic.stream_state.SendState.init(stream_id);
+    scratch.frames.clearRetainingCapacity();
+    try send.appendFrames(
+        &scratch.frames,
+        endpoint.allocator,
+        scratch.encoded.items,
+        max_stream_frame_data,
+        !body_open,
+    );
+    // Retain even an already-FIN sender until the opposite direction ends. A
+    // later cancellation still needs the exact final stream offset.
+    bodies.appendOpenAssumeCapacity(
+        stream_id,
+        send,
+        if (body_open) expected_length else 0,
+    );
+    for (scratch.frames.items) |frame| {
+        if (send_attempted) |attempted| attempted.* = true;
+        try endpoint.sendFrames(to, &.{frame});
+    }
+}
+
+fn sendRuntimeRequestCancellation(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    stream_id: u62,
+    application_error_code: u64,
+    local_final_size: u64,
+    send_reset: bool,
+) Error!void {
+    const reset: quic.Frame = .{ .reset_stream = .{
+        .stream_id = stream_id,
+        .application_error_code = application_error_code,
+        .final_size = local_final_size,
+    } };
+    const stop: quic.Frame = .{ .stop_sending = .{
+        .stream_id = stream_id,
+        .application_error_code = application_error_code,
+    } };
+    if (send_reset) {
+        try endpoint.sendFrames(to, &.{ reset, stop });
+    } else {
+        try endpoint.sendFrames(to, &.{stop});
+    }
+}
+
+fn sendRuntimeBodyChunk(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    max_stream_frame_data: usize,
+    send_attempted_out: ?*bool,
+) Error!void {
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    // Encoding failures occur before any datagram is observable and must not
+    // consume the stream offset or declared body length. A socket failure is
+    // intentionally not rolled back: UDP send errors cannot prove that an
+    // earlier fragment was invisible to the peer.
+    const previous = entry.*;
+    var send_attempted = false;
+    errdefer {
+        if (!send_attempted) entry.* = previous;
+    }
+    try bodies.prepareChunkForEntry(entry, data.len, fin);
+    bodies.payload_scratch.clearRetainingCapacity();
+    try writeDataFrame(&bodies.payload_scratch, endpoint.allocator, data);
+    bodies.frame_scratch.clearRetainingCapacity();
+    try entry.send.appendFrames(
+        &bodies.frame_scratch,
+        endpoint.allocator,
+        bodies.payload_scratch.items,
+        max_stream_frame_data,
+        fin,
+    );
+    for (bodies.frame_scratch.items) |frame| {
+        send_attempted = true;
+        if (send_attempted_out) |attempted| attempted.* = true;
+        endpoint.sendFrames(to, &.{frame}) catch |err| {
+            // The DATA frame may now be only partially visible. Retiring the
+            // sender is safer than permitting a later call to skip bytes that
+            // were never attempted after this failure.
+            return err;
+        };
     }
 }
 
@@ -3513,6 +4232,302 @@ const DevelopmentRequestStreamSet = struct {
                 !entry.from.eql(&from)) continue;
             entry.deinit(self.allocator);
             _ = self.entries.swapRemove(index);
+            return;
+        }
+    }
+};
+
+/// Per-peer state for the cleartext development server. UDP has no connection
+/// object at this layer, so every remote address gets its own HTTP/3 stream-ID
+/// namespace, parser, lifecycle, and send offsets. The total number of
+/// retained request streams remains bounded across all peers.
+const DevelopmentServerPeerSet = struct {
+    const Peer = struct {
+        address: net.IpAddress,
+        request_streams: RequestStreamSet,
+        streaming_requests: StreamingRequestSet,
+        lifecycle: ServerRequestLifecycle,
+        qpack_decode: QpackDecodeState,
+        qpack_encode: QpackEncodeState,
+        outbound_bodies: OutboundBodySet,
+        stream_send_scratch: StreamMessageSendScratch = .{},
+        unusable: bool = false,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            address: net.IpAddress,
+            max_stream_buffer: usize,
+            max_streams: usize,
+        ) Peer {
+            return .{
+                .address = address,
+                .request_streams = .init(allocator, max_stream_buffer, max_streams),
+                .streaming_requests = .init(
+                    allocator,
+                    max_streams,
+                    max_stream_buffer,
+                    development_settings,
+                    .request,
+                ),
+                .lifecycle = .init(allocator),
+                .qpack_decode = .init(allocator, 0, max_stream_buffer),
+                .qpack_encode = .init(allocator, 0, max_stream_buffer),
+                .outbound_bodies = .init(allocator, max_streams),
+            };
+        }
+
+        fn deinit(self: *Peer, allocator: std.mem.Allocator) void {
+            self.stream_send_scratch.deinit(allocator);
+            self.outbound_bodies.deinit();
+            self.qpack_encode.deinit();
+            self.qpack_decode.deinit();
+            self.lifecycle.deinit();
+            self.streaming_requests.deinit();
+            self.request_streams.deinit();
+            self.* = undefined;
+        }
+
+        fn retainedCount(self: Peer) usize {
+            var count = self.lifecycle.active_streams.items.len;
+            for (self.request_streams.entries.items) |entry| {
+                if (!self.lifecycle.contains(@intCast(entry.receive.stream_id))) {
+                    count += 1;
+                }
+            }
+            for (self.streaming_requests.entries.items) |entry| {
+                if (!self.lifecycle.contains(@intCast(entry.reader.receive.stream_id))) {
+                    count += 1;
+                }
+            }
+            for (self.streaming_requests.resets.items[self.streaming_requests.reset_head..]) |reset| {
+                if (!self.lifecycle.contains(reset.stream_id)) count += 1;
+            }
+            return count;
+        }
+
+        fn finishSendIfExchangeComplete(
+            self: *Peer,
+            stream_id: u62,
+        ) void {
+            if (self.request_streams.contains(stream_id) or
+                self.streaming_requests.contains(stream_id)) return;
+            const body = self.outbound_bodies.find(stream_id) orelse return;
+            if (body.send.fin_sent) _ = self.outbound_bodies.finish(stream_id);
+        }
+    };
+
+    allocator: std.mem.Allocator,
+    // Peer objects are individually allocated so an ArrayList growth cannot
+    // invalidate a pointer held by a concurrent response sender. A peer is
+    // removed only after it has no active receive or response lifecycle.
+    peers: std.ArrayList(*Peer) = .empty,
+    max_stream_buffer: usize,
+    max_streams: usize,
+    last_peer_index: ?usize = null,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_stream_buffer: usize,
+        max_streams: usize,
+    ) DevelopmentServerPeerSet {
+        return .{
+            .allocator = allocator,
+            .max_stream_buffer = max_stream_buffer,
+            .max_streams = max_streams,
+        };
+    }
+
+    fn deinit(self: *DevelopmentServerPeerSet) void {
+        for (self.peers.items) |peer| {
+            peer.deinit(self.allocator);
+            self.allocator.destroy(peer);
+        }
+        self.peers.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn totalRetained(self: DevelopmentServerPeerSet) usize {
+        var total: usize = 0;
+        for (self.peers.items) |peer| total += peer.retainedCount();
+        return total;
+    }
+
+    fn find(
+        self: *DevelopmentServerPeerSet,
+        address: net.IpAddress,
+    ) ?*Peer {
+        for (self.peers.items) |peer| {
+            if (peer.address.eql(&address)) return peer;
+        }
+        return null;
+    }
+
+    fn getOrCreate(
+        self: *DevelopmentServerPeerSet,
+        address: net.IpAddress,
+    ) Error!*Peer {
+        if (self.find(address)) |peer| return peer;
+        const peer = try self.allocator.create(Peer);
+        errdefer self.allocator.destroy(peer);
+        peer.* = .init(
+            self.allocator,
+            address,
+            self.max_stream_buffer,
+            self.max_streams,
+        );
+        errdefer peer.deinit(self.allocator);
+        try self.peers.append(self.allocator, peer);
+        return peer;
+    }
+
+    fn insert(
+        self: *DevelopmentServerPeerSet,
+        from: net.IpAddress,
+        frame: quic.StreamFrame,
+    ) Error!void {
+        const stream_id: u62 = @intCast(frame.stream_id);
+        var peer = self.find(from);
+        if (peer == null and self.totalRetained() >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        const created = peer == null;
+        peer = peer orelse try self.getOrCreate(from);
+        errdefer if (created and peer.?.retainedCount() == 0) {
+            self.removePeer(from);
+        };
+        if (!peer.?.request_streams.contains(stream_id) and
+            !peer.?.streaming_requests.contains(stream_id) and
+            self.totalRetained() >= self.max_streams)
+        {
+            return error.ExcessiveLoad;
+        }
+        try peer.?.streaming_requests.insertRequest(
+            &peer.?.request_streams,
+            from,
+            frame,
+        );
+    }
+
+    fn recordReset(
+        self: *DevelopmentServerPeerSet,
+        from: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        const peer = self.find(from) orelse return;
+        const replaces_stream = peer.request_streams.contains(stream_id) or
+            peer.streaming_requests.contains(stream_id);
+        if (!replaces_stream) return;
+        try peer.streaming_requests.prepareReset(
+            from,
+            stream_id,
+            peer.request_streams.entries.items.len,
+            true,
+        );
+        peer.streaming_requests.recordPreparedNewResetAssumeCapacity(
+            from,
+            stream_id,
+            application_error_code,
+        );
+        peer.request_streams.remove(stream_id);
+    }
+
+    fn pollRequestEvent(
+        self: *DevelopmentServerPeerSet,
+    ) Error!?StreamingRequestEvent {
+        if (self.peers.items.len == 0) return null;
+        var index = if (self.last_peer_index) |last|
+            (last + 1) % self.peers.items.len
+        else
+            0;
+        var remaining = self.peers.items.len;
+        while (remaining != 0) : (remaining -= 1) {
+            const peer = self.peers.items[index];
+            if (peer.streaming_requests.takeFirstReset()) |reset| {
+                peer.lifecycle.markFinished(reset.stream_id);
+                _ = peer.outbound_bodies.finish(reset.stream_id);
+                peer.qpack_encode.abandonStream(reset.stream_id);
+                self.last_peer_index = index;
+                return .{ .reset = .{
+                    .from = reset.from,
+                    .stream_id = reset.stream_id,
+                    .application_error_code = reset.application_error_code,
+                } };
+            }
+            if (try peer.streaming_requests.nextRequest(
+                &peer.request_streams,
+                peer.qpack_decode.table,
+                0,
+            )) |ready| {
+                const stream_id: u62 = @intCast(
+                    ready.entry.reader.receive.stream_id,
+                );
+                if (ready.event == .head) {
+                    const priority: http3.Priority = switch (ready.event.head) {
+                        .request => |request| requestPriority(request.headers),
+                        .response => .{},
+                    };
+                    try peer.lifecycle.markReceived(stream_id, priority);
+                } else if (ready.event == .finished) {
+                    peer.streaming_requests.remove(stream_id);
+                    peer.finishSendIfExchangeComplete(stream_id);
+                }
+                self.last_peer_index = index;
+                return .{ .message = .{
+                    .from = peer.address,
+                    .stream_id = stream_id,
+                    .value = ready.event,
+                } };
+            }
+            if (peer.retainedCount() == 0 and
+                peer.outbound_bodies.entries.items.len == 0)
+            {
+                peer.deinit(self.allocator);
+                const removed = self.peers.swapRemove(index);
+                self.allocator.destroy(removed);
+                self.last_peer_index = null;
+                if (self.peers.items.len == 0) return null;
+                index %= self.peers.items.len;
+                continue;
+            }
+            index = (index + 1) % self.peers.items.len;
+        }
+        return null;
+    }
+
+    fn readRequestData(
+        self: *DevelopmentServerPeerSet,
+        from: net.IpAddress,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        const peer = self.find(from) orelse return error.UnexpectedStream;
+        const entry = peer.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.readData(out);
+    }
+
+    fn skipRequestData(
+        self: *DevelopmentServerPeerSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!usize {
+        const peer = self.find(from) orelse return error.UnexpectedStream;
+        const entry = peer.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.skipData();
+    }
+
+    fn removePeer(
+        self: *DevelopmentServerPeerSet,
+        address: net.IpAddress,
+    ) void {
+        for (self.peers.items, 0..) |peer, index| {
+            if (!peer.address.eql(&address)) continue;
+            peer.deinit(self.allocator);
+            _ = self.peers.swapRemove(index);
+            self.allocator.destroy(peer);
+            self.last_peer_index = null;
             return;
         }
     }
@@ -32668,6 +33683,7 @@ test {
     _ = handshake_client_pool;
     _ = connect_datagram;
     _ = @import("runtime/handshake_client_pool_tests.zig");
+    _ = @import("runtime/development_streaming_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");

@@ -1838,6 +1838,42 @@ test "public modules are reachable" {
         "receiveRequestWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "receiveRequestEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "pollRequestEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "readRequestData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "skipRequestData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "startResponse",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "sendResponseBody",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "cancelRequest",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.Client,
         "requestWithTimeout",
     ));
@@ -1852,6 +1888,42 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Client,
         "requestWithInformationalAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "startRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "sendRequestBody",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "receiveResponseEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "receiveResponseEventWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "receiveResponseEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "pollResponseEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "readResponseData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "skipResponseData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "cancelRequest",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "receiveRequestsConcurrent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "serveConcurrent"));
