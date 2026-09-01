@@ -2417,7 +2417,16 @@ test "public modules are reachable" {
         @as(u64, 0x10c),
         netz.http3.ApplicationErrorCode.request_cancelled,
     );
+    try std.testing.expectEqual(
+        @as(u64, 0x108),
+        netz.http3.ApplicationErrorCode.id_error,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 256),
+        netz.http3.default_max_priority_updates,
+    );
     try std.testing.expect(@hasDecl(netz.http3, "ControlState"));
+    try std.testing.expect(@hasDecl(netz.http3.ControlState, "init"));
     try std.testing.expect(@hasDecl(netz.http3.ControlState, "deinit"));
     try std.testing.expect(@hasDecl(netz.http3.ControlState, "clone"));
     try std.testing.expect(@hasDecl(netz.http3, "Priority"));
@@ -2433,6 +2442,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "writeQpackDecoderStreamPrefix"));
     try std.testing.expect(@hasDecl(netz.http3.ControlState, "registerControlStream"));
     try std.testing.expect(@hasDecl(netz.http3.ControlState, "registerQpackStream"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.ControlState,
+        "removeRequestPriority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.ControlState,
+        "removePushPriority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.ControlState,
+        "retireRequestPriority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.ControlState,
+        "retirePushPriority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.ControlState,
+        "discardRetiredPriorityUpdates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.ControlState,
+        "appendControlPayloadValidated",
+    ));
     try std.testing.expect(@hasDecl(netz.http3, "writeMaxPushIdFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writeCancelPushFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writePushPromiseFrame"));
@@ -2454,11 +2487,23 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
     try std.testing.expect(@hasField(
         netz.http3.runtime.ProtectedConfig,
+        "max_priority_updates",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.ProtectedConfig,
+        "max_client_bidirectional_streams",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.ProtectedConfig,
         "response_scheduler_max_batch_packets",
     ));
     try std.testing.expectEqual(
         @as(usize, 128),
         (netz.http3.runtime.HandshakeSessionOptions{}).max_concurrent_request_streams,
+    );
+    try std.testing.expectEqual(
+        netz.http3.default_max_priority_updates,
+        (netz.http3.runtime.HandshakeSessionOptions{}).max_priority_updates,
     );
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "qpack_encode"));
@@ -4660,6 +4705,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramWithEcnAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "isPeerInitiatedStreamIdWithinLimit",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "isPeerInitiatedBidirectionalStreamIdWithinLimit",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendMany"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendManyProgress"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendManyProgressAt"));

@@ -28,6 +28,7 @@ pub const Error = wire.Error || error{
     InvalidHeader,
     InvalidOrigin,
     InvalidPriorityUpdate,
+    IdError,
     StreamCreationError,
     RequestCancelled,
     RequestIncomplete,
@@ -47,6 +48,9 @@ pub const default_max_informational_responses: usize = 16;
 /// RFC 8336 leaves the Origin Set unbounded. Apply a deterministic connection
 /// state cap so an authenticated server cannot grow client memory indefinitely.
 pub const max_peer_origins: usize = 256;
+/// Bound total retained RFC 9218 request and push state independently of each
+/// control-frame size so a peer cannot grow connection memory with unique IDs.
+pub const default_max_priority_updates: usize = 256;
 /// Bound partial control-frame retention, including fragmented ORIGIN frames.
 pub const max_control_stream_buffer_size: usize = 64 * 1024;
 
@@ -54,6 +58,8 @@ pub const ApplicationErrorCode = struct {
     /// RFC 9297 malformed HTTP Datagram association/context identifier.
     pub const datagram_error: u64 = 0x33;
     pub const no_error: u64 = 0x100;
+    pub const excessive_load: u64 = 0x107;
+    pub const id_error: u64 = 0x108;
     pub const request_rejected: u64 = 0x10b;
     pub const request_cancelled: u64 = 0x10c;
     pub const request_incomplete: u64 = 0x10d;
@@ -906,6 +912,11 @@ pub const SettingsState = struct {
 };
 
 pub const ControlState = struct {
+    pub const Options = struct {
+        /// Shared cap across request- and push-element priority entries.
+        max_priority_updates: usize = default_max_priority_updates,
+    };
+
     const PriorityUpdateKey = struct {
         frame_type: u64,
         prioritized_element_id: u64,
@@ -925,6 +936,29 @@ pub const ControlState = struct {
         ) void {
             allocator.free(self.payload.field_value);
             self.* = undefined;
+        }
+    };
+
+    /// Optional semantic validation performed for each complete control frame
+    /// immediately before it mutates connection state. Runtime layers use this
+    /// hook for checks that depend on transport limits or application-owned
+    /// push metadata, neither of which belongs in the wire codec.
+    pub const FrameDisposition = enum { apply, ignore };
+
+    pub const FrameValidator = struct {
+        context: *const anyopaque,
+        validate: *const fn (
+            context: *const anyopaque,
+            state: ControlState,
+            frame: Frame,
+        ) Error!FrameDisposition,
+
+        fn validateFrame(
+            self: FrameValidator,
+            state: ControlState,
+            frame: Frame,
+        ) Error!FrameDisposition {
+            return self.validate(self.context, state, frame);
         }
     };
 
@@ -966,11 +1000,24 @@ pub const ControlState = struct {
     priority_updates: std.ArrayList(StoredPriorityUpdate) = .empty,
     priority_update_index: std.AutoHashMapUnmanaged(PriorityUpdateKey, usize) = .empty,
     priority_update_generation: u64 = 0,
+    max_priority_updates: usize = default_max_priority_updates,
+    /// Coarse retirement watermarks keep late updates from turning completed
+    /// elements back into retained state. Advancing a watermark may also drop
+    /// priority hints for lower idle request IDs or older promised push IDs;
+    /// RFC 9218 explicitly permits ignoring priority signals, and this bounded
+    /// policy is preferable to lifetime tombstone growth.
+    retired_request_priority_through: ?u64 = null,
+    retired_push_priority_through: ?u64 = null,
     peer_qpack_encoder_stream_id: ?u64 = null,
     peer_qpack_decoder_stream_id: ?u64 = null,
     peer_qpack_encoder_stream_consumed_offset: usize = 0,
     peer_qpack_decoder_stream_consumed_offset: usize = 0,
     peer_cancelled_push_index: std.AutoHashMapUnmanaged(u64, void) = .empty,
+
+    pub fn init(options: Options) Error!ControlState {
+        if (options.max_priority_updates == 0) return error.InvalidSetting;
+        return .{ .max_priority_updates = options.max_priority_updates };
+    }
 
     pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {
         for (self.peer_origins.items) |*origin| origin.deinit();
@@ -1046,6 +1093,7 @@ pub const ControlState = struct {
             std.math.cast(u32, self.priority_updates.items.len) orelse
                 return error.OutOfMemory,
         );
+        var latest_index: ?usize = null;
         for (self.priority_updates.items) |update| {
             const owned = try allocator.dupe(
                 u8,
@@ -1064,12 +1112,22 @@ pub const ControlState = struct {
                 priorityUpdateKey(copied.frame_type, copied.payload.prioritized_element_id),
                 index,
             );
+            if (self.latest_priority_update) |latest| {
+                if (self.latest_priority_update_type == update.frame_type and
+                    latest.prioritized_element_id ==
+                        update.payload.prioritized_element_id)
+                {
+                    latest_index = index;
+                }
+            }
         }
-        if (copy.priority_updates.items.len != 0) {
-            copy.latest_priority_update =
-                copy.priority_updates.items[
-                    copy.priority_updates.items.len - 1
-                ].payload;
+        if (latest_index) |index| {
+            // Replacement and swap-removal deliberately do not keep the
+            // backing array in generation order. Rebind the compatibility
+            // view while cloning rather than assuming the array tail is the
+            // most recently processed update. Tracking the index here also
+            // avoids a hash lookup that would use borrowed state as a key.
+            copy.latest_priority_update = copy.priority_updates.items[index].payload;
         }
         return copy;
     }
@@ -1181,6 +1239,19 @@ pub const ControlState = struct {
         allocator: std.mem.Allocator,
         payload: []const u8,
     ) Error!void {
+        return self.appendControlPayloadValidated(
+            allocator,
+            payload,
+            null,
+        );
+    }
+
+    pub fn appendControlPayloadValidated(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+        validator: ?FrameValidator,
+    ) Error!void {
         if (payload.len > max_control_stream_buffer_size -|
             self.peer_control_stream_buffer.items.len)
         {
@@ -1210,11 +1281,18 @@ pub const ControlState = struct {
             }
             const total = try header.totalLength();
             if (remaining.len < total) break;
-            try self.applyFrame(allocator, .{
+            const frame = Frame{
                 .frame_type = header.frame_type,
                 .payload = remaining[header.header_length..total],
                 .consumed = total,
-            });
+            };
+            if (validator) |value| {
+                if (try value.validateFrame(self.*, frame) == .ignore) {
+                    consumed += total;
+                    continue;
+                }
+            }
+            try self.applyFrame(allocator, frame);
             consumed += total;
         }
         if (consumed == 0) return;
@@ -1295,7 +1373,9 @@ pub const ControlState = struct {
             ),
             FrameType.priority_update_request => {
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
-                try validateRequestStreamId(priority_update.prioritized_element_id);
+                validateRequestStreamId(
+                    priority_update.prioritized_element_id,
+                ) catch return error.IdError;
                 try self.storePriorityUpdate(
                     allocator,
                     frame.frame_type,
@@ -1487,6 +1567,96 @@ pub const ControlState = struct {
         return update.payload;
     }
 
+    /// Forget request priority after the corresponding request becomes
+    /// terminal. Removal is idempotent and repairs the swap-moved index entry.
+    pub fn removeRequestPriority(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+    ) void {
+        self.removePriorityUpdate(
+            allocator,
+            FrameType.priority_update_request,
+            stream_id,
+        );
+    }
+
+    /// Forget push priority once the promised push is cancelled or its stream
+    /// is complete. Keeping both element namespaces recyclable makes the bound
+    /// a memory limit rather than a lifetime quota on long-lived connections.
+    pub fn removePushPriority(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        push_id: u64,
+    ) void {
+        self.removePriorityUpdate(
+            allocator,
+            FrameType.priority_update_push,
+            push_id,
+        );
+    }
+
+    /// Mark a request priority namespace prefix as terminal and discard all
+    /// retained hints in that prefix. Future late updates are discarded by
+    /// `discardRetiredPriorityUpdates` after runtime validation.
+    pub fn retireRequestPriority(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+    ) void {
+        self.retired_request_priority_through = if (self.retired_request_priority_through) |previous| @max(previous, stream_id) else stream_id;
+        self.removePriorityPrefix(
+            allocator,
+            FrameType.priority_update_request,
+            self.retired_request_priority_through.?,
+        );
+    }
+
+    /// Mark a push priority namespace prefix as terminal. Push scheduling hints
+    /// below the watermark may be discarded because priorities are advisory.
+    pub fn retirePushPriority(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        push_id: u64,
+    ) void {
+        self.retired_push_priority_through = if (self.retired_push_priority_through) |previous| @max(previous, push_id) else push_id;
+        self.removePriorityPrefix(
+            allocator,
+            FrameType.priority_update_push,
+            self.retired_push_priority_through.?,
+        );
+    }
+
+    /// Expose retained entries read-only so a runtime can validate or apply
+    /// every update decoded from a batched control-stream fragment. Callers
+    /// must not retain the slice across another mutating control operation.
+    pub fn priorityUpdates(self: ControlState) []const StoredPriorityUpdate {
+        return self.priority_updates.items;
+    }
+
+    /// Reclaim hints for element-ID prefixes the runtime has declared
+    /// terminal. Calling this after each control-stream fragment also discards
+    /// late updates without retaining an unbounded set of closed IDs.
+    pub fn discardRetiredPriorityUpdates(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.retired_request_priority_through) |through| {
+            self.removePriorityPrefix(
+                allocator,
+                FrameType.priority_update_request,
+                through,
+            );
+        }
+        if (self.retired_push_priority_through) |through| {
+            self.removePriorityPrefix(
+                allocator,
+                FrameType.priority_update_push,
+                through,
+            );
+        }
+    }
+
     pub fn pushCancelled(self: ControlState, push_id: u64) bool {
         return self.peer_cancelled_push_index.count() != 0 and
             self.peer_cancelled_push_index.contains(push_id);
@@ -1528,7 +1698,6 @@ pub const ControlState = struct {
             self.priority_update_generation,
             1,
         ) catch return error.InvalidPriorityUpdate;
-
         const key = priorityUpdateKey(
             frame_type,
             update.prioritized_element_id,
@@ -1555,6 +1724,9 @@ pub const ControlState = struct {
                 return;
             }
         }
+        if (self.priority_updates.items.len >= self.max_priority_updates) {
+            return error.ExcessiveLoad;
+        }
         const slot = try self.priority_update_index.getOrPut(allocator, key);
         std.debug.assert(!slot.found_existing);
         errdefer _ = self.priority_update_index.remove(key);
@@ -1577,6 +1749,59 @@ pub const ControlState = struct {
             .field_value = owned,
         };
         self.priority_update_generation = next_generation;
+    }
+
+    fn removePriorityUpdate(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        frame_type: u64,
+        prioritized_element_id: u64,
+    ) void {
+        const key = priorityUpdateKey(frame_type, prioritized_element_id);
+        const index = self.priority_update_index.get(key) orelse return;
+        const removed_was_latest = self.latest_priority_update_type == frame_type and
+            self.latest_priority_update != null and
+            self.latest_priority_update.?.prioritized_element_id ==
+                prioritized_element_id;
+        _ = self.priority_update_index.remove(key);
+        var removed = self.priority_updates.swapRemove(index);
+        removed.deinit(allocator);
+        if (index < self.priority_updates.items.len) {
+            const moved = self.priority_updates.items[index];
+            const moved_key = priorityUpdateKey(
+                moved.frame_type,
+                moved.payload.prioritized_element_id,
+            );
+            self.priority_update_index.getPtr(moved_key).?.* = index;
+        }
+        if (removed_was_latest) {
+            self.latest_priority_update = null;
+            self.latest_priority_update_type = null;
+        }
+    }
+
+    fn removePriorityPrefix(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        frame_type: u64,
+        through: u64,
+    ) void {
+        var index: usize = 0;
+        while (index < self.priority_updates.items.len) {
+            const update = self.priority_updates.items[index];
+            if (update.frame_type != frame_type or
+                update.payload.prioritized_element_id > through)
+            {
+                index += 1;
+                continue;
+            }
+            self.removePriorityUpdate(
+                allocator,
+                update.frame_type,
+                update.payload.prioritized_element_id,
+            );
+            // swapRemove moved an unchecked entry into `index`.
+        }
     }
 
     fn priorityUpdateKey(
@@ -5037,7 +5262,7 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     defer invalid_priority.deinit(allocator);
     try writePriorityUpdateFrameRaw(&invalid_priority, allocator, FrameType.priority_update_request, 1, "u=1");
     const invalid_frame = try Frame.parse(invalid_priority.items);
-    try std.testing.expectError(error.UnexpectedFrame, control.applyFrame(allocator, invalid_frame));
+    try std.testing.expectError(error.IdError, control.applyFrame(allocator, invalid_frame));
 
     var no_alloc_priority: std.ArrayList(u8) = .empty;
     defer no_alloc_priority.deinit(allocator);
@@ -5174,6 +5399,88 @@ test "HTTP/3 identical priority update replacement does not allocate" {
     );
     try std.testing.expect(
         control.requestPriorityUpdate(0).?.priority().incremental,
+    );
+}
+
+test "HTTP/3 priority state is bounded and request removal repairs indexes" {
+    const allocator = std.testing.allocator;
+    var control = try ControlState.init(.{ .max_priority_updates = 2 });
+    defer control.deinit(allocator);
+    control.settings.received = true;
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try writePriorityUpdateFrame(&first, allocator, 0, .{ .urgency = 1 });
+    try control.applyFrame(allocator, try Frame.parse(first.items));
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try writePriorityUpdateFrame(&second, allocator, 4, .{ .urgency = 2 });
+    try control.applyFrame(allocator, try Frame.parse(second.items));
+
+    first.clearRetainingCapacity();
+    try writePriorityUpdateFrame(&first, allocator, 0, .{ .urgency = 5 });
+    try control.applyFrame(allocator, try Frame.parse(first.items));
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        control.requestPriorityUpdate(0).?.priority().urgency,
+    );
+    var cloned = try control.clone(allocator);
+    defer cloned.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        cloned.latest_priority_update.?.prioritized_element_id,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        cloned.latest_priority_update.?.priority().urgency,
+    );
+
+    var overflow: std.ArrayList(u8) = .empty;
+    defer overflow.deinit(allocator);
+    try writePriorityUpdateFrame(&overflow, allocator, 8, .{});
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        control.applyFrame(allocator, try Frame.parse(overflow.items)),
+    );
+    try std.testing.expect(control.requestPriorityUpdate(8) == null);
+
+    control.removeRequestPriority(allocator, 0);
+    try std.testing.expect(control.requestPriorityUpdate(0) == null);
+    try std.testing.expectEqual(
+        @as(u3, 2),
+        control.requestPriorityUpdate(4).?.priority().urgency,
+    );
+    try control.applyFrame(allocator, try Frame.parse(overflow.items));
+    try std.testing.expect(control.requestPriorityUpdate(8) != null);
+    control.removeRequestPriority(allocator, 99);
+
+    control.removeRequestPriority(allocator, 4);
+    var push: std.ArrayList(u8) = .empty;
+    defer push.deinit(allocator);
+    try writePushPriorityUpdateFrame(&push, allocator, 3, .{ .urgency = 6 });
+    try control.applyFrame(allocator, try Frame.parse(push.items));
+    try std.testing.expect(control.pushPriorityUpdate(3) != null);
+    control.removePushPriority(allocator, 3);
+    try std.testing.expect(control.pushPriorityUpdate(3) == null);
+
+    control.retireRequestPriority(allocator, 8);
+    try control.applyFrame(allocator, try Frame.parse(overflow.items));
+    control.discardRetiredPriorityUpdates(allocator);
+    try std.testing.expect(control.requestPriorityUpdate(8) == null);
+    try std.testing.expectEqual(@as(usize, 0), control.priorityUpdates().len);
+
+    try control.applyFrame(allocator, try Frame.parse(push.items));
+    control.retirePushPriority(allocator, 3);
+    try control.applyFrame(allocator, try Frame.parse(push.items));
+    control.discardRetiredPriorityUpdates(allocator);
+    try std.testing.expect(control.pushPriorityUpdate(3) == null);
+    try std.testing.expectEqual(@as(usize, 0), control.priorityUpdates().len);
+}
+
+test "HTTP/3 priority state rejects a zero bound" {
+    try std.testing.expectError(
+        error.InvalidSetting,
+        ControlState.init(.{ .max_priority_updates = 0 }),
     );
 }
 

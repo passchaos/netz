@@ -4,6 +4,105 @@ const one_rtt = @import("../../one_rtt.zig");
 const net = std.Io.net;
 const ObservedBatchSend = @import("observed_batch_send.zig").ObservedBatchSend;
 
+test "QUIC peer stream identifier predicate honors role direction and limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x81} ** 32);
+    var server = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_bidi = 2,
+        .initial_receive_max_streams_uni = 1,
+    });
+    defer server.deinit();
+
+    try std.testing.expect(server.isPeerInitiatedStreamIdWithinLimit(0));
+    try std.testing.expect(server.isPeerInitiatedStreamIdWithinLimit(4));
+    try std.testing.expect(!server.isPeerInitiatedStreamIdWithinLimit(8));
+    try std.testing.expect(server.isPeerInitiatedStreamIdWithinLimit(2));
+    try std.testing.expect(
+        server.isPeerInitiatedBidirectionalStreamIdWithinLimit(0),
+    );
+    try std.testing.expect(
+        !server.isPeerInitiatedBidirectionalStreamIdWithinLimit(2),
+    );
+    try std.testing.expect(!server.isPeerInitiatedStreamIdWithinLimit(6));
+    try std.testing.expect(!server.isPeerInitiatedStreamIdWithinLimit(1));
+    try std.testing.expect(
+        !server.isPeerInitiatedStreamIdWithinLimit(std.math.maxInt(u64)),
+    );
+
+    var client = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .local_endpoint = .client,
+        .initial_receive_max_streams_bidi = 2,
+        .initial_receive_max_streams_uni = 1,
+    });
+    defer client.deinit();
+    try std.testing.expect(
+        client.isPeerInitiatedBidirectionalStreamIdWithinLimit(1),
+    );
+    try std.testing.expect(
+        client.isPeerInitiatedBidirectionalStreamIdWithinLimit(5),
+    );
+    try std.testing.expect(
+        !client.isPeerInitiatedBidirectionalStreamIdWithinLimit(9),
+    );
+    try std.testing.expect(client.isPeerInitiatedStreamIdWithinLimit(3));
+    try std.testing.expect(!client.isPeerInitiatedStreamIdWithinLimit(7));
+    try std.testing.expect(!client.isPeerInitiatedStreamIdWithinLimit(0));
+}
+
+test "QUIC local close information is available before peer acknowledgement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x82} ** 32);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expect(one_rtt.testing.localCloseInfo(&connection) == null);
+    try connection.closeApplication(0x108, "invalid element");
+    const close = one_rtt.testing.localCloseInfo(&connection) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(close.application);
+    try std.testing.expectEqual(@as(u64, 0x108), close.error_code);
+    try std.testing.expectEqual(@as(u64, 0), close.frame_type);
+    try std.testing.expectEqualStrings("invalid element", close.reason_phrase);
+}
+
 const PayloadSendOptionsForTest = struct {
     destination_connection_id: []const u8,
     packet_number: u64,

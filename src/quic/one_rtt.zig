@@ -7890,6 +7890,35 @@ pub const Connection = struct {
         if (count > self.recv_max_streams_uni) return error.StreamLimitExceeded;
     }
 
+    /// Whether `stream_id` belongs to a peer-initiated stream-number space and
+    /// falls within the current receive-side MAX_STREAMS limit. This does not
+    /// inspect opened/closed state or mutate stream bookkeeping, which lets
+    /// upper protocols validate references to idle streams.
+    pub fn isPeerInitiatedStreamIdWithinLimit(
+        self: Connection,
+        stream_id: u64,
+    ) bool {
+        if (stream_id > quic.varint.max_value) return false;
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return false;
+        }
+        const count = streamCountForId(stream_id);
+        return if (streamDirection(stream_id) == .bidirectional)
+            count <= self.recv_max_streams_bidi
+        else
+            count <= self.recv_max_streams_uni;
+    }
+
+    /// Specialized form for protocols whose identifiers can only refer to a
+    /// peer-created bidirectional stream, such as an HTTP/3 request stream.
+    pub fn isPeerInitiatedBidirectionalStreamIdWithinLimit(
+        self: Connection,
+        stream_id: u64,
+    ) bool {
+        return streamDirection(stream_id) == .bidirectional and
+            self.isPeerInitiatedStreamIdWithinLimit(stream_id);
+    }
+
     fn initialSendStreamDataLimit(self: Connection, stream_id: u64) u64 {
         if (streamDirection(stream_id) == .unidirectional) {
             if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) return 0;
@@ -8652,6 +8681,24 @@ fn parsePacketFramesForType(
 /// to normal transport callers while allowing the large conformance suite to
 /// live outside the production module.
 pub const testing = struct {
+    pub const LocalCloseInfo = struct {
+        application: bool,
+        error_code: u64,
+        frame_type: u64,
+        reason_phrase: []const u8,
+    };
+
+    pub fn localCloseInfo(connection: *const Connection) ?LocalCloseInfo {
+        const close_info = connection.close_info orelse return null;
+        if (connection.peer_close_frame_received) return null;
+        return .{
+            .application = close_info.application,
+            .error_code = close_info.error_code,
+            .frame_type = close_info.frame_type,
+            .reason_phrase = close_info.reason_phrase,
+        };
+    }
+
     pub const handshake_done_test_stack_capacity =
         handshake_done_frame_stack_capacity;
 

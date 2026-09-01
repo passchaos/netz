@@ -3623,6 +3623,13 @@ pub const ProtectedConfig = struct {
     max_stream_frame_data: usize = 1200,
     max_informational_responses: usize =
         http3.default_max_informational_responses,
+    /// Maximum distinct RFC 9218 request/push priorities retained for this
+    /// connection. Replacements do not consume another slot.
+    max_priority_updates: usize = http3.default_max_priority_updates,
+    /// Receive-side QUIC MAX_STREAMS limit used by this lightweight runtime
+    /// when validating request IDs carried by PRIORITY_UPDATE. Unlike the
+    /// application retention cap in `Limits`, this models protocol credit.
+    max_client_bidirectional_streams: u64 = quic.max_stream_count,
     /// Maximum number of protected response DATA packets submitted in one
     /// lightweight multi-stream batch. Zero retains sequential submission.
     response_scheduler_max_batch_packets: usize =
@@ -3641,6 +3648,9 @@ pub const HandshakeSessionOptions = struct {
     max_stream_frame_data: usize = 1200,
     max_informational_responses: usize =
         http3.default_max_informational_responses,
+    /// Maximum distinct RFC 9218 request/push priorities retained for this
+    /// connection. Replacements do not consume another slot.
+    max_priority_updates: usize = http3.default_max_priority_updates,
     /// Maximum HTTP/3 DATA bytes one paced helper attempt may hand to QUIC.
     ///
     /// The default remains conservative for callers using the standard 1200B
@@ -4928,6 +4938,7 @@ pub const HandshakeServer = struct {
     transport_parameters: []u8,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits, options: HandshakeServerOptions) Error!HandshakeServer {
+        try validateHandshakeSessionOptions(options.session);
         try validateBlockedStreamLimit(
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
@@ -5266,6 +5277,7 @@ pub const HandshakeServerSession = struct {
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
     ) Error!HandshakeServerSession {
+        try validateHandshakeSessionOptions(options);
         if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
         const max_capacity = std.math.cast(
             usize,
@@ -5275,6 +5287,9 @@ pub const HandshakeServerSession = struct {
         return .{
             .established = established,
             .options = options,
+            .control = try .init(.{
+                .max_priority_updates = options.max_priority_updates,
+            }),
             .qpack_decode = .init(
                 allocator,
                 max_capacity,
@@ -5539,6 +5554,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_decode,
             &self.qpack_encode,
             &self.request_streams,
+            &self.request_lifecycle,
             self.peer_promised_push_ids.items,
             &self.connect_datagrams,
             deadline,
@@ -5561,7 +5577,9 @@ pub const HandshakeServerSession = struct {
             assembled.stream_id,
             request.qpack_section_acknowledgments,
         );
-        try self.request_lifecycle.markReceived(
+        try serverRequestReceived(
+            &self.control,
+            &self.request_lifecycle,
             assembled.stream_id,
             requestPriority(request.headers),
         );
@@ -5685,7 +5703,7 @@ pub const HandshakeServerSession = struct {
     ) Error!?StreamingRequestEvent {
         try self.releaseStreamingRequestCapacity();
         if (self.streaming_requests.takeFirstReset()) |reset| {
-            self.request_lifecycle.markFinished(reset.stream_id);
+            finishServerRequest(&self.control, &self.request_lifecycle, reset.stream_id);
             self.qpack_encode.abandonStream(reset.stream_id);
             _ = self.outbound_bodies.finish(reset.stream_id);
             return .{ .reset = .{
@@ -6162,7 +6180,11 @@ pub const HandshakeServerSession = struct {
         self.sent_push_ids.appendAssumeCapacity(push.push_id);
         self.peer_promised_push_ids.appendAssumeCapacity(push.push_id);
         self.next_push_stream_id = next_push_stream_id;
-        self.request_lifecycle.markFinished(request_stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, request_stream_id);
+        self.control.retirePushPriority(
+            self.established.connection.endpoint.allocator,
+            push.push_id,
+        );
         return push_stream_id;
     }
 
@@ -6210,7 +6232,7 @@ pub const HandshakeServerSession = struct {
         if (!streaming.body_allowed or
             streaming.expected_length == 0)
         {
-            self.request_lifecycle.markFinished(stream_id);
+            finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         }
     }
 
@@ -6231,7 +6253,7 @@ pub const HandshakeServerSession = struct {
             fin,
             self.options,
         );
-        if (fin) self.request_lifecycle.markFinished(stream_id);
+        if (fin) finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     /// Send response DATA while driving the receive side when QUIC
@@ -6584,9 +6606,6 @@ pub const HandshakeServerSession = struct {
         self: HandshakeServerSession,
         stream_id: u62,
     ) http3.Priority {
-        if (self.control.requestPriorityUpdate(stream_id)) |update| {
-            return update.priority();
-        }
         return self.request_lifecycle.priority(stream_id);
     }
 
@@ -6600,7 +6619,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) void {
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     fn sendResponseBodyPacedChunk(
@@ -6642,7 +6661,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encoder_prefix_sent,
             self.options,
         );
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     /// Wait until the peer cancels the response direction of `stream_id`.
@@ -6680,7 +6699,7 @@ pub const HandshakeServerSession = struct {
         );
         self.qpack_encode.abandonStream(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         return .{
             .stream_id = stream_id,
             .application_error_code = stopped.application_error_code,
@@ -6737,7 +6756,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
         );
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
@@ -6851,7 +6870,7 @@ pub const HandshakeServerSession = struct {
             cancel_qpack,
         );
         self.qpack_encode.abandonStream(stream_id);
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
 
@@ -6939,7 +6958,9 @@ pub const HandshakeServerSession = struct {
             try self.sendQpackFeedback();
         }
         if (event == .head) {
-            try self.request_lifecycle.markReceived(
+            try serverRequestReceived(
+                &self.control,
+                &self.request_lifecycle,
                 stream_id,
                 switch (event) {
                     .head => |head| switch (head) {
@@ -7148,6 +7169,7 @@ pub const HandshakeClient = struct {
         options: HandshakeClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!HandshakeClient {
+        try validateHandshakeSessionOptions(options.session);
         try validateBlockedStreamLimit(
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
@@ -7243,6 +7265,7 @@ pub const HandshakeClient = struct {
         options: HandshakeClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!HandshakeClient {
+        try validateHandshakeSessionOptions(options.session);
         try validateBlockedStreamLimit(
             options.session.local_settings,
             options.session.max_concurrent_request_streams,
@@ -7284,6 +7307,7 @@ pub const HandshakeClient = struct {
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
     ) Error!HandshakeClient {
+        try validateHandshakeSessionOptions(options);
         try validateBlockedStreamLimit(
             options.local_settings,
             options.max_concurrent_request_streams,
@@ -7330,6 +7354,7 @@ pub const HandshakeClient = struct {
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
     ) Error!HandshakeClient {
+        try validateHandshakeSessionOptions(options);
         if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
         const max_capacity = std.math.cast(
             usize,
@@ -7342,6 +7367,9 @@ pub const HandshakeClient = struct {
             .allocator = allocator,
             .established = established,
             .options = options,
+            .control = try .init(.{
+                .max_priority_updates = options.max_priority_updates,
+            }),
             .qpack_decode = .init(
                 allocator,
                 max_capacity,
@@ -7396,6 +7424,7 @@ pub const HandshakeClient = struct {
         options: HandshakeSessionOptions,
         transport: quic.handshake.PreconfiguredConnectionOptions,
     ) Error!HandshakeClient {
+        try validateHandshakeSessionOptions(options);
         try validateBlockedStreamLimit(
             options.local_settings,
             options.max_concurrent_request_streams,
@@ -10171,6 +10200,7 @@ pub const ProtectedServer = struct {
     expected_packet_number: u64 = 0,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits, config: ProtectedConfig) Error!ProtectedServer {
+        try validateProtectedConfig(config);
         try validateBlockedStreamLimit(
             config.local_settings,
             limits.max_concurrent_request_streams,
@@ -10182,6 +10212,9 @@ pub const ProtectedServer = struct {
         return .{
             .quic_server = quic_server,
             .config = config,
+            .control = try .init(.{
+                .max_priority_updates = config.max_priority_updates,
+            }),
             .qpack_decode = .init(allocator, max_capacity, config.max_stream_buffer),
             // The peer's encoder capacity is not known until its SETTINGS
             // frame arrives. Starting at zero prevents speculative inserts
@@ -10292,7 +10325,9 @@ pub const ProtectedServer = struct {
             assembled.stream_id,
             request.qpack_section_acknowledgments,
         );
-        try self.request_lifecycle.markReceived(
+        try serverRequestReceived(
+            &self.control,
+            &self.request_lifecycle,
             assembled.stream_id,
             requestPriority(request.headers),
         );
@@ -10373,7 +10408,7 @@ pub const ProtectedServer = struct {
             );
         }
         if (self.streaming_requests.takeFirstReset()) |reset| {
-            self.request_lifecycle.markFinished(reset.stream_id);
+            finishServerRequest(&self.control, &self.request_lifecycle, reset.stream_id);
             self.qpack_encode.abandonStream(reset.stream_id);
             _ = self.outbound_bodies.finish(reset.stream_id);
             return .{ .reset = .{
@@ -10518,7 +10553,11 @@ pub const ProtectedServer = struct {
         self.sent_push_ids.appendAssumeCapacity(push.push_id);
         self.peer_promised_push_ids.appendAssumeCapacity(push.push_id);
         self.next_push_stream_id = next_push_stream_id;
-        self.request_lifecycle.markFinished(request_stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, request_stream_id);
+        self.control.retirePushPriority(
+            self.quic_server.endpoint.allocator,
+            push.push_id,
+        );
         return push_stream_id;
     }
 
@@ -10571,7 +10610,7 @@ pub const ProtectedServer = struct {
         if (!streaming.body_allowed or
             streaming.expected_length == 0)
         {
-            self.request_lifecycle.markFinished(stream_id);
+            finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         }
     }
 
@@ -10596,7 +10635,7 @@ pub const ProtectedServer = struct {
             data,
             fin,
         );
-        if (fin) self.request_lifecycle.markFinished(stream_id);
+        if (fin) finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     pub fn sendResponseBodyPaced(
@@ -10892,9 +10931,6 @@ pub const ProtectedServer = struct {
         self: ProtectedServer,
         stream_id: u62,
     ) http3.Priority {
-        if (self.control.requestPriorityUpdate(stream_id)) |update| {
-            return update.priority();
-        }
         return self.request_lifecycle.priority(stream_id);
     }
 
@@ -10906,7 +10942,7 @@ pub const ProtectedServer = struct {
         self: *ProtectedServer,
         stream_id: u62,
     ) void {
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     fn sendResponseBodyPacedChunk(
@@ -10950,7 +10986,7 @@ pub const ProtectedServer = struct {
             &self.qpack_encoder_prefix_sent,
             &self.stream_send_scratch,
         );
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     pub fn finishResponseTrailersPaced(
@@ -11007,7 +11043,7 @@ pub const ProtectedServer = struct {
             &self.next_packet_number,
             &self.protected_send,
         );
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     pub fn sendGoAway(self: *ProtectedServer, to: net.IpAddress, stream_id: u64) Error!void {
@@ -11144,7 +11180,7 @@ pub const ProtectedServer = struct {
             cancel_qpack,
         );
         self.qpack_encode.abandonStream(stream_id);
-        self.request_lifecycle.markFinished(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
 
@@ -11192,17 +11228,9 @@ pub const ProtectedServer = struct {
                 &self.outbound_bodies,
                 packet.frames,
             );
-            if (try applyServerRequestPacketFrames(
-                packet.from,
-                packet.frames,
-                self.quic_server.endpoint.allocator,
-                &self.control,
-                &self.qpack_decode,
-                &self.qpack_encode,
-                &self.request_streams,
-                null,
-                self.peer_promised_push_ids.items,
-                null,
+            if (try applyProtectedServerRequestPacketFrames(
+                self,
+                packet,
                 null,
             )) |reset| {
                 try self.sendQpackFeedback(reset.from);
@@ -11231,18 +11259,10 @@ pub const ProtectedServer = struct {
             &self.outbound_bodies,
             packet.frames,
         );
-        _ = try applyServerRequestPacketFrames(
-            packet.from,
-            packet.frames,
-            self.quic_server.endpoint.allocator,
-            &self.control,
-            &self.qpack_decode,
-            &self.qpack_encode,
-            &self.request_streams,
+        _ = try applyProtectedServerRequestPacketFrames(
+            self,
+            packet,
             &self.streaming_requests,
-            self.peer_promised_push_ids.items,
-            null,
-            null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
@@ -11267,18 +11287,10 @@ pub const ProtectedServer = struct {
             &self.outbound_bodies,
             packet.frames,
         );
-        _ = try applyServerRequestPacketFrames(
-            packet.from,
-            packet.frames,
-            self.quic_server.endpoint.allocator,
-            &self.control,
-            &self.qpack_decode,
-            &self.qpack_encode,
-            &self.request_streams,
+        _ = try applyProtectedServerRequestPacketFrames(
+            self,
+            packet,
             &self.streaming_requests,
-            self.peer_promised_push_ids.items,
-            null,
-            null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
@@ -11341,18 +11353,10 @@ pub const ProtectedServer = struct {
             &self.outbound_bodies,
             packet.frames,
         );
-        _ = try applyServerRequestPacketFrames(
-            packet.from,
-            packet.frames,
-            self.quic_server.endpoint.allocator,
-            &self.control,
-            &self.qpack_decode,
-            &self.qpack_encode,
-            &self.request_streams,
+        _ = try applyProtectedServerRequestPacketFrames(
+            self,
+            packet,
             &self.streaming_requests,
-            self.peer_promised_push_ids.items,
-            null,
-            null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
@@ -11372,7 +11376,9 @@ pub const ProtectedServer = struct {
             try self.sendQpackFeedback(from);
         }
         if (event == .head) {
-            try self.request_lifecycle.markReceived(
+            try serverRequestReceived(
+                &self.control,
+                &self.request_lifecycle,
                 stream_id,
                 switch (event) {
                     .head => |head| switch (head) {
@@ -11433,6 +11439,7 @@ pub const ProtectedClient = struct {
     expected_packet_number: u64 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, config: ProtectedConfig) Error!ProtectedClient {
+        try validateProtectedConfig(config);
         try validateBlockedStreamLimit(
             config.local_settings,
             limits.max_concurrent_request_streams,
@@ -11444,6 +11451,9 @@ pub const ProtectedClient = struct {
         return .{
             .quic_client = quic_client,
             .config = config,
+            .control = try .init(.{
+                .max_priority_updates = config.max_priority_updates,
+            }),
             .qpack_decode = .init(allocator, max_capacity, config.max_stream_buffer),
             .qpack_encode = .initAwaitingPeerSettings(
                 allocator,
@@ -13517,6 +13527,76 @@ fn validateBlockedStreamLimit(
     if (settings.qpack_blocked_streams > runtime_limit) {
         return error.QpackDynamicTableUnsupported;
     }
+}
+
+fn validateProtectedConfig(config: ProtectedConfig) Error!void {
+    if (config.max_priority_updates == 0 or
+        config.max_client_bidirectional_streams > quic.max_stream_count)
+    {
+        return error.InvalidSetting;
+    }
+}
+
+fn validateHandshakeSessionOptions(options: HandshakeSessionOptions) Error!void {
+    if (options.max_priority_updates == 0) return error.InvalidSetting;
+}
+
+fn serverRequestReceived(
+    control: *http3.ControlState,
+    lifecycle: *ServerRequestLifecycle,
+    stream_id: u62,
+    initial_priority: http3.Priority,
+) Error!void {
+    const priority = if (control.requestPriorityUpdate(stream_id)) |update|
+        update.priority()
+    else
+        initial_priority;
+    try lifecycle.markReceived(
+        stream_id,
+        priority,
+    );
+    // Admission consumes only this stream's pre-request hint. A higher request
+    // can arrive while a lower one remains active, so receipt alone must not
+    // advance the terminal watermark.
+    control.removeRequestPriority(lifecycle.allocator, stream_id);
+}
+
+fn finishServerRequest(
+    control: *http3.ControlState,
+    lifecycle: *ServerRequestLifecycle,
+    stream_id: u64,
+) void {
+    lifecycle.markFinished(stream_id);
+    control.retireRequestPriority(lifecycle.allocator, stream_id);
+}
+
+fn reconcileServerRequestPriorities(
+    control: *http3.ControlState,
+    lifecycle: *ServerRequestLifecycle,
+) void {
+    var index: usize = 0;
+    while (index < control.priorityUpdates().len) {
+        const update = control.priorityUpdates()[index];
+        if (update.frame_type != http3.FrameType.priority_update_request) {
+            index += 1;
+            continue;
+        }
+        const stream_id = std.math.cast(
+            u62,
+            update.payload.prioritized_element_id,
+        ) orelse {
+            // Role validation rejects this before reconciliation. Keeping the
+            // loop total makes this helper safe to call in test scaffolding.
+            index += 1;
+            continue;
+        };
+        if (lifecycle.updatePriority(stream_id, update.priority())) {
+            control.removeRequestPriority(lifecycle.allocator, stream_id);
+            continue;
+        }
+        index += 1;
+    }
+    control.discardRetiredPriorityUpdates(lifecycle.allocator);
 }
 
 const RequestStreamSet = struct {
@@ -15683,6 +15763,23 @@ const ServerRequestLifecycle = struct {
             self.active_stream_index.contains(stream_id);
     }
 
+    fn updatePriority(
+        self: *ServerRequestLifecycle,
+        stream_id: u62,
+        updated_priority: http3.Priority,
+    ) bool {
+        if (self.active_stream_index.count() == 0) return false;
+        const index = self.active_stream_index.get(stream_id) orelse
+            return false;
+        if (index >= self.active_streams.items.len or
+            self.active_streams.items[index].stream_id != stream_id)
+        {
+            return false;
+        }
+        self.active_streams.items[index].priority = updated_priority;
+        return true;
+    }
+
     fn finalGoAwayId(self: ServerRequestLifecycle) Error!u64 {
         const highest = self.highest_processed_stream_id orelse return 0;
         return std.math.add(u64, highest, 4) catch error.InvalidFrame;
@@ -17105,7 +17202,7 @@ fn visitStreamingServerRequestPacket(
     session: *HandshakeServerSession,
     packet: quic.one_rtt.ReceivedPacketView,
 ) Error!void {
-    _ = try applyServerRequestPacketFrames(
+    _ = applyServerRequestPacketFrames(
         packet.from,
         packet.frames,
         session.established.connection.endpoint.allocator,
@@ -17114,10 +17211,18 @@ fn visitStreamingServerRequestPacket(
         &session.qpack_encode,
         &session.request_streams,
         &session.streaming_requests,
+        &session.request_lifecycle,
+        .{ .connection = &session.established.connection },
         session.peer_promised_push_ids.items,
         null,
         &session.connect_datagrams,
-    );
+    ) catch |err| {
+        try closeConnectionForHttp3ControlError(
+            &session.established.connection,
+            err,
+        );
+        return err;
+    };
     if (packetHasDatagram(packet.frames)) try routeConnectDatagramsFromPacket(
         &session.connect_datagrams,
         &session.established.connection,
@@ -17131,7 +17236,7 @@ fn visitDetachedServerRequestPacket(
     packet: quic.one_rtt.ReceivedPacketView,
 ) Error!void {
     const session, const detached_stream_id = context;
-    _ = try applyServerRequestPacketFrames(
+    _ = applyServerRequestPacketFrames(
         packet.from,
         packet.frames,
         session.established.connection.endpoint.allocator,
@@ -17140,10 +17245,18 @@ fn visitDetachedServerRequestPacket(
         &session.qpack_encode,
         &session.request_streams,
         &session.streaming_requests,
+        &session.request_lifecycle,
+        .{ .connection = &session.established.connection },
         session.peer_promised_push_ids.items,
         detached_stream_id,
         &session.connect_datagrams,
-    );
+    ) catch |err| {
+        try closeConnectionForHttp3ControlError(
+            &session.established.connection,
+            err,
+        );
+        return err;
+    };
     if (packetHasDatagram(packet.frames)) try routeConnectDatagramsFromPacket(
         &session.connect_datagrams,
         &session.established.connection,
@@ -17158,6 +17271,7 @@ const ConnectionRequestReceiveContext = struct {
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
+    request_lifecycle: *ServerRequestLifecycle,
     peer_promised_push_ids: []const u64,
     detached_streams: ?*connect_datagram.Registry = null,
     reset: ?RequestStreamReset = null,
@@ -17167,7 +17281,7 @@ fn visitConnectionRequestPacket(
     context: *ConnectionRequestReceiveContext,
     packet: quic.one_rtt.ReceivedPacketView,
 ) Error!void {
-    context.reset = try applyServerRequestPacketFrames(
+    context.reset = applyServerRequestPacketFrames(
         packet.from,
         packet.frames,
         context.connection.endpoint.allocator,
@@ -17176,10 +17290,15 @@ fn visitConnectionRequestPacket(
         context.qpack_encode,
         context.request_streams,
         null,
+        context.request_lifecycle,
+        .{ .connection = context.connection },
         context.peer_promised_push_ids,
         null,
         context.detached_streams,
-    );
+    ) catch |err| {
+        try closeConnectionForHttp3ControlError(context.connection, err);
+        return err;
+    };
     if (context.detached_streams) |detached| {
         if (packetHasDatagram(packet.frames)) {
             try routeConnectDatagramsFromPacket(
@@ -17200,6 +17319,7 @@ fn receiveConnectionRequestStreamBytes(
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
+    request_lifecycle: *ServerRequestLifecycle,
     peer_promised_push_ids: []const u64,
 ) Error!AssembledStream {
     return receiveConnectionRequestStreamBytesUntil(
@@ -17210,6 +17330,7 @@ fn receiveConnectionRequestStreamBytes(
         qpack_decode,
         qpack_encode,
         request_streams,
+        request_lifecycle,
         peer_promised_push_ids,
         null,
         null,
@@ -17227,6 +17348,7 @@ fn receiveConnectionRequestStreamBytesUntil(
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
+    request_lifecycle: *ServerRequestLifecycle,
     peer_promised_push_ids: []const u64,
     detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
@@ -17243,6 +17365,7 @@ fn receiveConnectionRequestStreamBytesUntil(
             .qpack_decode = qpack_decode,
             .qpack_encode = qpack_encode,
             .request_streams = request_streams,
+            .request_lifecycle = request_lifecycle,
             .peer_promised_push_ids = peer_promised_push_ids,
             .detached_streams = detached_streams,
         };
@@ -17309,6 +17432,8 @@ fn applyServerRequestPacketFrames(
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
     streaming_requests: ?*StreamingRequestSet,
+    request_lifecycle: *ServerRequestLifecycle,
+    request_id_validator: ServerRequestIdValidator,
     peer_promised_push_ids: []const u64,
     detached_stream_id: ?u62,
     detached_streams: ?*connect_datagram.Registry,
@@ -17373,6 +17498,7 @@ fn applyServerRequestPacketFrames(
                 try qpack_decode.recordStreamCancellation(stream_id);
             }
             request_streams.remove(stream_id);
+            finishServerRequest(control, request_lifecycle, stream_id);
             if (first_reset == null) {
                 first_reset = .{
                     .from = from,
@@ -17421,7 +17547,10 @@ fn applyServerRequestPacketFrames(
             frame.stream,
             .server,
             peer_promised_push_ids,
+            request_id_validator,
+            request_lifecycle,
         )) {
+            reconcileServerRequestPriorities(control, request_lifecycle);
             try configureQpackEncoderFromPeerSettings(
                 control.*,
                 qpack_encode,
@@ -17442,6 +17571,38 @@ fn applyServerRequestPacketFrames(
         }
     }
     return first_reset;
+}
+
+fn applyProtectedServerRequestPacketFrames(
+    server: *ProtectedServer,
+    packet: quic.one_rtt.ReceivedPacket,
+    streaming_requests: ?*StreamingRequestSet,
+) Error!?RequestStreamReset {
+    return applyServerRequestPacketFrames(
+        packet.from,
+        packet.frames,
+        server.quic_server.endpoint.allocator,
+        &server.control,
+        &server.qpack_decode,
+        &server.qpack_encode,
+        &server.request_streams,
+        streaming_requests,
+        &server.request_lifecycle,
+        .{ .static_limit = server.config.max_client_bidirectional_streams },
+        server.peer_promised_push_ids.items,
+        null,
+        null,
+    ) catch |err| {
+        sendProtectedHttp3ControlClose(
+            &server.quic_server.endpoint,
+            packet.from,
+            server.config,
+            &server.next_packet_number,
+            &server.protected_send,
+            err,
+        );
+        return err;
+    };
 }
 
 fn receiveConnectionResponseStreamBytes(
@@ -18671,6 +18832,147 @@ const ControlStreamRole = enum {
     server,
 };
 
+const ServerRequestIdValidator = union(enum) {
+    connection: *const quic.one_rtt.Connection,
+    static_limit: u64,
+
+    fn accepts(self: @This(), stream_id: u64) bool {
+        return switch (self) {
+            .connection => |connection| connection
+                .isPeerInitiatedBidirectionalStreamIdWithinLimit(stream_id),
+            .static_limit => |limit| stream_id <= quic.varint.max_value and
+                (stream_id & 0x03) == 0 and
+                stream_id / 4 < limit,
+        };
+    }
+};
+
+const ServerControlFrameValidator = struct {
+    request_ids: ServerRequestIdValidator,
+    promised_push_ids: ?[]const u64,
+    request_lifecycle: ?*const ServerRequestLifecycle,
+
+    fn validate(
+        context: *const anyopaque,
+        state: http3.ControlState,
+        frame: http3.Frame,
+    ) http3.Error!http3.ControlState.FrameDisposition {
+        const self: *const ServerControlFrameValidator =
+            @ptrCast(@alignCast(context));
+        switch (frame.frame_type) {
+            http3.FrameType.priority_update_request => {
+                const update = try http3.parsePriorityUpdatePayload(
+                    frame.payload,
+                );
+                if (!self.request_ids.accepts(
+                    update.prioritized_element_id,
+                )) return error.IdError;
+                if (state.retired_request_priority_through) |retired| {
+                    const stream_id: u62 = @intCast(
+                        update.prioritized_element_id,
+                    );
+                    const active = if (self.request_lifecycle) |lifecycle|
+                        lifecycle.contains(stream_id)
+                    else
+                        false;
+                    if (!active and stream_id <= retired) return .ignore;
+                }
+            },
+            http3.FrameType.priority_update_push => {
+                const update = try http3.parsePriorityUpdatePayload(
+                    frame.payload,
+                );
+                const within_limit = if (state.peer_max_push_id) |max_push_id|
+                    update.prioritized_element_id <= max_push_id
+                else
+                    false;
+                var promised = self.promised_push_ids == null;
+                if (self.promised_push_ids) |push_ids| {
+                    promised = false;
+                    for (push_ids) |push_id| {
+                        if (push_id == update.prioritized_element_id) {
+                            promised = true;
+                            break;
+                        }
+                    }
+                }
+                if (!within_limit or !promised) return error.IdError;
+                if (state.pushCancelled(update.prioritized_element_id)) {
+                    return .ignore;
+                }
+                if (state.retired_push_priority_through) |retired| {
+                    if (update.prioritized_element_id <= retired) {
+                        return .ignore;
+                    }
+                }
+            },
+            else => {},
+        }
+        return .apply;
+    }
+};
+
+/// Install the HTTP/3 connection close required for control-stream failures
+/// that this layer classifies precisely. Other failures keep their existing
+/// propagation behavior because they may be transport or local I/O errors.
+fn closeConnectionForHttp3ControlError(
+    connection: *quic.one_rtt.Connection,
+    err: anyerror,
+) Error!void {
+    const Close = struct { code: u64, reason: []const u8 };
+    const close: Close = switch (err) {
+        error.IdError => .{
+            .code = http3.ApplicationErrorCode.id_error,
+            .reason = "invalid-http3-element-id",
+        },
+        error.ExcessiveLoad => .{
+            .code = http3.ApplicationErrorCode.excessive_load,
+            .reason = "http3-control-state-limit",
+        },
+        else => return,
+    };
+    // The protocol classification remains the useful caller error even if the
+    // socket write fails. `closeApplication` installs local closing state
+    // before surfacing that send error, so a best-effort call is sufficient.
+    connection.closeApplication(close.code, close.reason) catch {};
+}
+
+fn sendProtectedHttp3ControlClose(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    err: anyerror,
+) void {
+    const Close = struct { code: u64, reason: []const u8 };
+    const close: Close = switch (err) {
+        error.IdError => .{
+            .code = http3.ApplicationErrorCode.id_error,
+            .reason = "invalid-http3-element-id",
+        },
+        error.ExcessiveLoad => .{
+            .code = http3.ApplicationErrorCode.excessive_load,
+            .reason = "http3-control-state-limit",
+        },
+        else => return,
+    };
+    const frames = [_]quic.Frame{.{ .application_close = .{
+        .error_code = close.code,
+        .reason_phrase = close.reason,
+    } }};
+    sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        &frames,
+        config.max_frames_per_packet,
+        protected_send,
+    ) catch {};
+}
+
 fn configureQpackEncoderFromPeerSettings(
     control: http3.ControlState,
     qpack: *QpackEncodeState,
@@ -18735,6 +19037,11 @@ fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.m
         stream,
         role,
         null,
+        if (role == .server)
+            .{ .static_limit = quic.max_stream_count }
+        else
+            null,
+        null,
     );
 }
 
@@ -18744,7 +19051,15 @@ fn applyControlStreamFrameForRoleWithPushes(
     stream: quic.StreamFrame,
     role: ControlStreamRole,
     promised_push_ids: ?[]const u64,
+    request_id_validator: ?ServerRequestIdValidator,
+    request_lifecycle: ?*const ServerRequestLifecycle,
 ) Error!bool {
+    const server_validator = ServerControlFrameValidator{
+        .request_ids = request_id_validator orelse
+            .{ .static_limit = quic.max_stream_count },
+        .promised_push_ids = promised_push_ids,
+        .request_lifecycle = request_lifecycle,
+    };
     // HTTP/3 control, QPACK, and push streams are unidirectional.  Request and
     // response STREAM frames are already validated by the message decoder, so
     // skip the expensive control-state clone/rollback path for the common
@@ -18769,7 +19084,15 @@ fn applyControlStreamFrameForRoleWithPushes(
     var previous = try control.clone(allocator);
     var previous_owned = true;
     defer if (previous_owned) previous.deinit(allocator);
-    const handled = applyControlStreamFrame(control, allocator, stream) catch |err| {
+    const handled = applyControlStreamFrameValidated(
+        control,
+        allocator,
+        stream,
+        if (role == .server) .{
+            .context = &server_validator,
+            .validate = ServerControlFrameValidator.validate,
+        } else null,
+    ) catch |err| {
         control.deinit(allocator);
         control.* = previous;
         previous_owned = false;
@@ -18846,29 +19169,61 @@ fn applyControlStreamFrameForRoleWithPushes(
     }
     if (handled and role == .server and
         control.priority_update_generation !=
-            previous.priority_update_generation and
-        control.latest_priority_update_type ==
-            http3.FrameType.priority_update_push)
+            previous.priority_update_generation)
     {
-        const update = control.latest_priority_update.?;
-        const within_limit = if (control.peer_max_push_id) |max_push_id|
-            update.prioritized_element_id <= max_push_id
-        else
-            false;
-        var promised = promised_push_ids == null;
-        if (promised_push_ids) |push_ids| {
-            for (push_ids) |push_id| {
-                if (push_id == update.prioritized_element_id) {
-                    promised = true;
-                    break;
-                }
+        // Per-frame validation above covers every newly decoded update before
+        // it mutates state. Rechecking the bounded retained set protects state
+        // created by lower-level callers before this role-aware wrapper runs.
+        for (control.priorityUpdates()) |update| {
+            switch (update.frame_type) {
+                http3.FrameType.priority_update_request => {
+                    const validator = request_id_validator orelse {
+                        control.deinit(allocator);
+                        control.* = previous;
+                        previous_owned = false;
+                        return error.IdError;
+                    };
+                    if (!validator.accepts(
+                        update.payload.prioritized_element_id,
+                    )) {
+                        control.deinit(allocator);
+                        control.* = previous;
+                        previous_owned = false;
+                        return error.IdError;
+                    }
+                },
+                http3.FrameType.priority_update_push => {
+                    const within_limit = if (control.peer_max_push_id) |max_push_id|
+                        update.payload.prioritized_element_id <= max_push_id
+                    else
+                        false;
+                    var promised = promised_push_ids == null;
+                    if (promised_push_ids) |push_ids| {
+                        promised = false;
+                        for (push_ids) |push_id| {
+                            if (push_id == update.payload.prioritized_element_id) {
+                                promised = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!within_limit or !promised) {
+                        control.deinit(allocator);
+                        control.* = previous;
+                        previous_owned = false;
+                        return error.IdError;
+                    }
+                },
+                else => unreachable,
             }
         }
-        if (!within_limit or !promised) {
-            control.deinit(allocator);
-            control.* = previous;
-            previous_owned = false;
-            return error.PushIdExceeded;
+    }
+    if (handled and role == .server and
+        control.push_cancellation_generation !=
+            previous.push_cancellation_generation)
+    {
+        for (control.peer_cancelled_push_ids.items[previous.peer_cancelled_push_ids.items.len..]) |push_id| {
+            control.retirePushPriority(allocator, push_id);
         }
     }
     return handled;
@@ -18914,6 +19269,15 @@ fn peekUniStreamType(stream: quic.StreamFrame) ?http3.StreamType {
 }
 
 fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame) Error!bool {
+    return applyControlStreamFrameValidated(control, allocator, stream, null);
+}
+
+fn applyControlStreamFrameValidated(
+    control: *http3.ControlState,
+    allocator: std.mem.Allocator,
+    stream: quic.StreamFrame,
+    validator: ?http3.ControlState.FrameValidator,
+) Error!bool {
     // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  Offset
     // zero carries the stream type varint; subsequent frames on an already
     // registered critical stream contain only that stream's payload.
@@ -18939,9 +19303,10 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
         }
         const payload_start =
             control.peer_control_stream_consumed_offset - stream_offset;
-        try control.appendControlPayload(
+        try control.appendControlPayloadValidated(
             allocator,
             stream.data[payload_start..],
+            validator,
         );
         control.peer_control_stream_consumed_offset = stream_end;
         return true;
@@ -18968,9 +19333,10 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
                 control.peer_control_stream_consumed_offset,
             );
             if (apply_start < stream.data.len) {
-                try control.appendControlPayload(
+                try control.appendControlPayloadValidated(
                     allocator,
                     stream.data[apply_start..],
+                    validator,
                 );
             }
             control.peer_control_stream_consumed_offset = stream_end;
@@ -19424,6 +19790,332 @@ test "HTTP/3 client rejects server-only control frames" {
     try std.testing.expect(
         !origin_server_control.peerOriginSetInitialized(),
     );
+}
+
+test "HTTP/3 server validates every batched priority update transactionally" {
+    const allocator = std.testing.allocator;
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&request_bytes, allocator);
+    try http3.writeSettingsFrame(&request_bytes, allocator, .{});
+    try http3.writePriorityUpdateFrame(
+        &request_bytes,
+        allocator,
+        8,
+        .{ .urgency = 6 },
+    );
+    try http3.writePriorityUpdateFrame(
+        &request_bytes,
+        allocator,
+        4,
+        .{ .urgency = 1 },
+    );
+
+    var request_control = http3.ControlState{};
+    defer request_control.deinit(allocator);
+    try std.testing.expectError(
+        error.IdError,
+        applyControlStreamFrameForRoleWithPushes(
+            &request_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = request_bytes.items,
+            },
+            .server,
+            &.{},
+            .{ .static_limit = 2 },
+            null,
+        ),
+    );
+    try std.testing.expect(!request_control.settings.received);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        request_control.priorityUpdates().len,
+    );
+
+    var push_bytes: std.ArrayList(u8) = .empty;
+    defer push_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&push_bytes, allocator);
+    try http3.writeSettingsFrame(&push_bytes, allocator, .{});
+    try http3.writeMaxPushIdFrame(&push_bytes, allocator, 3);
+    try http3.writePushPriorityUpdateFrame(
+        &push_bytes,
+        allocator,
+        2,
+        .{ .urgency = 6 },
+    );
+    try http3.writePushPriorityUpdateFrame(
+        &push_bytes,
+        allocator,
+        1,
+        .{ .urgency = 1 },
+    );
+
+    var push_control = http3.ControlState{};
+    defer push_control.deinit(allocator);
+    try std.testing.expectError(
+        error.IdError,
+        applyControlStreamFrameForRoleWithPushes(
+            &push_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = push_bytes.items,
+            },
+            .server,
+            &.{1},
+            .{ .static_limit = quic.max_stream_count },
+            null,
+        ),
+    );
+    try std.testing.expect(!push_control.settings.received);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        push_control.priorityUpdates().len,
+    );
+
+    // Validation runs before a later frame can trigger any bounded-state
+    // housekeeping. An invalid retired-prefix ID therefore remains an error
+    // rather than being hidden by the valid update that follows it.
+    var retired_bytes: std.ArrayList(u8) = .empty;
+    defer retired_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&retired_bytes, allocator);
+    try http3.writeSettingsFrame(&retired_bytes, allocator, .{});
+    try http3.writePriorityUpdateFrameRaw(
+        &retired_bytes,
+        allocator,
+        http3.FrameType.priority_update_request,
+        1,
+        "u=7",
+    );
+    try http3.writePriorityUpdateFrame(
+        &retired_bytes,
+        allocator,
+        4,
+        .{ .urgency = 2 },
+    );
+    try http3.writePriorityUpdateFrame(
+        &retired_bytes,
+        allocator,
+        8,
+        .{ .urgency = 3 },
+    );
+    var retired_control = try http3.ControlState.init(.{
+        .max_priority_updates = 2,
+    });
+    defer retired_control.deinit(allocator);
+    retired_control.retireRequestPriority(allocator, 4);
+    try std.testing.expectError(
+        error.IdError,
+        applyControlStreamFrameForRoleWithPushes(
+            &retired_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = retired_bytes.items,
+            },
+            .server,
+            &.{},
+            .{ .static_limit = 2 },
+            null,
+        ),
+    );
+    try std.testing.expect(!retired_control.settings.received);
+}
+
+test "HTTP/3 server request priorities move into active lifecycle" {
+    const allocator = std.testing.allocator;
+    var control = try http3.ControlState.init(.{
+        .max_priority_updates = 2,
+    });
+    defer control.deinit(allocator);
+    control.settings.received = true;
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try http3.writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        0,
+        .{ .urgency = 1, .incremental = true },
+    );
+    try control.applyFrame(allocator, try http3.Frame.parse(encoded.items));
+    try serverRequestReceived(&control, &lifecycle, 0, .{ .urgency = 6 });
+    try std.testing.expectEqual(@as(u3, 1), lifecycle.priority(0).urgency);
+    try std.testing.expect(lifecycle.priority(0).incremental);
+    try std.testing.expect(control.requestPriorityUpdate(0) == null);
+    try serverRequestReceived(&control, &lifecycle, 4, .{ .urgency = 5 });
+    finishServerRequest(&control, &lifecycle, 4);
+    try std.testing.expect(lifecycle.contains(0));
+    try std.testing.expect(!lifecycle.contains(4));
+
+    encoded.clearRetainingCapacity();
+    try http3.writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        0,
+        .{ .urgency = 4 },
+    );
+    try control.applyFrame(allocator, try http3.Frame.parse(encoded.items));
+    reconcileServerRequestPriorities(&control, &lifecycle);
+    try std.testing.expectEqual(@as(u3, 4), lifecycle.priority(0).urgency);
+    try std.testing.expect(control.requestPriorityUpdate(0) == null);
+
+    finishServerRequest(&control, &lifecycle, 0);
+    try std.testing.expect(!lifecycle.contains(0));
+
+    encoded.clearRetainingCapacity();
+    try http3.writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        0,
+        .{ .urgency = 7 },
+    );
+    try control.applyFrame(allocator, try http3.Frame.parse(encoded.items));
+    control.discardRetiredPriorityUpdates(allocator);
+    try std.testing.expect(control.requestPriorityUpdate(0) == null);
+}
+
+test "HTTP/3 priority control failures install exact application close codes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x83} ** quic.protection.secret_len,
+    );
+
+    inline for (.{
+        .{ error.IdError, http3.ApplicationErrorCode.id_error },
+        .{ error.ExcessiveLoad, http3.ApplicationErrorCode.excessive_load },
+    }) |expected| {
+        var endpoint = try quic.runtime.Endpoint.bind(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{},
+        );
+        defer endpoint.deinit();
+        var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+            .peer = endpoint.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "server",
+            .peer_connection_id = "client",
+            .local_endpoint = .server,
+            .enable_pacing = false,
+        });
+        defer connection.deinit();
+
+        try closeConnectionForHttp3ControlError(&connection, expected[0]);
+        const close = quic.one_rtt.testing.localCloseInfo(&connection) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(close.application);
+        try std.testing.expectEqual(expected[1], close.error_code);
+    }
+}
+
+test "HTTP/3 protected control error emits application close" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x84} ** quic.protection.secret_len,
+    );
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer peer_endpoint.deinit();
+    const config = ProtectedConfig{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+    };
+    var protected_send = ProtectedSendState.init(allocator);
+    defer protected_send.deinit();
+    var packet_number: u64 = 0;
+
+    sendProtectedHttp3ControlClose(
+        &server_endpoint,
+        peer_endpoint.address(),
+        config,
+        &packet_number,
+        &protected_send,
+        error.IdError,
+    );
+    var received = try quic.one_rtt.receive(
+        &peer_endpoint,
+        keys,
+        config.peer_connection_id.len,
+        0,
+        1,
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), received.frames.len);
+    try std.testing.expect(received.frames[0] == .application_close);
+    try std.testing.expectEqual(
+        http3.ApplicationErrorCode.id_error,
+        received.frames[0].application_close.error_code,
+    );
+}
+
+test "HTTP/3 server reset retires aggregate request lifecycle" {
+    const allocator = std.testing.allocator;
+    var control = http3.ControlState{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var requests = RequestStreamSet.init(allocator, 1024, 2);
+    defer requests.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+    try serverRequestReceived(&control, &lifecycle, 0, .{});
+
+    const reset = (try applyServerRequestPacketFrames(
+        .{ .ip4 = .loopback(443) },
+        &.{.{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+            .final_size = 0,
+        } }},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        &requests,
+        null,
+        &lifecycle,
+        .{ .static_limit = 1 },
+        &.{},
+        null,
+        null,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 0), reset.stream_id);
+    try std.testing.expect(!lifecycle.contains(0));
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
