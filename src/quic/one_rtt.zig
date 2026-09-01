@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("mod.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
+const pto_jitter = @import("one_rtt/pto_jitter.zig");
 
 const net = std.Io.net;
 
@@ -22,6 +23,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     PacingLimited,
     AeadLimitReached,
     InvalidPostHandshakeCrypto,
+    InvalidPtoJitter,
 };
 
 pub const SendOptions = struct {
@@ -214,6 +216,9 @@ pub const ConnectionConfig = struct {
     enable_hystart: bool = true,
     enable_pacing: bool = true,
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
+    /// Optional per-connection PTO jitter percentage (0...50). Zero preserves
+    /// exact RFC PTO calculations and does not request entropy.
+    pto_jitter_percentage: u8 = 0,
     max_stored_new_tokens: usize = 4,
     enable_spin_bit: bool = false,
     /// RFC 9287 negotiation is directional: advertise means accepting zero;
@@ -763,6 +768,7 @@ pub const Connection = struct {
     keep_alive_ping_sent: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
     pto_count: u8 = 0,
+    pto_jitter_state: pto_jitter.State = .{},
     peer_address_validated: bool = true,
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
@@ -879,6 +885,10 @@ pub const Connection = struct {
         connection.fixed_bit_generator = try .init(
             endpoint.io,
             config.grease_fixed_bit,
+        );
+        connection.pto_jitter_state = try .init(
+            endpoint.io,
+            config.pto_jitter_percentage,
         );
         try connection.send_frame_buffer.ensureTotalCapacity(endpoint.allocator, config.max_datagram_size);
         try connection.send_packet_buffer.ensureTotalCapacity(endpoint.allocator, send_buffer_capacity);
@@ -3246,6 +3256,8 @@ pub const Connection = struct {
     }
 
     pub fn retransmitTimeThresholdLoss(self: *Connection, now_ns: u64, loss_delay_ns: u64) Error!bool {
+        const pto_anchor_before =
+            self.sent.latestAckElicitingInFlightSentTime();
         const largest = self.sent.largestAcknowledged();
         if (largest == null and self.pmtud.active_probe_packet_number == null) {
             return false;
@@ -3281,6 +3293,15 @@ pub const Connection = struct {
             if (lost.bytes > 0) {
                 _ = self.applyPersistentCongestionIfDetected();
             }
+        }
+        if (self.sent.latestAckElicitingInFlightSentTime() !=
+            pto_anchor_before)
+        {
+            // Loss state is committed before retransmission. Rearm here so a
+            // later DatagramTooLarge/pacing/socket error cannot leave the new
+            // PTO anchor using the prior epoch. A successful retransmission
+            // then advances once more for the newly sent packet's own arm.
+            self.pto_jitter_state.rearm();
         }
         var retransmitted = false;
         const scan_count = self.sent.packets.items.len;
@@ -3319,6 +3340,15 @@ pub const Connection = struct {
         return self.pto_count;
     }
 
+    /// Whether this connection randomizes its established 1-RTT PTO.
+    pub fn ptoJitterEnabled(self: Connection) bool {
+        return self.pto_jitter_state.enabled();
+    }
+
+    pub fn ptoJitterEpoch(self: Connection) u64 {
+        return self.pto_jitter_state.currentEpoch();
+    }
+
     pub fn ptoPeriod(self: Connection) u64 {
         var period = self.rtt_stats.pto(true);
         var remaining = self.pto_count;
@@ -3327,6 +3357,17 @@ pub const Connection = struct {
             if (period >= quic.rtt.max_pto_ns) return quic.rtt.max_pto_ns;
         }
         return @min(@max(period, quic.rtt.timer_granularity_ns), quic.rtt.max_pto_ns);
+    }
+
+    /// Effective PTO recovery period for the currently armed epoch. Repeated
+    /// scheduler reads cannot move an already published deadline.
+    pub fn jitteredPtoPeriod(self: Connection) u64 {
+        return self.pto_jitter_state.period(
+            self.rtt_stats.pto(true),
+            self.pto_count,
+            quic.rtt.timer_granularity_ns,
+            quic.rtt.max_pto_ns,
+        );
     }
 
     pub fn ptoDeadline(self: Connection) ?u64 {
@@ -3340,7 +3381,7 @@ pub const Connection = struct {
             // normal in-flight deadline.
             return self.monotonicNowNs();
         };
-        return std.math.add(u64, sent_time, self.ptoPeriod()) catch std.math.maxInt(u64);
+        return std.math.add(u64, sent_time, self.jitteredPtoPeriod()) catch std.math.maxInt(u64);
     }
 
     pub fn lossDetectionTimerDeadline(self: Connection) ?LossDetectionTimerDeadline {
@@ -3628,6 +3669,8 @@ pub const Connection = struct {
     }
 
     pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
+        const pto_anchor_before =
+            self.sent.latestAckElicitingInFlightSentTime();
         const handshake_done_group =
             self.handshake_status.recoveryGroupId();
         const marked_sent = self.sent.markAcknowledged(packet_number);
@@ -3641,6 +3684,11 @@ pub const Connection = struct {
             if (self.pending_key_update_ack_threshold) |threshold| {
                 if (packet_number >= threshold) self.pending_key_update_ack_threshold = null;
             }
+        }
+        if (self.sent.latestAckElicitingInFlightSentTime() !=
+            pto_anchor_before)
+        {
+            self.pto_jitter_state.rearm();
         }
         return marked_sent or removed_recovery;
     }
@@ -4298,6 +4346,7 @@ pub const Connection = struct {
         );
         self.applyCurrentPmtuToPath();
         self.pacer.reset();
+        self.pto_jitter_state.rearm();
     }
 
     pub fn sendPendingPathChallenge(self: *Connection) Error!void {
@@ -6408,6 +6457,7 @@ pub const Connection = struct {
                 );
                 self.applyCurrentPmtuToPath();
                 self.pacer.reset();
+                self.pto_jitter_state.rearm();
             },
             .new_path => |*new_path| {
                 self.config.peer = new_path.from;
@@ -6430,6 +6480,7 @@ pub const Connection = struct {
                 );
                 self.applyCurrentPmtuToPath();
                 self.pacer.reset();
+                self.pto_jitter_state.rearm();
                 self.path_validation.deinit();
                 self.path_validation = new_path.path_validation;
             },
@@ -6489,6 +6540,9 @@ pub const Connection = struct {
         for (frames) |frame| {
             switch (frame) {
                 .ack => {
+                    const pto_anchor_before =
+                        self.sent.latestAckElicitingInFlightSentTime();
+                    const pto_base_before = self.rtt_stats.pto(true);
                     // Sample utilization before ACK accounting removes bytes
                     // from flight. Otherwise every ACK would make the sender
                     // look less utilized than it was while transmitting.
@@ -6617,6 +6671,15 @@ pub const Connection = struct {
                         if (self.hasAcknowledgedPacketAtOrAbove(threshold)) {
                             self.pending_key_update_ack_threshold = null;
                         }
+                    }
+                    if ((acked.ack_eliciting_packets != 0 and
+                        (self.sent.latestAckElicitingInFlightSentTime() != null or
+                            self.recovery.pendingCount() != 0)) or
+                        self.sent.latestAckElicitingInFlightSentTime() !=
+                            pto_anchor_before or
+                        self.rtt_stats.pto(true) != pto_base_before)
+                    {
+                        self.pto_jitter_state.rearm();
                     }
                 },
                 .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
@@ -7101,7 +7164,13 @@ pub const Connection = struct {
         const packet_len_u64 = std.math.cast(u64, packet_len) orelse
             std.math.maxInt(u64);
         self.bytes_sent_count +|= packet_len_u64;
-        if (ack_eliciting) self.markAckElicitingActivity(nanosToMillisFloor(now_ns));
+        if (ack_eliciting) {
+            self.markAckElicitingActivity(nanosToMillisFloor(now_ns));
+            // Successful transmission, rather than packet construction,
+            // starts a new PTO arm epoch. This also distinguishes packets sent
+            // at the same clock timestamp.
+            self.pto_jitter_state.rearm();
+        }
         if (self.lowest_one_rtt_packet_number == null or
             packet_number < self.lowest_one_rtt_packet_number.?)
         {

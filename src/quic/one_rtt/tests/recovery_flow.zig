@@ -502,6 +502,73 @@ test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     try std.testing.expectEqual(@as(?one_rtt.LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
 }
 
+test "QUIC 1-RTT jitter remains stable across PTO backoff and ACK rearm" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer sender.deinit();
+    var receiver = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer receiver.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "jitter-client",
+        .peer_connection_id = "jitter-server",
+        .pto_jitter_percentage = 25,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "jitter-server",
+        .peer_connection_id = "jitter-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 10_000_000);
+    const first_epoch = client.ptoJitterEpoch();
+    const first_period = client.jitteredPtoPeriod();
+    const first_deadline = client.ptoDeadline().?;
+    try std.testing.expectEqual(first_deadline, client.ptoDeadline().?);
+
+    _ = (try client.serviceLossDetectionTimer(first_deadline)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
+    try std.testing.expect(client.ptoJitterEpoch() > first_epoch);
+    const backed_off = client.jitteredPtoPeriod();
+    try std.testing.expect(backed_off >= 300_000_000);
+    try std.testing.expect(backed_off <= 500_000_000);
+    try std.testing.expectEqual(client.ptoDeadline().?, client.ptoDeadline().?);
+
+    var original = try server.receivePacket();
+    defer original.deinit(allocator);
+    var probe = try server.receivePacket();
+    defer probe.deinit(allocator);
+    try server.sendAck(0);
+    const before_ack_epoch = client.ptoJitterEpoch();
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0), client.ptoBackoffCount());
+    try std.testing.expect(client.ptoJitterEpoch() > before_ack_epoch);
+    const base_after_ack = client.ptoPeriod();
+    const jitter_after_ack = client.jitteredPtoPeriod();
+    const maximum_offset = base_after_ack / 4;
+    try std.testing.expect(jitter_after_ack >= base_after_ack - maximum_offset);
+    try std.testing.expect(jitter_after_ack <= base_after_ack + maximum_offset);
+    _ = first_period;
+}
+
 test "QUIC 1-RTT timer-aware GRO receive fires PTO before peer response" {
     if (!quic.runtime.udpGroSupported()) return error.SkipZigTest;
 

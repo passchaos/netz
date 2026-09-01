@@ -210,6 +210,9 @@ pub const OneRttConfig = struct {
     enable_hystart: bool = true,
     enable_pacing: bool = true,
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
+    /// Randomize established-connection PTOs by up to this percentage. Valid
+    /// values are 0...50; zero is deterministic and consumes no entropy.
+    pto_jitter_percentage: u8 = 0,
     keep_alive_period_ms: u64 = 0,
 
     fn apply(
@@ -261,6 +264,7 @@ pub const OneRttConfig = struct {
             .enable_hystart = self.enable_hystart,
             .enable_pacing = self.enable_pacing,
             .pacing_max_burst_packets = self.pacing_max_burst_packets,
+            .pto_jitter_percentage = self.pto_jitter_percentage,
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
@@ -622,6 +626,36 @@ test "preconfigured QUIC validates externally negotiated metadata" {
             &exported,
         ),
     );
+}
+
+test "preconfigured QUIC propagates established PTO jitter" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6a} ** quic.protection.secret_len,
+    );
+    var established = try establishPreconfigured(
+        &endpoint,
+        .{ .ip4 = .loopback(443) },
+        .client,
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "local-jitter",
+            .peer_connection_id = "peer-jitter",
+            .one_rtt = .{ .pto_jitter_percentage = 25 },
+        },
+    );
+    defer established.deinit();
+    try std.testing.expect(established.connection.ptoJitterEnabled());
 }
 
 fn validateConfiguredVersions(version: quic.Version, available_versions: []const quic.Version) Error!void {

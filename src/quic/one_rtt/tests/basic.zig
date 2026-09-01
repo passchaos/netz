@@ -2365,6 +2365,52 @@ test "QUIC 1-RTT idle negotiation ignores a disabled peer value" {
     try std.testing.expectEqual(@as(?u64, null), connection.effectiveIdleTimeoutMillis());
 }
 
+test "QUIC 1-RTT PTO jitter validates configuration and keeps armed deadline stable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7a} ** quic.protection.secret_len);
+
+    try std.testing.expectError(error.InvalidPtoJitter, one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "jitter-invalid-local",
+        .peer_connection_id = "jitter-invalid-peer",
+        .pto_jitter_percentage = 51,
+    }));
+
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "jitter-local",
+        .peer_connection_id = "jitter-peer",
+        .pto_jitter_percentage = 25,
+    });
+    defer connection.deinit();
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try connection.sendAt(&ping, 10_000_000);
+
+    const first = connection.ptoDeadline() orelse return error.TestUnexpectedResult;
+    const first_epoch = connection.pto_jitter_state.epoch;
+    try std.testing.expectEqual(first, connection.ptoDeadline().?);
+    try std.testing.expectEqual(first, connection.nextTimerDeadline().?.deadline_ns);
+    try std.testing.expect(first >= 160_000_000 and first <= 260_000_000);
+
+    // A later packet at the exact same timestamp is nevertheless a distinct
+    // timer-arm event. The explicit epoch avoids relying on clock resolution.
+    try connection.sendAt(&ping, 10_000_000);
+    try std.testing.expectEqual(first_epoch + 1, connection.pto_jitter_state.epoch);
+    const rearmed = connection.ptoDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(rearmed, connection.ptoDeadline().?);
+    try std.testing.expect(rearmed >= 160_000_000 and rearmed <= 260_000_000);
+}
+
 test "QUIC 1-RTT idle floor follows current RTT base PTO" {
     const allocator = std.testing.allocator;
 

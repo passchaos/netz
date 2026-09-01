@@ -661,6 +661,7 @@ test "QUIC 1-RTT PMTUD gates retransmission after path reset" {
         .pmtud_max_probe_size = 1300,
         .max_datagram_size = 1400,
         .enable_pacing = false,
+        .pto_jitter_percentage = 25,
     });
     defer client.deinit();
     var server = try one_rtt.Connection.init(&server_endpoint, .{
@@ -695,7 +696,9 @@ test "QUIC 1-RTT PMTUD gates retransmission after path reset" {
 
     client.pmtud.resetForPath();
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, client.currentSendDatagramSize());
+    const jitter_epoch = client.ptoJitterEpoch();
     try std.testing.expectError(error.DatagramTooLarge, client.retransmitTimeThresholdLoss(1_000_000, 1));
+    try std.testing.expect(client.ptoJitterEpoch() > jitter_epoch);
     try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
 }
 

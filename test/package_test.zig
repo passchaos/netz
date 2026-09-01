@@ -6364,5 +6364,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveRtcpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "iceBindingRequest"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.StunClient, "iceBindingRequest"));
+    try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "pto_jitter_percentage"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pto_jitter_percentage"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "jitteredPtoPeriod"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoJitterEnabled"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoJitterEpoch"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveManyConcurrent"));
 }
