@@ -94,6 +94,60 @@ const PendingMessage = struct {
     }
 };
 
+const ReceiveState = enum {
+    active,
+    terminal_pending,
+    terminal_delivered,
+    failed,
+};
+
+fn ownResponseHead(
+    allocator: std.mem.Allocator,
+    status: u16,
+    headers: []const http2.Hpack.HeaderField,
+) !http2.runtime.DuplexResponseHead {
+    return .{
+        .status = status,
+        .headers = try cloneHeaders(allocator, headers),
+    };
+}
+
+fn cloneHeaders(
+    allocator: std.mem.Allocator,
+    headers: []const http2.Hpack.HeaderField,
+) ![]http2.Hpack.HeaderField {
+    var total_bytes: usize = 0;
+    for (headers) |header| {
+        total_bytes = std.math.add(
+            usize,
+            total_bytes,
+            std.math.add(usize, header.name.len, header.value.len) catch
+                return error.MessageTooLarge,
+        ) catch return error.MessageTooLarge;
+    }
+    const fields = try allocator.alloc(http2.Hpack.HeaderField, headers.len);
+    errdefer allocator.free(fields);
+    const storage = try allocator.alloc(u8, total_bytes);
+    errdefer allocator.free(storage);
+    var cursor: usize = 0;
+    for (headers, 0..) |header, index| {
+        const name = storage[cursor..][0..header.name.len];
+        @memcpy(name, header.name);
+        cursor += header.name.len;
+        const value = storage[cursor..][0..header.value.len];
+        @memcpy(value, header.value);
+        cursor += header.value.len;
+        fields[index] = .{
+            .name = name,
+            .value = value,
+            .never_index = header.never_index,
+            .block_storage = if (index == 0) storage else null,
+        };
+    }
+    if (headers.len == 0) allocator.free(storage);
+    return fields;
+}
+
 pub const ClientDuplex = struct {
     allocator: std.mem.Allocator,
     transport: http2.runtime.ClientDuplexStream,
@@ -106,7 +160,7 @@ pub const ClientDuplex = struct {
     parse_response_body: bool = false,
     pending_message: ?PendingMessage = null,
     pending_terminal: ?Response = null,
-    terminal_delivered: bool = false,
+    receive_state: ReceiveState = .active,
 
     pub fn deinit(self: *ClientDuplex) void {
         if (self.decoder) |*decoder| decoder.deinit();
@@ -131,12 +185,8 @@ pub const ClientDuplex = struct {
         self: *ClientDuplex,
         payload: []const u8,
     ) Error!WriteResult {
+        try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
-        if (self.terminal_delivered or self.pending_terminal != null or
-            self.transport.responseFinished())
-        {
-            return error.ConnectionClosed;
-        }
         self.pending_message = .{
             .bytes = try encodeMessageAlloc(self.allocator, self.encoder, payload),
         };
@@ -146,41 +196,53 @@ pub const ClientDuplex = struct {
     /// Continue the exact unsent suffix after a response event interrupted a
     /// flow-control-blocked write.
     pub fn resumeMessage(self: *ClientDuplex) Error!WriteResult {
-        if (self.terminal_delivered or self.pending_terminal != null or
-            self.transport.responseFinished())
-        {
-            return error.ConnectionClosed;
-        }
+        try self.ensureWritable();
         const pending = if (self.pending_message) |*value| value else return error.InvalidStreamState;
         const result = self.transport.write(pending.bytes[pending.offset..]) catch |err| {
-            if (err == error.StreamReset) return .peer_event;
+            // Only a successful `response_available` result has a precise,
+            // resumable byte count. Any transport error can have unknown wire
+            // progress, so retrying would risk duplicating message bytes.
+            self.fail(.internal_error);
             return err;
         };
-        pending.offset += result.written;
+        if (result.written > pending.bytes.len - pending.offset) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
+        pending.offset = std.math.add(usize, pending.offset, result.written) catch {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        };
         if (pending.offset == pending.bytes.len) {
             pending.deinit(self.allocator);
             self.pending_message = null;
             return .complete;
         }
-        if (!result.response_available) return error.InvalidStreamState;
+        if (!result.response_available) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
         return .peer_event;
     }
 
     pub fn finishRequest(self: *ClientDuplex) Error!WriteResult {
+        try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
-        if (self.terminal_delivered or self.pending_terminal != null or
-            self.transport.responseFinished())
-        {
-            return error.ConnectionClosed;
-        }
         const result = self.transport.finishRequest() catch |err| {
-            if (err == error.StreamReset) return .peer_event;
+            self.fail(.internal_error);
             return err;
         };
         return if (result.response_available) .peer_event else .complete;
     }
 
     pub fn reset(self: *ClientDuplex, code: http2.ErrorCode) Error!void {
+        if (self.receive_state == .failed or
+            self.receive_state == .terminal_delivered)
+        {
+            return error.ConnectionClosed;
+        }
+        self.discardReceiveState();
+        self.receive_state = .failed;
         try self.transport.reset(code);
     }
 
@@ -199,10 +261,14 @@ pub const ClientDuplex = struct {
         comptime consume: anytype,
     ) !ClientEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseEventUntil(.fromNow(
-            self.transport.connection.io,
-            .{ .raw = timeout, .clock = .awake },
-        ), context, consume);
+        return self.readResponseEventWithDeadline(
+            .fromNow(self.transport.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            consume,
+        );
     }
 
     pub fn readResponseEventWithDeadline(
@@ -211,7 +277,24 @@ pub const ClientDuplex = struct {
         context: anytype,
         comptime consume: anytype,
     ) !ClientEvent {
-        return self.readResponseEventUntil(deadline, context, consume);
+        if (self.pending_terminal) |response| {
+            self.pending_terminal = null;
+            self.receive_state = .terminal_delivered;
+            return .{ .terminal = response };
+        }
+        if (self.receive_state != .active) return error.ConnectionClosed;
+        const event = self.transport.readResponseEventWithDeadline(
+            deadline,
+        ) catch |err| {
+            if (err != error.Timeout) self.fail(.internal_error);
+            return err;
+        };
+        return self.readResponseEventTransport(
+            event,
+            deadline,
+            context,
+            consume,
+        );
     }
 
     fn readResponseEventUntil(
@@ -222,12 +305,38 @@ pub const ClientDuplex = struct {
     ) !ClientEvent {
         if (self.pending_terminal) |response| {
             self.pending_terminal = null;
-            self.terminal_delivered = true;
+            self.receive_state = .terminal_delivered;
             return .{ .terminal = response };
         }
-        if (self.terminal_delivered) return error.ConnectionClosed;
+        if (self.receive_state != .active) return error.ConnectionClosed;
+        const event = readClientTransportEvent(
+            &self.transport,
+            deadline,
+        ) catch |err| {
+            if (err != error.Timeout) self.fail(.internal_error);
+            return err;
+        };
+        return self.readResponseEventTransport(
+            event,
+            deadline,
+            context,
+            consume,
+        );
+    }
 
-        var event = try readClientTransportEvent(&self.transport, deadline);
+    fn readResponseEventTransport(
+        self: *ClientDuplex,
+        transport_event: http2.runtime.DuplexResponseEvent,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !ClientEvent {
+        if (self.pending_terminal != null or self.receive_state != .active) {
+            var unused = transport_event;
+            unused.deinit(self.allocator);
+            return error.ConnectionClosed;
+        }
+        var event = transport_event;
         switch (event) {
             .informational => |head| {
                 event = undefined;
@@ -235,7 +344,10 @@ pub const ClientDuplex = struct {
             },
             .head => |head| {
                 event = undefined;
-                try self.beginResponse(head);
+                self.beginResponse(head) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
                 if (!self.transport.responseFinished()) {
                     const stored = self.response_head.?;
                     return .{ .initial_metadata = .{
@@ -244,11 +356,20 @@ pub const ClientDuplex = struct {
                         .encoding = self.response_encoding,
                     } };
                 }
-                try self.finishResponseDecoder();
-                try self.consumeTransportFinished(deadline);
-                const response = try self.takeTerminal(null);
+                self.finishResponseDecoder() catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.consumeTransportFinished(deadline) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                const response = self.takeTerminal(null) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
                 self.closeRequestAfterTerminal() catch {};
-                self.terminal_delivered = true;
+                self.receive_state = .terminal_delivered;
                 return .{ .terminal = response };
             },
             .data => |*data| {
@@ -259,25 +380,39 @@ pub const ClientDuplex = struct {
                     .count = &delivered,
                 };
                 if (self.parse_response_body) {
-                    const decoder = if (self.decoder) |*value| value else return error.InvalidStreamState;
+                    const decoder = if (self.decoder) |*value| value else {
+                        event.deinit(self.allocator);
+                        self.fail(.internal_error);
+                        return error.InvalidStreamState;
+                    };
                     decoder.feed(data.data, &counter, Counter.deliver) catch |err| {
                         event.deinit(self.allocator);
-                        self.transport.reset(.internal_error) catch {};
+                        self.fail(.internal_error);
                         return err;
                     };
                 }
                 event.deinit(self.allocator);
                 const ended = self.transport.responseFinished();
                 if (ended) {
-                    try self.finishResponseDecoder();
-                    try self.consumeTransportFinished(deadline);
-                    const response = try self.takeTerminal(null);
+                    self.finishResponseDecoder() catch |err| {
+                        self.fail(.internal_error);
+                        return err;
+                    };
+                    self.consumeTransportFinished(deadline) catch |err| {
+                        self.fail(.internal_error);
+                        return err;
+                    };
+                    const response = self.takeTerminal(null) catch |err| {
+                        self.fail(.internal_error);
+                        return err;
+                    };
                     self.closeRequestAfterTerminal() catch {};
                     if (delivered == 0) {
-                        self.terminal_delivered = true;
+                        self.receive_state = .terminal_delivered;
                         return .{ .terminal = response };
                     }
                     self.pending_terminal = response;
+                    self.receive_state = .terminal_pending;
                 }
                 return .{ .messages = .{
                     .count = delivered,
@@ -290,20 +425,46 @@ pub const ClientDuplex = struct {
                 errdefer if (trailers_owned) {
                     http2.Hpack.freeOwnedFields(self.allocator, trailers);
                 };
-                try self.finishResponseDecoder();
-                try self.consumeTransportFinished(deadline);
-                const response = try self.takeTerminal(trailers);
+                self.finishResponseDecoder() catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.consumeTransportFinished(deadline) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                const response = self.takeTerminal(trailers) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
                 trailers_owned = false;
                 self.closeRequestAfterTerminal() catch {};
-                self.terminal_delivered = true;
+                self.receive_state = .terminal_delivered;
                 return .{ .terminal = response };
             },
-            .finished => return error.InvalidStreamState,
+            .finished => {
+                event = undefined;
+                self.finishResponseDecoder() catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                const response = self.takeTerminal(null) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.closeRequestAfterTerminal() catch {};
+                self.receive_state = .terminal_delivered;
+                return .{ .terminal = response };
+            },
             .reset => |reset_value| {
                 event = undefined;
                 self.discardPendingMessage();
-                self.terminal_delivered = true;
-                return .{ .terminal = try self.takeResetTerminal(reset_value) };
+                const response = self.takeResetTerminal(reset_value) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.receive_state = .terminal_delivered;
+                return .{ .terminal = response };
             },
         }
     }
@@ -341,10 +502,7 @@ pub const ClientDuplex = struct {
     fn finishResponseDecoder(self: *ClientDuplex) Error!void {
         if (!self.parse_response_body) return;
         const decoder = if (self.decoder) |*value| value else return error.InvalidStreamState;
-        decoder.finish() catch |err| {
-            self.transport.reset(.internal_error) catch {};
-            return err;
-        };
+        try decoder.finish();
     }
 
     fn closeRequestAfterTerminal(self: *ClientDuplex) Error!void {
@@ -368,16 +526,13 @@ pub const ClientDuplex = struct {
         trailers: ?[]http2.Hpack.HeaderField,
     ) Error!Response {
         const head = self.response_head orelse return error.InvalidStreamState;
-        const parsed = sequential.parseResponseTerminal(
+        const parsed = try sequential.parseResponseTerminal(
             self.allocator,
             head.status,
             head.headers,
             trailers orelse &.{},
             self.response_encoding,
-        ) catch |err| {
-            if (trailers) |fields| http2.Hpack.freeOwnedFields(self.allocator, fields);
-            return err;
-        };
+        );
         self.response_head = null;
         return .{
             .allocator = self.allocator,
@@ -412,6 +567,29 @@ pub const ClientDuplex = struct {
     fn discardPendingMessage(self: *ClientDuplex) void {
         if (self.pending_message) |*pending| pending.deinit(self.allocator);
         self.pending_message = null;
+    }
+
+    fn ensureWritable(self: ClientDuplex) Error!void {
+        if (self.receive_state != .active or self.transport.responseFinished()) {
+            return error.ConnectionClosed;
+        }
+    }
+
+    /// Make every post-error operation deterministic. Reset is attempted once;
+    /// local state is discarded even when the transport is already unusable.
+    fn fail(self: *ClientDuplex, code: http2.ErrorCode) void {
+        if (self.receive_state == .failed) return;
+        self.discardReceiveState();
+        self.receive_state = .failed;
+        self.transport.reset(code) catch {};
+    }
+
+    fn discardReceiveState(self: *ClientDuplex) void {
+        self.discardPendingMessage();
+        if (self.pending_terminal) |*response| response.deinit();
+        self.pending_terminal = null;
+        if (self.response_head) |*head| head.deinit(self.allocator);
+        self.response_head = null;
     }
 };
 
@@ -472,7 +650,7 @@ pub const ServerDuplex = struct {
     response_encoder: ?codec.Encoder = null,
     pending_message: ?PendingMessage = null,
     pending_terminal: ?RequestTerminal = null,
-    terminal_delivered: bool = false,
+    receive_state: ReceiveState = .active,
     path: []const u8,
     service: []const u8,
     method: []const u8,
@@ -516,10 +694,14 @@ pub const ServerDuplex = struct {
         comptime consume: anytype,
     ) !ServerEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readRequestEventUntil(.fromNow(
-            self.transport.connection.io,
-            .{ .raw = timeout, .clock = .awake },
-        ), context, consume);
+        return self.readRequestEventWithDeadline(
+            .fromNow(self.transport.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            consume,
+        );
     }
 
     pub fn readRequestEventWithDeadline(
@@ -528,7 +710,24 @@ pub const ServerDuplex = struct {
         context: anytype,
         comptime consume: anytype,
     ) !ServerEvent {
-        return self.readRequestEventUntil(deadline, context, consume);
+        if (self.pending_terminal) |terminal| {
+            self.pending_terminal = null;
+            self.receive_state = .terminal_delivered;
+            return .{ .finished = terminal };
+        }
+        if (self.receive_state != .active) return error.ConnectionClosed;
+        const event = self.transport.readRequestEventWithDeadline(
+            deadline,
+        ) catch |err| {
+            if (err != error.Timeout) self.fail(.internal_error);
+            return err;
+        };
+        return self.readRequestEventTransport(
+            event,
+            deadline,
+            context,
+            consume,
+        );
     }
 
     fn readRequestEventUntil(
@@ -539,12 +738,38 @@ pub const ServerDuplex = struct {
     ) !ServerEvent {
         if (self.pending_terminal) |terminal| {
             self.pending_terminal = null;
-            self.terminal_delivered = true;
+            self.receive_state = .terminal_delivered;
             return .{ .finished = terminal };
         }
-        if (self.terminal_delivered) return error.ConnectionClosed;
+        if (self.receive_state != .active) return error.ConnectionClosed;
+        const event = readServerTransportEvent(
+            &self.transport,
+            deadline,
+        ) catch |err| {
+            if (err != error.Timeout) self.fail(.internal_error);
+            return err;
+        };
+        return self.readRequestEventTransport(
+            event,
+            deadline,
+            context,
+            consume,
+        );
+    }
 
-        var event = try readServerTransportEvent(&self.transport, deadline);
+    fn readRequestEventTransport(
+        self: *ServerDuplex,
+        transport_event: http2.runtime.DuplexRequestEvent,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !ServerEvent {
+        if (self.pending_terminal != null or self.receive_state != .active) {
+            var unused = transport_event;
+            unused.deinit(self.allocator);
+            return error.ConnectionClosed;
+        }
+        var event = transport_event;
         switch (event) {
             .data => |*data| {
                 var delivered: usize = 0;
@@ -555,7 +780,7 @@ pub const ServerDuplex = struct {
                 };
                 self.decoder.feed(data.data, &counter, Counter.deliver) catch |err| {
                     event.deinit(self.allocator);
-                    self.transport.reset(.internal_error) catch {};
+                    self.fail(.internal_error);
                     return err;
                 };
                 event.deinit(self.allocator);
@@ -563,20 +788,30 @@ pub const ServerDuplex = struct {
                     usize,
                     self.message_count,
                     delivered,
-                ) catch return error.MessageTooLarge;
+                ) catch {
+                    self.fail(.internal_error);
+                    return error.MessageTooLarge;
+                };
                 const ended = self.transport.requestFinished();
                 if (ended) {
-                    try self.finishRequestDecoder();
-                    try self.consumeRequestFinished(deadline);
+                    self.finishRequestDecoder() catch |err| {
+                        self.fail(.internal_error);
+                        return err;
+                    };
+                    self.consumeRequestFinished(deadline) catch |err| {
+                        self.fail(.internal_error);
+                        return err;
+                    };
                     const terminal = RequestTerminal{
                         .allocator = self.allocator,
                         .message_count = self.message_count,
                     };
                     if (delivered == 0) {
-                        self.terminal_delivered = true;
+                        self.receive_state = .terminal_delivered;
                         return .{ .finished = terminal };
                     }
                     self.pending_terminal = terminal;
+                    self.receive_state = .terminal_pending;
                 }
                 return .{ .messages = .{
                     .count = delivered,
@@ -589,9 +824,15 @@ pub const ServerDuplex = struct {
                 errdefer if (trailers_owned) {
                     http2.Hpack.freeOwnedFields(self.allocator, trailers);
                 };
-                try self.finishRequestDecoder();
-                try self.consumeRequestFinished(deadline);
-                self.terminal_delivered = true;
+                self.finishRequestDecoder() catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.consumeRequestFinished(deadline) catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.receive_state = .terminal_delivered;
                 trailers_owned = false;
                 return .{ .finished = .{
                     .allocator = self.allocator,
@@ -601,8 +842,11 @@ pub const ServerDuplex = struct {
             },
             .finished => {
                 event = undefined;
-                try self.finishRequestDecoder();
-                self.terminal_delivered = true;
+                self.finishRequestDecoder() catch |err| {
+                    self.fail(.internal_error);
+                    return err;
+                };
+                self.receive_state = .terminal_delivered;
                 return .{ .finished = .{
                     .allocator = self.allocator,
                     .message_count = self.message_count,
@@ -611,7 +855,7 @@ pub const ServerDuplex = struct {
             .reset => |reset_value| {
                 event = undefined;
                 self.discardPendingMessage();
-                self.terminal_delivered = true;
+                self.receive_state = .terminal_delivered;
                 return .{ .reset = reset_value };
             },
         }
@@ -621,12 +865,16 @@ pub const ServerDuplex = struct {
         self: *ServerDuplex,
         options: ResponseOptions,
     ) Error!void {
+        try self.ensureResponseWritable();
         if (self.response_encoder != null) return error.InvalidStreamState;
-        try sequential.startDuplexResponse(
+        sequential.startDuplexResponse(
             &self.transport,
             self.allocator,
             options,
-        );
+        ) catch |err| {
+            self.fail(.internal_error);
+            return err;
+        };
         const algorithm = negotiatedResponseAlgorithm(options);
         self.response_encoder = .{
             .allocator = self.allocator,
@@ -640,8 +888,8 @@ pub const ServerDuplex = struct {
         self: *ServerDuplex,
         payload: []const u8,
     ) Error!WriteResult {
+        try self.ensureResponseWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
-        if (self.transport.responseFinished()) return error.ConnectionClosed;
         const encoder = self.response_encoder orelse
             return error.InvalidStreamState;
         self.pending_message = .{
@@ -651,21 +899,31 @@ pub const ServerDuplex = struct {
     }
 
     pub fn resumeMessage(self: *ServerDuplex) Error!WriteResult {
-        if (self.transport.responseFinished()) return error.ConnectionClosed;
+        try self.ensureResponseWritable();
         const pending = if (self.pending_message) |*value| value else return error.InvalidStreamState;
         const result = self.transport.writeResponse(
             pending.bytes[pending.offset..],
         ) catch |err| {
-            if (err == error.StreamReset) return .peer_event;
+            self.fail(.internal_error);
             return err;
         };
-        pending.offset += result.written;
+        if (result.written > pending.bytes.len - pending.offset) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
+        pending.offset = std.math.add(usize, pending.offset, result.written) catch {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        };
         if (pending.offset == pending.bytes.len) {
             pending.deinit(self.allocator);
             self.pending_message = null;
             return .complete;
         }
-        if (!result.response_available) return error.InvalidStreamState;
+        if (!result.response_available) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
         return .peer_event;
     }
 
@@ -678,25 +936,32 @@ pub const ServerDuplex = struct {
         trailing_metadata: []const http2.Hpack.HeaderField,
         trailing_binary_metadata: []const metadata.BinaryMetadata,
     ) Error!void {
+        try self.ensureResponseWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         if (self.response_encoder == null) {
-            try sequential.finishDuplexHeadersOnly(
+            sequential.finishDuplexHeadersOnly(
                 &self.transport,
                 self.allocator,
                 status,
                 status_message,
                 trailing_metadata,
                 trailing_binary_metadata,
-            );
+            ) catch |err| {
+                self.fail(.internal_error);
+                return err;
+            };
         } else {
-            try sequential.finishDuplexTrailers(
+            sequential.finishDuplexTrailers(
                 &self.transport,
                 self.allocator,
                 status,
                 status_message,
                 trailing_metadata,
                 trailing_binary_metadata,
-            );
+            ) catch |err| {
+                self.fail(.internal_error);
+                return err;
+            };
         }
     }
 
@@ -705,14 +970,14 @@ pub const ServerDuplex = struct {
     }
 
     pub fn reset(self: *ServerDuplex, code: http2.ErrorCode) Error!void {
+        try self.ensureResponseWritable();
+        self.discardReceiveState();
+        self.receive_state = .failed;
         try self.transport.reset(code);
     }
 
     fn finishRequestDecoder(self: *ServerDuplex) Error!void {
-        self.decoder.finish() catch |err| {
-            self.transport.reset(.internal_error) catch {};
-            return err;
-        };
+        try self.decoder.finish();
     }
 
     fn consumeRequestFinished(
@@ -727,6 +992,25 @@ pub const ServerDuplex = struct {
     fn discardPendingMessage(self: *ServerDuplex) void {
         if (self.pending_message) |*pending| pending.deinit(self.allocator);
         self.pending_message = null;
+    }
+
+    fn ensureResponseWritable(self: ServerDuplex) Error!void {
+        if (self.receive_state == .failed or self.transport.responseFinished()) {
+            return error.ConnectionClosed;
+        }
+    }
+
+    fn fail(self: *ServerDuplex, code: http2.ErrorCode) void {
+        if (self.receive_state == .failed) return;
+        self.discardReceiveState();
+        self.receive_state = .failed;
+        self.transport.reset(code) catch {};
+    }
+
+    fn discardReceiveState(self: *ServerDuplex) void {
+        self.discardPendingMessage();
+        if (self.pending_terminal) |*terminal| terminal.deinit();
+        self.pending_terminal = null;
     }
 };
 
@@ -848,4 +1132,72 @@ fn negotiatedResponseAlgorithm(
         options.compression
     else
         .identity;
+}
+
+test "duplex terminal allocation failure releases all owned metadata" {
+    const allocator = std.testing.allocator;
+    const headers = [_]http2.Hpack.HeaderField{
+        .{
+            .name = "content-type",
+            .value = "application/grpc+proto",
+        },
+        .{ .name = "grpc-encoding", .value = "identity" },
+    };
+    const trailers = [_]http2.Hpack.HeaderField{
+        .{ .name = "grpc-status", .value = "7" },
+        .{ .name = "grpc-message", .value = "denied%20message" },
+    };
+
+    // Sweep allocation failure through both owned header copies and terminal
+    // status-message decoding. Every unsuccessful construction must release
+    // exactly the allocations it acquired before failing.
+    for (0..6) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+        const failing_allocator = failing.allocator();
+        var head = ownResponseHead(failing_allocator, 200, &headers) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(
+                failing.allocated_bytes,
+                failing.freed_bytes,
+            );
+            continue;
+        };
+        const trailers_copy = cloneHeaders(failing_allocator, &trailers) catch |err| {
+            head.deinit(failing_allocator);
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(
+                failing.allocated_bytes,
+                failing.freed_bytes,
+            );
+            continue;
+        };
+        const parsed = sequential.parseResponseTerminal(
+            failing_allocator,
+            head.status,
+            head.headers,
+            trailers_copy,
+            "identity",
+        ) catch |err| {
+            http2.Hpack.freeOwnedFields(failing_allocator, trailers_copy);
+            head.deinit(failing_allocator);
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(
+                failing.allocated_bytes,
+                failing.freed_bytes,
+            );
+            continue;
+        };
+        failing_allocator.free(parsed.status_message);
+        http2.Hpack.freeOwnedFields(failing_allocator, trailers_copy);
+        head.deinit(failing_allocator);
+        try std.testing.expectEqual(
+            failing.allocated_bytes,
+            failing.freed_bytes,
+        );
+    }
 }
