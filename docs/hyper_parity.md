@@ -834,6 +834,15 @@ Rust h2's time-based reset retention this stays deterministic under a blocking
 runtime without an always-running timer task. Capacity is reserved before a
 RST_STREAM becomes visible, including batch cancellation, so allocation failure
 cannot leave wire and local reset state inconsistent.
+When a valid peer request exceeds the advertised local concurrent-stream
+limit, every server request reader now consumes and decodes its complete HPACK
+field section, sends `RST_STREAM(REFUSED_STREAM)`, and continues serving the
+connection instead of surfacing a connection-fatal flow-control error. The
+refused stream advances the observed stream-ID cursor without entering active,
+window, response, priority, callback, or pending-request state. Fragmented
+HEADERS coverage proves that dynamic-table mutations survive refusal and can be
+referenced by a later request after capacity is released; late DATA, trailers,
+and duplicate resets use the same bounded reset-history policy described above.
 Remotely reset requests waiting in the server's pending-accept queue are
 tracked separately through `Limits.max_pending_accept_reset_streams`, matching
 Rust h2's defense against reset-after-HEADERS churn that no longer counts

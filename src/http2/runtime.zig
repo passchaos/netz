@@ -648,6 +648,7 @@ pub const Server = struct {
             .last_peer_frame_at = std.Io.Clock.awake.now(self.io),
             .awaiting_settings_ack = false,
             .last_peer_client_stream_id = 1,
+            .last_peer_processed_stream_id = 1,
         };
         connection.applyLocalLimits();
         errdefer connection.close();
@@ -2983,11 +2984,11 @@ pub const Connection = struct {
     /// New request streams seen by the graceful-shutdown PING pump are
     /// admitted before the final GOAWAY boundary is selected, but their raw
     /// HEADERS remain queued so HPACK is decoded exactly once in wire order.
-    graceful_preadmitted_peer_streams: std.ArrayList(u31) = .empty,
-    /// Highest request stream ID admitted before graceful preadmission began.
-    /// It lets an allocation failure undo only speculative admissions without
-    /// resurrecting streams that ordinary application reads had accepted.
-    graceful_preadmit_base_stream_id: ?u31 = null,
+    graceful_preadmitted_peer_streams: std.ArrayList(GracefulPeerRequest) =
+        .empty,
+    /// Processed-stream boundary before the current speculative graceful
+    /// admission run. Rollback restores it while preserving observed IDs.
+    graceful_preadmit_base_processed_stream_id: ?u31 = null,
     /// Shadow HPACK state advances across preadmission checks in exact wire
     /// order. The live decoder remains untouched until queued frames are later
     /// delivered to the application request reader.
@@ -3015,6 +3016,10 @@ pub const Connection = struct {
     peer_initial_settings_applied: bool = false,
     awaiting_settings_ack: bool = false,
     last_peer_client_stream_id: u31 = 0,
+    /// Highest peer request accepted for application processing. Keep this
+    /// separate from the observed-stream cursor because REFUSED_STREAM closes
+    /// a stream without claiming that its request might have been processed.
+    last_peer_processed_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
     /// Two-phase server shutdown sends its maximum GOAWAY exactly once, then
@@ -5717,7 +5722,18 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
-                    try self.claimPeerRequestStream(stream_id);
+                    const admission = try self.claimPeerRequestStream(
+                        stream_id,
+                    );
+                    if (admission != .admitted) {
+                        try self.refusePeerRequestStreamUntil(
+                            stream_id,
+                            frame.frame,
+                            deadline,
+                            admission == .refused_reset_sent,
+                        );
+                        continue;
+                    }
                     errdefer self.releasePeerStream(stream_id);
                     active_stream_id = stream_id;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
@@ -5865,7 +5881,18 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
-                    try self.claimPeerRequestStream(stream_id);
+                    const admission = try self.claimPeerRequestStream(
+                        stream_id,
+                    );
+                    if (admission != .admitted) {
+                        try self.refusePeerRequestStreamUntil(
+                            stream_id,
+                            frame.frame,
+                            deadline,
+                            admission == .refused_reset_sent,
+                        );
+                        continue;
+                    }
                     errdefer self.releasePeerStream(stream_id);
                     active_stream_id = stream_id;
                     const headers = try self.readHeaderBlockUntil(
@@ -6210,7 +6237,16 @@ pub const Connection = struct {
             }
 
             const stream_id = first.frame.header.stream_id;
-            try self.claimPeerRequestStream(stream_id);
+            const admission = try self.claimPeerRequestStream(stream_id);
+            if (admission != .admitted) {
+                try self.refusePeerRequestStreamUntil(
+                    stream_id,
+                    first.frame,
+                    deadline,
+                    admission == .refused_reset_sent,
+                );
+                continue;
+            }
             errdefer self.releasePeerStream(stream_id);
             active_stream_id = stream_id;
 
@@ -6495,15 +6531,26 @@ pub const Connection = struct {
                         continue;
                     }
 
-                    if (initialized == requests.len) {
-                        return error.UnexpectedFrame;
-                    }
                     const stream_id = frame.header.stream_id;
-                    try self.claimPeerRequestStream(stream_id);
+                    const admission = try self.claimPeerRequestStream(
+                        stream_id,
+                    );
+                    if (admission != .admitted) {
+                        try self.refusePeerRequestStreamUntil(
+                            stream_id,
+                            frame,
+                            null,
+                            admission == .refused_reset_sent,
+                        );
+                        continue;
+                    }
                     var stream_reserved = true;
                     errdefer if (stream_reserved) {
                         self.releasePeerStream(stream_id);
                     };
+                    if (initialized == requests.len) {
+                        return error.UnexpectedFrame;
+                    }
 
                     const headers = try self.readHeaderBlock(frame);
                     var headers_owned = true;
@@ -6891,12 +6938,23 @@ pub const Connection = struct {
         self.pending_application_overflow = frame;
     }
 
+    const PeerRequestAdmission = enum {
+        admitted,
+        refused,
+        refused_reset_sent,
+    };
+
+    const GracefulPeerRequest = struct {
+        stream_id: u31,
+        admission: PeerRequestAdmission,
+    };
+
     fn gracefulPreadmittedIndex(
         self: *const Connection,
         stream_id: u31,
     ) ?usize {
-        for (self.graceful_preadmitted_peer_streams.items, 0..) |id, index| {
-            if (id == stream_id) return index;
+        for (self.graceful_preadmitted_peer_streams.items, 0..) |entry, index| {
+            if (entry.stream_id == stream_id) return index;
         }
         return null;
     }
@@ -6908,30 +6966,114 @@ pub const Connection = struct {
     fn claimPeerRequestStream(
         self: *Connection,
         stream_id: u31,
-    ) Error!void {
+    ) Error!PeerRequestAdmission {
         if (self.role != .server) return error.UnexpectedFrame;
         if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
+        // A graceful preadmission can already have reset this stream. Keep its
+        // marker until the queued HEADERS is replayed rather than letting the
+        // generic late-frame path consume it before this admission lookup.
         if (self.gracefulPreadmittedIndex(stream_id)) |index| {
-            _ = self.graceful_preadmitted_peer_streams.orderedRemove(index);
-            return;
+            const admission = self.graceful_preadmitted_peer_streams
+                .orderedRemove(index).admission;
+            if (admission == .admitted and
+                !self.outboundStreamIsActive(stream_id))
+            {
+                try self.reservePeerStream(stream_id);
+                self.last_peer_processed_stream_id = stream_id;
+            }
+            return admission;
         }
         if (stream_id <= self.last_peer_client_stream_id) {
             return error.InvalidFrame;
         }
-        try self.reservePeerStream(stream_id);
+        self.reservePeerStream(stream_id) catch |err| switch (err) {
+            error.FlowControlViolation => {
+                self.prepareLocallyResetStreams(1) catch |alloc_err| {
+                    // The caller has already removed initial HEADERS from the
+                    // transport. Without reset-history capacity it cannot
+                    // safely retry or tolerate frames racing the refusal.
+                    self.aggregate_timeout_unusable = true;
+                    return alloc_err;
+                };
+                // A valid new stream that exceeds our advertised concurrency
+                // is closed, not idle. Apply the monotonic PRIORITY_UPDATE
+                // transition so this stream and skipped lower IDs cannot keep
+                // consuming the admission budget after refusal.
+                self.priority_state.openRequest(self.allocator, stream_id);
+                _ = self.priority_state.remove(self.allocator, stream_id);
+                self.last_peer_client_stream_id = stream_id;
+                return .refused;
+            },
+            else => {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            },
+        };
         self.last_peer_client_stream_id = stream_id;
+        self.last_peer_processed_stream_id = stream_id;
+        return .admitted;
+    }
+
+    /// Consume and HPACK-validate the entire refused field section before emitting
+    /// RST_STREAM. HPACK state is connection-wide, so skipping CONTINUATIONs
+    /// or decoder mutations here would corrupt every later request.
+    fn refusePeerRequestStreamUntil(
+        self: *Connection,
+        stream_id: u31,
+        first: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+        reset_already_sent: bool,
+    ) Error!void {
+        // A direct refusal reserves reset-history capacity while claiming the
+        // stream; graceful preadmission already sent and recorded its reset.
+        // Thus, after HPACK advances, this helper performs no allocation.
+        const headers = self.readHeaderBlockUntil(first, deadline) catch |err| {
+            // The initial HEADERS is already consumed, and decoding can mutate
+            // the dynamic table before reporting malformed input or OOM. No
+            // request API can safely resume after any failure at this point.
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        defer freeHeaders(self.allocator, headers);
+        validateHeaderBlock(headers, .request) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        _ = requestHeaderLookup(headers) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        if (!reset_already_sent) {
+            self.writeResetStreamFramePrepared(
+                stream_id,
+                .refused_stream,
+            ) catch |err| {
+                // `writeAll` cannot report how much of the frame reached the
+                // peer. Never permit another API call to append bytes after a
+                // potentially partial RST_STREAM.
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+        }
     }
 
     fn rollbackGracefulPreadmissions(self: *Connection) void {
-        for (self.graceful_preadmitted_peer_streams.items) |stream_id| {
-            self.releasePeerStream(stream_id);
-            self.forgetStreamWindows(stream_id);
+        for (self.graceful_preadmitted_peer_streams.items) |entry| {
+            if (entry.admission != .admitted) continue;
+            _ = self.removeActivePeerStream(entry.stream_id);
+            self.forgetResponseSemantics(entry.stream_id);
+            self.forgetStreamWindows(entry.stream_id);
         }
-        self.graceful_preadmitted_peer_streams.clearRetainingCapacity();
-        if (self.graceful_preadmit_base_stream_id) |base| {
-            self.last_peer_client_stream_id = base;
+        if (self.graceful_preadmit_base_processed_stream_id) |base| {
+            self.last_peer_processed_stream_id = base;
         }
-        self.graceful_preadmit_base_stream_id = null;
+        // Keep markers and the observed-ID cursor. The raw frames are still
+        // queued and must replay their original admitted/refused decisions; a
+        // refused stream has already received its wire-visible reset. Admitted
+        // markers re-reserve their stream when replayed after this rollback.
+        // Priority metadata also stays attached to those markers so replay
+        // preserves the same priority the shutdown probe observed.
+        self.graceful_preadmit_base_processed_stream_id = null;
         self.clearGracefulPreadmitDecoder();
     }
 
@@ -6966,13 +7108,13 @@ pub const Connection = struct {
         if (started_shadow) {
             self.graceful_preadmit_decoder =
                 try self.hpack_decoder.clone(self.allocator);
-            self.graceful_preadmit_base_stream_id =
-                self.last_peer_client_stream_id;
+            self.graceful_preadmit_base_processed_stream_id =
+                self.last_peer_processed_stream_id;
         }
         errdefer if (started_shadow and
             self.graceful_preadmitted_peer_streams.items.len == 0)
         {
-            self.graceful_preadmit_base_stream_id = null;
+            self.graceful_preadmit_base_processed_stream_id = null;
             self.clearGracefulPreadmitDecoder();
         };
         const parsed = try http2.HeadersPayload.parse(frame);
@@ -6990,8 +7132,39 @@ pub const Connection = struct {
             self.allocator,
             1,
         );
-        try self.reservePeerStream(stream_id);
-        self.graceful_preadmitted_peer_streams.appendAssumeCapacity(stream_id);
+        const admission: PeerRequestAdmission = blk: {
+            self.reservePeerStream(stream_id) catch |err| switch (err) {
+                error.FlowControlViolation => {
+                    // The original HEADERS remains queued for live HPACK
+                    // replay, so make reset bookkeeping allocation-safe before
+                    // its wire-visible refusal becomes irreversible.
+                    try self.prepareLocallyResetStreams(1);
+                    self.priority_state.openRequest(
+                        self.allocator,
+                        stream_id,
+                    );
+                    _ = self.priority_state.remove(
+                        self.allocator,
+                        stream_id,
+                    );
+                    self.writeResetStreamFramePrepared(
+                        stream_id,
+                        .refused_stream,
+                    ) catch |write_err| {
+                        self.aggregate_timeout_unusable = true;
+                        return write_err;
+                    };
+                    break :blk .refused_reset_sent;
+                },
+                else => return err,
+            };
+            self.last_peer_processed_stream_id = stream_id;
+            break :blk .admitted;
+        };
+        self.graceful_preadmitted_peer_streams.appendAssumeCapacity(.{
+            .stream_id = stream_id,
+            .admission = admission,
+        });
         self.last_peer_client_stream_id = stream_id;
         return true;
     }
@@ -7081,9 +7254,23 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!bool {
         if (frame.header.frame_type != .headers) return false;
-        if ((frame.header.flags & flag_end_stream) == 0) return false;
         const stream_id = frame.header.stream_id;
-        try self.claimPeerRequestStream(stream_id);
+        const admission = try self.claimPeerRequestStream(stream_id);
+        if (admission != .admitted) {
+            try self.refusePeerRequestStreamUntil(
+                stream_id,
+                frame,
+                deadline,
+                admission == .refused_reset_sent,
+            );
+            return true;
+        }
+        if ((frame.header.flags & flag_end_stream) == 0) {
+            // This helper can retain only complete requests. Undo the claim so
+            // its caller's existing fail-closed path does not leak capacity.
+            self.releasePeerStream(stream_id);
+            return false;
+        }
         var release_stream_on_error = true;
         errdefer if (release_stream_on_error) {
             self.releasePeerStream(stream_id);
@@ -8312,7 +8499,7 @@ pub const Connection = struct {
             // begins, no later call may wait for an ACK already consumed.
             self.graceful_shutdown_phase = .synchronized;
             self.clearGracefulPreadmitDecoder();
-            self.graceful_preadmit_base_stream_id = null;
+            self.graceful_preadmit_base_processed_stream_id = null;
         }
         const boundary = @min(
             self.local_goaway_last_stream_id orelse std.math.maxInt(u31),
@@ -8724,6 +8911,14 @@ pub const Connection = struct {
         error_code: http2.ErrorCode,
     ) Error!void {
         try self.prepareLocallyResetStreams(1);
+        return self.writeResetStreamFramePrepared(stream_id, error_code);
+    }
+
+    fn writeResetStreamFramePrepared(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+    ) Error!void {
         var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
         const encoded = try http2.ResetStreamPayload.writeInto(
             &storage,
@@ -8814,6 +9009,16 @@ pub const Connection = struct {
                 // CONTINUATION frames) before discarding its fields.
                 const headers = try self.readHeaderBlock(frame);
                 freeHeaders(self.allocator, headers);
+                if (self.gracefulPreadmittedIndex(
+                    frame.header.stream_id,
+                )) |index| {
+                    const marker = self.graceful_preadmitted_peer_streams
+                        .items[index];
+                    if (marker.admission == .refused_reset_sent) {
+                        _ = self.graceful_preadmitted_peer_streams
+                            .orderedRemove(index);
+                    }
+                }
             },
             .rst_stream => {
                 _ = try http2.ResetStreamPayload.parse(frame);
@@ -8850,6 +9055,16 @@ pub const Connection = struct {
                     deadline,
                 );
                 freeHeaders(self.allocator, headers);
+                if (self.gracefulPreadmittedIndex(
+                    frame.header.stream_id,
+                )) |index| {
+                    const marker = self.graceful_preadmitted_peer_streams
+                        .items[index];
+                    if (marker.admission == .refused_reset_sent) {
+                        _ = self.graceful_preadmitted_peer_streams
+                            .orderedRemove(index);
+                    }
+                }
             },
             .data => {
                 _ = try http2.DataPayload.parse(frame);
@@ -9145,7 +9360,7 @@ pub const Connection = struct {
     }
 
     fn lastPeerProcessedStreamId(self: Connection) u31 {
-        if (self.role == .server) return self.last_peer_client_stream_id;
+        if (self.role == .server) return self.last_peer_processed_stream_id;
         return self.push_state.last_peer_stream_id orelse 0;
     }
 
@@ -10542,6 +10757,25 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         raw_continuations: bool,
     ) Error![]http2.Hpack.HeaderField {
+        const block = try self.collectHeaderBlockUntil(
+            first,
+            deadline,
+            raw_continuations,
+        );
+        return decodeOwnedHeaders(
+            self.allocator,
+            block,
+            self.limits,
+            &self.hpack_decoder,
+        );
+    }
+
+    fn collectHeaderBlockUntil(
+        self: *Connection,
+        first: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+        raw_continuations: bool,
+    ) Error![]const u8 {
         if (first.header.frame_type != .headers) return error.UnexpectedFrame;
         const first_headers = try http2.HeadersPayload.parse(first);
         if (first_headers.priority) |priority| {
@@ -10593,12 +10827,7 @@ pub const Connection = struct {
             }
             break :blk self.header_block_scratch.items;
         };
-        return decodeOwnedHeaders(
-            self.allocator,
-            block,
-            self.limits,
-            &self.hpack_decoder,
-        );
+        return block;
     }
 
     fn writePushPromiseBlock(
@@ -13526,6 +13755,13 @@ pub const testing = struct {
         connection.releaseLocalStream(stream_id);
     }
 
+    pub fn releasePeerStream(
+        connection: *Connection,
+        stream_id: u31,
+    ) void {
+        connection.releasePeerStream(stream_id);
+    }
+
     pub fn addActiveLocalStream(
         connection: *Connection,
         stream_id: u31,
@@ -13589,6 +13825,53 @@ pub const testing = struct {
         frame: http2.Frame,
     ) Error!bool {
         return connection.handleConnectionFrame(frame);
+    }
+
+    pub fn hasActivePeerStream(
+        connection: *const Connection,
+        stream_id: u31,
+    ) bool {
+        return connection.active_peer_index.count() != 0 and
+            connection.active_peer_index.contains(stream_id);
+    }
+
+    pub fn hasStreamWindow(
+        connection: *const Connection,
+        stream_id: u31,
+    ) bool {
+        return (connection.send_stream_window_index.count() != 0 and
+            connection.send_stream_window_index.contains(stream_id)) or
+            connection.hasRecvStreamWindow(stream_id);
+    }
+
+    pub fn hasResponseSemantics(
+        connection: *const Connection,
+        stream_id: u31,
+    ) bool {
+        return connection.response_semantics_index.count() != 0 and
+            connection.response_semantics_index.contains(stream_id);
+    }
+
+    pub fn hasPeerPriority(
+        connection: *const Connection,
+        stream_id: u31,
+    ) bool {
+        return connection.priority_state.get(stream_id) != null or
+            connection.priority_state.containsIdleRequest(stream_id);
+    }
+
+    pub fn lastPeerClientStreamId(connection: *const Connection) u31 {
+        return connection.last_peer_client_stream_id;
+    }
+
+    pub fn pendingRequestCount(connection: *const Connection) usize {
+        return connection.pendingRequestCount();
+    }
+
+    pub fn gracefulPreadmittedCount(
+        connection: *const Connection,
+    ) usize {
+        return connection.graceful_preadmitted_peer_streams.items.len;
     }
 
     pub fn writeHeaders(
@@ -14812,6 +15095,7 @@ test "HTTP/2 graceful shutdown sends maximum GOAWAY ping and final boundary" {
             var connection = try server_ptr.accept();
             defer connection.close();
             connection.last_peer_client_stream_id = 3;
+            connection.last_peer_processed_stream_id = 3;
             try connection.gracefulShutdown();
         }
     };
@@ -14924,6 +15208,126 @@ test "HTTP/2 graceful shutdown admits request HEADERS before final GOAWAY" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("/during-shutdown", shared.path.?);
+}
+
+test "HTTP/2 graceful shutdown refuses overload and retires queued marker" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_concurrent_streams = 1 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        marker_count: usize = 99,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try connection.gracefulShutdown();
+            try std.testing.expectEqual(
+                @as(?u31, 1),
+                connection.local_goaway_last_stream_id,
+            );
+            while (connection.graceful_preadmitted_peer_streams.items.len != 0) {
+                const frame = (try connection.readBufferedFrame()).frame;
+                if (frame.header.frame_type == .headers and
+                    connection.gracefulPreadmittedIndex(
+                        frame.header.stream_id,
+                    ) != null)
+                {
+                    const headers = try connection.readHeaderBlock(frame);
+                    freeHeaders(self.server.allocator, headers);
+                    if (connection.gracefulPreadmittedIndex(
+                        frame.header.stream_id,
+                    )) |index| {
+                        _ = connection.graceful_preadmitted_peer_streams
+                            .orderedRemove(index);
+                    }
+                    continue;
+                }
+                if (try connection.handleConnectionFrame(frame)) continue;
+                return error.UnexpectedFrame;
+            }
+            self.marker_count =
+                connection.graceful_preadmitted_peer_streams.items.len;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_concurrent_streams = 1 },
+    );
+    defer client.close();
+    _ = try client.sendCompleteRequest(.{
+        .path = "/held",
+        .authority = "localhost",
+    });
+
+    var initial = try client.readGoAway();
+    defer initial.deinit(allocator);
+    var ping = try client.readOwnedFrame();
+    defer ping.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.ping, ping.frame.header.frame_type);
+    try client.writeHeaders(3, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/refused-during-shutdown" },
+        .{ .name = ":scheme", .value = "http" },
+    }, true);
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .ping,
+        flag_ack,
+        0,
+        ping.frame.payload,
+    );
+    var reset = try client.readResetStreamWithTimeout(.fromSeconds(2));
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 3), reset.reset.stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.refused_stream,
+        reset.reset.error_code,
+    );
+    var final = try client.readGoAway();
+    defer final.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), final.goaway.last_stream_id);
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .ping,
+        0,
+        0,
+        &.{ 7, 6, 5, 4, 3, 2, 1, 0 },
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), shared.marker_count);
 }
 
 test "HTTP/2 graceful shutdown preadmits dependent HPACK blocks in order" {
@@ -22037,6 +22441,171 @@ test "HTTP/2 reset history allocation failure precedes wire write" {
     try std.testing.expect(!connection.wasLocallyReset(1));
 }
 
+test "HTTP/2 refusal reserves reset history before consuming headers" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            return error.SocketUnconnected;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{
+            .max_concurrent_streams = 1,
+            .max_reset_stream_history = 1,
+        },
+    };
+    defer {
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+    }
+    try connection.active_peer_streams.ensureUnusedCapacity(allocator, 1);
+    try connection.active_peer_index.ensureUnusedCapacity(allocator, 1);
+    try std.testing.expectEqual(
+        Connection.PeerRequestAdmission.admitted,
+        try connection.claimPeerRequestStream(1),
+    );
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.claimPeerRequestStream(3),
+    );
+    connection.allocator = allocator;
+    try std.testing.expectEqual(@as(usize, 0), writer.writes);
+    try std.testing.expectEqual(@as(u31, 1), connection.last_peer_client_stream_id);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.wasLocallyReset(3));
+}
+
+test "HTTP/2 refusal write failure makes later request reads terminal" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(header.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .max_reset_stream_history = 1 },
+    };
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+    }
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/refused" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.refusePeerRequestStreamUntil(
+            3,
+            .{
+                .header = .{
+                    .length = @intCast(block.items.len),
+                    .frame_type = .headers,
+                    .flags = flag_end_headers,
+                    .stream_id = 3,
+                },
+                .payload = block.items,
+            },
+            null,
+            false,
+        ),
+    );
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectError(error.ConnectionClosed, connection.readRequest());
+    try std.testing.expect(!connection.wasLocallyReset(3));
+}
+
+test "HTTP/2 refusal decode failure makes later request reads terminal" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .max_reset_stream_history = 1 },
+    };
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+    }
+
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.refusePeerRequestStreamUntil(
+            3,
+            .{
+                .header = .{
+                    .length = 1,
+                    .frame_type = .headers,
+                    .flags = flag_end_headers,
+                    .stream_id = 3,
+                },
+                // An indexed integer whose continuation byte is missing.
+                .payload = &.{0xff},
+            },
+            null,
+            false,
+        ),
+    );
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectError(error.ConnectionClosed, connection.readRequest());
+}
+
 test "HTTP/2 sendWindowUpdate rejects idle streams" {
     var connection = Connection{
         .io = undefined,
@@ -22242,6 +22811,42 @@ test "HTTP/2 local max concurrent streams limits peer opened streams" {
     try std.testing.expectEqual(@as(usize, 1), connection.active_peer_streams.items.len);
     connection.releasePeerStream(5);
     try std.testing.expectEqual(@as(usize, 0), connection.active_peer_streams.items.len);
+}
+
+test "HTTP/2 refused request advances observed but not processed boundary" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{
+            .max_concurrent_streams = 1,
+            .max_reset_stream_history = 0,
+        },
+    };
+    defer {
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(
+        Connection.PeerRequestAdmission.admitted,
+        try connection.claimPeerRequestStream(1),
+    );
+    try std.testing.expectEqual(
+        Connection.PeerRequestAdmission.refused,
+        try connection.claimPeerRequestStream(3),
+    );
+    try std.testing.expectEqual(@as(u31, 3), connection.last_peer_client_stream_id);
+    try std.testing.expectEqual(@as(u31, 1), connection.lastPeerProcessedStreamId());
+    connection.releasePeerStream(1);
+    try std.testing.expectEqual(
+        Connection.PeerRequestAdmission.admitted,
+        try connection.claimPeerRequestStream(5),
+    );
+    try std.testing.expectEqual(@as(u31, 5), connection.lastPeerProcessedStreamId());
 }
 
 test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
@@ -22813,6 +23418,7 @@ test {
     _ = @import("runtime/response_writer_tests.zig");
     _ = @import("runtime/request_writer_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
+    _ = @import("runtime/refusal_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/unix_tests.zig");
