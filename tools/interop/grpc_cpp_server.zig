@@ -105,7 +105,7 @@ fn serveScenario(
         .ping_pong => try servePingPong(io, stream, &queue, deadline),
         .empty_stream => try serveEmpty(stream, &queue, deadline),
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
-        .timeout_on_sleeping_server => try serveSleepingDeadline(stream, &queue, deadline),
+        .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
     }
 }
 
@@ -174,31 +174,43 @@ fn serveCancellation(
 }
 
 fn serveSleepingDeadline(
+    io: std.Io,
     stream: *netz.grpc.ServerDuplex,
     queue: *RequestQueue,
-    deadline: ?std.Io.Clock.Timestamp,
 ) !void {
-    const absolute = deadline orelse return error.MissingTimeout;
-    const request = nextRequest(stream, queue, absolute) catch |err| switch (err) {
-        error.Timeout => {
-            try stream.finish(.deadline_exceeded, null, &.{}, &.{});
-            return;
-        },
-        else => return err,
-    };
-    if (request.response_size != null or request.request_body_size != 27_182) {
-        return error.UnexpectedRequest;
+    const timeout = stream.timeout orelse return error.MissingTimeout;
+    if (timeout.duration().nanoseconds > std.time.ns_per_s) {
+        return error.UnexpectedTimeout;
     }
-
-    var event = readEvent(stream, queue, absolute) catch |err| switch (err) {
-        error.Timeout => {
-            try stream.finish(.deadline_exceeded, null, &.{}, &.{});
-            return;
-        },
-        else => return err,
-    };
-    defer event.deinit();
-    return error.ExpectedDeadline;
+    // grpc-cpp owns deadline enforcement in this reverse-direction case. Its
+    // one-millisecond deadline can expire before or after the complete request
+    // reaches this process, so wait for the resulting CANCEL with a separate
+    // generous harness watchdog instead of restarting grpc-timeout at accept.
+    const watchdog = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
+    while (true) {
+        var event = try readEvent(stream, queue, watchdog);
+        defer event.deinit();
+        switch (event) {
+            .messages => {
+                while (queue.items.items.len != 0) {
+                    const request = queue.items.orderedRemove(0);
+                    if (request.response_size != null or
+                        request.request_body_size != 27_182)
+                    {
+                        return error.UnexpectedRequest;
+                    }
+                }
+            },
+            .finished => return error.ExpectedDeadline,
+            .reset => |reset| {
+                if (reset.error_code != .cancel) return error.UnexpectedReset;
+                return;
+            },
+        }
+    }
 }
 
 fn nextRequest(

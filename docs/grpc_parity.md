@@ -94,6 +94,13 @@ interop server:
 zig build interop-grpc-cpp -Doptimize=ReleaseFast
 ```
 
+Run the reverse-direction gate, with the upstream C++ client exercising a
+one-shot netz server for each scenario:
+
+```sh
+zig build interop-grpc-cpp-client -Doptimize=ReleaseFast
+```
+
 By default the gate verifies `~/Work/grpc` is at
 `03d65cc67c450ccbb58a8a45627c4da83a886ccd`, builds
 `//test/cpp/interop:interop_server` with Bazel, starts it with insecure
@@ -120,6 +127,13 @@ The independent C++ server build completed all 3492 Bazel actions and the
 process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
+The reverse gate also passed on 2026-09-02 with the same upstream revision,
+Bazel 8.7.0, and GCC. It built upstream's `interop_client` and verified
+`ping_pong`, `empty_stream`, `cancel_after_first_response`, and
+`timeout_on_sleeping_server` against separate netz server processes. Each case
+requires both the C++ client's successful exit and a netz marker proving that
+the expected request completion, cancellation, or deadline condition was
+observed; this prevents a client-only result from masking a server-side fault.
 
 The netz client exercises upstream's canonical `FullDuplexCall` contract:
 
@@ -171,8 +185,10 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    connection, and the owning h2c wrappers also compose multi-message request
    and response streams. A focused grpc-cpp gate is now available for external
    server checks of full duplex, metadata, cancellation/channel reuse, and
-   deadline propagation. A broader upstream matrix (including netz serving an
-   upstream client and TLS) remains future work.
+   deadline propagation. The reverse gate covers upstream-client ping-pong,
+   empty-stream completion, cancellation, and deadline behavior against netz.
+   A broader upstream matrix, including reverse custom metadata and TLS, remains
+   future work.
 3. Add higher-level application cancellation/deadline policy, retry policy,
    health checking, reflection, and broader conformance/interop runners.
 

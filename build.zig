@@ -292,6 +292,29 @@ pub fn build(b: *std.Build) void {
     );
     grpc_cpp_interop_step.dependOn(&grpc_cpp_interop.step);
 
+    const grpc_cpp_server = b.addExecutable(.{
+        .name = "netz-grpc-cpp-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/grpc_cpp_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_cpp_client_interop = b.addSystemCommand(
+        &.{"tools/interop/grpc_cpp_client.sh"},
+    );
+    grpc_cpp_client_interop.addArtifactArg(grpc_cpp_server);
+    const grpc_cpp_client_interop_step = b.step(
+        "interop-grpc-cpp-client",
+        "Run upstream gRPC C++ client against netz gRPC h2c server",
+    );
+    grpc_cpp_client_interop_step.dependOn(
+        &grpc_cpp_client_interop.step,
+    );
+
     const http2_h2_push_client = b.addExecutable(.{
         .name = "netz-http2-h2-push-client",
         .root_module = b.createModule(.{
