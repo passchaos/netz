@@ -18,6 +18,658 @@ const development_settings: http3.Settings = .{
     .enable_connect_protocol = true,
 };
 
+/// A FIN-complete non-HTTP/3 stream retained by the cleartext packet pump.
+/// Protocol adapters own interpretation of the leading bytes; HTTP/3 only
+/// guarantees peer/stream isolation and bounded reassembly.
+pub const DevelopmentStream = struct {
+    allocator: std.mem.Allocator,
+    from: net.IpAddress,
+    stream_id: u62,
+    direction: DevelopmentStreamDirection,
+    bytes: []u8,
+
+    pub fn deinit(self: *DevelopmentStream) void {
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const DevelopmentStreamDirection = enum {
+    bidirectional,
+    unidirectional,
+};
+
+pub const DevelopmentStreamMatch = struct {
+    session_id: u62,
+    local_role: DevelopmentEndpointRole,
+    /// A locally-created bidirectional stream has already consumed its
+    /// association prefix in the outbound direction. Its reverse direction
+    /// therefore starts directly with application bytes.
+    context: ?*const anyopaque = null,
+    is_local_bidirectional: ?*const fn (*const anyopaque, u62) bool = null,
+
+    fn ownsLocalBidirectional(
+        self: DevelopmentStreamMatch,
+        stream_id: u62,
+    ) bool {
+        const context = self.context orelse return false;
+        const predicate = self.is_local_bidirectional orelse return false;
+        return predicate(context, stream_id);
+    }
+};
+
+pub const DevelopmentEndpointRole = enum { client, server };
+
+pub const DevelopmentStreamDebugCounts = struct {
+    receives: usize,
+    sends: usize,
+};
+
+const webtransport_bidi_stream_type: u64 = 0x41;
+const webtransport_uni_stream_type: u64 =
+    @intFromEnum(http3.StreamType.webtransport_unidirectional);
+
+/// Bounded receive storage for extension streams that share the development
+/// endpoint's one packet pump. Entries are keyed by peer as well as ID because
+/// every cleartext client starts the same independent stream-number space.
+const DevelopmentStreamSet = struct {
+    const Classification = enum { incomplete, webtransport, other };
+
+    const Entry = struct {
+        from: net.IpAddress,
+        receive: quic.stream_state.RecvState,
+
+        fn deinit(self: *Entry) void {
+            self.receive.deinit();
+            self.* = undefined;
+        }
+    };
+
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+    max_stream_buffer: usize,
+    max_streams: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_stream_buffer: usize,
+        max_streams: usize,
+    ) DevelopmentStreamSet {
+        return .{
+            .allocator = allocator,
+            .max_stream_buffer = max_stream_buffer,
+            .max_streams = max_streams,
+        };
+    }
+
+    fn deinit(self: *DevelopmentStreamSet) void {
+        for (self.entries.items) |*entry| entry.deinit();
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn insert(
+        self: *DevelopmentStreamSet,
+        from: net.IpAddress,
+        frame: quic.StreamFrame,
+    ) Error!void {
+        const stream_id: u62 = std.math.cast(u62, frame.stream_id) orelse
+            return error.UnexpectedStream;
+        const entry = self.find(from, stream_id) orelse blk: {
+            if (self.entries.items.len >= self.max_streams) {
+                return error.ExcessiveLoad;
+            }
+            try self.entries.append(self.allocator, .{
+                .from = from,
+                .receive = .init(
+                    self.allocator,
+                    stream_id,
+                    self.max_stream_buffer,
+                ),
+            });
+            break :blk &self.entries.items[self.entries.items.len - 1];
+        };
+        try entry.receive.insert(frame);
+    }
+
+    fn removeMatching(
+        self: *DevelopmentStreamSet,
+        peer: net.IpAddress,
+        match: DevelopmentStreamMatch,
+    ) void {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            const entry = &self.entries.items[index];
+            if (!entry.from.eql(&peer) or
+                !developmentStreamMayBelongTo(
+                    entry.receive.available(),
+                    @intCast(entry.receive.stream_id),
+                    match,
+                ))
+            {
+                index += 1;
+                continue;
+            }
+            entry.deinit();
+            _ = self.entries.swapRemove(index);
+        }
+    }
+
+    fn clear(self: *DevelopmentStreamSet) void {
+        for (self.entries.items) |*entry| entry.deinit();
+        self.entries.clearRetainingCapacity();
+    }
+
+    fn find(
+        self: *DevelopmentStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) ?*Entry {
+        for (self.entries.items) |*entry| {
+            if (entry.receive.stream_id == stream_id and
+                entry.from.eql(&from)) return entry;
+        }
+        return null;
+    }
+
+    fn contains(
+        self: *DevelopmentStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) bool {
+        return self.find(from, stream_id) != null;
+    }
+
+    fn classifyBidirectional(
+        self: *DevelopmentStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!Classification {
+        const entry = self.find(from, stream_id) orelse
+            return error.UnexpectedStream;
+        const available = entry.receive.available();
+        const prefix = quic.varint.decodeSlice(available) catch |err|
+            switch (err) {
+                error.BufferTooShort => return if (entry.receive.final_size != null)
+                    error.InvalidStreamType
+                else
+                    .incomplete,
+                else => return err,
+            };
+        return if (prefix.value == webtransport_bidi_stream_type)
+            .webtransport
+        else
+            .other;
+    }
+
+    fn takeEntry(
+        self: *DevelopmentStreamSet,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) ?Entry {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.receive.stream_id == stream_id and
+                entry.from.eql(&from)) return self.entries.swapRemove(index);
+        }
+        return null;
+    }
+
+    fn takeMatchingComplete(
+        self: *DevelopmentStreamSet,
+        peer: net.IpAddress,
+        match: DevelopmentStreamMatch,
+    ) Error!?DevelopmentStream {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            const entry = &self.entries.items[index];
+            if (!entry.from.eql(&peer)) {
+                index += 1;
+                continue;
+            }
+            const final_size = entry.receive.final_size orelse {
+                index += 1;
+                continue;
+            };
+            if (entry.receive.contiguous_end < final_size) {
+                index += 1;
+                continue;
+            }
+            const bytes = entry.receive.buffer.items[0..final_size];
+            const stream_id: u62 = @intCast(entry.receive.stream_id);
+            const direction = developmentStreamDirection(stream_id);
+            const classified = developmentStreamPrefix(
+                bytes,
+                stream_id,
+                direction,
+                match,
+            ) catch |err| {
+                entry.deinit();
+                _ = self.entries.swapRemove(index);
+                return err;
+            };
+            const prefix_len = switch (classified) {
+                .match => |len| len,
+                // A valid association for another CONNECT must remain queued
+                // for that session's targeted poll.
+                .other_session => {
+                    index += 1;
+                    continue;
+                },
+                // Definitively unrelated extension bytes have no owner in the
+                // development runtime; drop them rather than pinning capacity.
+                .not_webtransport => {
+                    entry.deinit();
+                    _ = self.entries.swapRemove(index);
+                    continue;
+                },
+            };
+            const payload = try self.allocator.dupe(u8, bytes[prefix_len..]);
+            const from = entry.from;
+            entry.deinit();
+            _ = self.entries.swapRemove(index);
+            return .{
+                .allocator = self.allocator,
+                .from = from,
+                .stream_id = stream_id,
+                .direction = direction,
+                .bytes = payload,
+            };
+        }
+        return null;
+    }
+};
+
+/// Send offsets for raw development extension streams. The caller owns
+/// protocol prefixes, while this table owns exactly-once offset/FIN state.
+const DevelopmentStreamSendSet = struct {
+    const Entry = struct {
+        session_id: u62,
+        send: quic.stream_state.SendState,
+        unusable: bool = false,
+    };
+
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+    max_streams: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_streams: usize,
+    ) DevelopmentStreamSendSet {
+        return .{ .allocator = allocator, .max_streams = max_streams };
+    }
+
+    fn deinit(self: *DevelopmentStreamSendSet) void {
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn open(
+        self: *DevelopmentStreamSendSet,
+        session_id: u62,
+        stream_id: u62,
+    ) Error!void {
+        if (self.find(stream_id) != null) return error.UnexpectedStream;
+        if (self.entries.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.append(self.allocator, .{
+            .session_id = session_id,
+            .send = .init(stream_id),
+        });
+    }
+
+    fn prepareOpen(
+        self: *DevelopmentStreamSendSet,
+        stream_id: u62,
+    ) Error!void {
+        if (self.find(stream_id) != null) return error.UnexpectedStream;
+        if (self.entries.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    fn commitPreparedOpen(
+        self: *DevelopmentStreamSendSet,
+        session_id: u62,
+        stream_id: u62,
+    ) void {
+        self.entries.appendAssumeCapacity(.{
+            .session_id = session_id,
+            .send = .init(stream_id),
+        });
+    }
+
+    fn removeLast(
+        self: *DevelopmentStreamSendSet,
+        stream_id: u62,
+    ) void {
+        if (self.entries.items.len == 0) return;
+        if (self.entries.items[self.entries.items.len - 1].send.stream_id ==
+            stream_id) _ = self.entries.pop();
+    }
+
+    fn find(
+        self: *DevelopmentStreamSendSet,
+        stream_id: u62,
+    ) ?*quic.stream_state.SendState {
+        for (self.entries.items) |*entry| {
+            if (entry.send.stream_id == stream_id) return &entry.send;
+        }
+        return null;
+    }
+
+    fn findEntry(
+        self: *DevelopmentStreamSendSet,
+        stream_id: u62,
+    ) ?*Entry {
+        for (self.entries.items) |*entry| {
+            if (entry.send.stream_id == stream_id) return entry;
+        }
+        return null;
+    }
+
+    fn removeSession(
+        self: *DevelopmentStreamSendSet,
+        session_id: u62,
+    ) void {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            if (self.entries.items[index].session_id != session_id) {
+                index += 1;
+                continue;
+            }
+            _ = self.entries.swapRemove(index);
+        }
+    }
+
+    fn clear(self: *DevelopmentStreamSendSet) void {
+        self.entries.clearRetainingCapacity();
+    }
+
+    fn contains(self: *DevelopmentStreamSendSet, stream_id: u62) bool {
+        return self.find(stream_id) != null;
+    }
+
+    fn sessionId(
+        self: *DevelopmentStreamSendSet,
+        stream_id: u62,
+    ) ?u62 {
+        for (self.entries.items) |entry| {
+            if (entry.send.stream_id == stream_id) return entry.session_id;
+        }
+        return null;
+    }
+};
+
+const DevelopmentPeerStreamSendSet = struct {
+    const Entry = struct {
+        to: net.IpAddress,
+        session_id: u62,
+        send: quic.stream_state.SendState,
+        unusable: bool = false,
+    };
+    const Cursor = struct {
+        peer: net.IpAddress,
+        next_bidi: u62 = 1,
+        next_uni: u62 = 15,
+    };
+
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+    cursors: std.ArrayList(Cursor) = .empty,
+    max_streams: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_streams: usize,
+    ) DevelopmentPeerStreamSendSet {
+        return .{ .allocator = allocator, .max_streams = max_streams };
+    }
+
+    fn deinit(self: *DevelopmentPeerStreamSendSet) void {
+        self.cursors.deinit(self.allocator);
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn open(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+    ) Error!void {
+        if (self.find(to, stream_id) != null) return error.UnexpectedStream;
+        if (self.entries.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.append(self.allocator, .{
+            .to = to,
+            .session_id = session_id,
+            .send = .init(stream_id),
+        });
+    }
+
+    fn removeLast(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        stream_id: u62,
+    ) void {
+        if (self.entries.items.len == 0) return;
+        const last = self.entries.items[self.entries.items.len - 1];
+        if (last.send.stream_id == stream_id and last.to.eql(&to)) {
+            _ = self.entries.pop();
+        }
+    }
+
+    fn find(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        stream_id: u62,
+    ) ?*quic.stream_state.SendState {
+        for (self.entries.items) |*entry| {
+            if (entry.send.stream_id == stream_id and
+                entry.to.eql(&to)) return &entry.send;
+        }
+        return null;
+    }
+
+    fn findEntry(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        stream_id: u62,
+    ) ?*Entry {
+        for (self.entries.items) |*entry| {
+            if (entry.send.stream_id == stream_id and
+                entry.to.eql(&to)) return entry;
+        }
+        return null;
+    }
+
+    fn removeMatching(
+        self: *DevelopmentPeerStreamSendSet,
+        peer: net.IpAddress,
+        session_id: u62,
+    ) void {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            const entry = self.entries.items[index];
+            if (!entry.to.eql(&peer) or entry.session_id != session_id) {
+                index += 1;
+                continue;
+            }
+            _ = self.entries.swapRemove(index);
+        }
+    }
+
+    fn contains(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        stream_id: u62,
+    ) bool {
+        return self.find(to, stream_id) != null;
+    }
+
+    fn sessionId(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        stream_id: u62,
+    ) ?u62 {
+        for (self.entries.items) |entry| {
+            if (entry.send.stream_id == stream_id and entry.to.eql(&to)) {
+                return entry.session_id;
+            }
+        }
+        return null;
+    }
+
+    fn reserve(
+        self: *DevelopmentPeerStreamSendSet,
+        to: net.IpAddress,
+        session_id: u62,
+        direction: DevelopmentStreamDirection,
+    ) Error!u62 {
+        if (self.entries.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        var cursor: ?*Cursor = null;
+        for (self.cursors.items) |*candidate| {
+            if (candidate.peer.eql(&to)) {
+                cursor = candidate;
+                break;
+            }
+        }
+        if (cursor == null) {
+            // Cursor cardinality is bounded by the same endpoint-wide limit as
+            // retained associated streams. A peer may keep its cursor while
+            // sessions remain active, but churn cannot grow this table
+            // without bound.
+            if (self.cursors.items.len >= self.max_streams) {
+                return error.ExcessiveLoad;
+            }
+            try self.cursors.append(self.allocator, .{ .peer = to });
+            cursor = &self.cursors.items[self.cursors.items.len - 1];
+        }
+        const next = switch (direction) {
+            .bidirectional => &cursor.?.next_bidi,
+            .unidirectional => &cursor.?.next_uni,
+        };
+        const stream_id = next.*;
+        const advanced = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
+        self.entries.appendAssumeCapacity(.{
+            .to = to,
+            .session_id = session_id,
+            .send = .init(stream_id),
+        });
+        next.* = advanced;
+        return stream_id;
+    }
+};
+
+test "HTTP/3 development peer stream cursors stay bounded without ID reuse" {
+    const allocator = std.testing.allocator;
+    var sends = DevelopmentPeerStreamSendSet.init(allocator, 2);
+    defer sends.deinit();
+    const first: net.IpAddress = .{ .ip4 = .loopback(1001) };
+    const second: net.IpAddress = .{ .ip4 = .loopback(1002) };
+    const third: net.IpAddress = .{ .ip4 = .loopback(1003) };
+
+    try std.testing.expectEqual(
+        @as(u62, 1),
+        try sends.reserve(first, 0, .bidirectional),
+    );
+    try std.testing.expectEqual(
+        @as(u62, 1),
+        try sends.reserve(second, 4, .bidirectional),
+    );
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        sends.reserve(third, 8, .bidirectional),
+    );
+
+    sends.removeMatching(first, 0);
+    try std.testing.expectEqual(@as(usize, 2), sends.cursors.items.len);
+    try std.testing.expectEqual(
+        @as(u62, 5),
+        try sends.reserve(first, 8, .bidirectional),
+    );
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        sends.reserve(third, 12, .bidirectional),
+    );
+}
+
+fn developmentStreamDirection(stream_id: u62) DevelopmentStreamDirection {
+    return if ((stream_id & 0x02) == 0)
+        .bidirectional
+    else
+        .unidirectional;
+}
+
+const DevelopmentStreamPrefix = union(enum) {
+    match: usize,
+    other_session,
+    not_webtransport,
+};
+
+fn developmentStreamPrefix(
+    bytes: []const u8,
+    stream_id: u62,
+    direction: DevelopmentStreamDirection,
+    match: DevelopmentStreamMatch,
+) Error!DevelopmentStreamPrefix {
+    if (direction == .bidirectional) {
+        if (match.ownsLocalBidirectional(stream_id)) {
+            return .{ .match = 0 };
+        }
+        const locally_initiated = switch (match.local_role) {
+            .client => (stream_id & 0x01) == 0,
+            .server => (stream_id & 0x01) == 1,
+        };
+        if (locally_initiated) return .other_session;
+    }
+    const first = quic.varint.decodeSlice(bytes) catch |err| switch (err) {
+        // This classifier is only called after FIN-complete reassembly, so a
+        // truncated varint can never become valid on a later receive.
+        error.BufferTooShort => return error.InvalidStreamType,
+        else => return err,
+    };
+    const expected_type = switch (direction) {
+        .bidirectional => webtransport_bidi_stream_type,
+        .unidirectional => webtransport_uni_stream_type,
+    };
+    if (first.value != expected_type) return .not_webtransport;
+    const session = quic.varint.decodeSlice(bytes[first.len..]) catch |err|
+        switch (err) {
+            error.BufferTooShort => return error.InvalidStreamType,
+            else => return err,
+        };
+    if (session.value != match.session_id) return .other_session;
+    return .{ .match = @as(usize, first.len) + session.len };
+}
+
+fn developmentStreamMayBelongTo(
+    bytes: []const u8,
+    stream_id: u62,
+    match: DevelopmentStreamMatch,
+) bool {
+    const direction = developmentStreamDirection(stream_id);
+    if (direction == .bidirectional and
+        match.ownsLocalBidirectional(stream_id)) return true;
+    const first = quic.varint.decodeSlice(bytes) catch return false;
+    const expected_type = switch (direction) {
+        .bidirectional => webtransport_bidi_stream_type,
+        .unidirectional => webtransport_uni_stream_type,
+    };
+    if (first.value != expected_type) return false;
+    const session = quic.varint.decodeSlice(bytes[first.len..]) catch
+        return false;
+    return session.value == match.session_id;
+}
+
 pub const InformationalResponseHead = http3.InformationalResponseHead;
 pub const InformationalObserver = http3.InformationalObserver;
 
@@ -2758,6 +3410,11 @@ pub const Server = struct {
     /// peer therefore owns an independent HTTP/3 parser/lifecycle namespace;
     /// keying only by stream ID would merge unrelated clients.
     streaming_peers: DevelopmentServerPeerSet,
+    /// Raw extension streams share the request receive loop. Keeping their
+    /// reassembly here prevents WebTransport from becoming a second UDP
+    /// reader and preserves peer identity for identical stream IDs.
+    development_streams: DevelopmentStreamSet,
+    development_stream_sends: DevelopmentPeerStreamSendSet,
     runtime_datagrams: DevelopmentRetainedDatagramQueue,
     /// Monotonic development-runtime mode flag. Both reads and writes are
     /// protected by `peer_state_mutex`; receive ownership alone is not enough
@@ -2786,6 +3443,15 @@ pub const Server = struct {
                 limits.max_stream_buffer,
                 limits.max_concurrent_request_streams,
             ),
+            .development_streams = .init(
+                allocator,
+                limits.max_stream_buffer,
+                limits.max_concurrent_request_streams,
+            ),
+            .development_stream_sends = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
             .runtime_datagrams = .init(
                 allocator,
                 limits.max_queued_runtime_datagrams,
@@ -2796,6 +3462,8 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         self.runtime_datagrams.deinit();
+        self.development_stream_sends.deinit();
+        self.development_streams.deinit();
         self.streaming_peers.deinit();
         self.request_streams.deinit();
         self.quic_server.deinit();
@@ -3278,12 +3946,106 @@ pub const Server = struct {
                 continue;
             }
             if (frame != .stream) continue;
+            const stream_id: u62 = std.math.cast(
+                u62,
+                frame.stream.stream_id,
+            ) orelse return error.UnexpectedStream;
+            if ((stream_id & 0x03) == 0x01 and
+                self.development_stream_sends.sessionId(
+                    datagram.from,
+                    stream_id,
+                ) != null)
+            {
+                // Reverse direction of a server-opened WT bidi stream has no
+                // second association prefix and is known by its send entry.
+                try self.development_streams.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                continue;
+            }
+            if (stream_id % 4 == 0 and
+                self.streaming_peers.containsRequest(
+                    datagram.from,
+                    stream_id,
+                ))
+            {
+                try self.streaming_peers.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                continue;
+            }
+            // Non-request streams belong to extensions. A client-initiated
+            // bidi ID is ambiguous until enough offset-zero bytes identify
+            // either an H3 frame or the modern WT 0x41 association prefix.
+            if (stream_id % 4 != 0) {
+                try self.development_streams.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                continue;
+            }
+            if (self.development_streams.contains(
+                datagram.from,
+                stream_id,
+            )) {
+                try self.development_streams.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                switch (try self.development_streams
+                    .classifyBidirectional(datagram.from, stream_id)) {
+                    .incomplete, .webtransport => continue,
+                    .other => {
+                        var buffered = self.development_streams.takeEntry(
+                            datagram.from,
+                            stream_id,
+                        ).?;
+                        defer buffered.deinit();
+                        // Once classified as HTTP/3, feed every contiguous
+                        // byte range into its ordinary request reassembler.
+                        try self.streaming_peers.insert(
+                            datagram.from,
+                            .{
+                                .stream_id = stream_id,
+                                .offset = buffered.receive.storage_offset,
+                                .data = buffered.receive.buffer.items,
+                                .fin = buffered.receive.final_size != null,
+                            },
+                        );
+                        continue;
+                    },
+                }
+            }
+            if (frame.stream.offset != 0 or frame.stream.data.len == 0) {
+                try self.development_streams.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                continue;
+            }
+            const first = quic.varint.decodeSlice(frame.stream.data) catch |err|
+                switch (err) {
+                    error.BufferTooShort => {
+                        try self.development_streams.insert(
+                            datagram.from,
+                            frame.stream,
+                        );
+                        continue;
+                    },
+                    else => return err,
+                };
+            if (first.value == webtransport_bidi_stream_type) {
+                try self.development_streams.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                continue;
+            }
             if ((try messageStreamDisposition(
                 frame.stream.stream_id,
             )) == .ignore) continue;
-            if (frame.stream.stream_id % 4 != 0) {
-                return error.UnexpectedStream;
-            }
             try self.streaming_peers.insert(
                 datagram.from,
                 frame.stream,
@@ -3293,6 +4055,280 @@ pub const Server = struct {
             &self.runtime_datagrams,
             datagram.*,
         );
+    }
+
+    /// Poll one FIN-complete extension stream for a peer/session without
+    /// reading UDP. The caller supplies locally-opened bidi IDs so reverse
+    /// directions can be recognized without an association prefix.
+    pub fn pollDevelopmentStream(
+        self: *Server,
+        from: net.IpAddress,
+        match: DevelopmentStreamMatch,
+    ) Error!?DevelopmentStream {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        return self.development_streams.takeMatchingComplete(from, match);
+    }
+
+    pub fn closeDevelopmentSession(
+        self: *Server,
+        peer: net.IpAddress,
+        match: DevelopmentStreamMatch,
+    ) void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        self.development_streams.removeMatching(peer, match);
+        self.development_stream_sends.removeMatching(
+            peer,
+            match.session_id,
+        );
+    }
+
+    pub fn developmentStreamDebugCounts(
+        self: *Server,
+        peer: net.IpAddress,
+        session_id: u62,
+    ) DevelopmentStreamDebugCounts {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        var sends: usize = 0;
+        for (self.development_stream_sends.entries.items) |entry| {
+            sends += @intFromBool(entry.to.eql(&peer) and
+                entry.session_id == session_id);
+        }
+        var receives: usize = 0;
+        for (self.development_streams.entries.items) |entry| {
+            if (!entry.from.eql(&peer)) continue;
+            const stream_id: u62 = @intCast(entry.receive.stream_id);
+            receives += @intFromBool(developmentStreamMayBelongTo(
+                entry.receive.available(),
+                stream_id,
+                .{
+                    .session_id = session_id,
+                    .local_role = .server,
+                },
+            ));
+        }
+        return .{ .receives = receives, .sends = sends };
+    }
+
+    /// Atomically allocate the peer-scoped transport ID after the caller has
+    /// preflighted its session registry. Holding one lock across selection and
+    /// commit prevents concurrent CONNECT sessions from claiming the same ID.
+    pub fn reserveDevelopmentStream(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        direction: DevelopmentStreamDirection,
+    ) Error!u62 {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        if (self.streaming_peers.find(to) == null) {
+            return error.UnexpectedStream;
+        }
+        return self.development_stream_sends.reserve(
+            to,
+            session_id,
+            direction,
+        );
+    }
+
+    pub fn sendDevelopmentStream(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        var send_entry = self.development_stream_sends.findEntry(
+            to,
+            stream_id,
+        );
+        var opened_reverse = false;
+        if (send_entry == null and (stream_id & 0x03) == 0) {
+            // Reverse direction of a client-created bidirectional WT stream.
+            try self.development_stream_sends.open(
+                to,
+                session_id,
+                stream_id,
+            );
+            send_entry = self.development_stream_sends.findEntry(to, stream_id);
+            opened_reverse = true;
+        }
+        if (self.development_stream_sends.sessionId(to, stream_id) !=
+            session_id) return error.UnexpectedStream;
+        const entry = send_entry orelse return error.UnexpectedStream;
+        if (entry.unusable) return error.ConnectionUnusable;
+        const state = &entry.send;
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_server.endpoint.allocator);
+        state.appendFrames(
+            &frames,
+            self.quic_server.endpoint.allocator,
+            data,
+            self.limits.max_stream_frame_data,
+            fin,
+        ) catch |err| {
+            if (opened_reverse) {
+                self.development_stream_sends.removeLast(to, stream_id);
+            }
+            return err;
+        };
+        for (frames.items) |frame| {
+            self.quic_server.endpoint.sendFrames(to, &.{frame}) catch |err| {
+                entry.unusable = true;
+                return err;
+            };
+        }
+    }
+
+    pub fn sendDevelopmentStreamParts(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        payload: []const u8,
+        fin: bool,
+        send_attempted: *bool,
+    ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        const entry = self.development_stream_sends.findEntry(
+            to,
+            stream_id,
+        ) orelse return error.UnexpectedStream;
+        if (entry.unusable) return error.ConnectionUnusable;
+        const state = &entry.send;
+        if (self.development_stream_sends.sessionId(to, stream_id) !=
+            session_id) return error.UnexpectedStream;
+        const previous = state.*;
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_server.endpoint.allocator);
+        errdefer {
+            if (!send_attempted.*) state.* = previous;
+        }
+        try state.appendFrames(
+            &frames,
+            self.quic_server.endpoint.allocator,
+            prefix,
+            self.limits.max_stream_frame_data,
+            false,
+        );
+        try state.appendFrames(
+            &frames,
+            self.quic_server.endpoint.allocator,
+            payload,
+            self.limits.max_stream_frame_data,
+            fin,
+        );
+        for (frames.items) |frame| {
+            send_attempted.* = true;
+            self.quic_server.endpoint.sendFrames(to, &.{frame}) catch |err| {
+                entry.unusable = true;
+                return err;
+            };
+        }
+    }
+
+    pub fn receiveDevelopmentStream(
+        self: *Server,
+        from: net.IpAddress,
+        match: DevelopmentStreamMatch,
+    ) Error!DevelopmentStream {
+        return self.receiveDevelopmentStreamInternal(from, match, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveDevelopmentStreamWithDeadline(
+        self: *Server,
+        from: net.IpAddress,
+        match: DevelopmentStreamMatch,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!DevelopmentStream {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.receiveDevelopmentStreamInternal(from, match, deadline);
+    }
+
+    pub fn receiveDevelopmentStreamWithTimeout(
+        self: *Server,
+        from: net.IpAddress,
+        match: DevelopmentStreamMatch,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!DevelopmentStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDevelopmentStreamWithDeadline(
+            from,
+            match,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    fn receiveDevelopmentStreamInternal(
+        self: *Server,
+        from: net.IpAddress,
+        match: DevelopmentStreamMatch,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!DevelopmentStream {
+        try self.lockRequestReceive(deadline);
+        defer self.request_receive_mutex.unlock(self.quic_server.endpoint.io);
+        try self.enterStreamingMode();
+        while (true) {
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+            const ready = self.development_streams.takeMatchingComplete(
+                from,
+                match,
+            ) catch |err| {
+                self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+                return err;
+            };
+            if (ready) |stream| {
+                self.peer_state_mutex.unlock(
+                    self.quic_server.endpoint.io,
+                );
+                return stream;
+            }
+            self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+
+            var datagram = if (deadline) |absolute|
+                try self.quic_server.receiveWithDeadline(absolute)
+            else
+                try self.quic_server.receive();
+            defer datagram.deinit(self.quic_server.endpoint.allocator);
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+            defer self.peer_state_mutex.unlock(
+                self.quic_server.endpoint.io,
+            );
+            try self.processDevelopmentRequestDatagram(&datagram);
+        }
     }
 
     pub fn receiveRequestsConcurrent(self: *Server, count: usize) Error!OwnedRequestBatch {
@@ -3677,6 +4713,8 @@ pub const Client = struct {
     response_receive_mutex: std.Io.Mutex = .init,
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
+    development_streams: DevelopmentStreamSet,
+    development_stream_sends: DevelopmentStreamSendSet,
     request_lifecycle: ClientRequestLifecycle,
     qpack_decode: QpackDecodeState,
     qpack_encode: QpackEncodeState,
@@ -3715,6 +4753,15 @@ pub const Client = struct {
                 development_settings,
                 .response,
             ),
+            .development_streams = .init(
+                allocator,
+                limits.max_stream_buffer,
+                limits.max_concurrent_request_streams,
+            ),
+            .development_stream_sends = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
             .request_lifecycle = .init(
                 allocator,
                 limits.max_concurrent_request_streams,
@@ -3734,6 +4781,8 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        self.development_stream_sends.deinit();
+        self.development_streams.deinit();
         self.stream_send_scratch.deinit(self.quic_client.endpoint.allocator);
         self.runtime_datagrams.deinit();
         self.outbound_bodies.deinit();
@@ -4013,6 +5062,267 @@ pub const Client = struct {
             if (send_attempted) self.request_unusable = true;
             return err;
         };
+    }
+
+    /// Reserve a client-initiated raw extension stream while sharing the
+    /// bidirectional ID cursor with ordinary HTTP/3 requests. Unidirectional
+    /// IDs begin after the three conventional HTTP/3 critical streams.
+    pub fn openDevelopmentStream(
+        self: *Client,
+        session_id: u62,
+        direction: DevelopmentStreamDirection,
+    ) Error!u62 {
+        if (self.request_unusable) return error.ConnectionUnusable;
+        const stream_id: u62 = switch (direction) {
+            .bidirectional => self.next_stream_id,
+            .unidirectional => blk: {
+                var next: u62 = 14;
+                for (self.development_stream_sends.entries.items) |entry| {
+                    const id: u62 = @intCast(entry.send.stream_id);
+                    if ((id & 0x03) == 0x02 and id >= next) {
+                        next = std.math.add(u62, id, 4) catch
+                            return error.StreamCreationError;
+                    }
+                }
+                break :blk next;
+            },
+        };
+        try self.development_stream_sends.prepareOpen(stream_id);
+        if (direction == .bidirectional) {
+            const next = std.math.add(u62, stream_id, 4) catch
+                return error.StreamCreationError;
+            self.development_stream_sends.commitPreparedOpen(
+                session_id,
+                stream_id,
+            );
+            self.next_stream_id = next;
+        } else {
+            self.development_stream_sends.commitPreparedOpen(
+                session_id,
+                stream_id,
+            );
+        }
+        return stream_id;
+    }
+
+    /// Atomic counterpart used by protocol adapters after capacity-only
+    /// registry preflight. Client request and extension streams share one bidi
+    /// cursor, so selection and commit remain inside this method.
+    pub fn reserveDevelopmentStream(
+        self: *Client,
+        session_id: u62,
+        direction: DevelopmentStreamDirection,
+    ) Error!u62 {
+        return self.openDevelopmentStream(session_id, direction);
+    }
+
+    /// Send raw stream bytes at the retained offset. Offset/FIN state commits
+    /// before the first UDP send because a socket error cannot prove that an
+    /// earlier fragment was invisible to the peer.
+    pub fn sendDevelopmentStream(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        var send_entry = self.development_stream_sends.findEntry(stream_id);
+        var opened_reverse = false;
+        if (send_entry == null and (stream_id & 0x03) == 0x01) {
+            // Reverse direction of a server-created bidirectional WT stream.
+            try self.development_stream_sends.open(session_id, stream_id);
+            send_entry = self.development_stream_sends.findEntry(stream_id);
+            opened_reverse = true;
+        }
+        if (self.development_stream_sends.sessionId(stream_id) !=
+            session_id) return error.UnexpectedStream;
+        const entry = send_entry orelse return error.UnexpectedStream;
+        if (entry.unusable) return error.ConnectionUnusable;
+        const state = &entry.send;
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_client.endpoint.allocator);
+        state.appendFrames(
+            &frames,
+            self.quic_client.endpoint.allocator,
+            data,
+            self.limits.max_stream_frame_data,
+            fin,
+        ) catch |err| {
+            if (opened_reverse) {
+                self.development_stream_sends.removeLast(stream_id);
+            }
+            return err;
+        };
+        for (frames.items) |frame| {
+            self.quic_client.endpoint.sendFrames(
+                self.quic_client.peer,
+                &.{frame},
+            ) catch |err| {
+                entry.unusable = true;
+                return err;
+            };
+        }
+    }
+
+    pub fn sendDevelopmentStreamParts(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        payload: []const u8,
+        fin: bool,
+        send_attempted: *bool,
+    ) Error!void {
+        const entry = self.development_stream_sends.findEntry(stream_id) orelse
+            return error.UnexpectedStream;
+        if (entry.unusable) return error.ConnectionUnusable;
+        const state = &entry.send;
+        if (self.development_stream_sends.sessionId(stream_id) !=
+            session_id) return error.UnexpectedStream;
+        const previous = state.*;
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_client.endpoint.allocator);
+        errdefer {
+            if (!send_attempted.*) state.* = previous;
+        }
+        try state.appendFrames(
+            &frames,
+            self.quic_client.endpoint.allocator,
+            prefix,
+            self.limits.max_stream_frame_data,
+            false,
+        );
+        try state.appendFrames(
+            &frames,
+            self.quic_client.endpoint.allocator,
+            payload,
+            self.limits.max_stream_frame_data,
+            fin,
+        );
+        for (frames.items) |frame| {
+            send_attempted.* = true;
+            self.quic_client.endpoint.sendFrames(
+                self.quic_client.peer,
+                &.{frame},
+            ) catch |err| {
+                entry.unusable = true;
+                return err;
+            };
+        }
+    }
+
+    pub fn pollDevelopmentStream(
+        self: *Client,
+        match: DevelopmentStreamMatch,
+    ) Error!?DevelopmentStream {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
+        return self.development_streams.takeMatchingComplete(
+            self.quic_client.peer,
+            match,
+        );
+    }
+
+    pub fn receiveDevelopmentStream(
+        self: *Client,
+        match: DevelopmentStreamMatch,
+    ) Error!DevelopmentStream {
+        return self.receiveDevelopmentStreamInternal(match, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn closeDevelopmentSession(
+        self: *Client,
+        match: DevelopmentStreamMatch,
+    ) void {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
+        self.development_streams.removeMatching(
+            self.quic_client.peer,
+            match,
+        );
+        self.development_stream_sends.removeSession(match.session_id);
+    }
+
+    pub fn clearDevelopmentStreams(self: *Client) void {
+        self.response_receive_mutex.lockUncancelable(
+            self.quic_client.endpoint.io,
+        );
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
+        self.development_streams.clear();
+        self.development_stream_sends.clear();
+    }
+
+    pub fn receiveDevelopmentStreamWithDeadline(
+        self: *Client,
+        match: DevelopmentStreamMatch,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!DevelopmentStream {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.receiveDevelopmentStreamInternal(match, deadline);
+    }
+
+    pub fn receiveDevelopmentStreamWithTimeout(
+        self: *Client,
+        match: DevelopmentStreamMatch,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!DevelopmentStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDevelopmentStreamWithDeadline(
+            match,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    fn receiveDevelopmentStreamInternal(
+        self: *Client,
+        match: DevelopmentStreamMatch,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!DevelopmentStream {
+        if (deadline != null) {
+            if (!self.response_receive_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.response_receive_mutex.lockUncancelable(
+                self.quic_client.endpoint.io,
+            );
+        }
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
+        while (true) {
+            if (try self.development_streams.takeMatchingComplete(
+                self.quic_client.peer,
+                match,
+            )) |stream| return stream;
+            var datagram = if (deadline) |absolute|
+                try self.quic_client.receiveWithDeadline(absolute)
+            else
+                try self.quic_client.receive();
+            defer datagram.deinit(self.quic_client.endpoint.allocator);
+            if (!datagram.from.eql(&self.quic_client.peer)) continue;
+            try self.processDevelopmentResponseDatagram(&datagram);
+        }
     }
 
     pub fn receiveResponseEvent(
@@ -4301,10 +5611,52 @@ pub const Client = struct {
                 continue;
             }
             if (frame != .stream) continue;
-            if ((try messageStreamDisposition(
+            const stream_id: u62 = std.math.cast(
+                u62,
                 frame.stream.stream_id,
-            )) == .ignore) continue;
-            const stream_id: u62 = @intCast(frame.stream.stream_id);
+            ) orelse return error.UnexpectedStream;
+            if ((stream_id & 0x03) == 0 and
+                self.development_stream_sends.sessionId(stream_id) != null)
+            {
+                // Reverse direction of a client-opened WT bidi stream has no
+                // second association prefix and is known by its send entry.
+                try self.development_streams.insert(
+                    datagram.from,
+                    frame.stream,
+                );
+                continue;
+            }
+            const disposition = messageStreamDisposition(
+                frame.stream.stream_id,
+            ) catch |err| switch (err) {
+                // Server-initiated bidirectional streams are legal only for
+                // negotiated extensions; retain them for adapter validation.
+                error.StreamCreationError => {
+                    try self.development_streams.insert(
+                        datagram.from,
+                        frame.stream,
+                    );
+                    continue;
+                },
+                else => return err,
+            };
+            if (disposition == .ignore) {
+                // HTTP/3 critical/push streams use fixed IDs below 15. The
+                // cleartext runtime does not otherwise support them, while WT
+                // extension uni streams start after those reserved IDs.
+                if (stream_id >= 15 or
+                    self.development_streams.contains(
+                        datagram.from,
+                        stream_id,
+                    ))
+                {
+                    try self.development_streams.insert(
+                        datagram.from,
+                        frame.stream,
+                    );
+                }
+                continue;
+            }
             if (stream_id % 4 != 0) return error.UnexpectedStream;
             if (!self.request_lifecycle.contains(stream_id)) continue;
             if (try self.streaming_responses.insert(
@@ -5301,6 +6653,17 @@ const DevelopmentServerPeerSet = struct {
             if (peer.address.eql(&address)) return peer;
         }
         return null;
+    }
+
+    fn containsRequest(
+        self: *DevelopmentServerPeerSet,
+        address: net.IpAddress,
+        stream_id: u62,
+    ) bool {
+        const peer = self.find(address) orelse return false;
+        return peer.request_streams.contains(stream_id) or
+            peer.streaming_requests.contains(stream_id) or
+            peer.lifecycle.contains(stream_id);
     }
 
     fn getOrCreate(

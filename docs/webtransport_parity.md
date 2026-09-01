@@ -108,8 +108,8 @@ WebTransport DATAGRAM round trip and transport statistics.
 | --- | --- | --- | --- |
 | CONNECT / SETTINGS | Handshake, protected and dev runtimes; every server exposes a two-phase request object with authority/path/origin/header inspection, custom success headers, and typed 403/404/429 or generic 3xx-5xx rejection. Every client can send validated custom CONNECT headers, retain accepted response metadata, and opt into an attempt API that preserves non-2xx status and headers. Handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session with request inspection and accept/reject methods |
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
-| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop, lifecycle/limits and per-send-stream priority; standalone sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
-| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop, lifecycle/limits and send priority; standalone sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |
+| Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop, lifecycle/limits and per-send-stream priority; the cleartext development runtime also supports both initiators, reverse-direction data, fragmented modern `0x41` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone handshake sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
+| Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop, lifecycle/limits and send priority; the cleartext development runtime supports both initiators, fragmented `0x54` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone handshake sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |
 | Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup; external wtransport consumes netz DRAIN before an exactly validated CLOSE | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN and reports the immediately following CLOSE |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
@@ -121,10 +121,25 @@ and clean FIN; receive operations have relative-timeout and absolute awake-clock
 deadline forms. Partial HTTP/3 frames and partial capsules remain resumable
 after timeout, malformed control capsules cancel the CONNECT stream with
 H3_MESSAGE_ERROR, and server receive routing includes the peer address so two
-development clients may independently use request stream zero. This is a
-deterministic development/test transport only: it provides no QUIC handshake,
-authentication, encryption, congestion recovery, or associated WebTransport
-bidi/uni stream APIs. Production users should use the handshake-backed runtime.
+development clients may independently use request stream zero. Associated
+bidirectional and unidirectional streams now use the same packet pump, modern
+`0x41 + Session ID` / `0x54 + Session ID` prefixes, peer-and-session routing,
+shared HTTP/3 stream-ID cursors, bounded FIN-complete reassembly, and
+`StreamRegistry` local/peer limits. The development surface intentionally
+does not claim the stateful runtime's flow control, recovery, incremental
+reads, RESET_STREAM, or STOP_SENDING guarantees. It remains a deterministic
+development/test transport with no QUIC handshake, authentication, encryption,
+or congestion recovery; production users should use the handshake-backed
+runtime.
+Session teardown releases every fully associated receive stream and local or
+reverse send entry for that CONNECT. A prefix that is still incomplete cannot
+yet be attributed to a session; such hostile/abandoned input remains bounded
+by the connection-scoped HTTP/3 stream count and byte limits until completion
+or endpoint teardown. Server-side peer stream-ID cursors are likewise bounded
+and retained until endpoint teardown; this avoids reusing an ID while another
+same-peer session remains active. After the configured number of distinct peer
+addresses has opened streams, a long-lived development server rejects further
+peer stream creation rather than growing cursor state without bound.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte

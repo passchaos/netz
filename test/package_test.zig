@@ -6165,6 +6165,38 @@ test "public modules are reachable" {
         "connectAttempt",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "openBidirectionalStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "openUnidirectionalStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "receiveStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "openBidirectionalStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "openUnidirectionalStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "sendStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "receiveStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ConnectAttempt,
         "requireAccepted",
     ));

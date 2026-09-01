@@ -11,11 +11,13 @@ const session_control = @import("runtime/session_control.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream_batch.zig");
+const development_stream = @import("runtime/development_stream.zig");
 
 test {
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");
     _ = @import("runtime/development_lifecycle_tests.zig");
+    _ = @import("runtime/development_stream_tests.zig");
 }
 
 pub const Error = webtransport.Error || http3.runtime.Error ||
@@ -46,9 +48,13 @@ pub const max_connection_close_reason: usize = 1024;
 
 pub const Server = struct {
     h3: http3.runtime.Server,
+    max_session_streams: usize,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
-        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3) };
+        return .{
+            .h3 = try .bind(allocator, io, bind_address, limits.http3),
+            .max_session_streams = limits.max_session_streams,
+        };
     }
 
     pub fn deinit(self: *Server) void {
@@ -622,6 +628,16 @@ pub const PendingSession = struct {
         var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
         response_headers[0] = http3.capsule.protocol_header;
         @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
+        // Allocate every fallible per-session resource before the success
+        // response becomes observable. A failure therefore leaves the pending
+        // request rejectable instead of advertising an unusable session.
+        var streams = try initDevelopmentStreamRegistry(
+            self.server.h3.quic_server.endpoint.allocator,
+            self.session_id,
+            .server,
+            self.server.max_session_streams,
+        );
+        errdefer streams.deinit();
         // Extended CONNECT itself becomes the WebTransport control stream, so
         // the successful response must preserve both directions instead of
         // using the aggregate helper that immediately commits a terminal FIN.
@@ -641,6 +657,7 @@ pub const PendingSession = struct {
             .server = server,
             .request = request,
             .session_id = session_id,
+            .streams = streams,
             .control = protected_control.Reader.init(
                 try session_control.Control.init(session_id),
             ),
@@ -2472,6 +2489,7 @@ pub const AcceptedSession = struct {
     server: *Server,
     request: OwnedConnectRequest,
     session_id: webtransport.SessionId,
+    streams: webtransport.StreamRegistry,
     /// Reuses the protected-session adapter because development HTTP/3 now
     /// yields CONNECT DATA as caller-buffer payload chunks rather than raw
     /// detached QUIC bytes. This keeps timeout-resumable Capsule parsing and
@@ -2486,6 +2504,126 @@ pub const AcceptedSession = struct {
         return self.request.from;
     }
 
+    pub fn openBidirectionalStream(self: *AcceptedSession) Error!u62 {
+        return self.openLocalStream(.bidirectional);
+    }
+
+    pub fn openUnidirectionalStream(self: *AcceptedSession) Error!u62 {
+        return self.openLocalStream(.unidirectional);
+    }
+
+    fn openLocalStream(
+        self: *AcceptedSession,
+        direction: webtransport.StreamDirection,
+    ) Error!u62 {
+        try self.control.control.ensureOpen();
+        // Reserve registry allocation first without advancing its cursor. H3
+        // then selects and commits the shared peer ID under one mutex.
+        try development_stream.preflightLocal(
+            &self.streams,
+            .server,
+            direction,
+        );
+        const opened = try self.server.h3.reserveDevelopmentStream(
+            self.request.from,
+            self.session_id.value,
+            developmentDirection(direction),
+        );
+        // External registration preserves the registry's private cursor and
+        // accepts the authoritative ID selected by shared HTTP/3 state.
+        return (try self.streams.registerLocal(opened, direction)).stream_id;
+    }
+
+    pub fn sendStream(
+        self: *AcceptedSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.control.control.ensureOpen();
+        const stream = try developmentWritableStream(&self.streams, stream_id);
+        if (!stream.prefix_sent) {
+            var storage: [16]u8 = undefined;
+            var send_attempted = false;
+            self.server.h3.sendDevelopmentStreamParts(
+                self.request.from,
+                self.session_id.value,
+                stream_id,
+                try development_stream.prefix(
+                    &storage,
+                    stream.direction,
+                    self.session_id,
+                ),
+                payload,
+                fin,
+                &send_attempted,
+            ) catch |err| {
+                // Deterministic construction failures leave both layers
+                // retryable. Once a datagram send begins, suppress the prefix
+                // forever because the peer may already have observed it.
+                if (send_attempted) {
+                    stream.prefix_sent = true;
+                    stream.send_reset = .fromHttp3(
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return err;
+            };
+            stream.prefix_sent = true;
+            try self.streams.recordSent(stream_id, payload.len, fin);
+            return;
+        }
+        try self.server.h3.sendDevelopmentStream(
+            self.request.from,
+            self.session_id.value,
+            stream_id,
+            payload,
+            fin,
+        );
+        try self.streams.recordSent(stream_id, payload.len, fin);
+    }
+
+    pub fn receiveStream(self: *AcceptedSession) Error!OwnedDevelopmentStream {
+        const match = development_stream.match(
+            &self.streams,
+            self.session_id,
+            .server,
+        );
+        const raw = try self.server.h3.receiveDevelopmentStream(
+            self.request.from,
+            match,
+        );
+        return development_stream.take(&self.streams, raw);
+    }
+
+    pub fn receiveStreamWithTimeout(
+        self: *AcceptedSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedDevelopmentStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamWithDeadline(.fromNow(
+            self.server.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveStreamWithDeadline(
+        self: *AcceptedSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDevelopmentStream {
+        const match = development_stream.match(
+            &self.streams,
+            self.session_id,
+            .server,
+        );
+        const raw = try self.server.h3.receiveDevelopmentStreamWithDeadline(
+            self.request.from,
+            match,
+            deadline,
+        );
+        return development_stream.take(&self.streams, raw);
+    }
+
     pub fn deinit(self: *AcceptedSession, allocator: std.mem.Allocator) void {
         // A development session does not own the shared Server, so destruction
         // must explicitly abort its long-lived CONNECT before releasing only
@@ -2496,7 +2634,16 @@ pub const AcceptedSession = struct {
             self.session_id.value,
             webtransport.ApplicationErrorCode.session_gone,
         ) catch {};
+        self.server.h3.closeDevelopmentSession(
+            self.request.from,
+            development_stream.match(
+                &self.streams,
+                self.session_id,
+                .server,
+            ),
+        );
         self.request.deinit(allocator);
+        self.streams.deinit();
         self.* = undefined;
     }
 
@@ -3661,6 +3808,7 @@ pub const ClientSession = struct {
     /// headers. The body remains attached to the same stream for long-lived
     /// WebTransport control capsules after the 2xx head has been consumed.
     response: http3.DecodedResponseHead,
+    streams: webtransport.StreamRegistry,
     control: protected_control.Reader,
 
     pub fn connect(
@@ -3825,6 +3973,7 @@ pub const ClientSession = struct {
             .h3 = h3_client,
             .session_id = .init(session_stream_id),
             .response = response,
+            .max_session_streams = options.limits.max_session_streams,
         };
     }
 
@@ -3836,7 +3985,12 @@ pub const ClientSession = struct {
             self.session_id.value,
             webtransport.ApplicationErrorCode.session_gone,
         ) catch {};
+        // This session owns the complete cleartext H3 client, unlike the
+        // server's peer-shared runtime. Clear even unclassified partial
+        // prefixes before releasing the transport.
+        self.h3.clearDevelopmentStreams();
         self.response.deinit(self.h3.quic_client.endpoint.allocator);
+        self.streams.deinit();
         self.h3.deinit();
         self.* = undefined;
     }
@@ -3855,6 +4009,112 @@ pub const ClientSession = struct {
     /// The request-stream identifier used as the WebTransport Session ID.
     pub fn sessionId(self: ClientSession) webtransport.SessionId {
         return self.session_id;
+    }
+
+    pub fn openBidirectionalStream(self: *ClientSession) Error!u62 {
+        return self.openLocalStream(.bidirectional);
+    }
+
+    pub fn openUnidirectionalStream(self: *ClientSession) Error!u62 {
+        return self.openLocalStream(.unidirectional);
+    }
+
+    fn openLocalStream(
+        self: *ClientSession,
+        direction: webtransport.StreamDirection,
+    ) Error!u62 {
+        try self.control.control.ensureOpen();
+        try development_stream.preflightLocal(
+            &self.streams,
+            .client,
+            direction,
+        );
+        const opened = try self.h3.reserveDevelopmentStream(
+            self.session_id.value,
+            developmentDirection(direction),
+        );
+        return (try self.streams.registerLocal(opened, direction)).stream_id;
+    }
+
+    pub fn sendStream(
+        self: *ClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.control.control.ensureOpen();
+        const stream = try developmentWritableStream(&self.streams, stream_id);
+        if (!stream.prefix_sent) {
+            var storage: [16]u8 = undefined;
+            var send_attempted = false;
+            self.h3.sendDevelopmentStreamParts(
+                self.session_id.value,
+                stream_id,
+                try development_stream.prefix(
+                    &storage,
+                    stream.direction,
+                    self.session_id,
+                ),
+                payload,
+                fin,
+                &send_attempted,
+            ) catch |err| {
+                if (send_attempted) {
+                    stream.prefix_sent = true;
+                    stream.send_reset = .fromHttp3(
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return err;
+            };
+            stream.prefix_sent = true;
+            try self.streams.recordSent(stream_id, payload.len, fin);
+            return;
+        }
+        try self.h3.sendDevelopmentStream(
+            self.session_id.value,
+            stream_id,
+            payload,
+            fin,
+        );
+        try self.streams.recordSent(stream_id, payload.len, fin);
+    }
+
+    pub fn receiveStream(self: *ClientSession) Error!OwnedDevelopmentStream {
+        const match = development_stream.match(
+            &self.streams,
+            self.session_id,
+            .client,
+        );
+        const raw = try self.h3.receiveDevelopmentStream(match);
+        return development_stream.take(&self.streams, raw);
+    }
+
+    pub fn receiveStreamWithTimeout(
+        self: *ClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedDevelopmentStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamWithDeadline(.fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveStreamWithDeadline(
+        self: *ClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedDevelopmentStream {
+        const match = development_stream.match(
+            &self.streams,
+            self.session_id,
+            .client,
+        );
+        const raw = try self.h3.receiveDevelopmentStreamWithDeadline(
+            match,
+            deadline,
+        );
+        return development_stream.take(&self.streams, raw);
     }
 
     pub fn sendDatagram(self: *ClientSession, payload: []const u8) Error!void {
@@ -4046,6 +4306,7 @@ pub const ConnectAttempt = struct {
     h3: ?http3.runtime.Client,
     session_id: webtransport.SessionId,
     response: http3.DecodedResponseHead,
+    max_session_streams: usize,
 
     pub fn accepted(self: ConnectAttempt) bool {
         return self.response.status >= 200 and self.response.status < 300;
@@ -4082,10 +4343,18 @@ pub const ConnectAttempt = struct {
 
     pub fn requireAccepted(self: *ConnectAttempt) Error!ClientSession {
         if (!self.accepted()) return error.SessionRejected;
+        var streams = try initDevelopmentStreamRegistry(
+            self.h3.?.quic_client.endpoint.allocator,
+            self.session_id,
+            .client,
+            self.max_session_streams,
+        );
+        errdefer streams.deinit();
         const session = ClientSession{
             .h3 = self.h3.?,
             .session_id = self.session_id,
             .response = self.response,
+            .streams = streams,
             .control = protected_control.Reader.init(
                 try session_control.Control.init(self.session_id),
             ),
@@ -7578,6 +7847,29 @@ const receiveHandshakeSessionStreamWithDeadline =
 const readHandshakeSessionStream = incremental_stream.read;
 const resetHandshakeSessionStream = incremental_stream.reset;
 const stopHandshakeSessionStream = incremental_stream.stop;
+const initDevelopmentStreamRegistry = development_stream.initRegistry;
+pub const OwnedDevelopmentStream = development_stream.Owned;
+
+fn developmentDirection(
+    direction: webtransport.StreamDirection,
+) http3.runtime.DevelopmentStreamDirection {
+    return switch (direction) {
+        .bidirectional => .bidirectional,
+        .unidirectional => .unidirectional,
+    };
+}
+
+fn developmentWritableStream(
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+) Error!*webtransport.StreamState {
+    const stream = registry.get(stream_id) orelse return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        !stream.locally_initiated) return error.InvalidStreamState;
+    if (stream.send_reset != null or stream.stopped != null or
+        stream.local_fin) return error.InvalidStreamState;
+    return stream;
+}
 
 fn sendDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
