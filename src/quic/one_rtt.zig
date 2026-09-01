@@ -524,13 +524,18 @@ const PeerAddressUpdate = union(enum) {
 };
 
 const DatagramRecvQueue = struct {
-    slots: std.ArrayList(?[]u8) = .empty,
+    const Entry = struct {
+        payload: []u8,
+        packet_number: u64,
+    };
+
+    slots: std.ArrayList(?Entry) = .empty,
     head: usize = 0,
     len: usize = 0,
 
     fn deinit(self: *DatagramRecvQueue, allocator: std.mem.Allocator) void {
-        for (self.slots.items) |maybe_payload| {
-            if (maybe_payload) |payload| allocator.free(payload);
+        for (self.slots.items) |maybe_entry| {
+            if (maybe_entry) |entry| allocator.free(entry.payload);
         }
         self.slots.deinit(allocator);
         self.* = undefined;
@@ -548,6 +553,7 @@ const DatagramRecvQueue = struct {
         self: *DatagramRecvQueue,
         allocator: std.mem.Allocator,
         payload: []u8,
+        packet_number: u64,
         capacity: usize,
     ) std.mem.Allocator.Error!?[]u8 {
         std.debug.assert(capacity > 0);
@@ -557,24 +563,33 @@ const DatagramRecvQueue = struct {
             const tail = if (self.slots.items.len == 0) 0 else (self.head + self.len) % capacity;
             if (tail < self.slots.items.len) {
                 std.debug.assert(self.slots.items[tail] == null);
-                self.slots.items[tail] = payload;
+                self.slots.items[tail] = .{
+                    .payload = payload,
+                    .packet_number = packet_number,
+                };
             } else {
                 std.debug.assert(tail == self.slots.items.len);
-                try self.slots.append(allocator, payload);
+                try self.slots.append(allocator, .{
+                    .payload = payload,
+                    .packet_number = packet_number,
+                });
             }
             self.len += 1;
             return null;
         }
 
-        const dropped = self.slots.items[self.head].?;
-        self.slots.items[self.head] = payload;
+        const dropped = self.slots.items[self.head].?.payload;
+        self.slots.items[self.head] = .{
+            .payload = payload,
+            .packet_number = packet_number,
+        };
         self.head = (self.head + 1) % self.slots.items.len;
         return dropped;
     }
 
     fn pop(self: *DatagramRecvQueue) ?[]u8 {
         if (self.len == 0) return null;
-        const payload = self.slots.items[self.head].?;
+        const payload = self.slots.items[self.head].?.payload;
         self.slots.items[self.head] = null;
         self.len -= 1;
         if (self.len == 0) {
@@ -583,6 +598,36 @@ const DatagramRecvQueue = struct {
             self.head = (self.head + 1) % self.slots.items.len;
         }
         return payload;
+    }
+
+    fn discardPacket(
+        self: *DatagramRecvQueue,
+        allocator: std.mem.Allocator,
+        packet_number: u64,
+    ) usize {
+        const original_len = self.len;
+        var kept: usize = 0;
+        var discarded: usize = 0;
+        for (0..original_len) |logical| {
+            const source = (self.head + logical) % self.slots.items.len;
+            const entry = self.slots.items[source].?;
+            if (entry.packet_number == packet_number) {
+                allocator.free(entry.payload);
+                self.slots.items[source] = null;
+                discarded += 1;
+                continue;
+            }
+            const target = (self.head + kept) % self.slots.items.len;
+            if (target != source) {
+                std.debug.assert(self.slots.items[target] == null);
+                self.slots.items[target] = entry;
+                self.slots.items[source] = null;
+            }
+            kept += 1;
+        }
+        self.len = kept;
+        if (kept == 0) self.head = 0;
+        return discarded;
     }
 };
 
@@ -1753,6 +1798,36 @@ pub const Connection = struct {
 
     pub fn datagramReceiveQueueLen(self: Connection) usize {
         return self.datagram_recv_queue.count();
+    }
+
+    /// Remove queued transport copies belonging to one authenticated packet
+    /// after an application protocol has routed that packet's frame payloads
+    /// directly. Packet identity remains stable across GRO batch visitation.
+    pub fn discardDatagramsForPacket(
+        self: *Connection,
+        packet_number: u64,
+    ) usize {
+        return self.datagram_recv_queue.discardPacket(
+            self.endpoint.allocator,
+            packet_number,
+        );
+    }
+
+    pub fn queuedDatagramsForPacket(
+        self: Connection,
+        packet_number: u64,
+    ) usize {
+        var count: usize = 0;
+        for (0..self.datagram_recv_queue.len) |logical| {
+            const index = (self.datagram_recv_queue.head + logical) %
+                self.datagram_recv_queue.slots.items.len;
+            if (self.datagram_recv_queue.slots.items[index].?.packet_number ==
+                packet_number)
+            {
+                count += 1;
+            }
+        }
+        return count;
     }
 
     pub fn datagramsSent(self: Connection) u64 {
@@ -3071,17 +3146,22 @@ pub const Connection = struct {
         send_close: bool,
     ) Error!void {
         const code = @intFromEnum(quic.TransportErrorCode.aead_limit_reached);
-        if (send_close and self.close_info == null) {
+        if (send_close) {
             // Integrity exhaustion counts failed decryptions and does not
             // consume outgoing confidentiality budget, so RFC 9001 permits a
             // final protected CONNECTION_CLOSE. Socket/allocation failure must
             // not prevent the mandatory local terminal transition.
-            const frames = [_]quic.Frame{.{ .connection_close = .{
+            self.closeLocally(.{
+                .application = false,
                 .error_code = code,
                 .frame_type = 0,
                 .reason_phrase = reason_phrase,
-            } }};
-            self.sendTrackedFrames(&frames) catch {};
+                .now_ms = now_ms,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return,
+            };
+            return;
         }
         // Once outgoing confidentiality keys are exhausted, even a close
         // packet would exceed their AEAD limit. In both cases record terminal
@@ -4361,18 +4441,11 @@ pub const Connection = struct {
         now_ms: ?u64,
         pto_ms: ?u64,
     ) Error!void {
-        const frames = [_]quic.Frame{.{ .connection_close = .{
-            .error_code = error_code,
-            .frame_type = frame_type,
-            .reason_phrase = reason_phrase,
-        } }};
-        try self.sendTrackedFrames(&frames);
-        try self.setCloseInfo(.{
+        try self.closeLocally(.{
             .application = false,
             .error_code = error_code,
             .frame_type = frame_type,
             .reason_phrase = reason_phrase,
-            .state = .closing,
             .now_ms = now_ms,
             .pto_ms = pto_ms,
         });
@@ -4397,16 +4470,10 @@ pub const Connection = struct {
     }
 
     pub fn closeApplicationAt(self: *Connection, error_code: u64, reason_phrase: []const u8, now_ms: ?u64, pto_ms: ?u64) Error!void {
-        const frames = [_]quic.Frame{.{ .application_close = .{
-            .error_code = error_code,
-            .reason_phrase = reason_phrase,
-        } }};
-        try self.sendTrackedFrames(&frames);
-        try self.setCloseInfo(.{
+        try self.closeLocally(.{
             .application = true,
             .error_code = error_code,
             .reason_phrase = reason_phrase,
-            .state = .closing,
             .now_ms = now_ms,
             .pto_ms = pto_ms,
         });
@@ -6589,7 +6656,10 @@ pub const Connection = struct {
                 .stop_sending => |stop| try self.receiveStopSending(stop),
                 .new_token => |new_token| try self.receiveNewToken(new_token),
                 .handshake_done => try self.receiveHandshakeDone(),
-                .datagram => |datagram| try self.receiveDatagramFrame(datagram),
+                .datagram => |datagram| try self.receiveDatagramFrame(
+                    datagram,
+                    packet_number,
+                ),
                 .ack_frequency => |ack_frequency| try self.receiveAckFrequency(ack_frequency),
                 .immediate_ack => self.receiveImmediateAck(),
                 .connection_close => |close| try self.setCloseInfo(.{
@@ -7039,7 +7109,11 @@ pub const Connection = struct {
         }
     }
 
-    fn receiveDatagramFrame(self: *Connection, datagram: quic.DatagramFrame) Error!void {
+    fn receiveDatagramFrame(
+        self: *Connection,
+        datagram: quic.DatagramFrame,
+        packet_number: u64,
+    ) Error!void {
         try self.validateDatagramFrame(datagram);
         if (self.config.max_datagram_queue_items == 0) {
             self.datagrams_dropped_incoming_count +|= 1;
@@ -7051,6 +7125,7 @@ pub const Connection = struct {
         const dropped = try self.datagram_recv_queue.pushDroppingOldest(
             self.endpoint.allocator,
             owned,
+            packet_number,
             self.config.max_datagram_queue_items,
         );
         owns_payload = false;
@@ -7165,6 +7240,76 @@ pub const Connection = struct {
         const packets_u64 = std.math.cast(u64, packets) orelse
             std.math.maxInt(u64);
         self.packets_lost_count +|= packets_u64;
+    }
+
+    fn closeLocally(self: *Connection, close: struct {
+        application: bool,
+        error_code: u64,
+        frame_type: u64 = 0,
+        reason_phrase: []const u8,
+        now_ms: ?u64 = null,
+        pto_ms: ?u64 = null,
+    }) Error!void {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+
+        // Own the diagnostic before attempting irreversible packet emission.
+        // After this succeeds, every send outcome must publish the prepared
+        // closing state so callers cannot continue using a connection whose
+        // peer might already have observed CONNECTION_CLOSE.
+        var owned = CloseInfo{
+            .application = close.application,
+            .error_code = close.error_code,
+            .frame_type = close.frame_type,
+            .reason_phrase = try self.endpoint.allocator.dupe(
+                u8,
+                close.reason_phrase,
+            ),
+            .state = .closing,
+            .started_ms = close.now_ms,
+            .expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms),
+        };
+        var owns_reason = true;
+        errdefer if (owns_reason) owned.deinit(self.endpoint.allocator);
+
+        const frame: quic.Frame = if (owned.application)
+            .{ .application_close = .{
+                .error_code = owned.error_code,
+                .reason_phrase = owned.reason_phrase,
+            } }
+        else
+            .{ .connection_close = .{
+                .error_code = owned.error_code,
+                .frame_type = owned.frame_type,
+                .reason_phrase = owned.reason_phrase,
+            } };
+        const send_error: ?Error = blk: {
+            self.sendTrackedFrames(&.{frame}) catch |err| break :blk err;
+            break :blk null;
+        };
+
+        // Packet preparation can itself discover an exhausted AEAD limit and
+        // install that more fundamental terminal state. Preserve it rather
+        // than overwriting its owned reason phrase or emitting a second qlog
+        // close event; the errdefer above releases this unused local request.
+        if (self.close_info != null) {
+            if (send_error) |err| return err;
+            return error.ConnectionClosed;
+        }
+
+        self.close_info = owned;
+        owns_reason = false;
+        self.peer_close_frame_received = false;
+        const installed = &self.close_info.?;
+        self.observeConnectionClosed(
+            installed.started_ms,
+            installed.application,
+            installed.error_code,
+            installed.reason_phrase,
+            installed.state,
+        );
+        if (send_error) |err| return err;
     }
 
     fn setCloseInfo(self: *Connection, close: struct {
@@ -8373,19 +8518,19 @@ test "QUIC DATAGRAM receive queue drops oldest without shifting" {
     const one = try allocator.dupe(u8, "one");
     var owns_one = true;
     errdefer if (owns_one) allocator.free(one);
-    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, one, 2));
+    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, one, 0, 2));
     owns_one = false;
 
     const two = try allocator.dupe(u8, "two");
     var owns_two = true;
     errdefer if (owns_two) allocator.free(two);
-    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, two, 2));
+    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, two, 1, 2));
     owns_two = false;
 
     const three = try allocator.dupe(u8, "three");
     var owns_three = true;
     errdefer if (owns_three) allocator.free(three);
-    const dropped = (try queue.pushDroppingOldest(allocator, three, 2)).?;
+    const dropped = (try queue.pushDroppingOldest(allocator, three, 2, 2)).?;
     owns_three = false;
     defer allocator.free(dropped);
     try std.testing.expectEqualStrings("one", dropped);
@@ -8398,7 +8543,7 @@ test "QUIC DATAGRAM receive queue drops oldest without shifting" {
     const four = try allocator.dupe(u8, "four");
     var owns_four = true;
     errdefer if (owns_four) allocator.free(four);
-    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, four, 2));
+    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, four, 3, 2));
     owns_four = false;
 
     const second = queue.pop().?;
@@ -8626,6 +8771,27 @@ pub const testing = struct {
         datagram: quic.DatagramFrame,
     ) Error!void {
         return connection.validateDatagramFrame(datagram);
+    }
+
+    pub fn injectReceivedDatagram(
+        connection: *Connection,
+        payload: []const u8,
+    ) Error!void {
+        try connection.receiveDatagramFrame(.{
+            .data = payload,
+            .length_present = true,
+        }, 0);
+    }
+
+    pub fn injectReceivedDatagramForPacket(
+        connection: *Connection,
+        packet_number: u64,
+        payload: []const u8,
+    ) Error!void {
+        try connection.receiveDatagramFrame(.{
+            .data = payload,
+            .length_present = true,
+        }, packet_number);
     }
 
     pub fn recoveryPayloadForPacket(

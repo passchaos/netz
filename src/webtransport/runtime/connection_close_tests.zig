@@ -145,6 +145,7 @@ test "WebTransport peer connection close can be polled after packet dispatch" {
     defer if (h3_owned) h3.deinit();
     h3.control.settings.markSent(settings);
     h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
     var streams = try handshake_stream.initRegistry(
         allocator,
         .init(0),

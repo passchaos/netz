@@ -1766,6 +1766,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.origin_pool.Pool(usize), "releaseKey"));
     try std.testing.expect(@hasDecl(netz.http3.origin_pool.Pool(usize), "hitRate"));
     try std.testing.expect(@hasDecl(netz.http3, "capsule"));
+    try std.testing.expect(@hasDecl(netz.http3, "Datagram"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "OwnedConnectDatagram",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "Iterator"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "writeInto"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "protocolEnabled"));
@@ -1864,6 +1869,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "requestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendConnectDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "pollConnectDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "receiveConnectDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "maxConnectDatagramPayloadSize",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "closeConnectDatagramAssociation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "hasConnectDatagramAssociation",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
@@ -2145,6 +2174,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendMaxPushId"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendConnectDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "pollConnectDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receiveConnectDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "maxConnectDatagramPayloadSize",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "closeConnectDatagramAssociation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "prepareConnectDatagramAssociation",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendPriorityUpdate"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendPushPriorityUpdate"));
@@ -5390,6 +5443,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.PendingHandshakeConnect,
         "pollConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.PendingHandshakeConnect,
+        "pollConnectForDispatcher",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,

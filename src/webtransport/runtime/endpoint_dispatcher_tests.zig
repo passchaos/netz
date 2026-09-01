@@ -202,7 +202,10 @@ test "WebTransport client handshake and CONNECT share one socket owner" {
                 );
                 try pending.processPacket(&routed.packet);
                 try dispatcher.refreshConnectionTimer(1);
-                if (try pending.pollConnect()) |attempt| {
+                if (try pending.pollConnectForDispatcher(
+                    &dispatcher,
+                    1,
+                )) |attempt| {
                     pending_owned = false;
                     completed = attempt;
                 }
@@ -212,9 +215,13 @@ test "WebTransport client handshake and CONNECT share one socket owner" {
         }
     }
     var attempt = completed.?;
-    var session = try attempt.requireAccepted();
+    var session: runtime.HandshakeClientSession = undefined;
+    try attempt.requireAcceptedForDispatcher(
+        &dispatcher,
+        1,
+        &session,
+    );
     defer session.deinit();
-    try dispatcher.replaceConnection(1, &session.h3.established.connection);
     var closed = false;
     while (!closed) {
         var event = try dispatcher.receive(&versions);
@@ -288,8 +295,7 @@ test "WebTransport shared-endpoint client handshake has a total timeout" {
                 .authority = "localhost",
                 .path = "/timeout",
                 .h3 = .{ .handshake = .{
-                    .original_destination_connection_id =
-                        "wt-timeout-origin",
+                    .original_destination_connection_id = "wt-timeout-origin",
                     .local_connection_id = "wt-timeout-client",
                     .handshake_recovery = .{
                         .initial_pto_ms = 1_000,
@@ -315,8 +321,7 @@ test "WebTransport shared-endpoint client handshake has a total timeout" {
                 .authority = "localhost",
                 .path = "/timeout",
                 .h3 = .{ .handshake = .{
-                    .original_destination_connection_id =
-                        "wt-timeout-origin",
+                    .original_destination_connection_id = "wt-timeout-origin",
                     .local_connection_id = "wt-timeout-client",
                 } },
             },
@@ -466,6 +471,8 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
     session_a.h3.control.settings.markReceived(settings);
     session_b.h3.control.settings.markSent(settings);
     session_b.h3.control.settings.markReceived(settings);
+    try session_a.h3.connect_datagrams.register(0);
+    try session_b.h3.connect_datagrams.register(0);
 
     var client_a = try quic.one_rtt.Connection.init(&client_a_endpoint, .{
         .peer = server_endpoint.address(),
@@ -731,7 +738,10 @@ test "WebTransport client polls a dispatcher-injected packet" {
             .packet => |*routed| {
                 try pending.processPacket(&routed.packet);
                 try dispatcher.refreshConnectionTimer(1);
-                if (try pending.pollConnect()) |attempt_value| {
+                if (try pending.pollConnectForDispatcher(
+                    &dispatcher,
+                    1,
+                )) |attempt_value| {
                     pending_owned = false;
                     completed = attempt_value;
                 }
@@ -741,12 +751,13 @@ test "WebTransport client polls a dispatcher-injected packet" {
         }
     }
     var attempt = completed.?;
-    var session = try attempt.requireAccepted();
-    defer session.deinit();
-    try dispatcher.replaceConnection(
+    var session: runtime.HandshakeClientSession = undefined;
+    try attempt.requireAcceptedForDispatcher(
+        &dispatcher,
         1,
-        &session.h3.established.connection,
+        &session,
     );
+    defer session.deinit();
     const session_id = session.session_id.value;
 
     var stream_header: std.ArrayList(u8) = .empty;
@@ -1097,6 +1108,7 @@ test "WebTransport handshake receive helpers honor timeouts" {
     defer if (h3_owned) h3.deinit();
     h3.control.settings.markSent(settings);
     h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
     var streams = try handshake_stream.initRegistry(
         allocator,
         .init(0),

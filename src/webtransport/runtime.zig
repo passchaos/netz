@@ -23,6 +23,7 @@ pub const Error = webtransport.Error || http3.runtime.Error ||
     SessionRejected,
     MissingDatagram,
     InvalidSessionState,
+    InvalidDispatcherState,
 } || protected_control.Error;
 pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
@@ -1241,11 +1242,7 @@ pub const EndpointAcceptedSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        try sendHandshakeDatagramFromConnection(
-            &self.h3.established.connection,
-            self.session_id,
-            payload,
-        );
+        try self.h3.sendConnectDatagram(self.session_id.value, payload);
         try self.refreshTimer();
     }
 
@@ -1291,9 +1288,8 @@ pub const EndpointAcceptedSession = struct {
         self: EndpointAcceptedSession,
     ) ?usize {
         if (!self.datagramsNegotiated()) return null;
-        return webtransport.maxDatagramPayloadSize(
-            self.h3.established.connection.maxDatagramPayloadSize(),
-            self.session_id,
+        return self.h3.maxConnectDatagramPayloadSize(
+            self.session_id.value,
         );
     }
 
@@ -1306,7 +1302,7 @@ pub const EndpointAcceptedSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         ) catch return false;
-        return true;
+        return self.h3.connectDatagramsNegotiated();
     }
 
     pub fn stats(
@@ -1487,6 +1483,12 @@ pub const EndpointAcceptedSession = struct {
             capsule,
             true,
         );
+        self.h3.closeConnectDatagramAssociation(
+            self.session_id.value,
+        ) catch |err| switch (err) {
+            error.UnexpectedStream => {},
+            else => return err,
+        };
         try self.control.recordLocalClose(code);
         try session_control.terminateStreams(
             &self.h3.established.connection,
@@ -1500,6 +1502,9 @@ pub const EndpointAcceptedSession = struct {
     }
 
     fn deinit(self: *EndpointAcceptedSession, allocator: std.mem.Allocator) void {
+        self.h3.closeConnectDatagramAssociation(
+            self.session_id.value,
+        ) catch {};
         self.request.deinit(allocator);
         self.streams.deinit();
         self.* = undefined;
@@ -1705,6 +1710,12 @@ pub const EndpointServer = struct {
         const control = try session_control.Control.init(source.session_id);
         const accepted = try self.allocator.create(EndpointAcceptedSession);
         errdefer self.allocator.destroy(accepted);
+        try source.h3.prepareConnectDatagramAssociation(
+            source.session_id.value,
+        );
+        errdefer source.h3.cancelPreparedConnectDatagramAssociation(
+            source.session_id.value,
+        );
         try source.h3.startResponse(
             source.session_id.value,
             connectResponseWithHeaders(
@@ -2145,10 +2156,13 @@ pub const EndpointServer = struct {
         )) |event| {
             return .{ .stream = event };
         }
-        if (try popHandshakeDatagramFromConnection(
-            &target.h3.established.connection,
+        if (try target.h3.pollConnectDatagram(
+            target.session_id.value,
         )) |datagram| {
-            return .{ .datagram = datagram };
+            return .{ .datagram = ownedHandshakeDatagram(
+                datagram,
+                target.session_id,
+            ) };
         }
         return null;
     }
@@ -2203,6 +2217,12 @@ fn finishEndpointSessionEvent(
     event: SessionEvent,
 ) Error!void {
     if (event == .closed or event == .reset) {
+        target.h3.closeConnectDatagramAssociation(
+            target.session_id.value,
+        ) catch |err| switch (err) {
+            error.UnexpectedStream => {},
+            else => return err,
+        };
         if (event == .closed and !target.control.local_close_sent) {
             try target.h3.sendResponseBodyPaced(
                 target.session_id.value,
@@ -2435,6 +2455,12 @@ pub const PendingHandshakeSession = struct {
         );
         errdefer streams.deinit();
         const control = try session_control.Control.init(self.session_id);
+        try self.h3.prepareConnectDatagramAssociation(
+            self.session_id.value,
+        );
+        errdefer self.h3.cancelPreparedConnectDatagramAssociation(
+            self.session_id.value,
+        );
         try self.h3.startResponse(
             self.session_id.value,
             connectResponseWithHeaders(all_headers),
@@ -2531,6 +2557,9 @@ pub const AcceptedHandshakeSession = struct {
 
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
+        self.h3.closeConnectDatagramAssociation(
+            self.session_id.value,
+        ) catch {};
         self.request.deinit(allocator);
         self.streams.deinit();
         self.h3.deinit();
@@ -2629,7 +2658,10 @@ pub const AcceptedHandshakeSession = struct {
 
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
+        return ownedHandshakeDatagram(
+            try self.h3.receiveConnectDatagram(self.session_id.value),
+            self.session_id,
+        );
     }
 
     pub fn receiveDatagramWithTimeout(
@@ -2641,12 +2673,12 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return receiveHandshakeDatagramFromConnectionUntil(
-            &self.h3.established.connection,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
+        return ownedHandshakeDatagram(
+            try self.h3.receiveConnectDatagramWithTimeout(
+                self.session_id.value,
+                timeout,
+            ),
+            self.session_id,
         );
     }
 
@@ -2658,15 +2690,22 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return receiveHandshakeDatagramFromConnectionUntil(
-            &self.h3.established.connection,
-            deadline,
+        return ownedHandshakeDatagram(
+            try self.h3.receiveConnectDatagramWithDeadline(
+                self.session_id.value,
+                deadline,
+            ),
+            self.session_id,
         );
     }
 
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
+        return receiveManyHandshakeDatagrams(
+            &self.h3,
+            self.session_id,
+            count,
+        );
     }
 
     /// Receive up to `count` DATAGRAMs within one shared timeout budget. If
@@ -2697,7 +2736,8 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.control.settings.peer,
         );
         return receiveManyHandshakeDatagramsUntil(
-            &self.h3.established.connection,
+            &self.h3,
+            self.session_id,
             count,
             deadline,
         );
@@ -2706,15 +2746,12 @@ pub const AcceptedHandshakeSession = struct {
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
         try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
+        try self.h3.sendConnectDatagram(self.session_id.value, payload);
     }
 
     pub fn maxDatagramPayloadSize(self: AcceptedHandshakeSession) ?usize {
         if (!self.datagramsNegotiated()) return null;
-        return webtransport.maxDatagramPayloadSize(
-            self.h3.established.connection.maxDatagramPayloadSize(),
-            self.session_id,
-        );
+        return self.h3.maxConnectDatagramPayloadSize(self.session_id.value);
     }
 
     /// WebTransport API spelling for the maximum application payload accepted
@@ -2725,7 +2762,7 @@ pub const AcceptedHandshakeSession = struct {
 
     pub fn datagramsNegotiated(self: AcceptedHandshakeSession) bool {
         webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
-        return true;
+        return self.h3.connectDatagramsNegotiated();
     }
 
     pub fn stats(self: AcceptedHandshakeSession) quic.one_rtt.ConnectionStats {
@@ -3086,9 +3123,13 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return popHandshakeDatagramFromConnection(
-            &self.h3.established.connection,
+        const datagram = try self.h3.pollConnectDatagram(
+            self.session_id.value,
         );
+        return if (datagram) |owned|
+            ownedHandshakeDatagram(owned, self.session_id)
+        else
+            null;
     }
 
     /// Poll the detached CONNECT stream for DRAIN/CLOSE/reset state.
@@ -3167,6 +3208,12 @@ pub const AcceptedHandshakeSession = struct {
             capsule,
             true,
         );
+        self.h3.closeConnectDatagramAssociation(
+            self.session_id.value,
+        ) catch |err| switch (err) {
+            error.UnexpectedStream => {},
+            else => return err,
+        };
         try self.control.recordLocalClose(code);
         try session_control.terminateStreams(
             &self.h3.established.connection,
@@ -3215,6 +3262,12 @@ pub const AcceptedHandshakeSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
+            self.h3.closeConnectDatagramAssociation(
+                self.session_id.value,
+            ) catch |err| switch (err) {
+                error.UnexpectedStream => {},
+                else => return err,
+            };
             if (event == .closed and !self.control.local_close_sent) {
                 try self.h3.sendResponseBodyPaced(
                     self.session_id.value,
@@ -3967,6 +4020,9 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
+        self.h3.closeConnectDatagramAssociation(
+            self.session_id.value,
+        ) catch {};
         self.response.deinit(self.h3.allocator);
         self.streams.deinit();
         self.h3.deinit();
@@ -4067,12 +4123,15 @@ pub const HandshakeClientSession = struct {
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
         try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
+        try self.h3.sendConnectDatagram(self.session_id.value, payload);
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
+        return ownedHandshakeDatagram(
+            try self.h3.receiveConnectDatagram(self.session_id.value),
+            self.session_id,
+        );
     }
 
     pub fn receiveDatagramWithTimeout(
@@ -4084,12 +4143,12 @@ pub const HandshakeClientSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return receiveHandshakeDatagramFromConnectionUntil(
-            &self.h3.established.connection,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
+        return ownedHandshakeDatagram(
+            try self.h3.receiveConnectDatagramWithTimeout(
+                self.session_id.value,
+                timeout,
+            ),
+            self.session_id,
         );
     }
 
@@ -4101,9 +4160,12 @@ pub const HandshakeClientSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return receiveHandshakeDatagramFromConnectionUntil(
-            &self.h3.established.connection,
-            deadline,
+        return ownedHandshakeDatagram(
+            try self.h3.receiveConnectDatagramWithDeadline(
+                self.session_id.value,
+                deadline,
+            ),
+            self.session_id,
         );
     }
 
@@ -4115,14 +4177,22 @@ pub const HandshakeClientSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        return popHandshakeDatagramFromConnection(
-            &self.h3.established.connection,
+        const datagram = try self.h3.pollConnectDatagram(
+            self.session_id.value,
         );
+        return if (datagram) |owned|
+            ownedHandshakeDatagram(owned, self.session_id)
+        else
+            null;
     }
 
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
+        return receiveManyHandshakeDatagrams(
+            &self.h3,
+            self.session_id,
+            count,
+        );
     }
 
     /// Receive up to `count` DATAGRAMs within one shared timeout budget. If
@@ -4153,7 +4223,8 @@ pub const HandshakeClientSession = struct {
             self.h3.control.settings.peer,
         );
         return receiveManyHandshakeDatagramsUntil(
-            &self.h3.established.connection,
+            &self.h3,
+            self.session_id,
             count,
             deadline,
         );
@@ -4161,10 +4232,7 @@ pub const HandshakeClientSession = struct {
 
     pub fn maxDatagramPayloadSize(self: HandshakeClientSession) ?usize {
         if (!self.datagramsNegotiated()) return null;
-        return webtransport.maxDatagramPayloadSize(
-            self.h3.established.connection.maxDatagramPayloadSize(),
-            self.session_id,
-        );
+        return self.h3.maxConnectDatagramPayloadSize(self.session_id.value);
     }
 
     /// WebTransport API spelling for the negotiated send-payload limit. Zero
@@ -4175,7 +4243,7 @@ pub const HandshakeClientSession = struct {
 
     pub fn datagramsNegotiated(self: HandshakeClientSession) bool {
         webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
-        return true;
+        return self.h3.connectDatagramsNegotiated();
     }
 
     pub fn stats(self: HandshakeClientSession) quic.one_rtt.ConnectionStats {
@@ -4592,6 +4660,12 @@ pub const HandshakeClientSession = struct {
             capsule,
             true,
         );
+        self.h3.closeConnectDatagramAssociation(
+            self.session_id.value,
+        ) catch |err| switch (err) {
+            error.UnexpectedStream => {},
+            else => return err,
+        };
         try self.control.recordLocalClose(code);
         try session_control.terminateStreams(
             &self.h3.established.connection,
@@ -4660,6 +4734,12 @@ pub const HandshakeClientSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
+            self.h3.closeConnectDatagramAssociation(
+                self.session_id.value,
+            ) catch |err| switch (err) {
+                error.UnexpectedStream => {},
+                else => return err,
+            };
             if (event == .closed and !self.control.local_close_sent) {
                 try self.h3.sendRequestBodyPaced(
                     self.session_id.value,
@@ -4695,16 +4775,23 @@ pub const HandshakeClientSession = struct {
 };
 
 /// A dispatcher-driven WebTransport CONNECT whose final response has not yet
-/// arrived. Moving this value changes the address of its QUIC connection; an
-/// endpoint router must unregister it before moving or promoting the value and
-/// then register the resulting session at its new stable address.
+/// arrived. Promotion APIs can update a dispatcher atomically so its route
+/// never points at moved-from QUIC connection storage.
 pub const PendingHandshakeConnect = struct {
     h3: ?http3.runtime.HandshakeClient,
     session_id: webtransport.SessionId,
     limits: Limits,
+    pending_datagram_registered: bool = false,
 
     pub fn deinit(self: *PendingHandshakeConnect) void {
-        if (self.h3) |*h3| h3.deinit();
+        if (self.h3) |*h3| {
+            if (self.pending_datagram_registered) {
+                h3.cancelPendingConnectDatagramAssociation(
+                    self.session_id.value,
+                );
+            }
+            h3.deinit();
+        }
         self.* = undefined;
     }
 
@@ -4722,10 +4809,26 @@ pub const PendingHandshakeConnect = struct {
         self: *PendingHandshakeConnect,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
-        try self.h3.?.processDetachedResponsePacket(
+        var registered_now = false;
+        if (!self.pending_datagram_registered) {
+            try self.h3.?.registerPendingConnectDatagramAssociation(
+                self.session_id.value,
+            );
+            self.pending_datagram_registered = true;
+            registered_now = true;
+        }
+        self.h3.?.processPendingExtendedConnectPacket(
             self.session_id.value,
             packet,
-        );
+        ) catch |err| {
+            if (registered_now) {
+                self.h3.?.cancelPendingConnectDatagramAssociation(
+                    self.session_id.value,
+                );
+                self.pending_datagram_registered = false;
+            }
+            return err;
+        };
     }
 
     /// Poll the already-buffered CONNECT response without reading UDP.
@@ -4744,10 +4847,47 @@ pub const PendingHandshakeConnect = struct {
         errdefer response.deinit(self.h3.?.allocator);
         const h3 = self.h3.?;
         self.h3 = null;
+        // NRVO is not guaranteed for aggregate returns. Register the final
+        // destination in `requireAcceptedForDispatcher`, after this by-value
+        // attempt has reached caller storage.
         return .{
             .h3 = h3,
             .session_id = self.session_id,
             .response = response,
+            .limits = self.limits,
+        };
+    }
+
+    /// Poll a dispatcher-driven CONNECT and unregister its current address
+    /// before moving the connection into a by-value attempt. The caller must
+    /// complete promotion with `requireAcceptedForDispatcher`, which publishes
+    /// the exact caller-selected destination address.
+    pub fn pollConnectForDispatcher(
+        self: *PendingHandshakeConnect,
+        dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) Error!?HandshakeConnectAttempt {
+        if (!self.h3.?.control.settings.received) return null;
+        var ready_response = (try pollHandshakeConnectAttemptResponse(
+            &self.h3.?,
+            self.session_id.value,
+        )) orelse return null;
+        errdefer ready_response.deinit(self.h3.?.allocator);
+        // Moving a by-value attempt would briefly make the route point at a
+        // return-value temporary. Unregister first; the accepted promotion
+        // below registers the connection again at its final stable address.
+        _ = dispatcher.unregisterConnection(handle) catch
+            return error.InvalidDispatcherState;
+        errdefer dispatcher.registerConnection(
+            handle,
+            self.connection(),
+        ) catch {};
+        const h3 = self.h3.?;
+        self.h3 = null;
+        return .{
+            .h3 = h3,
+            .session_id = self.session_id,
+            .response = ready_response,
             .limits = self.limits,
         };
     }
@@ -4786,7 +4926,6 @@ pub const HandshakeConnectAttempt = struct {
     ) Error!HandshakeClientSession {
         if (!self.accepted()) return error.SessionRejected;
         var h3 = &self.h3.?;
-        try h3.detachResponseStream(self.session_id.value);
         try webtransport.ensureDatagramsNegotiated(
             h3.options.local_settings,
             h3.control.settings.peer,
@@ -4803,6 +4942,7 @@ pub const HandshakeConnectAttempt = struct {
         );
         errdefer streams.deinit();
         const control = try session_control.Control.init(self.session_id);
+        try h3.detachResponseStream(self.session_id.value);
         const session = HandshakeClientSession{
             .h3 = h3.*,
             .session_id = self.session_id,
@@ -4812,6 +4952,24 @@ pub const HandshakeConnectAttempt = struct {
         };
         self.* = undefined;
         return session;
+    }
+
+    /// Complete promotion directly into caller-selected stable storage, then
+    /// publish that exact connection address to the dispatcher.
+    pub fn requireAcceptedForDispatcher(
+        self: *HandshakeConnectAttempt,
+        dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        out: *HandshakeClientSession,
+    ) Error!void {
+        out.* = try self.requireAccepted();
+        var out_owned = true;
+        errdefer if (out_owned) out.deinit();
+        dispatcher.registerConnection(
+            handle,
+            &out.h3.established.connection,
+        ) catch return error.InvalidDispatcherState;
+        out_owned = false;
     }
 };
 
@@ -6563,6 +6721,9 @@ pub const OwnedProtectedDatagram = struct {
 };
 
 pub const OwnedHandshakeDatagram = struct {
+    /// Owned application payload. The RFC 9297 Quarter Stream ID prefix is
+    /// removed by HTTP/3's association demultiplexer before this value is made
+    /// visible to WebTransport.
     bytes: []u8,
     datagram: webtransport.Datagram,
 
@@ -6676,46 +6837,6 @@ fn receiveDatagramFromEndpointUntil(
             }
         }
         datagram.deinit(endpoint.allocator);
-    }
-}
-
-fn sendHandshakeDatagramFromConnection(
-    connection: *quic.one_rtt.Connection,
-    session_id: webtransport.SessionId,
-    payload: []const u8,
-) Error!void {
-    const max_payload = webtransport.maxDatagramPayloadSize(
-        connection.maxDatagramPayloadSize(),
-        session_id,
-    ) orelse return error.DatagramsNotNegotiated;
-    if (payload.len > max_payload) return error.DatagramTooLarge;
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(connection.endpoint.allocator);
-    try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, connection.endpoint.allocator);
-    try connection.sendDatagram(encoded.items);
-}
-
-fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) Error!OwnedHandshakeDatagram {
-    while (true) {
-        if (try popHandshakeDatagramFromConnection(connection)) |datagram| return datagram;
-        // DATAGRAM waiters also own the transport progress loop. In
-        // particular, a previously sent RESET_STREAM or STOP_SENDING may need
-        // PTO retransmission before the peer can emit the DATAGRAM that this
-        // call is awaiting. A plain blocking receive would sleep past that
-        // recovery deadline and deadlock both endpoints.
-        try connection.servicePacketServicingTimers();
-    }
-}
-
-fn receiveHandshakeDatagramFromConnectionUntil(
-    connection: *quic.one_rtt.Connection,
-    deadline: std.Io.Clock.Timestamp,
-) ReceiveTimeoutError!OwnedHandshakeDatagram {
-    while (true) {
-        if (try popHandshakeDatagramFromConnection(connection)) |datagram| {
-            return datagram;
-        }
-        try connection.servicePacketServicingTimersDeadline(deadline);
     }
 }
 
@@ -6879,35 +7000,65 @@ fn receiveHandshakePeerConnectionCloseUntil(
     }
 }
 
-fn popHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) Error!?OwnedHandshakeDatagram {
-    const allocator = connection.endpoint.allocator;
-    const capacity = connection.config.local_max_datagram_frame_size orelse connection.config.max_datagram_size;
-    if (capacity == 0) return null;
-
-    var buffer = try allocator.alloc(u8, capacity);
-    errdefer allocator.free(buffer);
-    const payload = (try connection.popDatagram(buffer)) orelse {
-        allocator.free(buffer);
-        return null;
+/// Transfer an HTTP/3 association payload into the established WebTransport
+/// owning shape. The registry has already stripped and validated the Quarter
+/// Stream ID, so the same allocation can be retained without re-encoding or
+/// copying it merely to reconstruct the WebTransport view.
+fn ownedHandshakeDatagram(
+    owned: http3.runtime.OwnedConnectDatagram,
+    session_id: webtransport.SessionId,
+) OwnedHandshakeDatagram {
+    std.debug.assert(owned.stream_id == session_id.value);
+    return .{
+        .bytes = owned.payload,
+        .datagram = .{
+            .session_id = session_id,
+            .payload = owned.payload,
+        },
     };
-    if (payload.len != buffer.len) buffer = try allocator.realloc(buffer, payload.len);
-    const wt = try webtransport.Datagram.parse(buffer);
-    return .{ .bytes = buffer, .datagram = wt };
 }
 
-fn drainQueuedHandshakeDatagrams(connection: *quic.one_rtt.Connection, datagrams: []?OwnedHandshakeDatagram) Error!usize {
+/// Wire-only test peer helper. Stateful WebTransport APIs must send through
+/// HTTP/3's association registry; this deliberately unregistered connection
+/// exists only to generate peer traffic for the bounded-batch regression.
+fn sendHandshakeDatagramForTest(
+    connection: *quic.one_rtt.Connection,
+    session_id: webtransport.SessionId,
+    payload: []const u8,
+) Error!void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(connection.endpoint.allocator);
+    try (webtransport.Datagram{
+        .session_id = session_id,
+        .payload = payload,
+    }).write(&encoded, connection.endpoint.allocator);
+    try connection.sendDatagram(encoded.items);
+}
+
+fn drainQueuedHandshakeDatagrams(
+    h3: anytype,
+    session_id: webtransport.SessionId,
+    datagrams: []?OwnedHandshakeDatagram,
+) Error!usize {
     var count: usize = 0;
     while (count < datagrams.len) {
-        const datagram = (try popHandshakeDatagramFromConnection(connection)) orelse break;
-        datagrams[count] = datagram;
+        const datagram = (try h3.pollConnectDatagram(
+            session_id.value,
+        )) orelse break;
+        datagrams[count] = ownedHandshakeDatagram(datagram, session_id);
         count += 1;
     }
     return count;
 }
 
-fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: usize) Error!OwnedHandshakeDatagramBatch {
+fn receiveManyHandshakeDatagrams(
+    h3: anytype,
+    session_id: webtransport.SessionId,
+    count: usize,
+) Error!OwnedHandshakeDatagramBatch {
     return receiveManyHandshakeDatagramsUntil(
-        connection,
+        h3,
+        session_id,
         count,
         null,
     ) catch |err| switch (err) {
@@ -6917,26 +7068,36 @@ fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: us
 }
 
 fn receiveManyHandshakeDatagramsUntil(
-    connection: *quic.one_rtt.Connection,
+    h3: anytype,
+    session_id: webtransport.SessionId,
     count: usize,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
-    const datagrams = try connection.endpoint.allocator.alloc(?OwnedHandshakeDatagram, count);
+    const allocator = h3.established.connection.endpoint.allocator;
+    const datagrams = try allocator.alloc(?OwnedHandshakeDatagram, count);
     errdefer {
         for (datagrams) |*datagram| {
             if (datagram.*) |*owned| {
-                owned.deinit(connection.endpoint.allocator);
+                owned.deinit(allocator);
             }
         }
-        connection.endpoint.allocator.free(datagrams);
+        allocator.free(datagrams);
     }
     @memset(datagrams, null);
-    const errors = try connection.endpoint.allocator.alloc(?anyerror, count);
-    errdefer connection.endpoint.allocator.free(errors);
+    const errors = try allocator.alloc(?anyerror, count);
+    errdefer allocator.free(errors);
     @memset(errors, null);
 
-    const filled = try drainQueuedHandshakeDatagrams(connection, datagrams);
-    if (filled == count) return .{ .allocator = connection.endpoint.allocator, .datagrams = datagrams, .errors = errors };
+    const filled = try drainQueuedHandshakeDatagrams(
+        h3,
+        session_id,
+        datagrams,
+    );
+    if (filled == count) return .{
+        .allocator = allocator,
+        .datagrams = datagrams,
+        .errors = errors,
+    };
 
     // A QUIC connection owns packet-number, ACK, flow-control, and DATAGRAM
     // queue state.  Unlike independent endpoint receives, multiple concurrent
@@ -6947,16 +7108,24 @@ fn receiveManyHandshakeDatagramsUntil(
     // for every slot so unrelated packets and earlier DATAGRAMs cannot renew
     // the caller's budget. Partial results remain owned by the returned batch.
     for (datagrams[filled..], errors[filled..]) |*datagram, *err_slot| {
-        datagram.* = (if (deadline) |absolute|
-            receiveHandshakeDatagramFromConnectionUntil(connection, absolute)
+        const owned = (if (deadline) |absolute|
+            h3.receiveConnectDatagramWithDeadline(
+                session_id.value,
+                absolute,
+            )
         else
-            receiveHandshakeDatagramFromConnection(connection)) catch |err| {
+            h3.receiveConnectDatagram(session_id.value)) catch |err| {
             err_slot.* = err;
             break;
         };
+        datagram.* = ownedHandshakeDatagram(owned, session_id);
         err_slot.* = null;
     }
-    return .{ .allocator = connection.endpoint.allocator, .datagrams = datagrams, .errors = errors };
+    return .{
+        .allocator = allocator,
+        .datagrams = datagrams,
+        .errors = errors,
+    };
 }
 
 fn sendProtectedDatagramFromEndpoint(
@@ -8400,6 +8569,7 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
     defer if (h3_owned) h3.deinit();
     h3.control.settings.markSent(settings);
     h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
     var streams = try handshake_stream.initRegistry(
         allocator,
         .init(0),
@@ -8437,7 +8607,7 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
     });
     defer peer.deinit();
 
-    try sendHandshakeDatagramFromConnection(&peer, .init(0), "first");
+    try sendHandshakeDatagramForTest(&peer, .init(0), "first");
     var batch = try session.receiveManyDatagramsWithTimeout(
         2,
         .fromMilliseconds(20),
@@ -8451,7 +8621,7 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
     );
     try std.testing.expect(batch.datagrams[1] == null);
 
-    try sendHandshakeDatagramFromConnection(&peer, .init(0), "second");
+    try sendHandshakeDatagramForTest(&peer, .init(0), "second");
     var resumed = try session.receiveManyDatagramsWithDeadline(
         1,
         .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),

@@ -4,6 +4,7 @@ const deadline_policy = @import("../internal/deadline.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
+const connect_datagram = @import("runtime/datagram.zig");
 const handshake_client_pool = @import("runtime/handshake_client_pool.zig");
 const response_scheduler = @import("runtime/response_scheduler.zig");
 
@@ -56,13 +57,16 @@ const MultiplexedInformationalContext = struct {
 
 pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || net.HostName.ValidateError || net.HostName.LookupError || error{
     MissingStreamFrame,
+    MissingDatagram,
     UnexpectedStream,
     GoAwayReceived,
     RequestRejected,
     ConnectionUnusable,
     ClosedCriticalStream,
+    ConnectDatagramAssociationClosed,
     InvalidUri,
     InvalidAlpn,
+    DatagramsNotNegotiated,
 };
 /// Failures produced by a handshake worker after admission has transferred
 /// Initial ownership. Keep this narrower than `HandshakeAdmissionError`: an
@@ -72,6 +76,241 @@ pub const HandshakeWorkerError = Error || std.Io.Timeout.Error;
 pub const HandshakeAdmissionError = HandshakeWorkerError ||
     quic.endpoint_dispatcher.Error || std.Io.ConcurrentError;
 pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
+pub const OwnedConnectDatagram = connect_datagram.Owned;
+
+const ConnectDatagramDirection = enum { send, receive };
+
+fn ensureConnectDatagramsNegotiated(
+    settings: http3.SettingsState,
+    connection: quic.one_rtt.Connection,
+    direction: ConnectDatagramDirection,
+) error{DatagramsNotNegotiated}!void {
+    if (!settings.sent or !settings.received or
+        !settings.local.h3_datagram or !settings.peer.h3_datagram)
+    {
+        return error.DatagramsNotNegotiated;
+    }
+    const transport_enabled = switch (direction) {
+        .send => connection.datagramSendEnabled(),
+        .receive => connection.datagramReceiveEnabled(),
+    };
+    if (!transport_enabled) return error.DatagramsNotNegotiated;
+}
+
+fn receiveConnectDatagramFromSession(
+    session: anytype,
+    stream_id: u62,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!OwnedConnectDatagram {
+    while (true) {
+        if (try session.pollConnectDatagram(stream_id)) |datagram| {
+            return datagram;
+        }
+        if (deadline) |absolute| {
+            if (@TypeOf(session) == *HandshakeServerSession) {
+                try session.receiveDetachedRequestProgressWithDeadline(
+                    stream_id,
+                    absolute,
+                );
+            } else {
+                try session.receiveDetachedResponseProgressWithDeadline(
+                    stream_id,
+                    absolute,
+                );
+            }
+        } else {
+            if (@TypeOf(session) == *HandshakeServerSession) {
+                try session.receiveDetachedRequestProgress(stream_id);
+            } else {
+                try session.receiveDetachedResponseProgress(stream_id);
+            }
+        }
+    }
+}
+
+fn observeConnectDatagramTerminal(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+    stream_id: u62,
+) void {
+    if (!registry.contains(stream_id)) return;
+    if (connection.streamResetReceived(stream_id)) |reset| {
+        registry.markTerminal(stream_id, .{
+            .peer_reset = reset.application_error_code,
+        });
+    } else if (connection.recvStreamStats(stream_id)) |stats| {
+        // FIN closes the receive direction once the entire final extent has
+        // arrived, independently of whether the tunnel protocol has consumed
+        // those bytes yet. This matches RFC 9297's late-datagram drop rule
+        // without stealing the stream bytes from WebTransport/Capsule readers.
+        if (stats.final_size != null and
+            stats.bytes_received == stats.final_size.?)
+        {
+            registry.markTerminal(stream_id, .peer_fin);
+        }
+    }
+    if (connection.closing() or connection.draining() or connection.closed()) {
+        registry.markTerminal(stream_id, .connection_closed);
+    }
+}
+
+fn ensureConnectDatagramSendSideOpen(
+    connection: quic.one_rtt.Connection,
+    stream_id: u62,
+) Error!void {
+    if (connection.closing() or connection.draining() or connection.closed()) {
+        return error.ConnectionClosed;
+    }
+    if (connection.streamStopped(stream_id) != null) return error.StreamStopped;
+    const stats = connection.sendStreamStats(stream_id) orelse
+        return error.UnexpectedStream;
+    if (stats.reset != null) return error.RequestCancelled;
+    if (stats.final_size != null) return error.ConnectDatagramAssociationClosed;
+}
+
+fn observeAllConnectDatagramTerminals(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+) void {
+    for (registry.associations.items) |association| {
+        observeConnectDatagramTerminal(
+            registry,
+            connection,
+            association.stream_id,
+        );
+    }
+}
+
+fn connectDatagramTerminalError(terminal: connect_datagram.Terminal) Error {
+    return switch (terminal) {
+        .peer_fin => error.ConnectDatagramAssociationClosed,
+        .peer_reset => error.RequestCancelled,
+        .connection_closed => error.ConnectionClosed,
+    };
+}
+
+fn pollConnectDatagramRegistry(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+    stream_id: u62,
+) Error!?OwnedConnectDatagram {
+    // Packet visitors route DATAGRAMs in frame order. Do not drain the raw
+    // transport FIFO here: with GRO it can already contain tagged copies for
+    // later packets whose FIN/RESET/CLOSE frames have not been visited yet.
+    observeConnectDatagramTerminal(registry, connection, stream_id);
+    if (try registry.poll(stream_id)) |datagram| return datagram;
+    if (try registry.drainedTerminal(stream_id)) |terminal| {
+        return connectDatagramTerminalError(terminal);
+    }
+    return null;
+}
+
+fn drainConnectDatagrams(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+) Error!void {
+    registry.drain(connection) catch |err| switch (err) {
+        error.BufferTooShort,
+        error.MalformedVarInt,
+        error.VarIntTooLarge,
+        error.InvalidFrame,
+        => {
+            // Entering the HTTP/3 connection error is more important than
+            // preserving the parser's diagnostic: if the close itself cannot
+            // be installed, expose that failure instead of pretending the
+            // mandatory H3_DATAGRAM_ERROR transition succeeded.
+            try connection.closeApplication(
+                http3.ApplicationErrorCode.datagram_error,
+                "invalid-http-datagram",
+            );
+            observeAllConnectDatagramTerminals(registry, connection);
+            registry.clear();
+            return err;
+        },
+        else => return err,
+    };
+    observeAllConnectDatagramTerminals(registry, connection);
+}
+
+/// Replay HTTP DATAGRAM frames in their authenticated QUIC packet order. The
+/// transport queue itself is intentionally connection-wide and does not retain
+/// ordering metadata relative to RESET_STREAM/FIN, so adapters must mark the
+/// affected association as soon as a terminal stream frame is crossed. A later
+/// DATAGRAM in that same packet is then dropped by `Registry.route`, while a
+/// preceding one remains queued for delivery.
+fn routeConnectDatagramsFromPacket(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+    frames: []const quic.Frame,
+    packet_number: u64,
+) Error!void {
+    const frame_datagrams = countPacketDatagrams(frames);
+    const retained_datagrams = connection.queuedDatagramsForPacket(
+        packet_number,
+    );
+    const dropped_datagrams = frame_datagrams -| retained_datagrams;
+    defer _ = connection.discardDatagramsForPacket(packet_number);
+    var datagram_index: usize = 0;
+    for (frames) |frame| switch (frame) {
+        .datagram => |datagram| {
+            defer datagram_index += 1;
+            const retained = datagram_index >= dropped_datagrams;
+            const route_result = if (retained)
+                registry.route(datagram.data)
+            else
+                connect_datagram.Registry.validate(datagram.data);
+            route_result catch |err| switch (err) {
+                error.BufferTooShort,
+                error.MalformedVarInt,
+                error.VarIntTooLarge,
+                error.InvalidFrame,
+                => {
+                    try connection.closeApplication(
+                        http3.ApplicationErrorCode.datagram_error,
+                        "invalid-http-datagram",
+                    );
+                    registry.clear();
+                    return err;
+                },
+                else => return err,
+            };
+        },
+        .reset_stream => |reset| {
+            const stream_id = std.math.cast(u62, reset.stream_id) orelse
+                continue;
+            registry.markTerminal(stream_id, .{
+                .peer_reset = reset.application_error_code,
+            });
+        },
+        .stream => |stream| {
+            if (!stream.fin) continue;
+            const stream_id = std.math.cast(u62, stream.stream_id) orelse
+                continue;
+            registry.markTerminal(stream_id, .peer_fin);
+        },
+        .connection_close, .application_close => {
+            for (registry.associations.items) |association| {
+                registry.markTerminal(
+                    association.stream_id,
+                    .connection_closed,
+                );
+            }
+        },
+        else => {},
+    };
+    observeAllConnectDatagramTerminals(registry, connection);
+}
+
+fn packetHasDatagram(frames: []const quic.Frame) bool {
+    for (frames) |frame| if (frame == .datagram) return true;
+    return false;
+}
+
+fn countPacketDatagrams(frames: []const quic.Frame) usize {
+    var count: usize = 0;
+    for (frames) |frame| count += @intFromBool(frame == .datagram);
+    return count;
+}
 
 const client_control_stream_id: u62 = 2;
 const client_qpack_encoder_stream_id: u62 = 6;
@@ -1278,6 +1517,8 @@ pub const StreamingMessageReader = struct {
         http3.default_max_informational_responses,
     response_request_method: ?[]const u8 = null,
     response_extended_connect: bool = false,
+    request_extended_connect: bool = false,
+    response_connect_established: bool = false,
     /// Absolute HTTP/3 stream offset already returned to QUIC flow control.
     credited_offset: usize = 0,
 
@@ -1398,6 +1639,9 @@ pub const StreamingMessageReader = struct {
                                     header.payload_length;
                                 self.content_length = head.content_length;
                                 self.body_allowed = head.body_allowed;
+                                self.request_extended_connect =
+                                    std.mem.eql(u8, head.method, "CONNECT") and
+                                    requestHasProtocol(head.headers);
                                 break :blk StreamingEvent{
                                     .head = .{ .request = head },
                                 };
@@ -1440,6 +1684,9 @@ pub const StreamingMessageReader = struct {
                                     else
                                         null;
                                     self.body_allowed = head.body_allowed;
+                                    self.response_connect_established =
+                                        self.response_extended_connect and
+                                        head.status >= 200 and head.status < 300;
                                 }
                                 break :blk StreamingEvent{
                                     .head = .{ .response = head },
@@ -3387,6 +3634,10 @@ pub const HandshakeSessionOptions = struct {
     max_frames_per_packet: usize = 8,
     max_stream_buffer: usize = 64 * 1024,
     max_concurrent_request_streams: usize = 128,
+    /// Per-CONNECT receive queue bound for unreliable HTTP Datagrams.
+    max_queued_connect_datagrams: usize = 16,
+    /// Per-CONNECT byte bound shared by its queued application payloads.
+    max_queued_connect_datagram_bytes: usize = 64 * 1024,
     max_stream_frame_data: usize = 1200,
     max_informational_responses: usize =
         http3.default_max_informational_responses,
@@ -5002,6 +5253,7 @@ pub const HandshakeServerSession = struct {
     streaming_requests: StreamingRequestSet,
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
+    connect_datagrams: connect_datagram.Registry,
     outbound_bodies: OutboundBodySet,
     stream_send_scratch: StreamMessageSendScratch = .{},
     push_send_scratch: PushSendScratch = .{},
@@ -5045,6 +5297,11 @@ pub const HandshakeServerSession = struct {
                 .request,
             ),
             .request_lifecycle = .init(allocator),
+            .connect_datagrams = .init(allocator, .{
+                .max_associations = options.max_concurrent_request_streams,
+                .max_queued_per_association = options.max_queued_connect_datagrams,
+                .max_queued_bytes_per_association = options.max_queued_connect_datagram_bytes,
+            }),
             .outbound_bodies = .init(
                 allocator,
                 options.max_concurrent_request_streams,
@@ -5180,6 +5437,7 @@ pub const HandshakeServerSession = struct {
             self.established.connection.endpoint.allocator,
         );
         self.receive_packets.deinit();
+        self.connect_datagrams.deinit();
         self.control.deinit(self.established.connection.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.streaming_requests.deinit();
@@ -5282,6 +5540,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encode,
             &self.request_streams,
             self.peer_promised_push_ids.items,
+            &self.connect_datagrams,
             deadline,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
@@ -5524,10 +5783,20 @@ pub const HandshakeServerSession = struct {
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
         if (entry.reader.phase != .body or
-            entry.reader.current_frame != null)
+            entry.reader.current_frame != null or
+            !entry.reader.request_extended_connect or
+            self.outbound_bodies.find(stream_id) == null)
         {
             return error.UnexpectedStream;
         }
+        const already_registered = self.connect_datagrams.contains(stream_id);
+        // WebTransport reserves the association before emitting its successful
+        // response so the post-200 detach transition is allocation-free.
+        // Generic CONNECT callers can still use this one-shot form.
+        if (!already_registered) try self.connect_datagrams.register(stream_id);
+        errdefer if (!already_registered) {
+            self.connect_datagrams.unregister(stream_id);
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             &entry.reader,
@@ -5535,6 +5804,38 @@ pub const HandshakeServerSession = struct {
         var removed = self.streaming_requests.takeEntry(stream_id) orelse
             return error.UnexpectedStream;
         removed.deinit();
+    }
+
+    /// Reserve receive routing for a validated Extended CONNECT request before
+    /// the server commits its successful response. The registration alone does
+    /// not authorize datagram APIs; the stream remains attached until
+    /// `detachRequestStream` completes.
+    pub fn prepareConnectDatagramAssociation(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (entry.reader.phase != .body or
+            entry.reader.current_frame != null or
+            !entry.reader.request_extended_connect or
+            self.outbound_bodies.find(stream_id) != null or
+            self.connect_datagrams.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        try self.connect_datagrams.register(stream_id);
+    }
+
+    pub fn cancelPreparedConnectDatagramAssociation(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) void {
+        if (self.streaming_requests.find(stream_id) != null and
+            self.outbound_bodies.find(stream_id) == null)
+        {
+            self.connect_datagrams.unregister(stream_id);
+        }
     }
 
     /// Pump one packet after an Extended CONNECT stream has been detached.
@@ -5546,6 +5847,9 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         detached_stream_id: u62,
     ) Error!void {
+        if (!self.connect_datagrams.contains(detached_stream_id)) {
+            return error.UnexpectedStream;
+        }
         try self.receive_packets.visit(
             &self.established.connection,
             .{ self, detached_stream_id },
@@ -5577,6 +5881,9 @@ pub const HandshakeServerSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (!self.connect_datagrams.contains(detached_stream_id)) {
+            return error.UnexpectedStream;
+        }
         try self.receive_packets.visitWithDeadline(
             &self.established.connection,
             deadline,
@@ -5595,6 +5902,9 @@ pub const HandshakeServerSession = struct {
         detached_stream_id: u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (!self.connect_datagrams.contains(detached_stream_id)) {
+            return error.UnexpectedStream;
+        }
         if (self.receive_packets.ack_pending) {
             try self.established.connection.sendAck(0);
             self.receive_packets.ack_pending = false;
@@ -5610,6 +5920,151 @@ pub const HandshakeServerSession = struct {
             packetView(packet.*),
         );
         try self.flushRequestPacketFeedback();
+    }
+
+    /// True only after both peers enabled RFC 9297 and QUIC permits DATAGRAM
+    /// frames in both directions. A missing peer SETTINGS frame is therefore
+    /// never mistaken for negotiation.
+    pub fn connectDatagramsNegotiated(self: HandshakeServerSession) bool {
+        return self.control.settings.sent and
+            self.control.settings.received and
+            self.control.settings.local.h3_datagram and
+            self.control.settings.peer.h3_datagram and
+            self.established.connection.datagramsEnabled();
+    }
+
+    pub fn maxConnectDatagramPayloadSize(
+        self: HandshakeServerSession,
+        stream_id: u62,
+    ) ?usize {
+        connect_datagram.validateStreamId(stream_id) catch return null;
+        if (!self.connect_datagrams.contains(stream_id)) return null;
+        ensureConnectDatagramSendSideOpen(
+            self.established.connection,
+            stream_id,
+        ) catch return null;
+        ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .send,
+        ) catch return null;
+        const quic_payload = self.established.connection
+            .maxDatagramPayloadSize() orelse return null;
+        const prefix = quic.varint.length(stream_id / 4) catch return null;
+        if (prefix > quic_payload) return null;
+        return quic_payload - prefix;
+    }
+
+    pub fn sendConnectDatagram(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!void {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        observeConnectDatagramTerminal(
+            &self.connect_datagrams,
+            &self.established.connection,
+            stream_id,
+        );
+        if (try self.connect_datagrams.terminal(stream_id)) |terminal| {
+            if (terminal == .connection_closed) {
+                return error.ConnectionClosed;
+            }
+        }
+        try ensureConnectDatagramSendSideOpen(
+            self.established.connection,
+            stream_id,
+        );
+        try ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .send,
+        );
+        const maximum = self.maxConnectDatagramPayloadSize(stream_id) orelse
+            return error.DatagramTooLarge;
+        if (payload.len > maximum) return error.DatagramTooLarge;
+        const encoded = try self.connect_datagrams.encode(stream_id, payload);
+        try self.established.connection.sendDatagram(encoded);
+    }
+
+    pub fn pollConnectDatagram(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!?OwnedConnectDatagram {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .receive,
+        );
+        if (self.established.connection.closing() or
+            self.established.connection.draining() or
+            self.established.connection.closed())
+        {
+            observeConnectDatagramTerminal(
+                &self.connect_datagrams,
+                &self.established.connection,
+                stream_id,
+            );
+            if (try self.connect_datagrams.poll(stream_id)) |datagram| {
+                return datagram;
+            }
+            if (try self.connect_datagrams.drainedTerminal(stream_id)) |terminal| {
+                return connectDatagramTerminalError(terminal);
+            }
+        }
+        return pollConnectDatagramRegistry(
+            &self.connect_datagrams,
+            &self.established.connection,
+            stream_id,
+        );
+    }
+
+    pub fn receiveConnectDatagram(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!OwnedConnectDatagram {
+        return receiveConnectDatagramFromSession(self, stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveConnectDatagramWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedConnectDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveConnectDatagramFromSession(self, stream_id, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveConnectDatagramWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedConnectDatagram {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return receiveConnectDatagramFromSession(self, stream_id, deadline);
+    }
+
+    pub fn closeConnectDatagramAssociation(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) return error.UnexpectedStream;
+        self.connect_datagrams.unregister(stream_id);
     }
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
@@ -6554,6 +7009,7 @@ pub const HandshakeClient = struct {
     push_aggregate: ClientPushAggregateState = .{},
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
+    connect_datagrams: connect_datagram.Registry,
     outbound_bodies: OutboundBodySet,
     stream_send_scratch: StreamMessageSendScratch = .{},
     critical_stream_send_scratch: CriticalStreamSendScratch = .{},
@@ -6919,6 +7375,11 @@ pub const HandshakeClient = struct {
                 allocator,
                 options.max_concurrent_request_streams,
             ),
+            .connect_datagrams = .init(allocator, .{
+                .max_associations = options.max_concurrent_request_streams,
+                .max_queued_per_association = options.max_queued_connect_datagrams,
+                .max_queued_bytes_per_association = options.max_queued_connect_datagram_bytes,
+            }),
             .outbound_bodies = .init(
                 allocator,
                 options.max_concurrent_request_streams,
@@ -7361,6 +7822,7 @@ pub const HandshakeClient = struct {
         self.stream_send_scratch.deinit(self.allocator);
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
+        self.connect_datagrams.deinit();
         self.push_aggregate.deinit(self.allocator);
         self.push_streams.deinit();
         self.streaming_responses.deinit();
@@ -7941,6 +8403,7 @@ pub const HandshakeClient = struct {
             &self.streaming_responses,
             &self.push_streams,
             &self.request_lifecycle,
+            &self.connect_datagrams,
             deadline,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
@@ -8127,6 +8590,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                &self.connect_datagrams,
                 deadline,
             );
         }
@@ -8142,7 +8606,7 @@ pub const HandshakeClient = struct {
     /// event loops to observe GOAWAY while an accepted response remains
     /// buffered and available to `receiveResponse`.
     pub fn receiveProgress(self: *HandshakeClient) Error!void {
-        try receiveConnectionResponsePacket(
+        receiveConnectionResponsePacketUntil(
             &self.established.connection,
             &self.receive_packets,
             &self.control,
@@ -8153,7 +8617,12 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             null,
-        );
+            &self.connect_datagrams,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
         try self.flushResponsePacketFeedback();
     }
 
@@ -8203,6 +8672,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                &self.connect_datagrams,
                 deadline,
             );
             try self.flushResponsePacketFeedback();
@@ -8272,11 +8742,16 @@ pub const HandshakeClient = struct {
         );
         const event = (try entry.reader.next(self.qpack_decode.table)) orelse
             return null;
-        var owned_event = event;
-        errdefer owned_event.deinit(
-            self.established.connection.endpoint.allocator,
-        );
+        const owned_event = event;
+        var event_owned = true;
+        errdefer if (event_owned) {
+            var dropped = owned_event;
+            dropped.deinit(
+                self.established.connection.endpoint.allocator,
+            );
+        };
         try self.applyStreamingResponseEvent(stream_id, owned_event);
+        event_owned = false;
         return owned_event;
     }
 
@@ -8318,6 +8793,7 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             null,
+            &self.connect_datagrams,
             deadline,
         );
         try self.flushResponsePacketFeedback();
@@ -8378,10 +8854,16 @@ pub const HandshakeClient = struct {
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         if (entry.reader.phase != .body or
-            entry.reader.current_frame != null)
+            entry.reader.current_frame != null or
+            !entry.reader.response_connect_established)
         {
             return error.UnexpectedStream;
         }
+        const already_registered = self.connect_datagrams.contains(stream_id);
+        if (!already_registered) try self.connect_datagrams.register(stream_id);
+        errdefer if (!already_registered) {
+            self.connect_datagrams.unregister(stream_id);
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             &entry.reader,
@@ -8391,27 +8873,30 @@ pub const HandshakeClient = struct {
         removed.deinit();
     }
 
+    /// Whether a pending protocol adapter already reserved this Extended
+    /// CONNECT association before the final response was decoded.
+    pub fn hasConnectDatagramAssociation(
+        self: HandshakeClient,
+        stream_id: u62,
+    ) bool {
+        return self.connect_datagrams.contains(stream_id);
+    }
+
     /// Client counterpart to `receiveDetachedRequestProgress`.
     pub fn receiveDetachedResponseProgress(
         self: *HandshakeClient,
         detached_stream_id: u62,
     ) Error!void {
-        if (self.request_lifecycle.outstanding.items.len == 0) {
+        if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
-        try receiveConnectionResponsePacket(
-            &self.established.connection,
-            &self.receive_packets,
-            &self.control,
-            &self.qpack_decode,
-            &self.qpack_encode,
-            &self.response_streams,
-            &self.streaming_responses,
-            &self.push_streams,
-            &self.request_lifecycle,
+        self.receiveDetachedResponseProgressInternal(
             detached_stream_id,
-        );
-        try self.flushResponsePacketFeedback();
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
     }
 
     pub fn receiveDetachedResponseProgressWithTimeout(
@@ -8435,9 +8920,20 @@ pub const HandshakeClient = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        if (self.request_lifecycle.outstanding.items.len == 0) {
+        if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
+        try self.receiveDetachedResponseProgressInternal(
+            detached_stream_id,
+            deadline,
+        );
+    }
+
+    fn receiveDetachedResponseProgressInternal(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         var context: ConnectionResponseReceiveContext = .{
             .connection = &self.established.connection,
             .control = &self.control,
@@ -8448,14 +8944,177 @@ pub const HandshakeClient = struct {
             .push_streams = &self.push_streams,
             .request_lifecycle = &self.request_lifecycle,
             .detached_stream_id = detached_stream_id,
+            .detached_streams = &self.connect_datagrams,
         };
-        try self.receive_packets.visitWithDeadline(
-            &self.established.connection,
-            deadline,
-            &context,
-            visitConnectionResponsePacket,
-        );
+        if (deadline) |absolute| {
+            try self.receive_packets.visitWithDeadline(
+                &self.established.connection,
+                absolute,
+                &context,
+                visitConnectionResponsePacket,
+            );
+        } else {
+            try self.receive_packets.visit(
+                &self.established.connection,
+                &context,
+                visitConnectionResponsePacket,
+            );
+        }
         try self.flushResponsePacketFeedback();
+    }
+
+    pub fn connectDatagramsNegotiated(self: HandshakeClient) bool {
+        return self.control.settings.sent and
+            self.control.settings.received and
+            self.control.settings.local.h3_datagram and
+            self.control.settings.peer.h3_datagram and
+            self.established.connection.datagramsEnabled();
+    }
+
+    pub fn maxConnectDatagramPayloadSize(
+        self: HandshakeClient,
+        stream_id: u62,
+    ) ?usize {
+        connect_datagram.validateStreamId(stream_id) catch return null;
+        if (!self.connect_datagrams.contains(stream_id)) return null;
+        ensureConnectDatagramSendSideOpen(
+            self.established.connection,
+            stream_id,
+        ) catch return null;
+        ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .send,
+        ) catch return null;
+        const quic_payload = self.established.connection
+            .maxDatagramPayloadSize() orelse return null;
+        const prefix = quic.varint.length(stream_id / 4) catch return null;
+        if (prefix > quic_payload) return null;
+        return quic_payload - prefix;
+    }
+
+    pub fn sendConnectDatagram(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!void {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        observeConnectDatagramTerminal(
+            &self.connect_datagrams,
+            &self.established.connection,
+            stream_id,
+        );
+        if (try self.connect_datagrams.terminal(stream_id)) |terminal| {
+            if (terminal == .connection_closed) {
+                return error.ConnectionClosed;
+            }
+        }
+        try ensureConnectDatagramSendSideOpen(
+            self.established.connection,
+            stream_id,
+        );
+        try ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .send,
+        );
+        const maximum = self.maxConnectDatagramPayloadSize(stream_id) orelse
+            return error.DatagramTooLarge;
+        if (payload.len > maximum) return error.DatagramTooLarge;
+        const encoded = try self.connect_datagrams.encode(stream_id, payload);
+        try self.established.connection.sendDatagram(encoded);
+    }
+
+    pub fn pollConnectDatagram(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!?OwnedConnectDatagram {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .receive,
+        );
+        if (self.established.connection.closing() or
+            self.established.connection.draining() or
+            self.established.connection.closed())
+        {
+            observeConnectDatagramTerminal(
+                &self.connect_datagrams,
+                &self.established.connection,
+                stream_id,
+            );
+            if (try self.connect_datagrams.poll(stream_id)) |datagram| {
+                return datagram;
+            }
+            if (try self.connect_datagrams.drainedTerminal(stream_id)) |terminal| {
+                return connectDatagramTerminalError(terminal);
+            }
+        }
+        return pollConnectDatagramRegistry(
+            &self.connect_datagrams,
+            &self.established.connection,
+            stream_id,
+        );
+    }
+
+    pub fn receiveConnectDatagram(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!OwnedConnectDatagram {
+        return receiveConnectDatagramFromSession(self, stream_id, null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn receiveConnectDatagramWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!OwnedConnectDatagram {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveConnectDatagramFromSession(self, stream_id, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveConnectDatagramWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!OwnedConnectDatagram {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return receiveConnectDatagramFromSession(self, stream_id, deadline);
+    }
+
+    pub fn closeConnectDatagramAssociation(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!void {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) return error.UnexpectedStream;
+        self.connect_datagrams.unregister(stream_id);
+    }
+
+    /// Undo only the provisional registration installed before an Extended
+    /// CONNECT response is accepted. Established detached associations must
+    /// use `closeConnectDatagramAssociation` instead.
+    pub fn cancelPendingConnectDatagramAssociation(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) void {
+        if (self.request_lifecycle.contains(stream_id)) {
+            self.connect_datagrams.unregister(stream_id);
+        }
     }
 
     /// Decode the final response head already buffered on a detached Extended
@@ -8489,26 +9148,48 @@ pub const HandshakeClient = struct {
             else => return err,
         };
         errdefer head.deinit(self.allocator);
+        // Activate the response reader before consuming the encoded head from
+        // QUIC. This is the only potentially allocating local-state mutation;
+        // failures therefore leave the head bytes available for retry.
+        const entry = try self.streaming_responses.activateResponse(
+            &self.response_streams,
+            detached_stream_id,
+        );
+        try self.qpack_decode.decoder_instructions.ensureUnusedCapacity(
+            self.qpack_decode.allocator,
+            11 *| head.qpack_section_acknowledgments,
+        );
         try self.established.connection.releaseReceivedCapacity(
             detached_stream_id,
             head.consumed,
         );
-        try self.qpack_decode.acknowledgeSections(
-            detached_stream_id,
-            head.qpack_section_acknowledgments,
-        );
-        var entry = try self.streaming_responses.activateResponse(
-            &self.response_streams,
-            detached_stream_id,
-        );
+        // Capacity was reserved before transport consumption. Canonical QPACK
+        // Section Acknowledgments are at most 11 bytes apiece, so these writes
+        // cannot allocate or fail once the request stream ID is known valid.
+        for (0..head.qpack_section_acknowledgments) |_| {
+            http3.Qpack.writeDecoderInstruction(
+                &self.qpack_decode.decoder_instructions,
+                self.qpack_decode.allocator,
+                .{ .section_acknowledgment = detached_stream_id },
+            ) catch unreachable;
+        }
         entry.reader.phase = .body;
         entry.reader.content_length = if (head.body_allowed)
             head.content_length
         else
             null;
         entry.reader.body_allowed = head.body_allowed;
+        entry.reader.response_connect_established =
+            self.request_lifecycle.responseDecodeOptions(
+                detached_stream_id,
+            ).extended_connect and
+            head.status >= 200 and head.status < 300;
         entry.reader.credited_offset = entry.reader.receive.read_offset;
-        try self.flushResponsePacketFeedback();
+        // The head is committed now. Feedback remains queued if its socket send
+        // cannot make progress; later packet/control operations retry it. A
+        // transient feedback failure must not turn a successfully consumed
+        // final response into an unreturnable error.
+        self.flushResponsePacketFeedback() catch {};
         return head;
     }
 
@@ -8520,13 +9201,49 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
-        if (!self.request_lifecycle.contains(detached_stream_id)) {
+        if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
         try self.processResponsePacketPreserving(
             detached_stream_id,
             packet,
         );
+    }
+
+    /// Apply a routed packet while an Extended CONNECT response head is still
+    /// pending. This narrow pre-detach entry point preserves only the selected
+    /// request stream and the WebTransport extension streams needed by its
+    /// handshake; established generic CONNECT users must call the validated
+    /// `processDetachedResponsePacket` API instead.
+    pub fn processPendingExtendedConnectPacket(
+        self: *HandshakeClient,
+        stream_id: u62,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id) or
+            !self.request_lifecycle.responseDecodeOptions(stream_id)
+                .extended_connect)
+        {
+            return error.UnexpectedStream;
+        }
+        try self.processResponsePacketPreserving(stream_id, packet);
+    }
+
+    /// Temporary compatibility hook for protocol adapters that detach only
+    /// after constructing their higher-level session object. The stream must
+    /// already be a locally opened Extended CONNECT request.
+    pub fn registerPendingConnectDatagramAssociation(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id) or
+            !self.request_lifecycle.responseDecodeOptions(stream_id)
+                .extended_connect)
+        {
+            return error.UnexpectedStream;
+        }
+        if (self.connect_datagrams.contains(stream_id)) return;
+        try self.connect_datagrams.register(stream_id);
     }
 
     fn processResponsePacketPreserving(
@@ -8554,6 +9271,7 @@ pub const HandshakeClient = struct {
             .push_streams = &self.push_streams,
             .request_lifecycle = &self.request_lifecycle,
             .detached_stream_id = detached_stream_id,
+            .detached_streams = &self.connect_datagrams,
         };
         try visitConnectionResponsePacket(&context, packetView(packet.*));
         try self.flushResponsePacketFeedback();
@@ -8636,6 +9354,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                &self.connect_datagrams,
                 deadline,
             );
             try self.flushResponsePacketFeedback();
@@ -8943,6 +9662,10 @@ pub const HandshakeClient = struct {
             self.options.local_settings.qpack_blocked_streams,
         ) orelse return null;
         var ready = ready_value;
+        var event_owned = true;
+        errdefer if (event_owned) ready.event.deinit(
+            self.established.connection.endpoint.allocator,
+        );
         const stream_id: u62 = @intCast(
             ready.entry.reader.receive.stream_id,
         );
@@ -8960,15 +9683,17 @@ pub const HandshakeClient = struct {
             );
             ready.entry.reader.body_allowed =
                 ready.event.head.response.body_allowed;
+            ready.entry.reader.response_connect_established =
+                ready.entry.reader.response_extended_connect and
+                ready.event.head.response.status >= 200 and
+                ready.event.head.response.status < 300;
             if (!ready.entry.reader.body_allowed) {
                 ready.entry.reader.content_length = null;
             }
         }
-        var owned_event = ready.event;
-        errdefer owned_event.deinit(
-            self.established.connection.endpoint.allocator,
-        );
+        const owned_event = ready.event;
         try self.applyStreamingResponseEvent(stream_id, owned_event);
+        event_owned = false;
         return .{ .message = .{
             .stream_id = stream_id,
             .value = owned_event,
@@ -9019,6 +9744,7 @@ pub const HandshakeClient = struct {
                 &self.push_streams,
                 &self.request_lifecycle,
                 null,
+                &self.connect_datagrams,
                 deadline,
             );
             try self.flushResponsePacketFeedback();
@@ -9111,6 +9837,7 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             null,
+            &self.connect_datagrams,
             deadline,
         );
         try self.flushResponsePacketFeedback();
@@ -9350,6 +10077,11 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!void {
+        // Detached CONNECT readers are removed from `streaming_responses` and
+        // retain their association until explicit close or peer FIN/reset.
+        if (self.streaming_responses.find(stream_id) != null) {
+            self.connect_datagrams.unregister(stream_id);
+        }
         _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         self.qpack_encode.abandonStream(stream_id);
@@ -10471,6 +11203,7 @@ pub const ProtectedServer = struct {
                 null,
                 self.peer_promised_push_ids.items,
                 null,
+                null,
             )) |reset| {
                 try self.sendQpackFeedback(reset.from);
                 return requestResetError(reset.application_error_code);
@@ -10509,6 +11242,7 @@ pub const ProtectedServer = struct {
             &self.streaming_requests,
             self.peer_promised_push_ids.items,
             null,
+            null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
@@ -10543,6 +11277,7 @@ pub const ProtectedServer = struct {
             &self.request_streams,
             &self.streaming_requests,
             self.peer_promised_push_ids.items,
+            null,
             null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
@@ -10616,6 +11351,7 @@ pub const ProtectedServer = struct {
             &self.request_streams,
             &self.streaming_requests,
             self.peer_promised_push_ids.items,
+            null,
             null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
@@ -11545,6 +12281,10 @@ pub const ProtectedClient = struct {
             self.config.local_settings.qpack_blocked_streams,
         ) orelse return null;
         var ready = ready_value;
+        var event_owned = true;
+        errdefer if (event_owned) ready.event.deinit(
+            self.quic_client.endpoint.allocator,
+        );
         const stream_id: u62 = @intCast(
             ready.entry.reader.receive.stream_id,
         );
@@ -11562,15 +12302,17 @@ pub const ProtectedClient = struct {
             );
             ready.entry.reader.body_allowed =
                 ready.event.head.response.body_allowed;
+            ready.entry.reader.response_connect_established =
+                ready.entry.reader.response_extended_connect and
+                ready.event.head.response.status >= 200 and
+                ready.event.head.response.status < 300;
             if (!ready.entry.reader.body_allowed) {
                 ready.entry.reader.content_length = null;
             }
         }
-        var owned_event = ready.event;
-        errdefer owned_event.deinit(
-            self.quic_client.endpoint.allocator,
-        );
+        const owned_event = ready.event;
         try self.applyStreamingResponseEvent(stream_id, owned_event);
+        event_owned = false;
         return .{ .message = .{
             .stream_id = stream_id,
             .value = owned_event,
@@ -16374,6 +17116,13 @@ fn visitStreamingServerRequestPacket(
         &session.streaming_requests,
         session.peer_promised_push_ids.items,
         null,
+        &session.connect_datagrams,
+    );
+    if (packetHasDatagram(packet.frames)) try routeConnectDatagramsFromPacket(
+        &session.connect_datagrams,
+        &session.established.connection,
+        packet.frames,
+        packet.packet_number,
     );
 }
 
@@ -16393,6 +17142,13 @@ fn visitDetachedServerRequestPacket(
         &session.streaming_requests,
         session.peer_promised_push_ids.items,
         detached_stream_id,
+        &session.connect_datagrams,
+    );
+    if (packetHasDatagram(packet.frames)) try routeConnectDatagramsFromPacket(
+        &session.connect_datagrams,
+        &session.established.connection,
+        packet.frames,
+        packet.packet_number,
     );
 }
 
@@ -16403,6 +17159,7 @@ const ConnectionRequestReceiveContext = struct {
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
     peer_promised_push_ids: []const u64,
+    detached_streams: ?*connect_datagram.Registry = null,
     reset: ?RequestStreamReset = null,
 };
 
@@ -16421,7 +17178,18 @@ fn visitConnectionRequestPacket(
         null,
         context.peer_promised_push_ids,
         null,
+        context.detached_streams,
     );
+    if (context.detached_streams) |detached| {
+        if (packetHasDatagram(packet.frames)) {
+            try routeConnectDatagramsFromPacket(
+                detached,
+                context.connection,
+                packet.frames,
+                packet.packet_number,
+            );
+        }
+    }
 }
 
 fn receiveConnectionRequestStreamBytes(
@@ -16444,6 +17212,7 @@ fn receiveConnectionRequestStreamBytes(
         request_streams,
         peer_promised_push_ids,
         null,
+        null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
@@ -16459,6 +17228,7 @@ fn receiveConnectionRequestStreamBytesUntil(
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
     peer_promised_push_ids: []const u64,
+    detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!AssembledStream {
     if (try request_streams.takeReady(
@@ -16474,6 +17244,7 @@ fn receiveConnectionRequestStreamBytesUntil(
             .qpack_encode = qpack_encode,
             .request_streams = request_streams,
             .peer_promised_push_ids = peer_promised_push_ids,
+            .detached_streams = detached_streams,
         };
         if (deadline) |absolute| {
             try receive_packets.visitWithDeadline(
@@ -16540,6 +17311,7 @@ fn applyServerRequestPacketFrames(
     streaming_requests: ?*StreamingRequestSet,
     peer_promised_push_ids: []const u64,
     detached_stream_id: ?u62,
+    detached_streams: ?*connect_datagram.Registry,
 ) Error!?RequestStreamReset {
     var first_reset: ?RequestStreamReset = null;
     for (frames) |frame| {
@@ -16550,6 +17322,15 @@ fn applyServerRequestPacketFrames(
             )) == .request_response)
         {
             const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+            if (detached_streams) |detached| {
+                if (detached.contains(stream_id)) {
+                    // Detached associations report their own terminal state.
+                    // Do not let reset of CONNECT A abort a receive that is
+                    // currently waiting for unrelated request B. Terminal
+                    // observation happens after queued DATAGRAMs are routed.
+                    continue;
+                }
+            }
             const replaces_stream =
                 request_streams.contains(stream_id) or
                 if (streaming_requests) |streaming|
@@ -16602,8 +17383,13 @@ fn applyServerRequestPacketFrames(
             continue;
         }
         if (frame != .stream) continue;
-        if (detached_stream_id != null and
-            frame.stream.stream_id == detached_stream_id.?)
+        if ((detached_stream_id != null and
+            frame.stream.stream_id == detached_stream_id.?) or
+            (detached_streams != null and
+                detached_streams.?.contains(
+                    std.math.cast(u62, frame.stream.stream_id) orelse
+                        return error.UnexpectedStream,
+                )))
         {
             // QUIC has already assembled this frame in the connection receive
             // state. Its protocol adapter consumes it directly.
@@ -16684,6 +17470,7 @@ fn receiveConnectionResponseStreamBytes(
         push_streams,
         request_lifecycle,
         null,
+        null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
@@ -16702,6 +17489,7 @@ fn receiveConnectionResponseStreamBytesUntil(
     streaming_responses: *StreamingResponseSet,
     push_streams: *PushStreamSet,
     request_lifecycle: *const ClientRequestLifecycle,
+    detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!AssembledStream {
     if (response_streams.takeReset(expected_stream_id)) |code| {
@@ -16728,6 +17516,7 @@ fn receiveConnectionResponseStreamBytesUntil(
             push_streams,
             request_lifecycle,
             null,
+            detached_streams,
             deadline,
         );
         if (response_streams.takeReset(expected_stream_id)) |code| {
@@ -16770,6 +17559,7 @@ fn receiveConnectionResponsePacket(
         request_lifecycle,
         detached_stream_id,
         null,
+        null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
@@ -16787,6 +17577,7 @@ fn receiveConnectionResponsePacketUntil(
     push_streams: ?*PushStreamSet,
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
+    detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!void {
     var context: ConnectionResponseReceiveContext = .{
@@ -16799,6 +17590,7 @@ fn receiveConnectionResponsePacketUntil(
         .push_streams = push_streams,
         .request_lifecycle = request_lifecycle,
         .detached_stream_id = detached_stream_id,
+        .detached_streams = detached_streams,
     };
     if (deadline) |absolute| {
         try receive_packets.visitWithDeadline(
@@ -16826,6 +17618,7 @@ const ConnectionResponseReceiveContext = struct {
     push_streams: ?*PushStreamSet,
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
+    detached_streams: ?*connect_datagram.Registry = null,
 };
 
 fn visitConnectionResponsePacket(
@@ -16866,6 +17659,13 @@ fn visitConnectionResponsePacket(
             )) == .request_response)
         {
             const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+            if (context.detached_streams) |detached| {
+                if (detached.contains(stream_id)) {
+                    // The post-visitor drain records RESET only after routing
+                    // DATAGRAMs that were accepted with this packet.
+                    continue;
+                }
+            }
             if (request_lifecycle) |lifecycle| {
                 if (lifecycle.isFinished(stream_id)) continue;
                 if (!lifecycle.contains(stream_id)) {
@@ -16886,6 +17686,12 @@ fn visitConnectionResponsePacket(
             frame.stream.stream_id == detached_stream_id.?)
         {
             continue;
+        }
+        if (context.detached_streams) |detached| {
+            if (detached.contains(
+                std.math.cast(u62, frame.stream.stream_id) orelse
+                    return error.UnexpectedStream,
+            )) continue;
         }
         if (detached_stream_id != null and
             shouldPreserveDetachedStream(
@@ -16958,6 +17764,16 @@ fn visitConnectionResponsePacket(
             if (try streaming.insert(packet.from, frame.stream)) continue;
         }
         try response_streams.insert(packet.from, frame.stream);
+    }
+    if (context.detached_streams) |registry| {
+        if (packetHasDatagram(packet.frames)) {
+            try routeConnectDatagramsFromPacket(
+                registry,
+                connection,
+                packet.frames,
+                packet.packet_number,
+            );
+        }
     }
 }
 
@@ -18345,6 +19161,7 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
         .streaming_responses = undefined,
         .push_streams = undefined,
         .request_lifecycle = undefined,
+        .connect_datagrams = undefined,
         .outbound_bodies = undefined,
     };
     try std.testing.expectEqual(
@@ -26727,6 +27544,397 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
 }
 
+test "HTTP/3 CONNECT datagrams round trip over a detached handshake stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const original_dcid = [_]u8{ 0xc0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
+    const client_cid = [_]u8{ 0xc8, 0xc9, 0xca, 0xcb };
+    const server_cid = [_]u8{ 0xcc, 0xcd, 0xce, 0xcf };
+    const settings = http3.Settings{
+        .enable_connect_protocol = true,
+        .h3_datagram = true,
+    };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xc3} ** 32,
+            .x25519_secret_key = [_]u8{0xc4} ** 32,
+        },
+        .session = .{ .local_settings = settings },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        response_sent: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var head_event = try session.receiveRequestEvent();
+            defer head_event.deinit(self.server.allocator);
+            const stream_id = head_event.message.stream_id;
+            try session.startResponse(stream_id, .{
+                .status = 200,
+                .request_method = "CONNECT",
+                .extended_connect = true,
+            }, null);
+            self.response_sent.set(self.server.quic_server.endpoint.io);
+            try session.detachRequestStream(stream_id);
+            var incoming = try session.receiveConnectDatagramWithTimeout(
+                stream_id,
+                .fromSeconds(2),
+            );
+            defer incoming.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("client datagram", incoming.payload);
+            try session.sendConnectDatagram(stream_id, "server datagram");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        thread.join();
+    };
+    var client = try HandshakeClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xc1} ** 32,
+            .x25519_secret_key = [_]u8{0xc2} ** 32,
+        },
+        .session = .{ .local_settings = settings },
+    });
+    defer client.deinit();
+
+    const stream_id = try client.startRequest(.{
+        .method = "CONNECT",
+        .path = "/capsule",
+        .authority = "localhost",
+        .headers = &.{.{ .name = ":protocol", .value = "connect-udp" }},
+    }, null);
+    try shared.response_sent.wait(io);
+    _ = try client.receivePeerSettingsWithDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    );
+    while (true) {
+        if (try client.pollDetachedResponseHead(stream_id)) |head_value| {
+            var head = head_value;
+            defer head.deinit(allocator);
+            try std.testing.expectEqual(@as(u16, 200), head.status);
+            break;
+        }
+        try client.established.connection.servicePacketServicingTimersDeadline(
+            .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+        );
+    }
+    try client.detachResponseStream(stream_id);
+    try std.testing.expect(client.connectDatagramsNegotiated());
+    try std.testing.expect(client.maxConnectDatagramPayloadSize(stream_id).? > 0);
+    try client.sendConnectDatagram(stream_id, "client datagram");
+    var incoming = try client.receiveConnectDatagramWithTimeout(
+        stream_id,
+        .fromSeconds(2),
+    );
+    defer incoming.deinit(allocator);
+    try std.testing.expectEqualStrings("server datagram", incoming.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 CONNECT datagram invalid QSID closes the connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    const local_cid = "h3-dgram-local";
+    const peer_cid = "h3-dgram-peer";
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = local_cid,
+        .peer_connection_id = peer_cid,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var registry = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+
+    // Injecting at the transport queue isolates the RFC 9297 parser/error
+    // mapping from packet protection while still exercising real close state.
+    try quic.one_rtt.testing.injectReceivedDatagram(&connection, &.{});
+    try std.testing.expectError(
+        error.BufferTooShort,
+        drainConnectDatagrams(&registry, &connection),
+    );
+    try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(
+        http3.ApplicationErrorCode.datagram_error,
+        connection.close_info.?.error_code,
+    );
+    try std.testing.expect(connection.close_info.?.application);
+    try std.testing.expectEqualStrings(
+        "invalid-http-datagram",
+        connection.close_info.?.reason_phrase,
+    );
+    try std.testing.expectEqual(@as(usize, 0), registry.associations.items.len);
+}
+
+test "HTTP/3 CONNECT datagrams preserve terminal frame ordering" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "order-local",
+        .peer_connection_id = "order-peer",
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var registry = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 2,
+        .max_queued_per_association = 2,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+    try registry.register(4);
+
+    try quic.one_rtt.testing.injectReceivedDatagram(&connection, &.{
+        0x00, 'b', 'e', 'f', 'o', 'r', 'e',
+    });
+    try quic.one_rtt.testing.injectReceivedDatagram(&connection, &.{
+        0x00, 'a', 'f', 't', 'e', 'r',
+    });
+    const frames = [_]quic.Frame{
+        .{ .datagram = .{ .data = &.{
+            0x00, 'b', 'e', 'f', 'o', 'r', 'e',
+        }, .length_present = true } },
+        .{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+            .final_size = 0,
+        } },
+        .{ .datagram = .{ .data = &.{
+            0x00, 'a', 'f', 't', 'e', 'r',
+        }, .length_present = true } },
+    };
+    try routeConnectDatagramsFromPacket(&registry, &connection, &frames, 0);
+    var before = (try registry.poll(0)).?;
+    defer before.deinit(allocator);
+    try std.testing.expectEqualStrings("before", before.payload);
+    try std.testing.expectEqualDeep(
+        connect_datagram.Terminal{
+            .peer_reset = http3.ApplicationErrorCode.request_cancelled,
+        },
+        (try registry.drainedTerminal(0)).?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(4));
+    try std.testing.expectEqual(@as(usize, 0), connection.datagramReceiveQueueLen());
+
+    registry.unregister(0);
+    try registry.register(0);
+    try quic.one_rtt.testing.injectReceivedDatagram(
+        &connection,
+        &.{ 0x00, 'l', 'a', 't', 'e' },
+    );
+    const close_frames = [_]quic.Frame{
+        .{ .application_close = .{
+            .error_code = 0,
+            .reason_phrase = "done",
+        } },
+        .{ .datagram = .{ .data = &.{ 0x00, 'l', 'a', 't', 'e' } } },
+    };
+    try routeConnectDatagramsFromPacket(
+        &registry,
+        &connection,
+        &close_frames,
+        0,
+    );
+    try std.testing.expectEqual(@as(?OwnedConnectDatagram, null), try registry.poll(0));
+    try std.testing.expectEqual(
+        connect_datagram.Terminal.connection_closed,
+        (try registry.drainedTerminal(0)).?,
+    );
+}
+
+test "HTTP/3 CONNECT datagram routing isolates GRO packet copies" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xda} ** quic.protection.secret_len,
+    );
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "gro-local",
+        .peer_connection_id = "gro-peer",
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var registry = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 4,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+
+    try quic.one_rtt.testing.injectReceivedDatagramForPacket(
+        &connection,
+        10,
+        &.{ 0x00, 'o', 'n', 'e' },
+    );
+    try quic.one_rtt.testing.injectReceivedDatagramForPacket(
+        &connection,
+        11,
+        &.{ 0x00, 't', 'w', 'o' },
+    );
+    const first_frames = [_]quic.Frame{.{ .datagram = .{
+        .data = &.{ 0x00, 'o', 'n', 'e' },
+    } }};
+    const second_frames = [_]quic.Frame{.{ .datagram = .{
+        .data = &.{ 0x00, 't', 'w', 'o' },
+    } }};
+    try routeConnectDatagramsFromPacket(
+        &registry,
+        &connection,
+        &first_frames,
+        10,
+    );
+    try std.testing.expectEqual(@as(usize, 1), connection.datagramReceiveQueueLen());
+    try routeConnectDatagramsFromPacket(
+        &registry,
+        &connection,
+        &second_frames,
+        11,
+    );
+    var first = (try registry.poll(0)).?;
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.payload);
+    var second = (try registry.poll(0)).?;
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.payload);
+    try std.testing.expectEqual(@as(usize, 0), connection.datagramReceiveQueueLen());
+}
+
+test "HTTP/3 CONNECT datagram validates transport-dropped payloads" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xdb} ** quic.protection.secret_len,
+    );
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "drop-local",
+        .peer_connection_id = "drop-peer",
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 0,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var registry = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+    const frames = [_]quic.Frame{.{ .datagram = .{ .data = &.{} } }};
+    try std.testing.expectError(
+        error.BufferTooShort,
+        routeConnectDatagramsFromPacket(
+            &registry,
+            &connection,
+            &frames,
+            12,
+        ),
+    );
+    try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(
+        http3.ApplicationErrorCode.datagram_error,
+        connection.close_info.?.error_code,
+    );
+}
+
 test "HTTP/3 handshake client requests from URI endpoint" {
     const allocator = std.testing.allocator;
 
@@ -30766,6 +31974,7 @@ test "HTTP/3 dev runtime receives requests with std.Io async batch" {
 
 test {
     _ = handshake_client_pool;
+    _ = connect_datagram;
     _ = @import("runtime/handshake_client_pool_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");

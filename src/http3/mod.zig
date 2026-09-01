@@ -51,6 +51,8 @@ pub const max_peer_origins: usize = 256;
 pub const max_control_stream_buffer_size: usize = 64 * 1024;
 
 pub const ApplicationErrorCode = struct {
+    /// RFC 9297 malformed HTTP Datagram association/context identifier.
+    pub const datagram_error: u64 = 0x33;
     pub const no_error: u64 = 0x100;
     pub const request_rejected: u64 = 0x10b;
     pub const request_cancelled: u64 = 0x10c;
@@ -3066,19 +3068,17 @@ pub fn decodeResponseHeadWithDynamicTableAndOptions(
             settings,
             table,
         );
+        var head_owned = true;
+        defer if (head_owned) head.deinit(allocator);
         acknowledgments += head.qpack_section_acknowledgments;
         offset += frame.consumed;
         if (head.status < 200) {
-            notifyInformationalResponse(
+            try notifyInformationalResponse(
                 options.informational,
                 .{ .status = head.status, .headers = head.headers },
                 &informational_count,
                 options.max_informational_responses,
-            ) catch |err| {
-                head.deinit(allocator);
-                return err;
-            };
-            head.deinit(allocator);
+            );
             if (offset >= bytes.len) return error.BufferTooShort;
             continue;
         }
@@ -3097,6 +3097,7 @@ pub fn decodeResponseHeadWithDynamicTableAndOptions(
         );
         head.consumed = offset;
         head.qpack_section_acknowledgments = acknowledgments;
+        head_owned = false;
         return head;
     }
 }
@@ -4401,18 +4402,29 @@ fn connectionSpecificHeaderName(name: []const u8) bool {
 }
 
 pub const Datagram = struct {
+    pub const max_quarter_stream_id: u64 =
+        @as(u64, std.math.maxInt(u62)) >> 2;
+
     quarter_stream_id: u64,
     payload: []const u8,
 
     pub fn parse(bytes: []const u8) Error!Datagram {
         var cursor = wire.Cursor.init(bytes);
         const quarter_stream_id = try quic.varint.decode(&cursor);
+        if (quarter_stream_id > max_quarter_stream_id) {
+            return error.InvalidFrame;
+        }
         return .{ .quarter_stream_id = quarter_stream_id, .payload = bytes[cursor.pos..] };
     }
 
     pub fn write(self: Datagram, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        if (self.quarter_stream_id > max_quarter_stream_id) {
+            return error.InvalidFrame;
+        }
         const id_len = try quic.varint.length(self.quarter_stream_id);
-        try list.ensureUnusedCapacity(allocator, id_len + self.payload.len);
+        const total_len = std.math.add(usize, id_len, self.payload.len) catch
+            return error.IntegerOverflow;
+        try list.ensureUnusedCapacity(allocator, total_len);
         try appendVarintAssumeCapacity(list, self.quarter_stream_id);
         list.appendSliceAssumeCapacity(self.payload);
     }
@@ -5653,6 +5665,29 @@ test "HTTP/3 datagram" {
     const parsed = try Datagram.parse(encoded.items);
     try std.testing.expectEqual(@as(u64, 4), parsed.quarter_stream_id);
     try std.testing.expectEqualStrings("capsule", parsed.payload);
+}
+
+test "HTTP/3 datagram bounds the Quarter Stream ID" {
+    const allocator = std.testing.allocator;
+    const maximum = Datagram.max_quarter_stream_id;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (Datagram{
+        .quarter_stream_id = maximum,
+        .payload = &.{},
+    }).write(&encoded, allocator);
+    try std.testing.expectEqual(
+        maximum,
+        (try Datagram.parse(encoded.items)).quarter_stream_id,
+    );
+
+    encoded.clearRetainingCapacity();
+    try quic.varint.encode(&encoded, allocator, maximum + 1);
+    try std.testing.expectError(error.InvalidFrame, Datagram.parse(encoded.items));
+    try std.testing.expectError(error.InvalidFrame, (Datagram{
+        .quarter_stream_id = maximum + 1,
+        .payload = &.{},
+    }).write(&encoded, allocator));
 }
 
 test "HTTP/3 request encode decode" {

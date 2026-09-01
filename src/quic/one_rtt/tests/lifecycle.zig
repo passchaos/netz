@@ -471,6 +471,242 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     }
 }
 
+test "QUIC 1-RTT local close installs state when socket send fails" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var transport_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer transport_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+
+    var transport_output: std.Io.Writer.Allocating = .init(allocator);
+    defer transport_output.deinit();
+    var transport_trace = quic.qlog.Trace.init(
+        &transport_output.writer,
+        .{},
+    );
+    var transport_observer = quic.qlog.Observer.init(&transport_trace);
+    var transport = try one_rtt.Connection.init(&transport_endpoint, .{
+        .peer = transport_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "transport-local",
+        .peer_connection_id = "transport-peer",
+        .qlog_observer = &transport_observer,
+    });
+    defer transport.deinit();
+
+    {
+        var failed_transport_send = ObservedBatchSend{
+            .delegate = transport_endpoint.io,
+            .fail_after_prefix = 0,
+        };
+        var failed_transport_vtable = transport_endpoint.io.vtable.*;
+        failed_transport_vtable.netSend = ObservedBatchSend.netSend;
+        transport_endpoint.io = .{
+            .userdata = &failed_transport_send,
+            .vtable = &failed_transport_vtable,
+        };
+        defer transport_endpoint.io = failed_transport_send.delegate;
+
+        try std.testing.expectError(
+            error.NetworkDown,
+            transport.closeTransportAt(
+                0x100,
+                @intFromEnum(quic.FrameType.stream),
+                "transport send failed",
+                100,
+                25,
+            ),
+        );
+        try std.testing.expectEqual(@as(usize, 1), failed_transport_send.calls);
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            transport.closeTransport(0x101, 0, "second close"),
+        );
+        try std.testing.expectEqual(@as(usize, 1), failed_transport_send.calls);
+    }
+
+    try std.testing.expect(transport.closing());
+    try std.testing.expectEqual(@as(?u64, 175), transport.closeExpiryDeadlineMillis());
+    try std.testing.expectEqual(@as(u64, 0x100), transport.close_info.?.error_code);
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.stream)),
+        transport.close_info.?.frame_type,
+    );
+    try std.testing.expectEqualStrings(
+        "transport send failed",
+        transport.close_info.?.reason_phrase,
+    );
+    try std.testing.expectEqual(@as(?one_rtt.PeerCloseInfo, null), transport.peerCloseInfo());
+    try std.testing.expectEqual(@as(u64, 0), transport.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), transport.sent.packets.items.len);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        transport.send(&.{.{ .ping = {} }}),
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transport_output.written(),
+        "\"name\":\"connectivity:connection_closed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transport_output.written(),
+        "\"trigger\":\"local_close\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transport_output.written(),
+        "\"reason\":\"transport send failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transport_output.written(),
+        "\"name\":\"quic:packet_sent\"",
+    ) == null);
+
+    // The owned diagnostic remains available for the dedicated retransmit
+    // path after the original caller's send attempt has failed.
+    try transport.resendClose();
+    try std.testing.expectEqual(@as(u64, 1), transport.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 1), transport.sent.packets.items.len);
+
+    var application_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer application_endpoint.deinit();
+    var application_output: std.Io.Writer.Allocating = .init(allocator);
+    defer application_output.deinit();
+    var application_trace = quic.qlog.Trace.init(
+        &application_output.writer,
+        .{},
+    );
+    var application_observer = quic.qlog.Observer.init(&application_trace);
+    var application = try one_rtt.Connection.init(&application_endpoint, .{
+        .peer = application_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "application-local",
+        .peer_connection_id = "application-peer",
+        .qlog_observer = &application_observer,
+    });
+    defer application.deinit();
+
+    {
+        var failed_application_send = ObservedBatchSend{
+            .delegate = application_endpoint.io,
+            .fail_after_prefix = 0,
+        };
+        var failed_application_vtable = application_endpoint.io.vtable.*;
+        failed_application_vtable.netSend = ObservedBatchSend.netSend;
+        application_endpoint.io = .{
+            .userdata = &failed_application_send,
+            .vtable = &failed_application_vtable,
+        };
+        defer application_endpoint.io = failed_application_send.delegate;
+
+        try std.testing.expectError(
+            error.NetworkDown,
+            application.closeApplicationAt(
+                42,
+                "application send failed",
+                200,
+                30,
+            ),
+        );
+        try std.testing.expectEqual(@as(usize, 1), failed_application_send.calls);
+    }
+
+    try std.testing.expect(application.closing());
+    try std.testing.expectEqual(@as(?u64, 290), application.closeExpiryDeadlineMillis());
+    try std.testing.expect(application.close_info.?.application);
+    try std.testing.expectEqual(@as(u64, 42), application.close_info.?.error_code);
+    try std.testing.expectEqualStrings(
+        "application send failed",
+        application.close_info.?.reason_phrase,
+    );
+    try std.testing.expectEqual(@as(?one_rtt.PeerCloseInfo, null), application.peerCloseInfo());
+    try std.testing.expectEqual(@as(u64, 0), application.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), application.sent.packets.items.len);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        application_output.written(),
+        "\"application_code\":42",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        application_output.written(),
+        "\"reason\":\"application send failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        application_output.written(),
+        "\"name\":\"quic:packet_sent\"",
+    ) == null);
+}
+
+test "QUIC 1-RTT local close allocates reason before packet emission" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    var endpoint = try quic.runtime.Endpoint.bind(
+        counting.allocator(),
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf3} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+    });
+    defer connection.deinit();
+
+    var observed_send = ObservedBatchSend{ .delegate = endpoint.io };
+    var observed_vtable = endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    endpoint.io = .{
+        .userdata = &observed_send,
+        .vtable = &observed_vtable,
+    };
+    defer endpoint.io = observed_send.delegate;
+    counting.fail_index = counting.alloc_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.closeTransportAt(7, 0, "must be owned", 10, 5),
+    );
+    try std.testing.expect(counting.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), observed_send.calls);
+    try std.testing.expect(connection.close_info == null);
+    try std.testing.expectEqual(@as(u64, 0), connection.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), connection.sent.packets.items.len);
+}
+
 test "QUIC 1-RTT close lifecycle expires after three PTOs" {
     const allocator = std.testing.allocator;
 
