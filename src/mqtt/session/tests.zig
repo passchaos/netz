@@ -967,6 +967,62 @@ test "session message expiry skips queued and publish retransmit" {
     );
 }
 
+test "session tracked drain reports pruning and fresh inflight selection" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("tracked-drain", false, 60, .zero);
+    _ = try store.enqueuePublish(opened.handle, "expired", "v", .{
+        .qos = .at_least_once,
+        .properties = &.{.{ .four_byte = .{
+            .id = .message_expiry_interval,
+            .value = 1,
+        } }},
+        .now = .zero,
+    });
+
+    var output: [1]Transmission = undefined;
+    var snapshot_changed = false;
+    const empty = try store.drainIntoTrackingSnapshotChange(
+        opened.handle,
+        std.Io.Timestamp.fromNanoseconds(second_ns),
+        1,
+        &output,
+        &snapshot_changed,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    try std.testing.expect(snapshot_changed);
+
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "selected",
+        "v",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    snapshot_changed = false;
+    const selected = try store.drainIntoTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+        &snapshot_changed,
+    );
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expect(snapshot_changed);
+
+    try store.retryUnsentPublish(opened.handle, selected[0].publish.packet_id);
+    snapshot_changed = false;
+    const retry = try store.drainIntoTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+        &snapshot_changed,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retry.len);
+    try std.testing.expect(!snapshot_changed);
+}
+
 test "session persists incoming QoS2 packet identifiers" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});

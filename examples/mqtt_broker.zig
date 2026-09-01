@@ -47,6 +47,7 @@ const Config = struct {
     persistence_path: ?[]const u8 = null,
     commit_log_path: ?[]const u8 = null,
     autosave_interval_seconds: ?u32 = null,
+    autosave_change_count: ?usize = null,
     restore: bool = true,
     ignore_connection_errors: bool = false,
 };
@@ -264,6 +265,11 @@ pub fn main(init: std.process.Init) !void {
                 .fromSeconds(seconds)
             else
                 null,
+            .persistent_change_autosave = if (config.autosave_change_count) |max_changes| .{
+                .dir = std.Io.Dir.cwd(),
+                .sub_path = config.persistence_path.?,
+                .max_changes = max_changes,
+            } else null,
             .connect_authorization = authorization,
             .access_control = access_control,
             .problem_information = problem_information[0..problem_information_count],
@@ -792,13 +798,22 @@ fn parseArgs(
             if (config.autosave_interval_seconds.? == 0) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--autosave-change-count=",
+        )) {
+            config.autosave_change_count = try parsePositiveUsize(
+                arg["--autosave-change-count=".len..],
+            );
         } else if (std.mem.eql(u8, arg, "--ignore-connection-errors")) {
             config.ignore_connection_errors = true;
         } else {
             return error.InvalidArgument;
         }
     }
-    if (config.autosave_interval_seconds != null and
+    if ((config.autosave_interval_seconds != null or
+        config.autosave_change_count != null) and
         config.persistence_path == null)
     {
         return error.InvalidArgument;
@@ -806,6 +821,7 @@ fn parseArgs(
     if (config.commit_log_path != null and
         (config.persistence_path != null or
             config.autosave_interval_seconds != null or
+            config.autosave_change_count != null or
             !config.restore))
     {
         return error.InvalidArgument;

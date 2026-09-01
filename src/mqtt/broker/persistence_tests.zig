@@ -21,6 +21,31 @@ fn createBroker(
     );
 }
 
+fn createAutosaveBroker(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    max_changes: usize,
+) !Broker {
+    return Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+            },
+            .persistent_change_autosave = .{
+                .dir = dir,
+                .sub_path = sub_path,
+                .max_changes = max_changes,
+            },
+        },
+    );
+}
+
 fn delayedWill(
     delay_seconds: u32,
     retain: bool,
@@ -43,6 +68,572 @@ fn delayedWill(
         .retain = retain,
         .properties = &Properties.values,
     };
+}
+
+test "MQTT persistent change autosave validates options and owns path" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        createAutosaveBroker(allocator, io, tmp.dir, "", 1),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        createAutosaveBroker(allocator, io, tmp.dir, "zero.db", 0),
+    );
+
+    var path = [_]u8{ 'o', 'w', 'n', 'e', 'd', '.', 'd', 'b' };
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        &path,
+        1,
+    );
+    defer broker.deinit();
+    path[0] = 'x';
+    try std.testing.expectEqualStrings(
+        "owned.db",
+        broker.options.persistent_change_autosave.?.sub_path,
+    );
+}
+
+test "MQTT persistent change autosave waits for threshold" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "changes.db",
+        2,
+    );
+    defer broker.deinit();
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/one",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "one",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "changes.db", .{}),
+    );
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/two",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "two",
+    });
+    _ = try tmp.dir.statFile(io, "changes.db", .{});
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "changes.db");
+    var matches_storage: [1]mqtt.retained.Match = undefined;
+    const matches = try restored.retained.matchInto(
+        "autosave/two",
+        std.Io.Clock.awake.now(io),
+        &matches_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqualStrings("two", matches[0].payload);
+}
+
+test "MQTT persistent change autosave ignores volatile and retained no-op publishes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "ignored.db",
+        1,
+    );
+    defer broker.deinit();
+
+    // With no durable subscribers, an ordinary PUBLISH changes only process
+    // counters and transient routing state. Deleting a missing retained entry
+    // is likewise a durable no-op. Neither reaches the autosave threshold.
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "volatile/only",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "value",
+    });
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "retained/missing",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "ignored.db", .{}),
+    );
+}
+
+test "MQTT persistent change autosave retains threshold across SnapshotBusy" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "busy.db",
+        1,
+    );
+    defer broker.deinit();
+
+    broker.slots[0].active = true;
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/busy",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "pending",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "busy.db", .{}),
+    );
+
+    broker.slots[0].active = false;
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "retained/no-op",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "busy.db", .{}),
+    );
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/retry",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "saved",
+    });
+    _ = try tmp.dir.statFile(io, "busy.db", .{});
+}
+
+test "MQTT manual snapshot does not acknowledge another autosave target" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "autosave.db",
+        2,
+    );
+    defer broker.deinit();
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/first",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "first",
+    });
+    try broker.saveLiveSnapshot(tmp.dir, "manual.db");
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "autosave.db", .{}),
+    );
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/second",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "second",
+    });
+    _ = try tmp.dir.statFile(io, "autosave.db", .{});
+}
+
+test "MQTT snapshot to autosave target acknowledges captured generation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "autosave.db",
+        2,
+    );
+    defer broker.deinit();
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/baseline",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "baseline",
+    });
+    try broker.saveLiveSnapshot(tmp.dir, "autosave.db");
+    const baseline = try tmp.dir.readFileAlloc(
+        io,
+        "autosave.db",
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(baseline);
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/one-after-baseline",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "pending",
+    });
+    const still_baseline = try tmp.dir.readFileAlloc(
+        io,
+        "autosave.db",
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(still_baseline);
+    try std.testing.expectEqualSlices(u8, baseline, still_baseline);
+}
+
+test "MQTT equivalent path through another directory does not suppress autosave" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "autosave.db",
+        2,
+    );
+    defer broker.deinit();
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/first",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "first",
+    });
+    var alias = try tmp.dir.openDir(io, ".", .{});
+    defer alias.close(io);
+    try broker.saveLiveSnapshot(alias, "autosave.db");
+    try tmp.dir.deleteFile(io, "autosave.db");
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/second",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "second",
+    });
+    // Conservative destination matching can cause a redundant checkpoint,
+    // but must never treat a separately opened handle as the configured one.
+    _ = try tmp.dir.statFile(io, "autosave.db", .{});
+}
+
+test "MQTT restore starts a fresh persistent change threshold" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "autosave.db",
+        2,
+    );
+    defer broker.deinit();
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/pre-restore",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "dirty",
+    });
+    try broker.saveLiveSnapshot(tmp.dir, "baseline.db");
+    try broker.restoreSnapshot(tmp.dir, "baseline.db");
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/post-restore",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "one",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "autosave.db", .{}),
+    );
+}
+
+test "MQTT persistent change autosave failure is best effort and retryable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "missing/checkpoint.db",
+        1,
+    );
+    defer broker.deinit();
+
+    // The retained mutation succeeds even though the optional checkpoint
+    // target cannot be created. The generation remains dirty for a later
+    // successful retry, and the failure is available to operators.
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/failure",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "committed",
+    });
+    try std.testing.expect(broker.persistentChangeAutosaveError() != null);
+    try tmp.dir.createDir(io, "missing", .default_dir);
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "retained/no-op",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "",
+    });
+    // A no-op does not itself trigger autosave; retry is coupled to the next
+    // persistent operation so harmless traffic cannot create I/O churn.
+    try std.testing.expect(broker.persistentChangeAutosaveError() != null);
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/retry-after-error",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "saved",
+    });
+    try std.testing.expectEqual(
+        @as(?anyerror, null),
+        broker.persistentChangeAutosaveError(),
+    );
+    _ = try tmp.dir.statFile(io, "missing/checkpoint.db", .{});
+}
+
+test "MQTT persistent change autosave counts durable Session enqueue" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "session.db",
+        1,
+    );
+    defer broker.deinit();
+    const now = std.Io.Clock.awake.now(io);
+    const opened = try broker.sessions.open(
+        "autosave-session",
+        false,
+        std.math.maxInt(u32),
+        now,
+    );
+    try broker.sessions.disconnect(opened.handle, null, now);
+
+    try broker.enqueueSessionPublish(
+        "autosave-session",
+        .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = "autosave/session",
+            .packet_id = null,
+            .properties = &.{},
+            .payload = "queued",
+        },
+        .at_least_once,
+        false,
+        null,
+    );
+    _ = try tmp.dir.statFile(io, "session.db", .{});
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "session.db");
+    const handle = restored.sessions.find(
+        "autosave-session",
+        std.Io.Clock.awake.now(io),
+    ).?;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try restored.sessions.stats(handle)).queued_count,
+    );
+}
+
+test "MQTT persistent change autosave tracks durable subscription lifecycle" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try createAutosaveBroker(
+        allocator,
+        io,
+        tmp.dir,
+        "subscription.db",
+        2,
+    );
+    defer broker.deinit();
+
+    var serve = struct {
+        broker: *Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(1) catch |err| {
+                self.err = err;
+            };
+        }
+    }{ .broker = &broker };
+    const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
+    var joined = false;
+    defer if (!joined) {
+        for (broker.slots) |*slot| {
+            if (slot.connection) |*connection| connection.shutdown() catch {};
+        }
+        thread.join();
+    };
+
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    var client = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "autosave-subscription",
+            .clean_start = false,
+            .properties = &expiry,
+        },
+    );
+    defer client.close();
+    // Durable CONNECT is the first operation; SUBSCRIBE reaches the threshold.
+    var suback = try client.subscribe(
+        &.{.{
+            .topic_filter = "autosave/subscription",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    suback.deinit(allocator);
+    _ = try tmp.dir.statFile(io, "subscription.db", .{});
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "subscription.db");
+    const restored_handle = restored.sessions.find(
+        "autosave-subscription",
+        std.Io.Clock.awake.now(io),
+    ).?;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try restored.sessions.stats(restored_handle)).subscription_count,
+    );
+
+    try client.disconnect(0);
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
 }
 
 test "MQTT broker snapshot restores retained and durable Session state" {
@@ -802,6 +1393,44 @@ test "MQTT live snapshot omits transient inbound QoS 2" {
             .retain = false,
             .topic = "transient/qos2",
             .packet_id = 7,
+            .properties = &.{},
+            .payload = "not-durable",
+        },
+        now,
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source.saveLiveSnapshot(tmp.dir, "broker.db");
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "broker.db");
+    try std.testing.expectEqual(@as(usize, 0), restored.pending_qos2.count());
+}
+
+test "MQTT live snapshot omits route-tagged transient inbound QoS 2" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try createBroker(allocator, io);
+    defer source.deinit();
+    const now = std.Io.Clock.awake.now(io);
+    const opened = try source.sessions.open(
+        "transient-canonical-qos2",
+        true,
+        0,
+        now,
+    );
+    _ = try source.pending_qos2.record(
+        sessionRouteSubscriberId(opened.route_id),
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "transient/canonical-qos2",
+            .packet_id = 8,
             .properties = &.{},
             .payload = "not-durable",
         },

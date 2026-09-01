@@ -726,6 +726,19 @@ pub const Scheduler = struct {
         };
     }
 
+    /// Return a claimed Will to the deadline heap after publication
+    /// preparation fails. The original deadline is retained, so the next
+    /// driver iteration retries it immediately rather than leaving live
+    /// snapshots permanently busy on an unreachable `.due` entry.
+    pub fn retryDue(self: *Scheduler, handle: Handle) Error!void {
+        const entry = try self.getEntry(handle);
+        if (entry.state != .due or entry.heap_index != null) {
+            return error.WillNotDue;
+        }
+        entry.state = .scheduled;
+        self.heap.appendAssumeCapacity(self, handle.index);
+    }
+
     fn countDueFrom(
         self: Scheduler,
         heap_index: usize,

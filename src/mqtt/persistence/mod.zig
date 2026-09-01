@@ -201,10 +201,11 @@ fn encodeMode(
             sessions: *session.Store,
             publisher_id: u64,
         ) bool {
-            return sessionRouteId(publisher_id) != null and
-                sessions.handleForRouteId(
-                    sessionRouteId(publisher_id).?,
-                ) != null;
+            const route_id = sessionRouteId(publisher_id) orelse return false;
+            const handle = sessions.handleForRouteId(route_id) orelse
+                return false;
+            const session_stats = sessions.stats(handle) catch return false;
+            return session_stats.expiry_interval != 0;
         }
     };
     if (live_checkpoint) {

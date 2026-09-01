@@ -63,6 +63,17 @@ pub const Limits = struct {
     runtime: runtime.Limits = .{},
 };
 
+/// Save a live broker snapshot after this many persistent state changes.
+///
+/// `dir` remains borrowed for the lifetime of the Broker. `sub_path` is
+/// deep-copied by `Broker.init`, matching the ownership contract of the other
+/// string-bearing broker options.
+pub const ChangeAutosaveOptions = struct {
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    max_changes: usize,
+};
+
 pub const Options = struct {
     limits: Limits = .{},
     /// Prefix for broker-assigned Client Identifiers. Copied by `listen`.
@@ -98,6 +109,11 @@ pub const Options = struct {
     /// Publish retained `$SYS` gauge snapshots at this interval. Null disables
     /// periodic publication. Explicit `publishSystemStats` remains available.
     system_stats_interval: ?std.Io.Duration = null,
+    /// Optional broker-managed snapshot policy driven by durable mutations.
+    ///
+    /// The path is copied during initialization. The directory handle remains
+    /// borrowed and must stay valid until `Broker.deinit` returns.
+    persistent_change_autosave: ?ChangeAutosaveOptions = null,
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -348,6 +364,7 @@ const RoutePlan = struct {
 const Registration = struct {
     subscriber_id: router_mod.SubscriberId,
     replaced_owner_id: ?router_mod.SubscriberId,
+    persistent_changed: bool,
 };
 
 const EncodedSessionPacket = struct {
@@ -360,6 +377,11 @@ const EncodedSessionPacket = struct {
         self.encoded.deinit();
         self.* = undefined;
     }
+};
+
+const SessionAckResult = struct {
+    owned: bool,
+    persistent_changed: bool,
 };
 const subscriberId = session_route.connectionSubscriberId;
 const nextConnectionGeneration = session_route.nextConnectionGeneration;
@@ -806,6 +828,17 @@ pub const Broker = struct {
     commit_log: ?commit_log_mod.Log = null,
     persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
+    /// Monotonic durable-state generations protected by `state_mutex`.
+    ///
+    /// Autosave captures `persistent_generation` together with encoded state,
+    /// and acknowledges only that captured value after the atomic replacement
+    /// succeeds. Mutations concurrent with disk I/O therefore remain pending.
+    persistent_generation: u128 = 0,
+    autosave_generation: u128 = 0,
+    /// Last asynchronous checkpoint failure. Autosave is best-effort because
+    /// its caller's broker mutation is already committed; returning the I/O
+    /// error would falsely invite the caller to retry that mutation.
+    persistent_change_autosave_error: ?anyerror = null,
     /// Cumulative lifecycle counters protected by `state_mutex`. They are
     /// intentionally process-local like Mosquitto's `$SYS` counters and are
     /// not restored from protocol-state snapshots.
@@ -863,6 +896,11 @@ pub const Broker = struct {
         if (options.system_stats_interval) |interval| {
             if (interval.nanoseconds <= 0) return error.InvalidProperty;
         }
+        if (options.persistent_change_autosave) |autosave| {
+            if (autosave.sub_path.len == 0 or autosave.max_changes == 0) {
+                return error.InvalidProperty;
+            }
+        }
         if (options.persistent_session_expiry_seconds == 0) {
             return error.InvalidProperty;
         }
@@ -889,6 +927,17 @@ pub const Broker = struct {
         var owned_options = options;
         owned_options.auto_client_id_prefix = auto_client_id_prefix;
         owned_options.accept.response_information = response_information;
+        const autosave_sub_path = if (options.persistent_change_autosave) |autosave|
+            try allocator.dupe(u8, autosave.sub_path)
+        else
+            null;
+        var autosave_path_owned = autosave_sub_path != null;
+        errdefer if (autosave_path_owned) {
+            allocator.free(autosave_sub_path.?);
+        };
+        if (owned_options.persistent_change_autosave) |*autosave| {
+            autosave.sub_path = autosave_sub_path.?;
+        }
         const problem_information = owned_properties.clone(
             allocator,
             options.problem_information,
@@ -950,7 +999,7 @@ pub const Broker = struct {
             @intCast(options.will.max_wills),
         );
         const started_at_ns = std.Io.Clock.awake.now(io).nanoseconds;
-        return .{
+        const broker: Broker = .{
             .allocator = allocator,
             .io = io,
             .options = owned_options,
@@ -967,6 +1016,11 @@ pub const Broker = struct {
             // periodic `$SYS` update covers the complete initial interval.
             .load_tracker = .init(started_at_ns),
         };
+        // Ownership moved into `broker.options`; later initialization failures
+        // above have already run their guards, while successful destruction is
+        // centralized in `Broker.deinit`.
+        autosave_path_owned = false;
+        return broker;
     }
 
     pub fn deinit(self: *Broker) void {
@@ -979,6 +1033,9 @@ pub const Broker = struct {
         self.allocator.free(self.options.auto_client_id_prefix);
         if (self.options.accept.response_information) |value| {
             self.allocator.free(value);
+        }
+        if (self.options.persistent_change_autosave) |autosave| {
+            self.allocator.free(@constCast(autosave.sub_path));
         }
         owned_properties.deinit(
             self.allocator,
@@ -1008,6 +1065,18 @@ pub const Broker = struct {
         return self.statsLocked();
     }
 
+    /// Return the most recent background change-autosave failure.
+    ///
+    /// Autosave runs after a broker mutation has committed, so failures are
+    /// observable here rather than returned from the mutation API as though
+    /// the MQTT operation itself had failed. A later successful autosave
+    /// clears the value.
+    pub fn persistentChangeAutosaveError(self: *Broker) ?anyerror {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return self.persistent_change_autosave_error;
+    }
+
     /// Enqueue a canonical publication for an existing offline Session.
     ///
     /// This uses the same bounded Session queue, expiry handling and journal
@@ -1023,23 +1092,34 @@ pub const Broker = struct {
     ) Error!void {
         const now = std.Io.Clock.awake.now(self.io);
         self.state_mutex.lockUncancelable(self.io);
-        const handle = self.sessions.find(client_id, now) orelse {
+        var state_locked = true;
+        var persistent_changed = self.pruneExpiredSessionRoutesLocked(now) != 0;
+        errdefer if (state_locked) {
+            self.recordPersistentChangeLocked(persistent_changed);
             self.state_mutex.unlock(self.io);
+            self.finishPartialPersistentChange(persistent_changed);
+        };
+        const handle = self.sessions.find(client_id, now) orelse {
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            state_locked = false;
+            self.finishPartialPersistentChange(persistent_changed);
             return error.SessionNotFound;
         };
-        self.enqueueSessionDeliveryLocked(
+        try self.enqueueSessionDeliveryLocked(
             handle,
             subscription_identifier,
             retain,
             qos,
             publish,
             now,
-        ) catch |err| {
-            self.state_mutex.unlock(self.io);
-            return err;
-        };
+            &persistent_changed,
+        );
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
+        state_locked = false;
         try self.appendCommitIfEnabled();
+        self.finishPersistentChange(persistent_changed);
     }
 
     /// Publish a trusted, transport-independent Application Message.
@@ -1064,24 +1144,34 @@ pub const Broker = struct {
         }
 
         self.state_mutex.lockUncancelable(self.io);
+        var state_locked = true;
+        var persistent_changed = false;
+        errdefer if (state_locked) {
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            self.finishPartialPersistentChange(persistent_changed);
+        };
         const plan = self.enqueuePublishLocked(
             null,
             publish,
             null,
             std.Io.Clock.awake.now(self.io),
+            &persistent_changed,
         ) catch |err| {
-            self.state_mutex.unlock(self.io);
             return err;
         };
         defer self.allocator.free(plan.storage);
         self.publish_messages_received +|= 1;
         self.publish_payload_bytes_received +|= publish.payload.len;
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
+        state_locked = false;
 
         // Neither durable I/O nor destination socket writes may hold the
         // global routing lock. The state mutation is complete at this point,
         // so journal it before making the publication visible on the wire.
-        try self.appendCommitIfEnabled();
+        if (persistent_changed) try self.appendCommitIfEnabled();
+        self.finishPersistentChange(persistent_changed);
         try self.flushPlan(plan);
     }
 
@@ -1172,6 +1262,7 @@ pub const Broker = struct {
                 },
                 null,
                 std.Io.Clock.awake.now(self.io),
+                null,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
                 return err;
@@ -1278,6 +1369,19 @@ pub const Broker = struct {
         return self.appendCommitModeIfEnabled(false);
     }
 
+    /// Append while the caller already owns `persistence_mutex`.
+    fn appendCommitIfEnabledLocked(self: *Broker) Error!void {
+        if (self.commit_log == null) return;
+        const log = &self.commit_log.?;
+        const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            break :blk try self.encodeLiveStateLocked(false);
+        };
+        defer self.allocator.free(encoded);
+        _ = try log.append(encoded);
+    }
+
     fn appendProvisionalCommitIfEnabled(self: *Broker) Error!void {
         return self.appendCommitModeIfEnabled(true);
     }
@@ -1301,6 +1405,198 @@ pub const Broker = struct {
         _ = try log.append(encoded);
     }
 
+    /// Record one externally meaningful persistent transition. Callers group
+    /// all store mutations belonging to one broker operation into one change.
+    /// This must be called while `state_mutex` is held.
+    fn recordPersistentChangeLocked(self: *Broker, changed: bool) void {
+        if (!changed) return;
+        if (self.persistent_generation == std.math.maxInt(u128)) {
+            // Preserve all outstanding debt while rebasing away from the
+            // saturation edge. Values above every practical threshold remain
+            // represented as `maxInt(usize)`.
+            const pending = self.pendingAutosaveChangesLocked();
+            self.persistent_generation = @min(
+                pending,
+                std.math.maxInt(usize),
+            );
+            self.autosave_generation = 0;
+        }
+        self.persistent_generation += 1;
+    }
+
+    /// Retry an eligible checkpoint without changing the result of the broker
+    /// operation that made it necessary.
+    fn finishPersistentChange(self: *Broker, changed: bool) void {
+        if (changed) self.autosavePersistentChangesIfNeeded();
+    }
+
+    /// Preserve a partially completed durable transition without replacing the
+    /// operation's original error. Both persistence mechanisms are retried on
+    /// later mutations if their best-effort write fails here.
+    fn finishPartialPersistentChange(self: *Broker, changed: bool) void {
+        if (!changed) return;
+        self.appendCommitIfEnabled() catch {};
+        self.autosavePersistentChangesIfNeeded();
+    }
+
+    fn finishPersistentChangeLocked(self: *Broker, changed: bool) void {
+        if (changed) self.autosavePersistentChangesIfNeededLocked();
+    }
+
+    fn finishPartialPersistentChangeLocked(
+        self: *Broker,
+        changed: bool,
+    ) void {
+        if (!changed) return;
+        self.appendCommitIfEnabledLocked() catch {};
+        self.autosavePersistentChangesIfNeededLocked();
+    }
+
+    fn sessionIsPersistentLocked(
+        self: *Broker,
+        handle: session_mod.Handle,
+    ) bool {
+        const session_stats = self.sessions.stats(handle) catch return false;
+        return session_stats.expiry_interval != 0;
+    }
+
+    fn subscriptionEqualsLocked(
+        self: *Broker,
+        handle: session_mod.Handle,
+        candidate: mqtt.Subscription,
+        subscription_identifier: ?usize,
+    ) Error!bool {
+        const session_stats = try self.sessions.stats(handle);
+        const subscriptions = try self.allocator.alloc(
+            session_mod.Subscription,
+            session_stats.subscription_count,
+        );
+        defer self.allocator.free(subscriptions);
+        const current = try self.sessions.subscriptionsInto(
+            handle,
+            subscriptions,
+        );
+        for (current) |existing| {
+            if (!std.mem.eql(
+                u8,
+                existing.topic_filter,
+                candidate.topic_filter,
+            )) continue;
+            return existing.qos == candidate.qos and
+                existing.no_local == candidate.no_local and
+                existing.retain_as_published ==
+                    candidate.retain_as_published and
+                existing.retain_handling == candidate.retain_handling and
+                existing.subscription_identifier == subscription_identifier;
+        }
+        return false;
+    }
+
+    fn publisherIsPersistentLocked(
+        self: *Broker,
+        publisher_id: router_mod.SubscriberId,
+    ) bool {
+        const route_id = sessionRouteId(publisher_id) orelse return false;
+        const handle = self.sessions.handleForRouteId(route_id) orelse
+            return false;
+        return self.sessionIsPersistentLocked(handle);
+    }
+
+    /// Write a live snapshot when enough unacknowledged changes accumulated.
+    ///
+    /// Lock ordering is always persistence then state. Encoding captures a
+    /// generation while state is frozen, but the atomic disk replacement runs
+    /// with traffic unblocked. Only the captured generation is acknowledged,
+    /// so mutations racing that I/O remain due for the next checkpoint. A
+    /// provisional CONNECT makes live encoding temporarily unsafe; retain the
+    /// dirty generation and retry after attachment or at the next persistent
+    /// mutation. Encoding and filesystem failures are recorded for inspection
+    /// but never retroactively fail the already-committed broker operation.
+    fn autosavePersistentChangesIfNeeded(self: *Broker) void {
+        if (self.options.persistent_change_autosave == null) return;
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        self.autosavePersistentChangesIfNeededLocked();
+    }
+
+    fn autosavePersistentChangesIfNeededLocked(self: *Broker) void {
+        const autosave = self.options.persistent_change_autosave orelse return;
+        const captured_generation, const encoded = blk: {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            const pending = self.pendingAutosaveChangesLocked();
+            if (pending < autosave.max_changes) return;
+            const generation = self.persistent_generation;
+            const state = self.encodeLiveStateLocked(false) catch |err| {
+                if (err != error.SnapshotBusy) {
+                    self.persistent_change_autosave_error = err;
+                }
+                return;
+            };
+            break :blk .{ generation, state };
+        };
+        defer self.allocator.free(encoded);
+        persistence_mod.saveEncodedAtomic(
+            self.io,
+            autosave.dir,
+            autosave.sub_path,
+            encoded,
+        ) catch |err| {
+            self.state_mutex.lockUncancelable(self.io);
+            self.persistent_change_autosave_error = err;
+            self.state_mutex.unlock(self.io);
+            return;
+        };
+
+        self.state_mutex.lockUncancelable(self.io);
+        self.acknowledgeAutosaveGenerationLocked(captured_generation);
+        self.state_mutex.unlock(self.io);
+    }
+
+    fn snapshotIsConfiguredAutosaveTarget(
+        self: *const Broker,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+    ) bool {
+        const autosave = self.options.persistent_change_autosave orelse
+            return false;
+        // Handle and byte-for-byte path equality is intentionally conservative:
+        // aliases or separately opened handles may cause one redundant write,
+        // but can never suppress a checkpoint to a distinct destination.
+        return dir.handle == autosave.dir.handle and
+            std.mem.eql(u8, sub_path, autosave.sub_path);
+    }
+
+    fn pendingAutosaveChangesLocked(self: *const Broker) u128 {
+        return self.persistent_generation -| self.autosave_generation;
+    }
+
+    fn acknowledgeAutosaveGeneration(
+        self: *Broker,
+        captured_generation: u128,
+    ) void {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        self.acknowledgeAutosaveGenerationLocked(captured_generation);
+    }
+
+    fn acknowledgeAutosaveGenerationLocked(
+        self: *Broker,
+        captured_generation: u128,
+    ) void {
+        self.autosave_generation = @max(
+            self.autosave_generation,
+            captured_generation,
+        );
+        if (self.autosave_generation == self.persistent_generation and
+            self.persistent_generation == std.math.maxInt(u128))
+        {
+            self.persistent_generation = 0;
+            self.autosave_generation = 0;
+        }
+        self.persistent_change_autosave_error = null;
+    }
+
     /// Atomically persist retained messages and durable Session State.
     ///
     /// This strict API retains the original quiescent-only contract. Use
@@ -1315,7 +1611,7 @@ pub const Broker = struct {
     ) Error!void {
         self.persistence_mutex.lockUncancelable(self.io);
         defer self.persistence_mutex.unlock(self.io);
-        const encoded = blk: {
+        const captured_generation, const encoded = blk: {
             self.state_mutex.lockUncancelable(self.io);
             defer self.state_mutex.unlock(self.io);
             for (self.slots) |slot| {
@@ -1330,7 +1626,8 @@ pub const Broker = struct {
             {
                 return error.SnapshotBusy;
             }
-            break :blk try persistence_mod.encode(
+            const generation = self.persistent_generation;
+            const state = try persistence_mod.encode(
                 self.allocator,
                 .{
                     .retained = &self.retained,
@@ -1342,6 +1639,7 @@ pub const Broker = struct {
                 std.Io.Clock.awake.now(self.io),
                 std.Io.Clock.real.now(self.io),
             );
+            break :blk .{ generation, state };
         };
         defer self.allocator.free(encoded);
         try persistence_mod.saveEncodedAtomic(
@@ -1350,6 +1648,9 @@ pub const Broker = struct {
             sub_path,
             encoded,
         );
+        if (self.snapshotIsConfiguredAutosaveTarget(dir, sub_path)) {
+            self.acknowledgeAutosaveGeneration(captured_generation);
+        }
     }
 
     /// Persist durable broker state while clients remain connected.
@@ -1374,10 +1675,12 @@ pub const Broker = struct {
     ) Error!void {
         self.persistence_mutex.lockUncancelable(self.io);
         defer self.persistence_mutex.unlock(self.io);
-        const encoded = blk: {
+        const captured_generation, const encoded = blk: {
             self.state_mutex.lockUncancelable(self.io);
             defer self.state_mutex.unlock(self.io);
-            break :blk try self.encodeLiveStateLocked(false);
+            const generation = self.persistent_generation;
+            const state = try self.encodeLiveStateLocked(false);
+            break :blk .{ generation, state };
         };
         defer self.allocator.free(encoded);
 
@@ -1387,6 +1690,9 @@ pub const Broker = struct {
             sub_path,
             encoded,
         );
+        if (self.snapshotIsConfiguredAutosaveTarget(dir, sub_path)) {
+            self.acknowledgeAutosaveGeneration(captured_generation);
+        }
     }
 
     fn encodeLiveStateLocked(
@@ -1511,6 +1817,11 @@ pub const Broker = struct {
         );
         self.router.deinit();
         self.router = staged_router;
+        // A successful restore is a new persistence baseline. Debt from an
+        // earlier in-memory generation must not influence its autosave window.
+        self.persistent_generation = 0;
+        self.autosave_generation = 0;
+        self.persistent_change_autosave_error = null;
         restored.retained.deinit();
         restored.sessions.deinit();
         restored.wills.deinit();
@@ -1933,11 +2244,16 @@ pub const Broker = struct {
                 return null;
             };
         }
-        const registration = try self.register(
+        const registration = self.register(
             index,
             effective_connect,
             listener_authorization.access_control,
-        );
+        ) catch |err| {
+            // Registration can prune expired durable Sessions before a later
+            // allocation fails. Retry any checkpoint made due by that work.
+            self.autosavePersistentChangesIfNeeded();
+            return err;
+        };
         const subscriber_id = registration.subscriber_id;
         // The Will scheduler now owns its canonical topic. Restore the parsed
         // CONNECT view before it transfers to the long-lived client task.
@@ -1955,12 +2271,20 @@ pub const Broker = struct {
                 self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
         }
         self.appendProvisionalCommitIfEnabled() catch |err| {
-            self.abortRegistration(index, subscriber_id);
+            self.abortRegistration(
+                index,
+                subscriber_id,
+                registration.persistent_changed,
+            );
             return err;
         };
         var accepted = pending.finish(accept_options) catch |err| {
-            self.abortRegistration(index, subscriber_id);
-            self.appendCommitIfEnabled() catch {};
+            self.abortRegistration(
+                index,
+                subscriber_id,
+                registration.persistent_changed,
+            );
+            self.finishPartialPersistentChange(registration.persistent_changed);
             return err;
         };
         pending_owned = false;
@@ -1971,7 +2295,15 @@ pub const Broker = struct {
         errdefer if (accepted_owns_connection) {
             accepted.deinit(self.allocator);
         };
-        self.attachConnection(index, subscriber_id, &accepted.connection);
+        self.attachConnection(
+            index,
+            subscriber_id,
+            &accepted.connection,
+            registration.persistent_changed,
+        );
+        // A threshold reached during the provisional CONNECT window was left
+        // pending by SnapshotBusy. Attachment is the first safe retry point.
+        self.autosavePersistentChangesIfNeeded();
         accepted_owns_connection = false;
         errdefer accepted.connect.deinit(self.allocator);
         errdefer self.unregister(index, subscriber_id) catch {};
@@ -2042,7 +2374,9 @@ pub const Broker = struct {
         // `find` removes an expired Session without exposing its route ID.
         // Prune first so the router and Session Store always retire stable
         // identities atomically from the broker's point of view.
-        _ = self.pruneExpiredSessionRoutesLocked(now);
+        const expired_count = self.pruneExpiredSessionRoutesLocked(now);
+        var persistent_changed = expired_count != 0;
+        errdefer self.recordPersistentChangeLocked(persistent_changed);
         var effective_connect = connect;
         if (connect.client_id.len == 0) {
             effective_connect.client_id = self.assignClientIdLocked(
@@ -2056,6 +2390,14 @@ pub const Broker = struct {
             effective_connect.client_id,
             now,
         );
+        const previous_session_persistent = if (previous_session_handle) |handle| blk: {
+            const session_stats = self.sessions.stats(handle) catch
+                break :blk false;
+            break :blk session_stats.expiry_interval != 0;
+        } else false;
+        // Clean Start may remove the previous Session before allocating its
+        // replacement, so carry that durable deletion through any later error.
+        persistent_changed = persistent_changed or previous_session_persistent;
         const previous_route_id = if (previous_session_handle) |handle|
             self.sessions.routeId(handle) catch null
         else
@@ -2159,9 +2501,12 @@ pub const Broker = struct {
             );
         }
         self.deadline_driver.notify(self.io);
+        persistent_changed = persistent_changed or slot.session_persistent or
+            previous_handle != null or accepted_will.current != null;
         return .{
             .subscriber_id = id,
             .replaced_owner_id = replaced_owner_id,
+            .persistent_changed = persistent_changed,
         };
     }
 
@@ -2347,6 +2692,7 @@ pub const Broker = struct {
         slot_index: usize,
         id: router_mod.SubscriberId,
         connection: *runtime.Connection,
+        persistent_changed: bool,
     ) void {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
@@ -2368,12 +2714,14 @@ pub const Broker = struct {
             self.maximum_active_connections,
             active_connections,
         );
+        self.recordPersistentChangeLocked(persistent_changed);
     }
 
     fn abortRegistration(
         self: *Broker,
         slot_index: usize,
         _: router_mod.SubscriberId,
+        persistent_changed: bool,
     ) void {
         self.state_mutex.lockUncancelable(self.io);
         const slot = &self.slots[slot_index];
@@ -2404,6 +2752,7 @@ pub const Broker = struct {
         slot.session_persistent = false;
         slot.listener_access_control = null;
         slot.will_handle = null;
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);
     }
@@ -2492,27 +2841,39 @@ pub const Broker = struct {
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
+        var state_locked = true;
+        var persistent_changed = false;
+        errdefer if (state_locked) {
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            self.finishPartialPersistentChange(persistent_changed);
+        };
         if (!slot.graceful_disconnect) {
             if (slot.will_handle) |handle| {
-                _ = self.wills.close(
+                const result: ?will_mod.CloseResult = self.wills.close(
                     handle,
                     .ungraceful,
                     std.Io.Clock.awake.now(self.io),
-                ) catch |err| {
-                    if (err == error.WillNotFound) {
+                ) catch |err| switch (err) {
+                    error.WillNotFound => blk: {
                         // A newer connection with the same ClientID already
                         // canceled or committed this generation during
                         // takeover. The stale transport close has no remaining
                         // Will lifecycle work.
                         slot.will_handle = null;
-                    } else {
-                        self.state_mutex.unlock(self.io);
+                        break :blk null;
+                    },
+                    else => {
                         return err;
-                    }
+                    },
                 };
+                if (result) |changed_result| {
+                    persistent_changed = changed_result != .no_will;
+                }
             }
         }
         if (slot.session_handle) |handle| {
+            persistent_changed = persistent_changed or slot.session_persistent;
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
                 _ = self.session_owners.remove(value);
@@ -2523,7 +2884,6 @@ pub const Broker = struct {
                 std.Io.Clock.awake.now(self.io),
             ) catch |err| {
                 if (err != error.SessionNotFound) {
-                    self.state_mutex.unlock(self.io);
                     return err;
                 }
             };
@@ -2549,11 +2909,14 @@ pub const Broker = struct {
         }
         slot.active = false;
         slot.clearQueue();
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
+        state_locked = false;
         self.deadline_driver.notify(self.io);
         // Persist disconnect, Session expiry, and Will scheduling before an
         // orderly close becomes observable to the peer.
-        try self.appendCommitIfEnabled();
+        if (persistent_changed) try self.appendCommitIfEnabled();
+        self.finishPersistentChange(persistent_changed);
         if (slot.connection) |*value| value.close();
         slot.connection = null;
         slot.will_handle = null;
@@ -2574,16 +2937,41 @@ pub const Broker = struct {
             disconnect,
         );
         self.state_mutex.lockUncancelable(self.io);
-        self.closeWillForDisconnectWithExpiryLocked(
-            slot,
-            disconnect,
-            session_expiry_override,
-            now,
-        ) catch |err| {
+        var state_locked = true;
+        var persistent_changed = false;
+        errdefer if (state_locked) {
+            self.recordPersistentChangeLocked(persistent_changed);
             self.state_mutex.unlock(self.io);
-            return err;
+            self.finishPartialPersistentChange(persistent_changed);
         };
+        if (slot.will_handle) |handle| {
+            const result: ?will_mod.CloseResult = self.wills.closeDisconnectWithSessionExpiry(
+                handle,
+                disconnect,
+                session_expiry_override,
+                now,
+            ) catch |err| switch (err) {
+                error.WillNotFound => blk: {
+                    if (slot.session_handle != null) {
+                        return err;
+                    }
+                    slot.will_handle = null;
+                    break :blk null;
+                },
+                else => {
+                    return err;
+                },
+            };
+            if (result) |close_result| {
+                persistent_changed = close_result != .no_will;
+                if (close_result == .canceled) {
+                    _ = self.will_publishers.remove(handle);
+                    slot.will_handle = null;
+                }
+            }
+        }
         if (slot.session_handle) |handle| {
+            persistent_changed = persistent_changed or slot.session_persistent;
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
                 _ = self.session_owners.remove(value);
@@ -2593,7 +2981,6 @@ pub const Broker = struct {
                 session_expiry_override,
                 now,
             ) catch |err| {
-                self.state_mutex.unlock(self.io);
                 return err;
             };
             const session_removed = self.sessions.stats(handle) catch |err|
@@ -2611,8 +2998,11 @@ pub const Broker = struct {
             slot.session_handle = null;
         }
         slot.graceful_disconnect = true;
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
+        state_locked = false;
         self.deadline_driver.notify(self.io);
+        self.finishPersistentChange(persistent_changed);
     }
 
     fn handleSubscribe(
@@ -2674,6 +3064,16 @@ pub const Broker = struct {
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
+        var state_locked = true;
+        var persistent_changed = false;
+        const persistent_session = self.sessionIsPersistentLocked(
+            session_handle,
+        );
+        errdefer if (state_locked) {
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            self.finishPartialPersistentChange(persistent_changed);
+        };
         for (mapped_subscriptions, 0..) |subscription, index| {
             if (reasons[index] != 0xff) continue;
             var granted = subscription;
@@ -2681,21 +3081,30 @@ pub const Broker = struct {
                 granted.qos,
                 connection.localMaximumQoS(),
             );
+            const unchanged = if (persistent_session)
+                self.subscriptionEqualsLocked(
+                    session_handle,
+                    granted,
+                    subscription_identifier,
+                ) catch |err| {
+                    return err;
+                }
+            else
+                true;
             const session_existed = self.sessions.setSubscription(
                 session_handle,
                 granted,
                 subscription_identifier,
             ) catch |err| {
-                self.state_mutex.unlock(self.io);
                 return err;
             };
+            persistent_changed = persistent_changed or !unchanged;
             const route_id = try self.sessions.routeId(session_handle);
             const existed = self.router.subscribeWithIdentifierStatus(
                 sessionSubscriberId(route_id),
                 granted,
                 subscription_identifier,
             ) catch |err| {
-                self.state_mutex.unlock(self.io);
                 return err;
             };
             std.debug.assert(existed == session_existed);
@@ -2713,24 +3122,22 @@ pub const Broker = struct {
                     .upgrade_outgoing_qos = self.options.upgrade_outgoing_qos,
                 },
                 now,
-            ) catch |err| {
-                self.state_mutex.unlock(self.io);
-                return err;
-            };
+            ) catch |err| return err;
             defer self.allocator.free(deliveries);
-            self.enqueueRetainedDeliveries(
+            try self.enqueueRetainedDeliveries(
                 slot,
                 deliveries,
                 now,
-            ) catch |err| {
-                self.state_mutex.unlock(self.io);
-                return err;
-            };
+                &persistent_changed,
+            );
         }
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
+        state_locked = false;
         // SUBACK makes the subscription durable from the peer's perspective.
         // The journal must reach disk before that acknowledgement is emitted.
-        try self.appendCommitIfEnabled();
+        if (persistent_changed) try self.appendCommitIfEnabled();
+        self.finishPersistentChange(persistent_changed);
         try connection.writeSubAck(
             subscribe.packet_id,
             reasons,
@@ -2757,6 +3164,7 @@ pub const Broker = struct {
         slot: *ClientSlot,
         deliveries: []const retained_mod.Delivery,
         now: std.Io.Timestamp,
+        persistent_changed: *bool,
     ) Error!void {
         const handle = slot.session_handle orelse
             return error.SessionNotFound;
@@ -2812,6 +3220,7 @@ pub const Broker = struct {
                     delivery.qos,
                     publish,
                     now,
+                    persistent_changed,
                 );
                 continue;
             }
@@ -2872,6 +3281,13 @@ pub const Broker = struct {
         defer self.allocator.free(reasons);
         const slot = try self.slotForSubscriber(id);
         self.state_mutex.lockUncancelable(self.io);
+        var state_locked = true;
+        var persistent_changed = false;
+        errdefer if (state_locked) {
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            self.finishPartialPersistentChange(persistent_changed);
+        };
         for (mapped_filters, 0..) |filter, index| {
             if (!self.unsubscribeAuthorized(
                 slot.listener_access_control,
@@ -2884,16 +3300,17 @@ pub const Broker = struct {
                 continue;
             }
             const session_handle = slot.session_handle orelse {
-                self.state_mutex.unlock(self.io);
                 return error.SessionNotFound;
             };
             const session_removed = self.sessions.removeSubscription(
                 session_handle,
                 filter,
             ) catch |err| {
-                self.state_mutex.unlock(self.io);
                 return err;
             };
+            persistent_changed = persistent_changed or
+                (session_removed and
+                    self.sessionIsPersistentLocked(session_handle));
             const route_id = try self.sessions.routeId(session_handle);
             self.router.unsubscribe(
                 sessionSubscriberId(route_id),
@@ -2905,15 +3322,17 @@ pub const Broker = struct {
                     continue;
                 },
                 else => {
-                    self.state_mutex.unlock(self.io);
                     return err;
                 },
             };
             std.debug.assert(session_removed);
             reasons[index] = 0;
         }
+        self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
-        try self.appendCommitIfEnabled();
+        state_locked = false;
+        if (persistent_changed) try self.appendCommitIfEnabled();
+        self.finishPersistentChange(persistent_changed);
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         try connection.writeUnsubAck(
@@ -3057,7 +3476,10 @@ pub const Broker = struct {
         const durable_publisher_id = self.canonicalPublisherId(
             publisher_id,
         );
-        _ = self.pending_qos2.record(
+        const persistent_publisher = self.publisherIsPersistentLocked(
+            durable_publisher_id,
+        );
+        const record_changed = self.pending_qos2.record(
             durable_publisher_id,
             publish,
             std.Io.Clock.awake.now(self.io),
@@ -3086,11 +3508,19 @@ pub const Broker = struct {
             );
             return;
         };
+        self.recordPersistentChangeLocked(
+            persistent_publisher and record_changed,
+        );
         self.state_mutex.unlock(self.io);
 
         // A successful PUBREC promises that this QoS 2 transaction survives a
         // reconnect. Establish the durability point before sending PUBREC.
-        try self.appendCommitIfEnabled();
+        if (persistent_publisher and record_changed) {
+            try self.appendCommitIfEnabled();
+        }
+        self.finishPersistentChange(
+            persistent_publisher and record_changed,
+        );
 
         // Mosquitto stores the inbound QoS 2 base message before PUBREC and
         // routes only when PUBREL arrives. A retransmitted PUBLISH receives the
@@ -3108,15 +3538,27 @@ pub const Broker = struct {
         source_client_id: []const u8,
         ack: mqtt.AckPacket,
     ) Error!void {
+        // Keep snapshot/journal writers outside the entire take-and-route
+        // transaction. Acquiring persistence before state preserves the global
+        // lock order and prevents a checkpoint from observing the gap between
+        // removal of the inbound QoS 2 record and installation of its effects.
+        self.persistence_mutex.lockUncancelable(self.io);
+        var persistence_locked = true;
+        defer if (persistence_locked) self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         const durable_publisher_id = self.canonicalPublisherId(
             publisher_id,
+        );
+        const persistent_publisher = self.publisherIsPersistentLocked(
+            durable_publisher_id,
         );
         var pending = self.pending_qos2.take(
             durable_publisher_id,
             ack.packet_id,
         ) orelse {
             self.state_mutex.unlock(self.io);
+            self.persistence_mutex.unlock(self.io);
+            persistence_locked = false;
             // Mosquitto deliberately acknowledges an unknown/repeated PUBREL:
             // the original PUBCOMP may have been lost after the message was
             // already released. MQTT 5 allows 0x92, but Success is maximally
@@ -3138,28 +3580,54 @@ pub const Broker = struct {
             try publisher.writePubComp(ack.packet_id, 0);
             return;
         };
+        var persistent_changed = persistent_publisher;
         self.state_mutex.unlock(self.io);
         defer pending.deinit();
 
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
-        if (try pending.asPublish(
+        const maybe_publish = pending.asPublish(
             ack.packet_id,
             std.Io.Clock.awake.now(self.io),
             &properties,
-        )) |publish| {
-            try self.routeReleasedPublish(
+        ) catch |err| {
+            self.state_mutex.lockUncancelable(self.io);
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            self.finishPartialPersistentChangeLocked(persistent_changed);
+            return err;
+        };
+        if (maybe_publish) |publish| {
+            self.routeReleasedPublishMode(
                 publisher_id,
                 publisher,
                 publish,
                 source_client_id,
                 false,
-            );
+                false,
+                false,
+                &persistent_changed,
+            ) catch |err| {
+                self.state_mutex.lockUncancelable(self.io);
+                self.recordPersistentChangeLocked(persistent_changed);
+                self.state_mutex.unlock(self.io);
+                self.finishPartialPersistentChangeLocked(persistent_changed);
+                return err;
+            };
         }
+        self.state_mutex.lockUncancelable(self.io);
+        self.recordPersistentChangeLocked(persistent_changed);
+        self.state_mutex.unlock(self.io);
         // `routeReleasedPublish` journals the routed state before returning.
         // If Message Expiry discarded the Application Message instead, the
         // pending inbound transaction removal is still a durable mutation.
-        try self.appendCommitIfEnabled();
+        if (persistent_changed) try self.appendCommitIfEnabledLocked();
+        self.finishPersistentChangeLocked(persistent_changed);
+        // Socket delivery is intentionally delayed until after the atomic
+        // pending-QoS2 removal/routing persistence transaction above.
+        self.persistence_mutex.unlock(self.io);
+        persistence_locked = false;
+        try self.flushAllSlots();
 
         const publisher_slot = try self.slotForSubscriber(publisher_id);
         publisher_slot.writer_mutex.lockUncancelable(self.io);
@@ -3175,23 +3643,74 @@ pub const Broker = struct {
         source_client_id: []const u8,
         acknowledge_qos1: bool,
     ) Error!void {
+        return self.routeReleasedPublishMode(
+            publisher_id,
+            publisher,
+            publish,
+            source_client_id,
+            acknowledge_qos1,
+            true,
+            true,
+            null,
+        );
+    }
+
+    fn routeReleasedPublishMode(
+        self: *Broker,
+        publisher_id: router_mod.SubscriberId,
+        publisher: *runtime.Connection,
+        publish: mqtt.Publish,
+        source_client_id: []const u8,
+        acknowledge_qos1: bool,
+        count_persistent_change: bool,
+        flush_routed_deliveries: bool,
+        outer_changed: ?*bool,
+    ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
+        var state_locked = true;
+        var persistent_changed = false;
+        errdefer if (state_locked) {
+            if (count_persistent_change) {
+                self.recordPersistentChangeLocked(persistent_changed);
+            }
+            self.state_mutex.unlock(self.io);
+            if (count_persistent_change) {
+                self.finishPartialPersistentChange(persistent_changed);
+            }
+        };
         const plan = self.enqueuePublishLocked(
             publisher_id,
             publish,
             source_client_id,
             std.Io.Clock.awake.now(self.io),
+            &persistent_changed,
         ) catch |err| {
-            self.state_mutex.unlock(self.io);
+            if (outer_changed) |changed| {
+                changed.* = changed.* or persistent_changed;
+            }
             return err;
         };
         defer self.allocator.free(plan.storage);
+        if (outer_changed) |changed| {
+            changed.* = changed.* or persistent_changed;
+        }
+        self.recordPersistentChangeLocked(
+            count_persistent_change and persistent_changed,
+        );
         self.state_mutex.unlock(self.io);
+        state_locked = false;
 
         // Retained changes and durable fanout queues precede PUBACK and every
         // downstream write. A crash after either peer observes progress can
         // therefore recover a state no older than that observable boundary.
-        try self.appendCommitIfEnabled();
+        // PUBREL owns the surrounding transaction and appends once after
+        // combining inbound removal with any routing mutations.
+        if (count_persistent_change and persistent_changed) {
+            try self.appendCommitIfEnabled();
+        }
+        self.finishPersistentChange(
+            count_persistent_change and persistent_changed,
+        );
 
         if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
             const publisher_slot = try self.slotForSubscriber(
@@ -3210,7 +3729,7 @@ pub const Broker = struct {
             };
             publisher_slot.writer_mutex.unlock(self.io);
         };
-        try self.flushPlan(plan);
+        if (flush_routed_deliveries) try self.flushPlan(plan);
     }
 
     /// Apply retained state and enqueue live fanout while `state_mutex` is held.
@@ -3226,18 +3745,24 @@ pub const Broker = struct {
         publish: mqtt.Publish,
         source_client_id: ?[]const u8,
         now: std.Io.Timestamp,
+        persistent_changed: ?*bool,
     ) Error!RoutePlan {
-        _ = self.pruneExpiredSessionRoutesLocked(now);
+        if (self.pruneExpiredSessionRoutesLocked(now) != 0) {
+            if (persistent_changed) |changed| changed.* = true;
+        }
         const route_publisher_id = if (publisher_id) |id|
             self.canonicalPublisherId(id)
         else
             null;
-        _ = self.retained.applyParsedPublish(
+        const retained_result = self.retained.applyParsedPublish(
             publish,
             route_publisher_id,
             source_client_id,
             now,
         ) catch |err| return err;
+        if (retained_result != .ignored) {
+            if (persistent_changed) |changed| changed.* = true;
+        }
         const matches = self.router.matchAllocForPublisher(
             self.allocator,
             publish.topic,
@@ -3270,6 +3795,7 @@ pub const Broker = struct {
             self.options.upgrade_outgoing_qos,
         );
         defer session_plan.deinit();
+        var ignored_persistent_change = false;
         for (session_plan.routes) |*route| {
             const handle = self.sessions.handleForRouteId(
                 route.route_id,
@@ -3339,6 +3865,7 @@ pub const Broker = struct {
                 if (online) route.output_subscriber_id = owner_id.?;
                 continue;
             }
+            const changed = persistent_changed orelse &ignored_persistent_change;
             try self.enqueueSessionDeliveryManyLocked(
                 handle,
                 session_plan.identifiersFor(route),
@@ -3346,6 +3873,7 @@ pub const Broker = struct {
                 route.qos,
                 publish,
                 now,
+                changed,
             );
             if (online) {
                 route.output_subscriber_id =
@@ -3569,6 +4097,7 @@ pub const Broker = struct {
         qos: mqtt.QoS,
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
+        persistent_changed: *bool,
     ) Error!void {
         var identifier_storage: [1]usize = undefined;
         const identifiers: []const usize = if (subscription_identifier) |id| blk: {
@@ -3582,6 +4111,7 @@ pub const Broker = struct {
             qos,
             publish,
             now,
+            persistent_changed,
         );
     }
 
@@ -3593,6 +4123,7 @@ pub const Broker = struct {
         qos: mqtt.QoS,
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
+        persistent_changed: *bool,
     ) Error!void {
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
@@ -3617,7 +4148,8 @@ pub const Broker = struct {
                 .value = identifier,
             } });
         }
-        _ = self.sessions.enqueuePublish(
+        var snapshot_changed = false;
+        const result = self.sessions.enqueuePublishTrackingSnapshotChange(
             handle,
             publish.topic,
             publish.payload,
@@ -3627,31 +4159,54 @@ pub const Broker = struct {
                 .properties = properties.items,
                 .now = now,
             },
+            &snapshot_changed,
         ) catch |err| switch (err) {
             error.QueueFull => {
                 self.publish_messages_dropped +|= 1;
+                persistent_changed.* = persistent_changed.* or
+                    (snapshot_changed and
+                        self.sessionIsPersistentLocked(handle));
                 return;
             },
-            else => return err,
+            else => {
+                persistent_changed.* = persistent_changed.* or
+                    (snapshot_changed and
+                        self.sessionIsPersistentLocked(handle));
+                return err;
+            },
         };
+        _ = result;
+        persistent_changed.* = persistent_changed.* or
+            (snapshot_changed and self.sessionIsPersistentLocked(handle));
     }
 
     fn handleSessionAckLocked(
         self: *Broker,
         slot: *ClientSlot,
         ack: mqtt.AckPacket,
-    ) Error!bool {
-        const handle = slot.session_handle orelse return false;
+    ) Error!SessionAckResult {
+        const handle = slot.session_handle orelse return .{
+            .owned = false,
+            .persistent_changed = false,
+        };
         if (!self.sessions.ownsPacketId(handle, ack.packet_id)) {
-            return false;
+            return .{
+                .owned = false,
+                .persistent_changed = false,
+            };
         }
+        const persistent_changed = self.sessionIsPersistentLocked(handle);
         _ = try self.sessions.handleAck(
             handle,
             ack.packet_type,
             ack.packet_id,
             ack.reason_code,
         );
-        return true;
+        self.recordPersistentChangeLocked(persistent_changed);
+        return .{
+            .owned = true,
+            .persistent_changed = persistent_changed,
+        };
     }
 
     fn canonicalPublisherId(
@@ -3866,7 +4421,25 @@ pub const Broker = struct {
         slot: *ClientSlot,
     ) Error!void {
         while (true) {
-            if (try self.takeSessionPacketLocked(slot)) |packet_value| {
+            var take_changed = false;
+            const maybe_packet = self.takeSessionPacketLocked(
+                slot,
+                &take_changed,
+            ) catch |err| {
+                if (take_changed) {
+                    try self.appendCommitIfEnabled();
+                    self.finishPersistentChange(true);
+                }
+                return err;
+            };
+            if (take_changed or maybe_packet != null) {
+                // Commit logs retain their historical behavior of recording
+                // every selected Session packet, including retransmissions.
+                // Change autosave advances only for snapshot-visible changes.
+                try self.appendCommitIfEnabled();
+                self.finishPersistentChange(take_changed);
+            }
+            if (maybe_packet) |packet_value| {
                 var packet = packet_value;
                 defer packet.deinit();
                 // Selecting a durable QoS 1/2 message moves it from queued to
@@ -3874,7 +4447,6 @@ pub const Broker = struct {
                 // before the bytes can reach the peer, so restart retransmits
                 // the same identifier with DUP rather than inventing a new
                 // transaction.
-                try self.appendCommitIfEnabled();
                 slot.connection.?.writeSessionTransmission(
                     packet.transmission,
                     slot.connection.?.localMaximumQoS(),
@@ -3886,22 +4458,31 @@ pub const Broker = struct {
                         // remove that transaction and continue draining rather
                         // than permanently consuming Session inflight credit.
                         self.state_mutex.lockUncancelable(self.io);
-                        _ = self.sessions.dropOversizedPublish(
+                        const drop_action = self.sessions.dropOversizedPublish(
                             packet.handle,
                             packet.encoded.packet_id,
-                        ) catch {};
+                        ) catch null;
+                        const persistent_changed = drop_action != null and
+                            drop_action.? == .dropped and
+                            self.sessionIsPersistentLocked(packet.handle);
+                        self.recordPersistentChangeLocked(persistent_changed);
                         self.state_mutex.unlock(self.io);
+                        if (persistent_changed) {
+                            try self.appendCommitIfEnabled();
+                            self.finishPersistentChange(true);
+                        }
                         self.recordPublishDropped();
                         continue;
                     },
                     else => {
                         if (packet.encoded.kind != .pubrel) {
                             self.state_mutex.lockUncancelable(self.io);
-                            self.sessions.retryUnsentPublish(
+                            const retry = self.sessions.retryUnsentPublish(
                                 packet.handle,
                                 packet.encoded.packet_id,
-                            ) catch {};
+                            );
                             self.state_mutex.unlock(self.io);
+                            retry catch {};
                         }
                         return err;
                     },
@@ -3919,6 +4500,19 @@ pub const Broker = struct {
                         packet.route_id,
                         packet.encoded.packet_id,
                     );
+                    const current_handle = self.sessions.handleForRouteId(
+                        packet.route_id,
+                    );
+                    const completion_succeeded = if (completion) |_|
+                        true
+                    else |_|
+                        false;
+                    const persistent_changed = completion_succeeded and
+                        (if (current_handle) |value|
+                            self.sessionIsPersistentLocked(value)
+                        else
+                            false);
+                    self.recordPersistentChangeLocked(persistent_changed);
                     self.state_mutex.unlock(self.io);
                     // A concurrent ClientID takeover invalidates the old
                     // Session handle. Native QoS 0 completion is tied to that
@@ -3930,7 +4524,8 @@ pub const Broker = struct {
                         error.SessionNotFound => {},
                         else => return err,
                     };
-                    try self.appendCommitIfEnabled();
+                    if (persistent_changed) try self.appendCommitIfEnabled();
+                    self.finishPersistentChange(persistent_changed);
                 }
                 continue;
             }
@@ -4035,26 +4630,44 @@ pub const Broker = struct {
     fn takeSessionPacketLocked(
         self: *Broker,
         slot: *ClientSlot,
+        persistent_changed_out: *bool,
     ) Error!?EncodedSessionPacket {
+        persistent_changed_out.* = false;
         const handle = slot.session_handle orelse return null;
         const connection = &(slot.connection orelse return null);
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         const route_id = try self.sessions.routeId(handle);
         const client_id = try self.sessions.clientId(handle);
+        const persistent_session = self.sessionIsPersistentLocked(handle);
+        var persistent_changed = false;
+        errdefer {
+            persistent_changed_out.* = persistent_changed;
+            self.recordPersistentChangeLocked(persistent_changed);
+        }
 
         while (true) {
             var storage: [1]session_mod.Transmission = undefined;
-            const transmissions = self.sessions.drainInto(
+            var selection_changed = false;
+            const transmissions = self.sessions.drainIntoTrackingSnapshotChange(
                 handle,
                 std.Io.Clock.awake.now(self.io),
                 connection.max_outgoing_inflight,
                 &storage,
-            ) catch |err| switch (err) {
-                error.SessionNotFound => return null,
-                else => return err,
+                &selection_changed,
+            ) catch |err| {
+                persistent_changed = persistent_changed or
+                    (persistent_session and selection_changed);
+                if (err == error.SessionNotFound) return null;
+                return err;
             };
-            if (transmissions.len == 0) return null;
+            persistent_changed = persistent_changed or
+                (persistent_session and selection_changed);
+            if (transmissions.len == 0) {
+                persistent_changed_out.* = persistent_changed;
+                self.recordPersistentChangeLocked(persistent_changed);
+                return null;
+            }
             const transmission = transmissions[0];
             if (transmission == .publish and
                 !self.deliveryAuthorized(slot.listener_access_control, .{
@@ -4071,10 +4684,12 @@ pub const Broker = struct {
                 // inflight messages when read ACL policy changes. A PUBREL is
                 // never dropped: the peer has already accepted that QoS 2
                 // PUBLISH and its handshake must be completed.
-                _ = try self.sessions.dropOutgoingPublish(
+                const drop_action = try self.sessions.dropOutgoingPublish(
                     handle,
                     transmission.publish.packet_id,
                 );
+                persistent_changed = persistent_changed or
+                    (persistent_session and drop_action == .dropped);
                 continue;
             }
             if (transmission == .publish and
@@ -4088,10 +4703,12 @@ pub const Broker = struct {
                 // must not abort the connection or permanently block later
                 // visible messages. This follows the same fail-closed/drop
                 // policy as a delivery whose read ACL changed while offline.
-                _ = try self.sessions.dropOutgoingPublish(
+                const drop_action = try self.sessions.dropOutgoingPublish(
                     handle,
                     transmission.publish.packet_id,
                 );
+                persistent_changed = persistent_changed or
+                    (persistent_session and drop_action == .dropped);
                 continue;
             }
             const encoded = session_route.encodeTransmission(
@@ -4109,6 +4726,8 @@ pub const Broker = struct {
                 }
                 return err;
             };
+            persistent_changed_out.* = persistent_changed;
+            self.recordPersistentChangeLocked(persistent_changed);
             return .{
                 .encoded = encoded,
                 .transmission = transmission,
@@ -4125,12 +4744,25 @@ pub const Broker = struct {
             self.state_mutex.lockUncancelable(self.io);
             const now = std.Io.Clock.awake.now(self.io);
             const expired_count = self.pruneExpiredSessionRoutesLocked(now);
-            const published_any = self.publishDueWillsLocked(
+            var published_any = false;
+            self.publishDueWillsLocked(
                 now,
+                &published_any,
             ) catch |err| {
+                // Completed Wills from earlier iterations remain committed;
+                // the failing claim itself has been returned to the heap.
+                const persistent_changed = published_any or
+                    expired_count != 0;
+                self.recordPersistentChangeLocked(persistent_changed);
                 self.state_mutex.unlock(self.io);
+                if (persistent_changed) {
+                    self.appendCommitIfEnabled() catch {};
+                    self.finishPersistentChange(true);
+                }
                 return err;
             };
+            const persistent_changed = published_any or expired_count != 0;
+            self.recordPersistentChangeLocked(persistent_changed);
             // `$SYS` publication itself uses the state lock and ordinary
             // routing. Decide whether it is due here, but advance the next
             // deadline only after a complete snapshot is published. A failed
@@ -4167,6 +4799,7 @@ pub const Broker = struct {
 
             if (published_any or expired_count != 0) {
                 self.appendCommitIfEnabled() catch |err| return err;
+                self.finishPersistentChange(persistent_changed);
             }
             if (published_any) {
                 self.flushAllSlots() catch |err| return err;
@@ -4201,13 +4834,18 @@ pub const Broker = struct {
     fn publishDueWillsLocked(
         self: *Broker,
         now: std.Io.Timestamp,
-    ) Error!bool {
-        var published_any = false;
+        published_any: *bool,
+    ) Error!void {
         while (self.wills.pollOneDue(now)) |handle| {
-            try self.publishWillLocked(handle, now);
-            published_any = true;
+            self.publishWillLocked(handle, now) catch |err| {
+                // `pollOneDue` removes the entry from its heap. Roll that
+                // claim back when routing cannot commit, otherwise the Will
+                // becomes unreachable and every live snapshot stays busy.
+                self.wills.retryDue(handle) catch {};
+                return err;
+            };
+            published_any.* = true;
         }
-        return published_any;
     }
 
     fn flushAllSlots(self: *Broker) Error!void {
@@ -4268,11 +4906,13 @@ pub const Broker = struct {
                 }
             }
         }
+        var persistent_changed = false;
         const plan = try self.enqueuePublishLocked(
             publisher_id,
             publish,
             will.client_id,
             now,
+            &persistent_changed,
         );
         defer self.allocator.free(plan.storage);
         try self.wills.releaseDue(handle);
@@ -4370,7 +5010,7 @@ const ClientTask = struct {
                     task.broker.state_mutex.lockUncancelable(
                         task.broker.io,
                     );
-                    const session_owned =
+                    const session_ack =
                         task.broker.handleSessionAckLocked(
                             slot,
                             owned.ack,
@@ -4382,13 +5022,16 @@ const ClientTask = struct {
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
-                    if (session_owned) {
+                    if (session_ack.persistent_changed) {
                         task.broker.appendCommitIfEnabled() catch |err| {
                             slot.writer_mutex.unlock(task.broker.io);
                             return err;
                         };
+                        task.broker.finishPersistentChange(
+                            session_ack.persistent_changed,
+                        );
                     }
-                    if (!session_owned) connection.applyPubAck(
+                    if (!session_ack.owned) connection.applyPubAck(
                         owned.ack,
                     ) catch |err| {
                         slot.writer_mutex.unlock(task.broker.io);
@@ -4405,7 +5048,7 @@ const ClientTask = struct {
                     task.broker.state_mutex.lockUncancelable(
                         task.broker.io,
                     );
-                    const session_owned =
+                    const session_ack =
                         task.broker.handleSessionAckLocked(
                             slot,
                             owned.ack,
@@ -4417,20 +5060,23 @@ const ClientTask = struct {
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
-                    if (session_owned) {
+                    if (session_ack.persistent_changed) {
                         task.broker.appendCommitIfEnabled() catch |err| {
                             slot.writer_mutex.unlock(task.broker.io);
                             return err;
                         };
+                        task.broker.finishPersistentChange(
+                            session_ack.persistent_changed,
+                        );
                     }
-                    if (!session_owned) connection.applyPubRec(
+                    if (!session_ack.owned) connection.applyPubRec(
                         owned.ack,
                     ) catch |err| {
                         slot.writer_mutex.unlock(task.broker.io);
                         return err;
                     };
                     slot.writer_mutex.unlock(task.broker.io);
-                    if (session_owned) {
+                    if (session_ack.owned) {
                         try task.broker.flushSlot(
                             task.slot_index,
                             slot,
@@ -4450,7 +5096,7 @@ const ClientTask = struct {
                     task.broker.state_mutex.lockUncancelable(
                         task.broker.io,
                     );
-                    const session_owned =
+                    const session_ack =
                         task.broker.handleSessionAckLocked(
                             slot,
                             owned.ack,
@@ -4462,13 +5108,16 @@ const ClientTask = struct {
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
-                    if (session_owned) {
+                    if (session_ack.persistent_changed) {
                         task.broker.appendCommitIfEnabled() catch |err| {
                             slot.writer_mutex.unlock(task.broker.io);
                             return err;
                         };
+                        task.broker.finishPersistentChange(
+                            session_ack.persistent_changed,
+                        );
                     }
-                    if (!session_owned) connection.applyPubComp(
+                    if (!session_ack.owned) connection.applyPubComp(
                         owned.ack,
                     ) catch |err| {
                         slot.writer_mutex.unlock(task.broker.io);

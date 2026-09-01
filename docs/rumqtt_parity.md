@@ -32,7 +32,7 @@ and equal-wire broker results are kept separate.
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
-| Broker persistence | Atomic versioned snapshots plus an opt-in fsynced append journal for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages |
+| Broker persistence | Atomic versioned snapshots plus opt-in interval- or durable-change-count-driven live checkpoints, and a separate opt-in fsynced append journal, for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages; Mosquitto can interpret its autosave threshold as elapsed seconds or persistence changes |
 | Observability | `Broker.stats()` takes one allocation-free, state-locked snapshot of uptime, admitted CONNECT count, live connections, the process high-water connection count, cumulative expired Sessions, complete MQTT Control Packet/message and MQTT-byte counters, inbound/outbound/dropped PUBLISH counters and payload-byte counters, connected/offline Sessions, ordinary/shared subscriptions, retained state, live queues, durable queues/inflight, inbound QoS 2 and scheduled Wills, including owned byte gauges. `publishSystemStats()` and `system_stats_interval` publish the snapshot as retained QoS 0 `$SYS` messages through normal routing and ACL checks, including Mosquitto-compatible `$SYS/broker/uptime`, cumulative message/byte/client/PUBLISH topics, and 1/5/15-minute EWMA connection, message, PUBLISH, drop, and byte rates. Wire counters are shared atomics below the broker state lock, span TCP/TLS/WS/WSS, count CONNECT before admission and successful CONNACK/control writes, and exclude lower-transport framing. Drops count per destination rejected by a live or durable queue bound or negotiated Maximum Packet Size; ordinary no-match, ACL denial, and expiry are distinct outcomes. Like Mosquitto, `$SYS` updates actually written to subscribers contribute to the following sent-PUBLISH and total-message/byte snapshots | Mosquitto periodically publishes a broad counter/gauge and rolling-load set through `$SYS`; rumqttd exposes metrics through its server architecture |
 
 ## One-way inbound broker bridge
@@ -188,10 +188,11 @@ and a real new-broker reconnect with Session Present plus restored live
 routing. Scheduled-Will tests cover downtime deadline reduction, canonical
 publisher restoration, reconnect cancellation, driver publication after an
 actual broker restart and retained-Will storage. This snapshot surface still
-has narrower online autosave/plugin integration than Mosquitto, but tests now
-also cover inbound QoS 2 body ownership, downtime expiry, Clean Start cleanup,
-real broker restart, Session Present, post-restart PUBREL routing and duplicate
-PUBREL idempotence.
+has narrower persistence-plugin integration than Mosquitto, but supports both
+elapsed-time and persistent-change-count live autosave. Tests also cover
+inbound QoS 2 body ownership, downtime expiry, Clean Start cleanup, real broker
+restart, Session Present, post-restart PUBREL routing and duplicate PUBREL
+idempotence.
 
 ## Incremental commit log
 
@@ -238,14 +239,25 @@ The netz broker is a finite process for deterministic teardown:
 zig build run-mqtt-broker -Doptimize=ReleaseFast -- \
   --bind=127.0.0.1:18883 --connections=8 \
   --max-queued-deliveries=1024 --max-outgoing-inflight=64 \
-  --persistence=netz-mqtt.db --autosave-interval-seconds=30
+  --persistence=netz-mqtt.db --autosave-interval-seconds=30 \
+  --autosave-change-count=100
 ```
 
 The finite example restores that snapshot before accepting clients and saves
 again after all configured connections exit. With the autosave interval above,
 it also writes live checkpoints while clients remain connected;
 `--no-restore` starts from an empty in-memory state but still writes periodic
-and final snapshots. `zig build interop-mqtt-live-autosave
+and final snapshots. The change-count option currently writes after 100 broker
+operations that change snapshot-backed state. A compound publish/fanout or
+lifecycle operation counts once, and periodic `$SYS` refreshes are excluded so
+telemetry cannot force checkpoint churn. Both positive thresholds may be
+enabled together; either trigger writes the same atomic destination, and the
+broker serializes concurrent snapshot writers. Both require `--persistence`
+and are rejected with `--commit-log`, which already journals each
+protocol-visible durable boundary. Change-triggered checkpoint failures remain
+pending for retry and are exposed by `Broker.persistentChangeAutosaveError`
+rather than retroactively failing an MQTT operation whose in-memory mutation
+has already committed. `zig build interop-mqtt-live-autosave
 -Doptimize=ReleaseFast` creates a durable subscription, waits for an autosave,
 kills the broker without its final save, restores the database in a fresh
 process, and verifies Session Present plus live routing through the restored
@@ -1626,9 +1638,12 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    2 transactions remain intentionally excluded; opt-in offline QoS 0 and
    inbound QoS 2 owned by a durable Session are restored.
    Tests cover both direct state and a real active broker connection remaining
-   usable after checkpoint, followed by restore. The production example now
-   accepts `--autosave-interval-seconds=N`, and the process gate above proves a
-   periodic checkpoint survives forced termination with both subscription
+   usable after checkpoint, followed by restore. The production example accepts
+   `--autosave-interval-seconds=N` and `--autosave-change-count=N`; the latter
+   counts broker operations that change snapshot-backed durable state instead
+   of elapsed time, providing the first bounded Mosquitto-style
+   `autosave_on_changes` policy surface. The process gate above proves
+   a periodic checkpoint survives forced termination with both subscription
    metadata and an opt-in offline QoS 0 delivery intact. The append journal
    closes the interval between checkpoints for protocol-visible durable
    mutations. Cross-node replication/consensus remains separate work.

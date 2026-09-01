@@ -282,11 +282,11 @@ pub const Store = struct {
         var iterator = self.entries.iterator();
         while (iterator.next()) |entry| {
             if (!publisherExists(context, entry.key_ptr.publisher_id)) {
-                if (skip_transient_publishers and
-                    sessionRouteId(entry.key_ptr.publisher_id) == null)
-                {
-                    continue;
-                }
+                // Live checkpoints omit every transaction whose owner is not
+                // a persistent Session. Broker canonicalization gives even a
+                // transient connection a route-shaped identifier, so the tag
+                // alone cannot distinguish durable from transient ownership.
+                if (skip_transient_publishers) continue;
                 return error.CorruptSnapshot;
             }
             if (remainingExpiryNs(
@@ -303,11 +303,7 @@ pub const Store = struct {
         iterator = self.entries.iterator();
         while (iterator.next()) |entry| {
             if (!publisherExists(context, entry.key_ptr.publisher_id) and
-                skip_transient_publishers and
-                sessionRouteId(entry.key_ptr.publisher_id) == null)
-            {
-                continue;
-            }
+                skip_transient_publishers) continue;
             const pending = entry.value_ptr.*;
             const remaining_ns = remainingExpiryNs(
                 pending,

@@ -3032,6 +3032,22 @@ test "public modules are reachable" {
         "restoreSnapshot",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "ChangeAutosaveOptions",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.ChangeAutosaveOptions,
+        "dir",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.ChangeAutosaveOptions,
+        "sub_path",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.ChangeAutosaveOptions,
+        "max_changes",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "stats",
     ));
@@ -3071,6 +3087,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker.Options,
         "system_stats_interval",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Options,
+        "persistent_change_autosave",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "persistentChangeAutosaveError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "drainIntoTrackingSnapshotChange",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Scheduler,
+        "retryDue",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.router.Router,

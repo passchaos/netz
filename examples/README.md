@@ -46,6 +46,21 @@ The finite `run-mqtt-broker` example enables this with
 configured connection batch exits. Pass `--no-restore` to replace an existing
 database with a fresh run.
 
+`--autosave-change-count=N` additionally writes a live snapshot after `N`
+broker operations that change snapshot-backed state, including durable Session,
+subscription, queued-delivery, acknowledgement, inbound QoS 2, retained-message,
+and Will lifecycle transitions. One operation counts once even when it changes
+several stores or fans out to several durable Sessions. Periodic `$SYS` refreshes
+are excluded so telemetry cannot force checkpoint churn. The option requires
+`--persistence`, and `N` must be greater than zero. It may be combined with
+`--autosave-interval-seconds=N`; both triggers target the same atomic snapshot
+file, and whichever trigger becomes due writes the next checkpoint. Snapshot
+autosave modes are intentionally incompatible with `--commit-log`, whose
+fsynced records provide a separate durability policy. Change-triggered writes
+are best effort after the corresponding broker mutation has committed; failures
+remain pending for a later retry and are available through
+`Broker.persistentChangeAutosaveError`.
+
 Trusted reverse proxies can prepend HAProxy PROXY protocol metadata with
 `--proxy-protocol=1` or `--proxy-protocol=2`. For v2,
 `--proxy-v2-require-tls` and `--proxy-v2-require-client-certificate` reject

@@ -99,6 +99,13 @@ pub const EnqueueResult = enum {
     expired,
 };
 
+pub const EnqueueOptions = struct {
+    qos: mqtt.QoS,
+    retain: bool = false,
+    properties: []const mqtt.Property = &.{},
+    now: std.Io.Timestamp,
+};
+
 pub const PublishTransmission = struct {
     topic: []const u8,
     payload: []const u8,
@@ -1471,13 +1478,30 @@ pub const Store = struct {
         handle: Handle,
         topic: []const u8,
         payload: []const u8,
-        options: struct {
-            qos: mqtt.QoS,
-            retain: bool = false,
-            properties: []const mqtt.Property = &.{},
-            now: std.Io.Timestamp,
-        },
+        options: EnqueueOptions,
     ) Error!EnqueueResult {
+        var ignored_snapshot_change = false;
+        return self.enqueuePublishTrackingSnapshotChange(
+            handle,
+            topic,
+            payload,
+            options,
+            &ignored_snapshot_change,
+        );
+    }
+
+    /// Like `enqueuePublish`, while also reporting expiry pruning performed
+    /// before admission. This lets broker persistence account for a real
+    /// deletion even when the new message is expired or the queue is full.
+    pub fn enqueuePublishTrackingSnapshotChange(
+        self: *Store,
+        handle: Handle,
+        topic: []const u8,
+        payload: []const u8,
+        options: EnqueueOptions,
+        snapshot_changed: *bool,
+    ) Error!EnqueueResult {
+        snapshot_changed.* = false;
         try mqtt.validateTopicName(topic);
         try mqtt.validatePublishProperties(options.properties);
         try validateQueuedPayload(options.properties, payload);
@@ -1491,7 +1515,10 @@ pub const Store = struct {
         // that reaches/crosses the threshold is retained, while later messages
         // wait for draining or expiry to release byte budget. Prune first so an
         // expired head never blocks a fresh Application Message.
-        self.pruneExpiredPublishes(session, options.now.nanoseconds);
+        snapshot_changed.* = self.pruneExpiredPublishes(
+            session,
+            options.now.nanoseconds,
+        );
         // A selected QoS 0 publication still consumes the same logical queue
         // count and payload-byte admission budget until its socket write is
         // committed. This prevents concurrent routing from exceeding the
@@ -1548,6 +1575,7 @@ pub const Store = struct {
         session.allocation_bytes += publish.allocation_bytes;
         self.total_bytes += publish.allocation_bytes;
         publish = undefined;
+        snapshot_changed.* = true;
         return .queued;
     }
 
@@ -1560,9 +1588,35 @@ pub const Store = struct {
         receive_maximum: u16,
         out: []Transmission,
     ) Error![]Transmission {
+        var ignored_snapshot_change = false;
+        return self.drainIntoTrackingSnapshotChange(
+            handle,
+            now,
+            receive_maximum,
+            out,
+            &ignored_snapshot_change,
+        );
+    }
+
+    /// Like `drainInto`, while reporting whether selection changed the durable
+    /// snapshot representation. Retransmission flags and the temporary QoS 0
+    /// write owner are deliberately excluded because snapshots do not encode
+    /// those distinctions.
+    pub fn drainIntoTrackingSnapshotChange(
+        self: *Store,
+        handle: Handle,
+        now: std.Io.Timestamp,
+        receive_maximum: u16,
+        out: []Transmission,
+        snapshot_changed: *bool,
+    ) Error![]Transmission {
+        snapshot_changed.* = false;
         if (receive_maximum == 0) return error.InvalidProperty;
         const session = try self.getSession(handle);
-        self.pruneExpiredPublishes(session, now.nanoseconds);
+        snapshot_changed.* = self.pruneExpiredPublishes(
+            session,
+            now.nanoseconds,
+        );
         // The returned slices borrow Session-owned memory. The caller must
         // finish or roll back a previously selected QoS 0 publication before
         // requesting another batch.
@@ -1714,6 +1768,10 @@ pub const Store = struct {
                     session.inflight_payload_bytes,
                     publish.payload.len,
                 ) catch unreachable;
+                // This is the only drain transition that changes serialized
+                // ownership: queued QoS 1/2 becomes inflight and consumes a
+                // persistent Packet Identifier.
+                snapshot_changed.* = true;
                 publish_window_used += 1;
                 out[written] = .{ .publish = publishTransmission(
                     session.inflight.items[inflight_index].?,
@@ -2034,7 +2092,8 @@ pub const Store = struct {
         self: *Store,
         session: *Session,
         now_ns: i96,
-    ) void {
+    ) bool {
+        var changed = false;
         for (session.queued.items[session.queued_head..]) |*maybe_publish| {
             if (maybe_publish.*) |publish| {
                 if (remainingExpiry(publish, now_ns) != 0) continue;
@@ -2045,6 +2104,7 @@ pub const Store = struct {
                 session.allocation_bytes -= removed.allocation_bytes;
                 self.total_bytes -= removed.allocation_bytes;
                 removed.deinit(self.allocator);
+                changed = true;
             }
         }
         advanceQueueHead(session);
@@ -2057,7 +2117,9 @@ pub const Store = struct {
                 continue;
             }
             self.removeInflight(session, index);
+            changed = true;
         }
+        return changed;
     }
 
     fn removeInflight(
