@@ -8,6 +8,21 @@ const Server = runtime.Server;
 const flag_end_stream: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
 
+fn writeAll(io: std.Io, stream: std.Io.net.Stream, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const count = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[written..],
+            &.{""},
+            0,
+        );
+        if (count == 0) return error.SocketUnconnected;
+        written += count;
+    }
+}
+
 test "HTTP/2 request writer streams with flow control and trailers" {
     const allocator = std.testing.allocator;
     const first = "request-writer-first-" ** 2048;
@@ -928,6 +943,10 @@ test "HTTP/2 duplex request HEADERS timeout resumes CONTINUATION" {
                     .fromMilliseconds(20),
                 ),
             );
+            try std.testing.expectError(
+                error.UnexpectedFrame,
+                connection.readRequestWithTimeout(.fromMilliseconds(20)),
+            );
             self.timed_out.set(self.server.io);
             var stream = try connection.acceptDuplexRequestWithTimeout(
                 .fromSeconds(1),
@@ -982,6 +1001,142 @@ test "HTTP/2 duplex request HEADERS timeout resumes CONTINUATION" {
     );
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client duplex queues sibling response without livelock" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            var batch: std.ArrayList(u8) = .empty;
+            defer batch.deinit(self.server.allocator);
+            const sibling_block = try connection.hpack_encoder
+                .encodeBlockRetained(self.server.allocator, &.{
+                .{ .name = ":status", .value = "200" },
+                .{ .name = "content-length", .value = "7" },
+                .{ .name = "x-shared", .value = "sibling-value" },
+            });
+            const split = @max(@as(usize, 1), sibling_block.len / 2);
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .headers,
+                    .flags = 0,
+                    .stream_id = second.stream_id,
+                },
+                .payload = sibling_block[0..split],
+            }).write(&batch, self.server.allocator);
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .continuation,
+                    .flags = flag_end_headers,
+                    .stream_id = second.stream_id,
+                },
+                .payload = sibling_block[split..],
+            }).write(&batch, self.server.allocator);
+            const active_block = try connection.hpack_encoder
+                .encodeBlockRetained(self.server.allocator, &.{
+                .{ .name = ":status", .value = "200" },
+                .{ .name = "content-length", .value = "6" },
+                .{ .name = "x-shared", .value = "sibling-value" },
+            });
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .headers,
+                    .flags = flag_end_headers,
+                    .stream_id = first.stream_id,
+                },
+                .payload = active_block,
+            }).write(&batch, self.server.allocator);
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .data,
+                    .flags = flag_end_stream,
+                    .stream_id = second.stream_id,
+                },
+                .payload = "sibling",
+            }).write(&batch, self.server.allocator);
+            try (http2.Frame{
+                .header = .{
+                    .length = 0,
+                    .frame_type = .data,
+                    .flags = flag_end_stream,
+                    .stream_id = first.stream_id,
+                },
+                .payload = "active",
+            }).write(&batch, self.server.allocator);
+            try writeAll(
+                self.server.io,
+                connection.stream,
+                batch.items,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var connection = try Client.connect(allocator, io, server.address(), .{});
+    defer connection.close();
+    var first_writer = try connection.startRequest(.{
+        .path = "/active",
+        .authority = "localhost",
+    });
+    defer first_writer.deinit();
+    var stream = try first_writer.beginDuplex();
+    defer stream.deinit();
+    _ = try stream.finishRequest();
+    const sibling = try runtime.testing.sendCompleteRequest(&connection, .{
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    var head = try stream.readResponseEventWithTimeout(.fromSeconds(1));
+    defer head.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), head.head.status);
+    var data = try stream.readResponseEvent();
+    defer data.deinit(allocator);
+    try std.testing.expectEqualStrings("active", data.data.data);
+    var done = try stream.readResponseEvent();
+    defer done.deinit(allocator);
+    try std.testing.expect(done == .finished);
+
+    var sibling_response = try connection.readResponseWithTimeout(
+        sibling.stream_id,
+        sibling.request_method,
+        sibling.extended_connect,
+        .fromSeconds(1),
+    );
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualStrings("sibling", sibling_response.body);
+    try std.testing.expectEqual(@as(u16, 200), sibling_response.status);
 
     thread.join();
     joined = true;
