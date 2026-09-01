@@ -3001,6 +3001,14 @@ pub const Connection = struct {
     /// makes a PING wait fail after consuming one more frame from the wire. It
     /// follows the queued prefix and keeps the next application read lossless.
     pending_application_overflow: ?OwnedFrame = null,
+    /// A duplex stream owns the connection frame reader until both HTTP/2
+    /// halves close or it is explicitly abandoned. This catches accidental
+    /// construction of two step drivers; ordinary APIs retain their documented
+    /// requirement not to race a duplex owner.
+    duplex_reader_active: bool = false,
+    /// A bounded duplex accept retains an incomplete HEADERS/CONTINUATION
+    /// sequence here so timeout never discards connection-wide HPACK input.
+    pending_duplex_request_head: ?DuplexHeaderBlock = null,
     /// Awake-clock timestamp of the last frame removed from transport. Queued
     /// application frames were already accounted for at ingress and therefore
     /// do not make an idle connection look newly active when later consumed.
@@ -3106,6 +3114,9 @@ pub const Connection = struct {
         }
         if (self.pending_application_overflow) |*frame| {
             frame.deinit(self.allocator);
+        }
+        if (self.pending_duplex_request_head) |*head| {
+            head.deinit(self.allocator);
         }
         self.frame_reader.deinit(self.allocator);
         self.transportForIo().close();
@@ -6181,6 +6192,159 @@ pub const Connection = struct {
         );
     }
 
+    /// Begin a step-driven request receive. The returned object owns the sole
+    /// connection frame reader and keeps the response half independently open.
+    pub fn acceptDuplexRequest(
+        self: *Connection,
+    ) Error!ServerDuplexStream {
+        return self.acceptDuplexRequestUntil(null);
+    }
+
+    pub fn acceptDuplexRequestWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!ServerDuplexStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptDuplexRequestWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn acceptDuplexRequestWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ServerDuplexStream {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptDuplexRequestUntil(deadline);
+    }
+
+    fn acceptDuplexRequestUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ServerDuplexStream {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.role != .server or self.duplex_reader_active) {
+            return error.UnexpectedFrame;
+        }
+        if (self.pending_duplex_request_head) |*pending| {
+            const stream_id = pending.stream_id;
+            const end_stream = pending.end_stream;
+            const headers = (pending.resumeUntil(self, deadline) catch |err| {
+                if (err != error.Timeout) {
+                    pending.deinit(self.allocator);
+                    self.pending_duplex_request_head = null;
+                    self.cancelPeerRequest(stream_id);
+                }
+                return err;
+            }).?;
+            pending.deinit(self.allocator);
+            self.pending_duplex_request_head = null;
+            return self.finishAcceptedDuplexRequest(
+                stream_id,
+                headers,
+                end_stream,
+            );
+        }
+        while (true) {
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) continue;
+            if (frame.frame.header.frame_type != .headers) {
+                return error.UnexpectedFrame;
+            }
+
+            const stream_id = frame.frame.header.stream_id;
+            const admission = try self.claimPeerRequestStream(stream_id);
+            if (admission != .admitted) {
+                try self.refusePeerRequestStreamUntil(
+                    stream_id,
+                    frame.frame,
+                    deadline,
+                    admission == .refused_reset_sent,
+                );
+                continue;
+            }
+            self.pending_duplex_request_head = DuplexHeaderBlock.init(
+                self,
+                frame.frame,
+            ) catch |err| {
+                self.cancelPeerRequest(stream_id);
+                return err;
+            };
+            const pending = &self.pending_duplex_request_head.?;
+            const end_stream = pending.end_stream;
+            const headers = (pending.resumeUntil(self, deadline) catch |err| {
+                if (err != error.Timeout) {
+                    pending.deinit(self.allocator);
+                    self.pending_duplex_request_head = null;
+                    self.cancelPeerRequest(stream_id);
+                }
+                return err;
+            }).?;
+            pending.deinit(self.allocator);
+            self.pending_duplex_request_head = null;
+            return self.finishAcceptedDuplexRequest(
+                stream_id,
+                headers,
+                end_stream,
+            );
+        }
+    }
+
+    fn finishAcceptedDuplexRequest(
+        self: *Connection,
+        stream_id: u31,
+        headers: []http2.Hpack.HeaderField,
+        end_stream: bool,
+    ) Error!ServerDuplexStream {
+        errdefer freeHeaders(self.allocator, headers);
+        errdefer self.cancelPeerRequest(stream_id);
+        try validateHeaderBlock(headers, .request);
+        const lookup = try requestHeaderLookup(headers);
+        const method = lookup.method orelse return error.MissingPseudoHeader;
+        const protocol = lookup.protocol;
+        if (protocol != null and !self.limits.enable_connect_protocol) {
+            return error.ExtendedConnectDisabled;
+        }
+        const is_connect = methodIsConnect(method);
+        const extended_connect = is_connect and protocol != null;
+        if (is_connect and !extended_connect and
+            (lookup.content_length orelse 0) != 0)
+        {
+            return error.InvalidContentLength;
+        }
+        if ((lookup.content_length orelse 0) > self.limits.max_body_bytes) {
+            return error.MessageTooLarge;
+        }
+        const request_priority = self.effectiveRequestPriority(
+            stream_id,
+            lookup.priority,
+        );
+        try self.rememberResponseSemantics(
+            stream_id,
+            method,
+            protocol,
+            request_priority,
+        );
+        self.duplex_reader_active = true;
+        return .{
+            .connection = self,
+            .stream_id = stream_id,
+            .headers = headers,
+            .method = method,
+            .path = lookup.path orelse "",
+            .scheme = lookup.scheme orelse "",
+            .authority = lookup.requestAuthority(),
+            .protocol = protocol,
+            .expected_request_length = lookup.content_length,
+            .request_finished = end_stream or
+                (is_connect and !extended_connect),
+            .priority = request_priority,
+        };
+    }
+
     fn readRequestStreamingWithHeadUntil(
         self: *Connection,
         context: anytype,
@@ -7434,6 +7598,15 @@ pub const Connection = struct {
     }
 
     pub fn writeResponse(self: *Connection, stream_id: u31, options: ResponseOptions) Error!void {
+        return self.writeResponseInternal(stream_id, options, true);
+    }
+
+    fn writeResponseInternal(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        release_stream: bool,
+    ) Error!void {
         if (self.role != .server) return error.UnexpectedFrame;
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
@@ -7507,7 +7680,7 @@ pub const Connection = struct {
             }
             if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
         }
-        self.releasePeerStream(stream_id);
+        if (release_stream) self.releasePeerStream(stream_id);
     }
 
     /// Start a response whose DATA is supplied incrementally.
@@ -7520,6 +7693,15 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
         options: StreamingResponseOptions,
+    ) Error!ResponseWriter {
+        return self.startResponseInternal(stream_id, options, true);
+    }
+
+    fn startResponseInternal(
+        self: *Connection,
+        stream_id: u31,
+        options: StreamingResponseOptions,
+        release_at_headers: bool,
     ) Error!ResponseWriter {
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) {
@@ -7603,7 +7785,9 @@ pub const Connection = struct {
             self.releasePeerStream(stream_id);
             return err;
         };
-        if (ends_at_headers) self.releasePeerStream(stream_id);
+        if (ends_at_headers and release_at_headers) {
+            self.releasePeerStream(stream_id);
+        }
         return .{
             .connection = self,
             .stream_id = stream_id,
@@ -11058,6 +11242,108 @@ pub const Connection = struct {
         }
     }
 
+    /// Duplex counterpart to `writeDataTracked`. Response frames already in
+    /// the queue, or encountered while waiting for credit, are preserved and
+    /// reported without implicitly closing the request half.
+    fn writeDataDuplexTracked(
+        self: *Connection,
+        stream_id: u31,
+        data: []const u8,
+        end_stream: bool,
+        written: *usize,
+    ) Error!void {
+        if (!self.outboundStreamIsActive(stream_id)) {
+            return error.InvalidStreamId;
+        }
+        written.* = 0;
+        if (self.pendingApplicationFrameCount() != 0) {
+            return error.ResponseAvailable;
+        }
+        if (data.len == 0) {
+            try writeFrameTransport(
+                self.allocator,
+                self.transportForIo(),
+                .data,
+                if (end_stream) flag_end_stream else 0,
+                stream_id,
+                &.{},
+            );
+            return;
+        }
+
+        const chunk_size = self.outboundFramePayloadLimit();
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const stream_window = try self.sendStreamWindow(stream_id);
+            const available_credit = @min(
+                data.len - offset,
+                self.send_connection_window.available(),
+                stream_window.available(),
+            );
+            if (available_credit == 0) {
+                self.waitForDuplexSendCapacity(stream_id) catch |err| {
+                    written.* = offset;
+                    return err;
+                };
+                continue;
+            }
+            const burst_limit = std.math.mul(
+                usize,
+                chunk_size,
+                max_data_frames_per_write,
+            ) catch std.math.maxInt(usize);
+            const burst_len = @min(available_credit, burst_limit);
+            try self.writeDataBurst(
+                stream_id,
+                data[offset..][0..burst_len],
+                end_stream and offset + burst_len == data.len,
+                chunk_size,
+                stream_window,
+            );
+            offset += burst_len;
+            written.* = offset;
+        }
+    }
+
+    fn waitForDuplexSendCapacity(
+        self: *Connection,
+        stream_id: u31,
+    ) Error!void {
+        while (self.send_connection_window.available() == 0 or
+            (try self.sendStreamWindow(stream_id)).available() == 0)
+        {
+            var frame = try self.readOwnedFrame();
+            var frame_owned = true;
+            defer if (frame_owned) frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                try self.handleGoAwayForStream(stream_id, goaway);
+                continue;
+            }
+            if (frame.frame.header.stream_id != stream_id) {
+                return error.UnexpectedFrame;
+            }
+            switch (frame.frame.header.frame_type) {
+                .headers, .data, .push_promise => {
+                    try self.queuePendingApplicationFrame(frame);
+                    frame_owned = false;
+                    return error.ResponseAvailable;
+                },
+                .rst_stream => {
+                    _ = try http2.ResetStreamPayload.parse(frame.frame);
+                    // Preserve the terminal frame for the duplex event API so
+                    // callers receive the typed reset even when it arrived
+                    // while a write was pumping flow-control updates.
+                    try self.queuePendingApplicationFrame(frame);
+                    frame_owned = false;
+                    return error.ResponseAvailable;
+                },
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
     fn writeDataBurst(
         self: *Connection,
         stream_id: u31,
@@ -12199,6 +12485,25 @@ pub const RequestWriter = struct {
         return response;
     }
 
+    /// Transfer this request's two half-streams to a single step-driven owner.
+    /// The original writer becomes inert and must not be used again.
+    pub fn beginDuplex(self: *RequestWriter) Error!ClientDuplexStream {
+        if (self.completed or self.connection.duplex_reader_active) {
+            return error.UnexpectedFrame;
+        }
+        self.connection.duplex_reader_active = true;
+        const duplex = ClientDuplexStream{
+            .connection = self.connection,
+            .stream_id = self.stream_id,
+            .expected_request_length = self.expected_length,
+            .request_written = self.written,
+            .request_finished = self.body_finished,
+            .head_request = self.head_request,
+        };
+        self.completed = true;
+        return duplex;
+    }
+
     pub fn reset(
         self: *RequestWriter,
         error_code: http2.ErrorCode,
@@ -12233,6 +12538,1009 @@ pub const RequestWriter = struct {
                 return error.InvalidContentLength;
             }
         }
+    }
+};
+
+pub const DuplexResponseHead = struct {
+    headers: []http2.Hpack.HeaderField,
+    status: u16,
+
+    pub fn deinit(self: *DuplexResponseHead, allocator: std.mem.Allocator) void {
+        freeHeaders(allocator, self.headers);
+        self.* = undefined;
+    }
+};
+
+pub const DuplexData = struct {
+    frame: OwnedFrame,
+    data: []const u8,
+
+    pub fn deinit(self: *DuplexData, allocator: std.mem.Allocator) void {
+        self.frame.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const DuplexHeaderBlock = struct {
+    stream_id: u31,
+    end_stream: bool,
+    end_headers: bool,
+    continuation_count: usize = 0,
+    bytes: std.ArrayList(u8) = .empty,
+
+    fn init(
+        connection: *Connection,
+        first: http2.Frame,
+    ) Error!DuplexHeaderBlock {
+        const first_headers = try http2.HeadersPayload.parse(first);
+        if (first_headers.priority) |priority| {
+            if (priority.stream_dependency == first.header.stream_id) {
+                return error.InvalidFrame;
+            }
+        }
+        var result = DuplexHeaderBlock{
+            .stream_id = first.header.stream_id,
+            .end_stream = (first.header.flags & flag_end_stream) != 0,
+            .end_headers = (first.header.flags & flag_end_headers) != 0,
+        };
+        errdefer result.deinit(connection.allocator);
+        try result.bytes.appendSlice(
+            connection.allocator,
+            first_headers.header_block,
+        );
+        try result.validateSize(connection);
+        return result;
+    }
+
+    fn resumeUntil(
+        self: *DuplexHeaderBlock,
+        connection: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!?[]http2.Hpack.HeaderField {
+        while (!self.end_headers) {
+            var continuation = try connection.readOwnedFrameWithDeadline(
+                deadline,
+            );
+            defer continuation.deinit(connection.allocator);
+            if (continuation.frame.header.frame_type != .continuation or
+                continuation.frame.header.stream_id != self.stream_id)
+            {
+                return error.UnexpectedFrame;
+            }
+            self.continuation_count = std.math.add(
+                usize,
+                self.continuation_count,
+                1,
+            ) catch return error.MessageTooLarge;
+            if (self.continuation_count > connection.maxContinuationFrames()) {
+                return error.MessageTooLarge;
+            }
+            try self.bytes.appendSlice(
+                connection.allocator,
+                continuation.frame.payload,
+            );
+            try self.validateSize(connection);
+            self.end_headers =
+                (continuation.frame.header.flags & flag_end_headers) != 0;
+        }
+        return try decodeOwnedHeaders(
+            connection.allocator,
+            self.bytes.items,
+            connection.limits,
+            &connection.hpack_decoder,
+        );
+    }
+
+    fn validateSize(
+        self: DuplexHeaderBlock,
+        connection: *const Connection,
+    ) Error!void {
+        const limit = std.math.mul(
+            usize,
+            connection.limits.max_frame_payload,
+            connection.limits.max_header_fields + 1,
+        ) catch return error.MessageTooLarge;
+        if (self.bytes.items.len > limit) return error.MessageTooLarge;
+    }
+
+    fn deinit(self: *DuplexHeaderBlock, allocator: std.mem.Allocator) void {
+        self.bytes.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const DuplexWriteResult = struct {
+    written: usize,
+    response_available: bool,
+};
+
+pub const DuplexResponseEvent = union(enum) {
+    informational: DuplexResponseHead,
+    head: DuplexResponseHead,
+    data: DuplexData,
+    trailers: []http2.Hpack.HeaderField,
+    finished,
+    reset: http2.ResetStreamPayload,
+
+    pub fn deinit(self: *DuplexResponseEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .informational, .head => |*head| head.deinit(allocator),
+            .data => |*data| data.deinit(allocator),
+            .trailers => |trailers| freeHeaders(allocator, trailers),
+            .finished, .reset => {},
+        }
+        self.* = undefined;
+    }
+};
+
+/// One client-owned HTTP/2 stream whose request and response halves progress
+/// independently while this object remains the connection's sole frame reader.
+pub const ClientDuplexStream = struct {
+    connection: *Connection,
+    stream_id: u31,
+    expected_request_length: ?usize,
+    request_written: usize = 0,
+    request_finished: bool = false,
+    head_request: bool = false,
+    response_head_seen: bool = false,
+    response_finished: bool = false,
+    response_finished_reported: bool = false,
+    response_body_bytes: usize = 0,
+    response_content_length: ?usize = null,
+    response_body_forbidden: bool = false,
+    informational_count: usize = 0,
+    pending_header: ?DuplexHeaderBlock = null,
+    released: bool = false,
+
+    pub fn deinit(self: *ClientDuplexStream) void {
+        if (self.pending_header) |*header| {
+            header.deinit(self.connection.allocator);
+        }
+        if (!self.released) {
+            if (self.request_finished and self.response_finished) {
+                self.release();
+            } else {
+                self.connection.sendResetStream(self.stream_id, .cancel) catch {
+                    self.connection.releaseLocalStream(self.stream_id);
+                    self.connection.forgetStreamWindows(self.stream_id);
+                };
+                self.released = true;
+            }
+        }
+        self.connection.duplex_reader_active = false;
+        self.* = undefined;
+    }
+
+    pub fn streamId(self: ClientDuplexStream) u31 {
+        return self.stream_id;
+    }
+
+    pub fn write(
+        self: *ClientDuplexStream,
+        data: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeRequestSlices(&.{data}, false);
+    }
+
+    pub fn writeParts(
+        self: *ClientDuplexStream,
+        first: []const u8,
+        second: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeRequestSlices(&.{ first, second }, false);
+    }
+
+    pub fn finishRequest(
+        self: *ClientDuplexStream,
+    ) Error!DuplexWriteResult {
+        return self.finishRequestData(&.{});
+    }
+
+    pub fn requestFinished(self: ClientDuplexStream) bool {
+        return self.request_finished;
+    }
+
+    pub fn responseFinished(self: ClientDuplexStream) bool {
+        return self.response_finished;
+    }
+
+    pub fn reset(
+        self: *ClientDuplexStream,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        if (self.released) return error.ConnectionClosed;
+        try self.connection.sendResetStream(self.stream_id, error_code);
+        self.request_finished = true;
+        self.response_finished = true;
+        self.response_finished_reported = true;
+        self.released = true;
+        self.connection.duplex_reader_active = false;
+    }
+
+    pub fn finishRequestData(
+        self: *ClientDuplexStream,
+        data: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeRequestSlices(&.{data}, true);
+    }
+
+    pub fn finishRequestParts(
+        self: *ClientDuplexStream,
+        first: []const u8,
+        second: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeRequestSlices(&.{ first, second }, true);
+    }
+
+    pub fn finishRequestTrailers(
+        self: *ClientDuplexStream,
+        trailers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        if (self.request_finished or self.released) {
+            return error.ConnectionClosed;
+        }
+        if (self.expected_request_length) |expected| {
+            if (self.request_written != expected) {
+                return error.InvalidContentLength;
+            }
+        }
+        try validateHeaderBlock(trailers, .request_trailers);
+        try self.connection.writeHeaders(self.stream_id, trailers, true);
+        self.request_finished = true;
+        self.maybeRelease();
+    }
+
+    pub fn writeRequestSlices(
+        self: *ClientDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!DuplexWriteResult {
+        if (self.request_finished or self.released) {
+            return error.ConnectionClosed;
+        }
+        var additional: usize = 0;
+        for (slices) |slice| {
+            additional = std.math.add(usize, additional, slice.len) catch
+                return error.MessageTooLarge;
+        }
+        const total = std.math.add(
+            usize,
+            self.request_written,
+            additional,
+        ) catch return error.MessageTooLarge;
+        if (self.expected_request_length) |expected| {
+            if (total > expected or (end_stream and total != expected)) {
+                return error.InvalidContentLength;
+            }
+        }
+        if (additional == 0) {
+            var sent: usize = 0;
+            self.connection.writeDataDuplexTracked(
+                self.stream_id,
+                &.{},
+                end_stream,
+                &sent,
+            ) catch |err| switch (err) {
+                error.ResponseAvailable => return .{
+                    .written = 0,
+                    .response_available = true,
+                },
+                else => return err,
+            };
+            if (end_stream) self.request_finished = true;
+            self.maybeRelease();
+            return .{ .written = 0, .response_available = false };
+        }
+        var written: usize = 0;
+        var remaining_non_empty: usize = 0;
+        for (slices) |slice| {
+            remaining_non_empty += @intFromBool(slice.len != 0);
+        }
+        for (slices) |slice| {
+            if (slice.len == 0) continue;
+            remaining_non_empty -= 1;
+            var sent: usize = 0;
+            self.connection.writeDataDuplexTracked(
+                self.stream_id,
+                slice,
+                end_stream and remaining_non_empty == 0,
+                &sent,
+            ) catch |err| switch (err) {
+                error.ResponseAvailable => {
+                    written += sent;
+                    self.request_written += written;
+                    return .{
+                        .written = written,
+                        .response_available = true,
+                    };
+                },
+                else => {
+                    self.request_written += written + sent;
+                    return err;
+                },
+            };
+            written += sent;
+        }
+        self.request_written += written;
+        if (end_stream) {
+            self.request_finished = true;
+            self.maybeRelease();
+        }
+        return .{ .written = written, .response_available = false };
+    }
+
+    pub fn readResponseEvent(
+        self: *ClientDuplexStream,
+    ) Error!DuplexResponseEvent {
+        return self.readResponseEventUntil(null);
+    }
+
+    pub fn readResponseEventWithTimeout(
+        self: *ClientDuplexStream,
+        timeout: std.Io.Duration,
+    ) Error!DuplexResponseEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseEventUntil(.fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readResponseEventWithDeadline(
+        self: *ClientDuplexStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!DuplexResponseEvent {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.readResponseEventUntil(deadline);
+    }
+
+    fn readResponseEventUntil(
+        self: *ClientDuplexStream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!DuplexResponseEvent {
+        if (self.response_finished_reported or self.released) {
+            return error.ConnectionClosed;
+        }
+        if (self.response_finished) {
+            self.response_finished_reported = true;
+            self.maybeRelease();
+            return .finished;
+        }
+        while (true) {
+            if (self.pending_header) |*pending| {
+                const end_stream = pending.end_stream;
+                const headers = (try pending.resumeUntil(
+                    self.connection,
+                    deadline,
+                )).?;
+                pending.deinit(self.connection.allocator);
+                self.pending_header = null;
+                return self.applyResponseHeaders(headers, end_stream);
+            }
+            var frame = try self.connection.readOwnedFrameWithDeadline(deadline);
+            var frame_owned = true;
+            defer if (frame_owned) frame.deinit(self.connection.allocator);
+            if (try self.connection.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                try self.connection.handleGoAwayForStream(self.stream_id, goaway);
+                continue;
+            }
+            if (frame.frame.header.stream_id != self.stream_id) {
+                return error.UnexpectedFrame;
+            }
+            switch (frame.frame.header.frame_type) {
+                .headers => {
+                    self.pending_header = try DuplexHeaderBlock.init(
+                        self.connection,
+                        frame.frame,
+                    );
+                    const pending = &self.pending_header.?;
+                    const end_stream = pending.end_stream;
+                    const headers = (try pending.resumeUntil(
+                        self.connection,
+                        deadline,
+                    )).?;
+                    pending.deinit(self.connection.allocator);
+                    self.pending_header = null;
+                    return self.applyResponseHeaders(headers, end_stream);
+                },
+                .data => {
+                    if (!self.response_head_seen) return error.UnexpectedFrame;
+                    const payload = try self.connection.receiveDataPayload(
+                        self.stream_id,
+                        frame.frame,
+                    );
+                    if (self.response_body_forbidden and
+                        payload.data.len != 0)
+                    {
+                        return error.InvalidContentLength;
+                    }
+                    self.response_body_bytes = std.math.add(
+                        usize,
+                        self.response_body_bytes,
+                        payload.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (self.response_body_bytes >
+                        self.connection.limits.max_body_bytes)
+                    {
+                        return error.MessageTooLarge;
+                    }
+                    const end_stream =
+                        (frame.frame.header.flags & flag_end_stream) != 0;
+                    if (end_stream) {
+                        if (!self.response_body_forbidden) {
+                            try validateExpectedContentLength(
+                                self.response_content_length,
+                                self.response_body_bytes,
+                            );
+                        }
+                        self.response_finished = true;
+                    }
+                    if (payload.data.len == 0) {
+                        try self.connection.maybeReleaseReceivedCapacity(
+                            self.stream_id,
+                        );
+                        if (end_stream) {
+                            self.response_finished_reported = true;
+                            self.maybeRelease();
+                            return .finished;
+                        }
+                        continue;
+                    }
+                    try self.connection.maybeReleaseReceivedCapacity(
+                        self.stream_id,
+                    );
+                    const data = payload.data;
+                    frame_owned = false;
+                    return .{ .data = .{ .frame = frame, .data = data } };
+                },
+                .rst_stream => {
+                    const peer_reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    try self.connection.recordResetStream(peer_reset);
+                    self.request_finished = true;
+                    self.response_finished = true;
+                    self.response_finished_reported = true;
+                    self.release();
+                    return .{ .reset = peer_reset };
+                },
+                .push_promise => return error.UnexpectedFrame,
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
+    fn applyResponseHeaders(
+        self: *ClientDuplexStream,
+        headers: []http2.Hpack.HeaderField,
+        end_stream: bool,
+    ) Error!DuplexResponseEvent {
+        var headers_owned = true;
+        errdefer if (headers_owned) {
+            freeHeaders(self.connection.allocator, headers);
+        };
+        if (!self.response_head_seen) {
+            try validateHeaderBlock(headers, .response);
+            const lookup = try responseHeaderLookup(headers);
+            const status_text = lookup.status orelse
+                return error.MissingPseudoHeader;
+            const status = std.fmt.parseInt(u16, status_text, 10) catch
+                return error.InvalidStatus;
+            if (informationalResponseToSkip(status)) {
+                if (end_stream or lookup.content_length != null) {
+                    return error.InvalidContentLength;
+                }
+                self.informational_count = std.math.add(
+                    usize,
+                    self.informational_count,
+                    1,
+                ) catch return error.TooManyInformationalResponses;
+                if (self.informational_count >
+                    self.connection.limits.max_informational_responses)
+                {
+                    return error.TooManyInformationalResponses;
+                }
+                headers_owned = false;
+                return .{ .informational = .{
+                    .headers = headers,
+                    .status = status,
+                } };
+            }
+            self.response_head_seen = true;
+            self.response_content_length = lookup.content_length;
+            self.response_body_forbidden = responseForbidsBody(
+                status,
+                if (self.head_request) "HEAD" else "POST",
+                false,
+            );
+            if (status == 204 and lookup.content_length != null) {
+                return error.InvalidContentLength;
+            }
+            if (!self.response_body_forbidden and
+                (lookup.content_length orelse 0) >
+                    self.connection.limits.max_body_bytes)
+            {
+                return error.MessageTooLarge;
+            }
+            if (end_stream) {
+                if (!self.response_body_forbidden) {
+                    try validateExpectedContentLength(
+                        self.response_content_length,
+                        0,
+                    );
+                }
+                self.response_finished = true;
+            }
+            headers_owned = false;
+            return .{ .head = .{ .headers = headers, .status = status } };
+        }
+        if (!end_stream) return error.UnexpectedFrame;
+        if (self.response_body_forbidden) return error.InvalidContentLength;
+        try validateHeaderBlock(headers, .response_trailers);
+        try validateExpectedContentLength(
+            self.response_content_length,
+            self.response_body_bytes,
+        );
+        self.response_finished = true;
+        headers_owned = false;
+        return .{ .trailers = headers };
+    }
+
+    fn maybeRelease(self: *ClientDuplexStream) void {
+        if (self.request_finished and self.response_finished_reported) {
+            self.release();
+        }
+    }
+
+    /// Stop an upload after observing a terminal early response. This emits
+    /// only the request-half FIN; the response result remains available until
+    /// its terminal event has been reported.
+    pub fn closeRequestAfterResponse(
+        self: *ClientDuplexStream,
+    ) Error!void {
+        if (!self.response_finished) return error.UnexpectedFrame;
+        if (self.request_finished) return;
+        var sent: usize = 0;
+        try self.connection.writeDataDuplexTracked(
+            self.stream_id,
+            &.{},
+            true,
+            &sent,
+        );
+        self.request_finished = true;
+        self.maybeRelease();
+    }
+
+    fn release(self: *ClientDuplexStream) void {
+        if (self.released) return;
+        self.connection.releaseLocalStream(self.stream_id);
+        self.connection.duplex_reader_active = false;
+        self.released = true;
+    }
+};
+
+pub const DuplexRequestEvent = union(enum) {
+    data: DuplexData,
+    trailers: []http2.Hpack.HeaderField,
+    finished,
+    reset: http2.ResetStreamPayload,
+
+    pub fn deinit(self: *DuplexRequestEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .data => |*data| data.deinit(allocator),
+            .trailers => |trailers| freeHeaders(allocator, trailers),
+            .finished, .reset => {},
+        }
+        self.* = undefined;
+    }
+};
+
+/// Server counterpart to `ClientDuplexStream`. Request metadata is owned by
+/// this object while request DATA arrives stepwise and response DATA may be
+/// written between receive steps.
+pub const ServerDuplexStream = struct {
+    connection: *Connection,
+    stream_id: u31,
+    headers: []http2.Hpack.HeaderField,
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    protocol: ?[]const u8,
+    priority: http2.ExtensiblePriority,
+    expected_request_length: ?usize,
+    request_body_bytes: usize = 0,
+    request_finished: bool = false,
+    request_finished_reported: bool = false,
+    response_started: bool = false,
+    response_finished: bool = false,
+    response_expected_length: ?usize = null,
+    response_written: usize = 0,
+    pending_header: ?DuplexHeaderBlock = null,
+    released: bool = false,
+
+    pub fn deinit(self: *ServerDuplexStream) void {
+        if (self.pending_header) |*header| {
+            header.deinit(self.connection.allocator);
+        }
+        if (!self.released) {
+            self.connection.sendResetStream(self.stream_id, .cancel) catch {
+                self.connection.releasePeerStream(self.stream_id);
+                self.connection.forgetStreamWindows(self.stream_id);
+            };
+            self.released = true;
+        }
+        self.connection.duplex_reader_active = false;
+        freeHeaders(self.connection.allocator, self.headers);
+        self.* = undefined;
+    }
+
+    pub fn startResponse(
+        self: *ServerDuplexStream,
+        options: StreamingResponseOptions,
+    ) Error!void {
+        if (self.response_started or self.released) {
+            return error.UnexpectedFrame;
+        }
+        var writer = try self.connection.startResponseInternal(
+            self.stream_id,
+            options,
+            false,
+        );
+        self.response_started = true;
+        self.response_finished = writer.finished;
+        self.response_expected_length = writer.expected_length;
+        self.response_written = writer.written;
+        writer.finished = true;
+        self.maybeRelease();
+    }
+
+    /// Send one response HEADERS block carrying END_STREAM. This is the
+    /// trailers-only response shape used by an early gRPC status while the
+    /// request half can remain open and be drained separately.
+    pub fn finishResponseHeaders(
+        self: *ServerDuplexStream,
+        options: ResponseOptions,
+    ) Error!void {
+        if (self.response_started or self.released) {
+            return error.UnexpectedFrame;
+        }
+        if (options.body.len != 0 or options.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        var response_options = options;
+        response_options.request_method = self.method;
+        response_options.extended_connect = self.protocol != null;
+        try self.connection.writeResponseInternal(
+            self.stream_id,
+            response_options,
+            false,
+        );
+        self.response_started = true;
+        self.response_finished = true;
+        self.maybeRelease();
+    }
+
+    pub fn requestFinished(self: ServerDuplexStream) bool {
+        return self.request_finished;
+    }
+
+    pub fn responseFinished(self: ServerDuplexStream) bool {
+        return self.response_finished;
+    }
+
+    pub fn reset(
+        self: *ServerDuplexStream,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        if (self.released) return error.ConnectionClosed;
+        try self.connection.sendResetStream(self.stream_id, error_code);
+        self.request_finished = true;
+        self.request_finished_reported = true;
+        self.response_finished = true;
+        self.released = true;
+        self.connection.duplex_reader_active = false;
+    }
+
+    pub fn writeResponse(
+        self: *ServerDuplexStream,
+        data: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeResponseData(data, false);
+    }
+
+    pub fn writeResponseParts(
+        self: *ServerDuplexStream,
+        first: []const u8,
+        second: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeResponseSlices(&.{ first, second }, false);
+    }
+
+    pub fn writeResponseSlices(
+        self: *ServerDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!DuplexWriteResult {
+        var additional: usize = 0;
+        for (slices) |slice| {
+            additional = std.math.add(usize, additional, slice.len) catch
+                return error.MessageTooLarge;
+        }
+        const total = std.math.add(
+            usize,
+            self.response_written,
+            additional,
+        ) catch return error.MessageTooLarge;
+        if (self.response_expected_length) |expected| {
+            if (total > expected or (end_stream and total != expected)) {
+                return error.InvalidContentLength;
+            }
+        }
+        var written: usize = 0;
+        var remaining_non_empty: usize = 0;
+        for (slices) |slice| {
+            remaining_non_empty += @intFromBool(slice.len != 0);
+        }
+        for (slices) |slice| {
+            if (slice.len == 0) continue;
+            remaining_non_empty -= 1;
+            const result = try self.writeResponseData(
+                slice,
+                end_stream and remaining_non_empty == 0,
+            );
+            written += result.written;
+            if (result.response_available) {
+                return .{
+                    .written = written,
+                    .response_available = true,
+                };
+            }
+        }
+        if (written == 0 and end_stream) {
+            const result = try self.writeResponseData(&.{}, true);
+            return .{
+                .written = 0,
+                .response_available = result.response_available,
+            };
+        }
+        return .{ .written = written, .response_available = false };
+    }
+
+    pub fn finishResponse(
+        self: *ServerDuplexStream,
+    ) Error!DuplexWriteResult {
+        return self.finishResponseData(&.{});
+    }
+
+    pub fn finishResponseData(
+        self: *ServerDuplexStream,
+        data: []const u8,
+    ) Error!DuplexWriteResult {
+        return self.writeResponseData(data, true);
+    }
+
+    pub fn finishResponseTrailers(
+        self: *ServerDuplexStream,
+        trailers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        if (!self.response_started or self.response_finished or self.released) {
+            return error.ConnectionClosed;
+        }
+        if (self.response_expected_length) |expected| {
+            if (self.response_written != expected) {
+                return error.InvalidContentLength;
+            }
+        }
+        try validateHeaderBlock(trailers, .response_trailers);
+        try self.connection.writeHeaders(self.stream_id, trailers, true);
+        self.response_finished = true;
+        self.maybeRelease();
+    }
+
+    fn writeResponseData(
+        self: *ServerDuplexStream,
+        data: []const u8,
+        end_stream: bool,
+    ) Error!DuplexWriteResult {
+        if (!self.response_started or self.response_finished or self.released) {
+            return error.ConnectionClosed;
+        }
+        const total = std.math.add(
+            usize,
+            self.response_written,
+            data.len,
+        ) catch return error.MessageTooLarge;
+        if (self.response_expected_length) |expected| {
+            if (total > expected or (end_stream and total != expected)) {
+                return error.InvalidContentLength;
+            }
+        }
+        if (self.connection.pendingApplicationFrameCount() != 0) {
+            return .{ .written = 0, .response_available = true };
+        }
+        var sent: usize = 0;
+        self.connection.writeDataDuplexTracked(
+            self.stream_id,
+            data,
+            end_stream,
+            &sent,
+        ) catch |err| switch (err) {
+            error.ResponseAvailable => {
+                self.response_written += sent;
+                return .{ .written = sent, .response_available = true };
+            },
+            else => {
+                self.response_written += sent;
+                return err;
+            },
+        };
+        self.response_written += sent;
+        if (end_stream) {
+            self.response_finished = true;
+            self.maybeRelease();
+        }
+        return .{ .written = sent, .response_available = false };
+    }
+
+    pub fn readRequestEvent(
+        self: *ServerDuplexStream,
+    ) Error!DuplexRequestEvent {
+        return self.readRequestEventUntil(null);
+    }
+
+    pub fn readRequestEventWithTimeout(
+        self: *ServerDuplexStream,
+        timeout: std.Io.Duration,
+    ) Error!DuplexRequestEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readRequestEventUntil(.fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readRequestEventWithDeadline(
+        self: *ServerDuplexStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!DuplexRequestEvent {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.readRequestEventUntil(deadline);
+    }
+
+    fn readRequestEventUntil(
+        self: *ServerDuplexStream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!DuplexRequestEvent {
+        if (self.request_finished_reported or self.released) {
+            return error.ConnectionClosed;
+        }
+        if (self.request_finished) {
+            self.request_finished_reported = true;
+            self.maybeRelease();
+            return .finished;
+        }
+        while (true) {
+            if (self.pending_header) |*pending| {
+                const trailers = (try pending.resumeUntil(
+                    self.connection,
+                    deadline,
+                )).?;
+                pending.deinit(self.connection.allocator);
+                self.pending_header = null;
+                errdefer freeHeaders(self.connection.allocator, trailers);
+                try validateHeaderBlock(trailers, .request_trailers);
+                try validateExpectedContentLength(
+                    self.expected_request_length,
+                    self.request_body_bytes,
+                );
+                self.request_finished = true;
+                return .{ .trailers = trailers };
+            }
+            var frame = try self.connection.readOwnedFrameWithDeadline(deadline);
+            var frame_owned = true;
+            defer if (frame_owned) frame.deinit(self.connection.allocator);
+            if (try self.connection.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) continue;
+            if (frame.frame.header.stream_id != self.stream_id) {
+                return error.UnexpectedFrame;
+            }
+            switch (frame.frame.header.frame_type) {
+                .data => {
+                    const payload = try self.connection.receiveDataPayload(
+                        self.stream_id,
+                        frame.frame,
+                    );
+                    self.request_body_bytes = std.math.add(
+                        usize,
+                        self.request_body_bytes,
+                        payload.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (self.request_body_bytes >
+                        self.connection.limits.max_body_bytes)
+                    {
+                        return error.MessageTooLarge;
+                    }
+                    const end_stream =
+                        (frame.frame.header.flags & flag_end_stream) != 0;
+                    if (end_stream) {
+                        try validateExpectedContentLength(
+                            self.expected_request_length,
+                            self.request_body_bytes,
+                        );
+                        self.request_finished = true;
+                    }
+                    if (payload.data.len == 0) {
+                        try self.connection.maybeReleaseReceivedCapacity(
+                            self.stream_id,
+                        );
+                        if (end_stream) {
+                            self.request_finished_reported = true;
+                            self.maybeRelease();
+                            return .finished;
+                        }
+                        continue;
+                    }
+                    try self.connection.maybeReleaseReceivedCapacity(
+                        self.stream_id,
+                    );
+                    const data = payload.data;
+                    frame_owned = false;
+                    return .{ .data = .{ .frame = frame, .data = data } };
+                },
+                .headers => {
+                    if ((frame.frame.header.flags & flag_end_stream) == 0) {
+                        return error.UnexpectedFrame;
+                    }
+                    self.pending_header = try DuplexHeaderBlock.init(
+                        self.connection,
+                        frame.frame,
+                    );
+                    const pending = &self.pending_header.?;
+                    const trailers = (try pending.resumeUntil(
+                        self.connection,
+                        deadline,
+                    )).?;
+                    pending.deinit(self.connection.allocator);
+                    self.pending_header = null;
+                    errdefer freeHeaders(self.connection.allocator, trailers);
+                    try validateHeaderBlock(trailers, .request_trailers);
+                    try validateExpectedContentLength(
+                        self.expected_request_length,
+                        self.request_body_bytes,
+                    );
+                    self.request_finished = true;
+                    return .{ .trailers = trailers };
+                },
+                .rst_stream => {
+                    const peer_reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    try self.connection.recordResetStream(peer_reset);
+                    self.request_finished = true;
+                    self.request_finished_reported = true;
+                    self.response_finished = true;
+                    self.release();
+                    return .{ .reset = peer_reset };
+                },
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
+    fn maybeRelease(self: *ServerDuplexStream) void {
+        if (self.request_finished_reported and self.response_finished) {
+            self.release();
+        }
+    }
+
+    fn release(self: *ServerDuplexStream) void {
+        if (self.released) return;
+        self.connection.releasePeerStream(self.stream_id);
+        self.connection.duplex_reader_active = false;
+        self.released = true;
     }
 };
 
@@ -13894,6 +15202,23 @@ pub const testing = struct {
         end_stream: bool,
     ) Error!void {
         return connection.writeData(stream_id, data, end_stream);
+    }
+
+    pub fn writeRawFrame(
+        connection: *Connection,
+        frame_type: http2.FrameType,
+        flags: u8,
+        stream_id: u31,
+        payload: []const u8,
+    ) Error!void {
+        return writeFrameTransport(
+            connection.allocator,
+            connection.transportForIo(),
+            frame_type,
+            flags,
+            stream_id,
+            payload,
+        );
     }
 };
 

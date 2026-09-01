@@ -457,6 +457,15 @@ Reusable implementation changes behind these H2 results:
   receive mode instead of discarding it. The pending storage stays bounded to
   one frame because control returns to the caller immediately, paralleling
   Hyper's independently driven response future/body pipe;
+- `RequestWriter.beginDuplex` and `Connection.acceptDuplexRequest` transfer a
+  stream to a single-owner step driver whose request and response halves close
+  independently. Client response and server request events expose owned heads,
+  DATA, trailers, FIN, informational heads and resets; DATA writes report the
+  exact committed prefix when peer input interrupts flow-control progress. The
+  same owner alternates socket pumping and writes, avoiding a second reader,
+  preserving HPACK/CONTINUATION state across bounded timeouts, and preventing
+  the classic both-sides-waiting-for-window-credit deadlock. Existing aggregate
+  and callback-streaming APIs retain their sequential behavior;
 - `requestBatchInto` opens bodyless streams together, accepts response frames in
   any stream order, and returns owned responses in request order.
   `requestBatchWithInformationalInto` adds borrowed, ordered 1xx callbacks
