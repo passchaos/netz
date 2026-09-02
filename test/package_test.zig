@@ -2644,6 +2644,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Options"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "init"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "initHost"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.Bridge,
+        "initConnector",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "connect"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "step"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "run"));

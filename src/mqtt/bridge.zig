@@ -1,6 +1,6 @@
 //! One-way inbound MQTT broker bridge.
 //!
-//! A Bridge owns one reconnecting cleartext client, subscribes to exactly one
+//! A Bridge owns one reconnecting client, subscribes to exactly one
 //! remote Topic Filter, maps each incoming Topic Name beneath a local prefix,
 //! and injects the resulting Application Message through `Broker.publishLocal`.
 //! There is deliberately no local-to-remote path: using one direction per
@@ -15,6 +15,52 @@ const reconnect = @import("reconnect.zig");
 const runtime = @import("runtime.zig");
 
 const net = std.Io.net;
+
+const bridge_client_options: reconnect.ClientOptions = .{
+    .max_subscriptions = 1,
+    .manual_acknowledgements = true,
+};
+
+const Remote = union(enum) {
+    address: net.IpAddress,
+    host: struct {
+        name: []const u8,
+        port: u16,
+    },
+    connector: runtime.ClientConnector,
+};
+
+/// Owned backing for the public `Rule` view retained by a Bridge. Keeping the
+/// allocations together makes construction and rollback identical for every
+/// transport target.
+const OwnedRule = struct {
+    value: Rule,
+    filter: []u8,
+    local_prefix: []u8,
+
+    fn init(allocator: std.mem.Allocator, rule: Rule) Error!OwnedRule {
+        try rule.validate();
+        const filter = try allocator.dupe(u8, rule.filter);
+        errdefer allocator.free(filter);
+        const local_prefix = try allocator.dupe(u8, rule.local_prefix);
+        errdefer allocator.free(local_prefix);
+        return .{
+            .value = .{
+                .filter = filter,
+                .qos = rule.qos,
+                .local_prefix = local_prefix,
+            },
+            .filter = filter,
+            .local_prefix = local_prefix,
+        };
+    }
+
+    fn deinit(self: *OwnedRule, allocator: std.mem.Allocator) void {
+        allocator.free(self.local_prefix);
+        allocator.free(self.filter);
+        self.* = undefined;
+    }
+};
 
 pub const Error = broker_mod.Error || reconnect.Error || error{
     InvalidBridgeQoS,
@@ -118,8 +164,10 @@ pub const testing = if (builtin.is_test) struct {
 /// An inbound bridge and its reconnect/session state.
 ///
 /// The caller owns the shutdown Event and local Broker for the entire Bridge
-/// lifetime. The Bridge deeply owns the reconnect Client's CONNECT fields but
-/// borrows `local`; `deinit` must run before either dependency is destroyed.
+/// lifetime. The Bridge deeply owns its rule strings and the reconnect
+/// Client's CONNECT fields but borrows `local`; `deinit` must run before either
+/// dependency is destroyed. A custom connector, including its context and all
+/// reachable transport/TLS option storage, is also borrowed until `deinit`.
 /// All methods are single-owner, matching `reconnect.Client`: do not call
 /// `run`, `step`, `connect`, or `deinit` concurrently. Another thread may only
 /// set the shutdown Event (and shut down the active client connection when an
@@ -129,8 +177,7 @@ pub const Bridge = struct {
     local: *broker_mod.Broker,
     client: reconnect.Client,
     rule: Rule,
-    filter: []u8,
-    local_prefix: []u8,
+    rule_storage: OwnedRule,
 
     /// Construct a fixed-address cleartext bridge. Configuration slices are
     /// copied, so they may be released immediately after this call.
@@ -142,45 +189,112 @@ pub const Bridge = struct {
         options: Options,
         shutdown: *std.Io.Event,
     ) Error!Bridge {
-        try options.rule.validate();
-        const filter = try allocator.dupe(u8, options.rule.filter);
-        errdefer allocator.free(filter);
-        const local_prefix = try allocator.dupe(
-            u8,
-            options.rule.local_prefix,
-        );
-        errdefer allocator.free(local_prefix);
-        const owned_rule = Rule{
-            .filter = filter,
-            .qos = options.rule.qos,
-            .local_prefix = local_prefix,
-        };
-        const client = try reconnect.Client.initWithOptions(
+        return initRemote(
             allocator,
             io,
-            remote_address,
-            options.connect,
-            options.reconnect_policy,
+            local,
+            .{ .address = remote_address },
+            options,
             shutdown,
-            .{
-                .max_subscriptions = 1,
-                .manual_acknowledgements = true,
-            },
         );
+    }
+
+    /// Construct a cleartext bridge from a DNS hostname. The hostname, rule
+    /// strings, and MQTT CONNECT data are copied and may be released after this
+    /// call. DNS is resolved again for every connection attempt.
+    pub fn initHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *broker_mod.Broker,
+        remote_host: []const u8,
+        remote_port: u16,
+        options: Options,
+        shutdown: *std.Io.Event,
+    ) Error!Bridge {
+        return initRemote(
+            allocator,
+            io,
+            local,
+            .{ .host = .{ .name = remote_host, .port = remote_port } },
+            options,
+            shutdown,
+        );
+    }
+
+    /// Construct a bridge over a caller-supplied transport connector. Rule
+    /// strings and MQTT CONNECT data are copied, but the connector context and
+    /// every transport-specific option it references (including TLS options)
+    /// are borrowed and must remain valid until `deinit` returns.
+    pub fn initConnector(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *broker_mod.Broker,
+        connector: runtime.ClientConnector,
+        options: Options,
+        shutdown: *std.Io.Event,
+    ) Error!Bridge {
+        return initRemote(
+            allocator,
+            io,
+            local,
+            .{ .connector = connector },
+            options,
+            shutdown,
+        );
+    }
+
+    fn initRemote(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *broker_mod.Broker,
+        remote: Remote,
+        options: Options,
+        shutdown: *std.Io.Event,
+    ) Error!Bridge {
+        var owned_rule = try OwnedRule.init(allocator, options.rule);
+        errdefer owned_rule.deinit(allocator);
+        const client = switch (remote) {
+            .address => |address| try reconnect.Client.initWithOptions(
+                allocator,
+                io,
+                address,
+                options.connect,
+                options.reconnect_policy,
+                shutdown,
+                bridge_client_options,
+            ),
+            .host => |host| try reconnect.Client.initHostWithOptions(
+                allocator,
+                io,
+                host.name,
+                host.port,
+                options.connect,
+                options.reconnect_policy,
+                shutdown,
+                bridge_client_options,
+            ),
+            .connector => |connector| try reconnect.Client.initConnectorWithOptions(
+                allocator,
+                io,
+                connector,
+                options.connect,
+                options.reconnect_policy,
+                shutdown,
+                bridge_client_options,
+            ),
+        };
         return .{
             .allocator = allocator,
             .local = local,
             .client = client,
-            .rule = owned_rule,
-            .filter = filter,
-            .local_prefix = local_prefix,
+            .rule = owned_rule.value,
+            .rule_storage = owned_rule,
         };
     }
 
     pub fn deinit(self: *Bridge) void {
         self.client.deinit();
-        self.allocator.free(self.local_prefix);
-        self.allocator.free(self.filter);
+        self.rule_storage.deinit(self.allocator);
         self.* = undefined;
     }
 

@@ -3,8 +3,11 @@ const mqtt = @import("../mod.zig");
 const bridge_mod = @import("../bridge.zig");
 const broker_mod = @import("../broker.zig");
 const runtime = @import("../runtime.zig");
+const mqtt_tls = @import("../tls_runtime.zig");
+const tls_test = @import("../testing/tls13_server.zig");
 
 const Rule = bridge_mod.Rule;
+const CertificateBundle = std.crypto.Certificate.Bundle;
 const session_expiry_properties = [_]mqtt.Property{.{ .four_byte = .{
     .id = .session_expiry_interval,
     .value = 60,
@@ -101,6 +104,103 @@ const InjectFailure = struct {
     }
 };
 
+fn localCaBundle(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !struct { CertificateBundle, std.Io.RwLock } {
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    var pem_storage: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&pem_storage);
+    try writer.writeAll("-----BEGIN CERTIFICATE-----\n");
+    const encoded_len = std.base64.standard.Encoder.calcSize(
+        certificate_der.len,
+    );
+    const encoded = try writer.writableSliceGreedy(encoded_len);
+    _ = std.base64.standard.Encoder.encode(
+        encoded[0..encoded_len],
+        &certificate_der,
+    );
+    writer.advance(encoded_len);
+    try writer.writeAll("\n-----END CERTIFICATE-----\n");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "ca.pem",
+        .data = writer.buffered(),
+    });
+    var bundle: CertificateBundle = .empty;
+    errdefer bundle.deinit(allocator);
+    try bundle.addCertsFromFilePath(
+        allocator,
+        io,
+        std.Io.Timestamp.now(io, .real),
+        tmp.dir,
+        "ca.pem",
+    );
+    return .{ bundle, .init };
+}
+
+const TlsBridgePeer = struct {
+    server: *mqtt_tls.Server,
+    local: *broker_mod.Broker,
+    injected: std.Io.Event = .unset,
+    allow_ack_read: std.Io.Event = .unset,
+    err: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        self.runFallible() catch |err| {
+            self.err = err;
+        };
+    }
+
+    fn runFallible(self: *@This()) !void {
+        var accepted = try self.server.accept(.{ .protocol = .v5 });
+        defer accepted.deinit(self.server.allocator);
+        try std.testing.expectEqualStrings(
+            "tls-hostname-bridge",
+            accepted.connect.connect.client_id,
+        );
+        var subscribe = try accepted.connection.readSubscribe();
+        defer subscribe.deinit(self.server.allocator);
+        try std.testing.expectEqualStrings(
+            "secure/#",
+            subscribe.subscribe.subscriptions[0].topic_filter,
+        );
+        try accepted.connection.writeSubAck(
+            subscribe.subscribe.packet_id,
+            &.{0x01},
+            &.{},
+        );
+
+        const packet_id = (try accepted.connection.writePublish(
+            "secure/device/state",
+            "online",
+            .{ .qos = .at_least_once },
+        )).?;
+        self.injected.set(self.server.io);
+        self.allow_ack_read.waitUncancelable(self.server.io);
+        var acknowledgement = try accepted.connection.readPubAck();
+        defer acknowledgement.deinit(self.server.allocator);
+        try std.testing.expectEqual(
+            packet_id,
+            acknowledgement.ack.packet_id,
+        );
+        // The bridge writes PUBACK only after local injection returns, so
+        // observing it here is also an ordering barrier for broker state.
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            self.local.stats().publish_messages_received,
+        );
+        var disconnect = try accepted.connection.readDisconnect();
+        defer disconnect.deinit(self.server.allocator);
+    }
+};
+
 test "bridge rule validates bounded inbound mappings" {
     try (Rule{
         .filter = "sensors/+/state",
@@ -178,6 +278,194 @@ test "bridge public configuration retains MQTT types" {
         },
     };
     try std.testing.expectEqual(mqtt.QoS.at_least_once, options.rule.qos);
+}
+
+test "bridge hostname constructor owns endpoint and configuration strings" {
+    const allocator = std.testing.allocator;
+    const operation_timeout = std.Io.Duration.fromSeconds(2);
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer remote.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "owned-host-bridge",
+                accepted.connect.connect.client_id,
+            );
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "owned/#",
+                subscribe.subscribe.subscriptions[0].topic_filter,
+            );
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x01},
+                &.{},
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &remote };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const hostname = try allocator.dupe(u8, "localhost");
+    defer allocator.free(hostname);
+    const client_id = try allocator.dupe(u8, "owned-host-bridge");
+    defer allocator.free(client_id);
+    const filter = try allocator.dupe(u8, "owned/#");
+    defer allocator.free(filter);
+    const prefix = try allocator.dupe(u8, "mirror/");
+    defer allocator.free(prefix);
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.initHost(
+        allocator,
+        io,
+        &local,
+        hostname,
+        remote.address().ip4.port,
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = client_id,
+                .connect_timeout = operation_timeout,
+                .network_connect_timeout = operation_timeout,
+            },
+            .rule = .{
+                .filter = filter,
+                .qos = .at_least_once,
+                .local_prefix = prefix,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    @memset(hostname, 'x');
+    @memset(client_id, 'x');
+    @memset(filter, 'x');
+    @memset(prefix, 'x');
+
+    try std.testing.expectEqualStrings("owned/#", bridge.rule.filter);
+    try std.testing.expectEqualStrings("mirror/", bridge.rule.local_prefix);
+    _ = try bridge.connect();
+    try bridge.client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "inbound bridge accepts QoS 1 over a verified TLS hostname connector" {
+    const allocator = std.testing.allocator;
+    const operation_timeout = std.Io.Duration.fromSeconds(2);
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var remote = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer remote.deinit();
+
+    var shared = TlsBridgePeer{ .server = &remote, .local = &local };
+    const thread = try std.Thread.spawn(.{}, TlsBridgePeer.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var connector = mqtt_tls.HostReconnectConnector{
+        .host = "localhost",
+        .port = remote.address().ip4.port,
+        .options = .{
+            .mqtt = undefined,
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+        },
+    };
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.initConnector(
+        allocator,
+        io,
+        &local,
+        connector.connector(),
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = "tls-hostname-bridge",
+                .connect_timeout = operation_timeout,
+                .network_connect_timeout = operation_timeout,
+            },
+            .rule = .{
+                .filter = "secure/#",
+                .qos = .at_least_once,
+                .local_prefix = "mirror/",
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+
+    _ = try bridge.connect();
+    shared.injected.waitUncancelable(io);
+    try std.testing.expect(try bridge.step(.{
+        .timeout = operation_timeout,
+        .cancellation_check_interval = .fromMilliseconds(20),
+    }));
+    shared.allow_ack_read.set(io);
+    try bridge.client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "inbound bridge mirrors retained MQTT 5 QoS 1 publication end to end" {
