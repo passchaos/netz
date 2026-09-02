@@ -920,6 +920,18 @@ keep-alive, cancellation and GOAWAY gate remains green.
 
 ## Remaining evidence
 
+The cleartext persistent server now treats peer EOF at an empty request
+boundary as orderly retirement instead of a connection failure. A client may
+send one or more complete HTTP/1 requests, shut down its write half, and still
+receive every response; `serve` then returns the completed request count and
+`serveUntil` reuses its worker without notifying the connection-error observer.
+This does not relax request framing: a partial head, short Content-Length body,
+or unterminated chunked body still fails with `ConnectionClosed`, and public
+`serveOne` retains its existing empty-EOF error contract. TLS is deliberately
+unchanged because its current `ConnectionClosed` classification combines
+close_notify, fatal alerts, physical EOF, and truncated TLS records; treating
+that aggregate signal as a clean HTTP boundary would hide truncation.
+
 1. Add a cancellation-race benchmark that combines reset timing with the
    priority-aware flow scheduler. **Completed:** `bench-http2-flow --priority
    --cancel-after=8` opens ten 1-MiB responses behind 8-KiB stream/65,535-byte

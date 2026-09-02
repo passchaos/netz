@@ -4351,20 +4351,61 @@ pub const Connection = struct {
     }
 
     pub fn serveOne(self: *Connection, context: anytype, comptime handler: anytype) Error!bool {
+        return (try self.serveOneInternal(context, handler)) orelse
+            error.ConnectionClosed;
+    }
+
+    /// Serve-loop-only tri-state: null is an orderly cleartext EOF before any
+    /// byte of a new request; false finishes one exchange and retires; true
+    /// permits another exchange. Keeping the read catch here prevents a
+    /// handler or response-write ConnectionClosed from being mistaken for a
+    /// clean peer half-close.
+    fn serveOneInternal(
+        self: *Connection,
+        context: anytype,
+        comptime handler: anytype,
+    ) Error!?bool {
         if (self.graceful_shutdown_requested) return false;
-        var request = try self.readRequest(.{});
+        const boundary_was_empty = self.inbuf.items.len == 0;
+        var request = self.readRequest(.{}) catch |err| {
+            // TLS currently maps close_notify, fatal alerts, physical EOF and
+            // truncated records onto ConnectionClosed. Until that layer has a
+            // reliable orderly-close signal, only raw TCP/Unix stream EOF is
+            // safe to classify as a clean HTTP request boundary.
+            if (err == error.ConnectionClosed and
+                self.tls_server_conn == null and
+                boundary_was_empty and
+                self.inbuf.items.len == 0)
+            {
+                return null;
+            }
+            return err;
+        };
         defer request.deinit(self.allocator);
-        const request_keep_alive = request.request.keepAlive();
-        var response = try handler(context, request.request);
+        return @as(?bool, try self.serveRequest(
+            context,
+            handler,
+            request.request,
+        ));
+    }
+
+    fn serveRequest(
+        self: *Connection,
+        context: anytype,
+        comptime handler: anytype,
+        request: http1.Request,
+    ) Error!bool {
+        const request_keep_alive = request.keepAlive();
+        var response = try handler(context, request);
         var adjusted = try adjustResponseForServeLoop(
             self.allocator,
-            request.request,
+            request,
             response,
             self.graceful_shutdown_requested,
         );
         defer adjusted.deinit(self.allocator);
         response = adjusted.response;
-        if (response.request_method == null) response.request_method = request.request.method;
+        if (response.request_method == null) response.request_method = request.method;
         const response_keep_alive = responseOptionsKeepAlive(response);
         try self.writeResponse(response);
         if (self.graceful_shutdown_requested) {
@@ -4378,7 +4419,10 @@ pub const Connection = struct {
         var served: usize = 0;
         while (served < max_requests) : (served += 1) {
             if (self.graceful_shutdown_requested) return served;
-            const keep_going = try self.serveOne(context, handler);
+            const keep_going = (try self.serveOneInternal(
+                context,
+                handler,
+            )) orelse return served;
             if (!keep_going) return served + 1;
         }
         return served;
@@ -10406,4 +10450,5 @@ test {
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
+    _ = @import("runtime/half_close_tests.zig");
 }
