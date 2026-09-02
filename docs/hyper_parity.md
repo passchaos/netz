@@ -82,6 +82,16 @@ benchmark response:
 - borrowed head parsing scans CRLF-delimited lines once instead of first
   scanning for CRLFCRLF and then rescanning every header line.
 
+Connection persistence and Upgrade decisions scan every repeated `Connection`
+field as one comma-separated token list while ordinary `header()` lookup still
+returns the first field. Thus a later `close` token overrides an earlier
+`keep-alive`, and an `upgrade` token on any field enables an otherwise valid
+request or 101 response handoff. Aggregate, borrowed-head, streaming, writer,
+serve-loop, and pooled-client paths share this rule, including pool eviction
+when a later response field carries `close`. This matches Hyper's `get_all`
+handling for connection-close reuse decisions rather than inspecting only the
+first field.
+
 The parser also mirrors Hyper's explicitly opt-in HTTP/1 compatibility
 controls while preserving strict defaults.
 Header field names retain their exact input spelling in both borrowed and

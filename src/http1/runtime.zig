@@ -5977,21 +5977,11 @@ fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
 }
 
 fn responseOptionsKeepAlive(response: ResponseOptions) bool {
-    for (response.headers) |header| {
-        if (!header.eqlName("connection")) continue;
-        if (wire.containsToken(header.value, "close")) return false;
-        if (wire.containsToken(header.value, "keep-alive")) return true;
-    }
-    return response.version == .http_1_1;
+    return http1.headersKeepAlive(response.version, response.headers);
 }
 
 fn requestOptionsKeepAlive(request: RequestOptions) bool {
-    for (request.headers) |header| {
-        if (!header.eqlName("connection")) continue;
-        if (wire.containsToken(header.value, "close")) return false;
-        if (wire.containsToken(header.value, "keep-alive")) return true;
-    }
-    return request.version == .http_1_1;
+    return http1.headersKeepAlive(request.version, request.headers);
 }
 
 fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {

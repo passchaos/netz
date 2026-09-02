@@ -126,11 +126,7 @@ pub const RequestHead = struct {
     }
 
     pub fn keepAlive(self: RequestHead) bool {
-        if (self.header("connection")) |connection| {
-            if (wire.containsToken(connection, "close")) return false;
-            if (wire.containsToken(connection, "keep-alive")) return true;
-        }
-        return self.version == .http_1_1;
+        return headersKeepAlive(self.version, self.headers);
     }
 
     /// Total bytes for a pipelined message when its body boundary is known from
@@ -224,20 +220,38 @@ pub const Request = struct {
     }
 
     pub fn keepAlive(self: Request) bool {
-        if (self.header("connection")) |connection| {
-            if (wire.containsToken(connection, "close")) return false;
-            if (wire.containsToken(connection, "keep-alive")) return true;
-        }
-        return self.version == .http_1_1;
+        return headersKeepAlive(self.version, self.headers);
     }
 
     pub fn upgradeProtocol(self: Request) ?[]const u8 {
-        const connection = self.header("connection") orelse return null;
-        if (!wire.containsToken(connection, "upgrade")) return null;
+        if (!wire.anyHeaderContainsToken(
+            self.headers,
+            "connection",
+            "upgrade",
+        )) return null;
         const upgrade = self.header("upgrade") orelse return null;
         return wire.trimOws(upgrade);
     }
 };
+
+/// Apply HTTP/1 persistence defaults after combining every repeated
+/// Connection field. `close` has precedence regardless of field order.
+pub fn headersKeepAlive(
+    version: Version,
+    headers: []const Header,
+) bool {
+    if (wire.anyHeaderContainsToken(
+        headers,
+        "connection",
+        "close",
+    )) return false;
+    if (wire.anyHeaderContainsToken(
+        headers,
+        "connection",
+        "keep-alive",
+    )) return true;
+    return version == .http_1_1;
+}
 
 pub const Response = struct {
     version: Version,
@@ -266,11 +280,7 @@ pub const Response = struct {
     }
 
     pub fn keepAlive(self: Response) bool {
-        if (self.header("connection")) |connection| {
-            if (wire.containsToken(connection, "close")) return false;
-            if (wire.containsToken(connection, "keep-alive")) return true;
-        }
-        return self.version == .http_1_1;
+        return headersKeepAlive(self.version, self.headers);
     }
 
     /// Return the selected protocol from a valid 101 Switching Protocols
@@ -278,8 +288,11 @@ pub const Response = struct {
     /// mistake an arbitrary informational response for a protocol handoff.
     pub fn upgradeProtocol(self: Response) ?[]const u8 {
         if (self.status != 101) return null;
-        const connection = self.header("connection") orelse return null;
-        if (!wire.containsToken(connection, "upgrade")) return null;
+        if (!wire.anyHeaderContainsToken(
+            self.headers,
+            "connection",
+            "upgrade",
+        )) return null;
         const upgrade = self.header("upgrade") orelse return null;
         const protocol = wire.trimOws(upgrade);
         return if (protocol.len == 0) null else protocol;
@@ -1733,6 +1746,74 @@ test "HTTP/1 borrowed request heads parse pipelines without allocation" {
     _ = no_alloc.allocator();
     _ = try parseRequestHead(pipeline, &headers, .{});
     try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 repeated Connection fields all affect message semantics" {
+    const allocator = std.testing.allocator;
+
+    const close_request =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "cOnNeCtIoN: close\r\n" ++
+        "\r\n";
+    var borrowed_headers: [4]Header = undefined;
+    const request_head = try parseRequestHead(
+        close_request,
+        &borrowed_headers,
+        .{},
+    );
+    // Generic lookup intentionally retains first-field behavior. Only token
+    // consumers combine repeated list-valued fields.
+    try std.testing.expectEqualStrings(
+        "keep-alive",
+        request_head.header("connection").?,
+    );
+    try std.testing.expect(!request_head.keepAlive());
+
+    var request = try parseRequest(allocator, close_request, .{});
+    defer request.deinit(allocator);
+    try std.testing.expect(!request.keepAlive());
+
+    const upgrade_request =
+        "GET /chat HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "\r\n";
+    var upgrading_request = try parseRequest(
+        allocator,
+        upgrade_request,
+        .{},
+    );
+    defer upgrading_request.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "websocket",
+        upgrading_request.upgradeProtocol().?,
+    );
+
+    const close_response =
+        "HTTP/1.1 204 No Content\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Connection: close\r\n" ++
+        "\r\n";
+    var response = try parseResponse(allocator, close_response, .{});
+    defer response.deinit(allocator);
+    try std.testing.expect(!response.keepAlive());
+
+    const upgrade_response =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "\r\n";
+    var switching = try parseResponse(allocator, upgrade_response, .{});
+    defer switching.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "websocket",
+        switching.upgradeProtocol().?,
+    );
 }
 
 test "HTTP/1 parser preserves exact header-name spelling across borrowed and owned heads" {

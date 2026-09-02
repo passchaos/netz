@@ -250,7 +250,7 @@ fn prepareStreamingRequest(
             .chunked
         else
             .{ .fixed = fixed_length },
-        .reusable_after_finish = messageKeepAlive(
+        .reusable_after_finish = http1.headersKeepAlive(
             options.version,
             scratch.request_headers.items,
         ),
@@ -375,7 +375,7 @@ fn prepareStreamingResponse(
         else
             .{ .fixed = fixed_length },
         .reusable_after_finish = !successful_connect and
-            messageKeepAlive(options.version, options.headers),
+            http1.headersKeepAlive(options.version, options.headers),
         .expected_length = if (suppress_body)
             0
         else if (use_chunked)
@@ -1078,18 +1078,6 @@ fn requestUnknownLengthUsesChunked(method: http1.Method) bool {
         .GET, .HEAD, .CONNECT => false,
         else => true,
     };
-}
-
-fn messageKeepAlive(
-    version: http1.Version,
-    headers: []const http1.Header,
-) bool {
-    for (headers) |header| {
-        if (!header.eqlName("connection")) continue;
-        if (wire.containsToken(header.value, "close")) return false;
-        if (wire.containsToken(header.value, "keep-alive")) return true;
-    }
-    return version == .http_1_1;
 }
 
 fn validateDeclaredRequestBodyLength(

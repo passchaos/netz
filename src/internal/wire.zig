@@ -112,10 +112,43 @@ pub fn containsToken(value: []const u8, token: []const u8) bool {
     return false;
 }
 
+/// Return whether any field with `name` contains `token` in its comma-separated
+/// value. This deliberately differs from `findHeader`: ordinary lookup keeps
+/// returning the first field, while list-valued protocol decisions must treat
+/// repeated field lines as one logical value.
+pub fn anyHeaderContainsToken(
+    headers: []const Header,
+    name: []const u8,
+    token: []const u8,
+) bool {
+    for (headers) |header| {
+        if (header.eqlName(name) and containsToken(header.value, token)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 test "wire cursor and helpers" {
     var cursor = Cursor.init(&.{ 0x12, 0x34, 0xab, 0xcd, 0xef });
     try std.testing.expectEqual(@as(u16, 0x1234), try cursor.readInt(u16, .big));
     try std.testing.expectEqual(@as(u24, 0xabcdef), try readU24(&cursor));
     try std.testing.expect(cursor.eof());
     try std.testing.expect(containsToken("keep-alive, Upgrade", "upgrade"));
+
+    const headers = [_]Header{
+        .{ .name = "Connection", .value = "keep-alive" },
+        .{ .name = "X-Other", .value = "close" },
+        .{ .name = "connection", .value = "foo, Close" },
+    };
+    try std.testing.expect(anyHeaderContainsToken(
+        &headers,
+        "CONNECTION",
+        "close",
+    ));
+    try std.testing.expect(!anyHeaderContainsToken(
+        &headers,
+        "connection",
+        "upgrade",
+    ));
 }

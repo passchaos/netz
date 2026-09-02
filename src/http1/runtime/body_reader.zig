@@ -77,7 +77,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             }
 
             pub fn keepAlive(self: Request) bool {
-                return messageKeepAlive(
+                return http1.headersKeepAlive(
                     self.version,
                     self.headers,
                 );
@@ -120,7 +120,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             }
 
             pub fn keepAlive(self: Response) bool {
-                return messageKeepAlive(
+                return http1.headersKeepAlive(
                     self.version,
                     self.headers,
                 );
@@ -850,22 +850,6 @@ fn addBodyBytes(
     ) catch return error.BodyTooLarge;
     if (total > maximum) return error.BodyTooLarge;
     return total;
-}
-
-fn messageKeepAlive(
-    version: http1.Version,
-    headers: []const http1.Header,
-) bool {
-    for (headers) |header| {
-        if (!header.eqlName("connection")) continue;
-        var values = std.mem.splitScalar(u8, header.value, ',');
-        while (values.next()) |raw| {
-            const value = std.mem.trim(u8, raw, " \t");
-            if (std.ascii.eqlIgnoreCase(value, "close")) return false;
-            if (std.ascii.eqlIgnoreCase(value, "keep-alive")) return true;
-        }
-    }
-    return version == .http_1_1;
 }
 
 fn stripHeader(

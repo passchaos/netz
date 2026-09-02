@@ -226,7 +226,7 @@ test "HTTP/1 client pool retries a stale idempotent connection" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/1 client pool discards Connection close responses" {
+test "HTTP/1 client pool discards close in any Connection response field" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -254,7 +254,13 @@ test "HTTP/1 client pool discards Connection close responses" {
             var request = try connection.readRequest(.{});
             defer request.deinit(self.server.allocator);
             try connection.writeResponse(.{
-                .headers = &.{.{ .name = "Connection", .value = "close" }},
+                // The first field alone advertises persistence. A later close
+                // token must still make the parsed response and pool slot
+                // non-reusable.
+                .headers = &.{
+                    .{ .name = "Connection", .value = "keep-alive" },
+                    .{ .name = "connection", .value = "close" },
+                },
                 .body = "done",
             });
         }
@@ -269,6 +275,7 @@ test "HTTP/1 client pool discards Connection close responses" {
     defer allocator.free(uri);
     var response = try pool.requestUri(uri, .{});
     defer response.deinit(allocator);
+    try std.testing.expect(!response.response.keepAlive());
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
 
     thread.join();
