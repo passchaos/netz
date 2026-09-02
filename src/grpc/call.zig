@@ -8,7 +8,7 @@ const wire = @import("wire.zig");
 
 pub const Error = wire.Error || metadata_mod.Error ||
     compression_mod.Error ||
-    http2.runtime.Error || error{
+    http2.runtime.ResponseTimeoutError || error{
     CompressionNotNegotiated,
     InvalidContentType,
     InvalidGrpcRequest,
@@ -156,6 +156,9 @@ pub const UnaryCallOptions = struct {
     compression_level: u4 = 6,
     /// Decoders advertised to the server for response messages.
     accepted_encodings: AlgorithmSet = .supported,
+    /// Propagated unchanged as `grpc-timeout` and enforced locally from one
+    /// awake-clock deadline captured when `unaryCall` begins. Null leaves the
+    /// transport operation unbounded.
     timeout: ?Timeout = null,
     /// ASCII application metadata already suitable for HTTP/2.
     metadata: []const http2.Hpack.HeaderField = &.{},
@@ -191,6 +194,16 @@ pub fn unaryCall(
     allocator: std.mem.Allocator,
     options: UnaryCallOptions,
 ) Error!UnaryResponse {
+    // Establish the local budget before validation, compression, or metadata
+    // encoding. Passing the absolute timestamp through to HTTP/2 prevents any
+    // setup time from silently renewing the caller's timeout.
+    const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
+        std.Io.Clock.Timestamp.fromNow(connection.io, .{
+            .raw = timeout.duration(),
+            .clock = .awake,
+        })
+    else
+        null;
     if (options.message.len > options.max_message_size) {
         return error.GrpcMessageTooLarge;
     }
@@ -270,14 +283,18 @@ pub fn unaryCall(
     headers.appendSliceAssumeCapacity(options.metadata);
     headers.appendSliceAssumeCapacity(binary_metadata.fields);
 
-    const response = connection.request(.{
+    const request_options = http2.runtime.RequestOptions{
         .method = "POST",
         .path = options.path,
         .scheme = options.scheme,
         .authority = options.authority,
         .headers = headers.items,
         .body = framed.items,
-    }) catch |err| switch (err) {
+    };
+    const response = (if (deadline) |absolute|
+        connection.requestWithDeadline(request_options, absolute)
+    else
+        connection.request(request_options)) catch |err| switch (err) {
         error.StreamReset => {
             const reset = connection.takeLastPeerReset() orelse return err;
             return resetUnaryResponse(allocator, reset);

@@ -537,7 +537,7 @@ test "gRPC unary call compresses asymmetrically and falls back when unaccepted" 
     );
 }
 
-test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
+test "gRPC unary call succeeds before its local deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -697,6 +697,95 @@ test "gRPC unary call exchanges opaque protobuf bytes over HTTP/2" {
         "two",
         (try trailing_metadata.next()).?.value,
     );
+}
+
+test "gRPC unary call times out locally and cancels the HTTP2 stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+
+            // Consume the complete request but deliberately send no response.
+            // The client-side deadline must terminate the wait and cancel the
+            // admitted HTTP/2 stream rather than relying on the peer.
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "100m",
+                findHeader(request.headers, "grpc-timeout").?,
+            );
+
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(2),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                request.stream_id,
+                reset.reset.stream_id,
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    var client_closed = false;
+    defer if (!client_closed) client.close();
+
+    try std.testing.expectError(
+        error.Timeout,
+        unaryCall(&client, allocator, .{
+            .path = "/demo.Deadline/Silent",
+            .authority = "localhost",
+            .message = "request",
+            .timeout = try Timeout.init(100, .millisecond),
+        }),
+    );
+
+    // Closing only after unaryCall returns makes the server-side assertion
+    // independent of test cleanup while still unblocking it if a regression
+    // prevents the request from reaching the wire at all.
+    client.close();
+    client_closed = true;
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "gRPC unary call accepts trailers-only error and HTTP fallback" {

@@ -39,6 +39,10 @@ existing HTTP/2 runtime:
 - unary HTTP/2 client/server helpers with initial metadata, trailing metadata,
   trailers-only errors, configurable message-size limits, and explicit
   ownership for decoded request and response messages,
+- unary client deadlines captured once from `grpc-timeout` at API entry and
+  enforced locally with the awake clock across request setup and the complete
+  HTTP/2 exchange; expiration returns `error.Timeout` and emits
+  `RST_STREAM(CANCEL)`, while a null timeout remains unbounded,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
 - step-driven bidirectional streams whose single owner alternates request and
@@ -158,8 +162,9 @@ timeout/status parsing, non-shortening timeout rounding, status-message
 encoding, gzip/deflate round trips, decompression limits, raw-deflate and
 trailing-data rejection, tiny-message compression fallback, asymmetric
 request/response negotiation, unaccepted-response fallback, successful unary
-calls with trailers, trailers-only errors with custom metadata, and a real
-HTTP 503 response without `grpc-status`. Stream tests sweep every byte split
+calls before their local deadline, silent-server deadline expiry with an
+observed `RST_STREAM(CANCEL)`, trailers-only errors with custom metadata, and a
+real HTTP 503 response without `grpc-status`. Stream tests sweep every byte split
 across three coalesced messages, split a prefix across separate HTTP/2 writes,
 force large gzip/deflate messages across small DATA frames in both directions,
 verify independent compressed members, and require RST_STREAM(INTERNAL_ERROR)
@@ -189,8 +194,10 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    empty-stream completion, cancellation, and deadline behavior against netz.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
-3. Add higher-level application cancellation/deadline policy, retry policy,
-   health checking, reflection, and broader conformance/interop runners.
+3. Add higher-level application cancellation and streaming deadline policy,
+   retry policy, health checking, reflection, and broader conformance/interop
+   runners. Unary transport deadlines are already enforced locally as described
+   above.
 
 The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature
