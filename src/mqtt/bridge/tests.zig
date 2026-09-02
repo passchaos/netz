@@ -424,7 +424,14 @@ test "inbound bridge accepts QoS 1 over a verified TLS hostname connector" {
         .host = "localhost",
         .port = remote.address().ip4.port,
         .options = .{
-            .mqtt = undefined,
+            // Reconnect connectors retain their own network-attempt budget
+            // while replacing the remaining MQTT CONNECT fields with the
+            // reconnect client's owned options. Keep this placeholder fully
+            // initialized because `reconnectOptions` reads that timeout.
+            .mqtt = .{
+                .client_id = "",
+                .network_connect_timeout = operation_timeout,
+            },
             .tls = .{ .ca_bundle = .{
                 .bundle = &ca_bundle,
                 .lock = &ca_lock,
