@@ -7139,7 +7139,17 @@ pub const Connection = struct {
             error.InvalidFrame => for (frames) |frame| {
                 if (self.config.local_endpoint == .server and frame == .new_token) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
                 if (self.config.local_endpoint == .server and frame == .handshake_done) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");
-                if (frame == .datagram) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.datagram_len), "datagram");
+                if (frame == .datagram) {
+                    const frame_type = if (frame.datagram.length_present)
+                        quic.FrameType.datagram_len
+                    else
+                        quic.FrameType.datagram;
+                    break semanticClose(
+                        .protocol_violation,
+                        @intFromEnum(frame_type),
+                        "datagram",
+                    );
+                }
             } else null,
             error.StreamLimitExceeded => firstFrameClose(frames, .stream_limit_error, "stream limit"),
             error.StreamStateError => firstFrameClose(frames, .stream_state_error, "stream state"),

@@ -2202,6 +2202,42 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.datagram_len)), no_dgram.close_info.?.frame_type);
     try std.testing.expectEqualStrings("datagram", no_dgram.close_info.?.reason_phrase);
 
+    // The no-length DATAGRAM form has a distinct wire type and close
+    // diagnostics must identify the frame that the peer actually sent.
+    var no_length_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer no_length_endpoint.deinit();
+    const no_length_cid = [_]u8{ 0xe9, 0xea, 0xeb, 0xec };
+    var no_length_dgram = try one_rtt.Connection.init(&no_length_endpoint, .{
+        .peer = no_length_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &no_length_cid,
+        .peer_connection_id = &no_length_cid,
+    });
+    defer no_length_dgram.deinit();
+    try one_rtt.sendFrames(&no_length_endpoint, no_length_endpoint.address(), keys, .{
+        .destination_connection_id = &no_length_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .datagram = .{
+            .data = "disabled",
+            .length_present = false,
+        } }},
+    });
+    try std.testing.expectError(error.InvalidFrame, no_length_dgram.receivePacket());
+    try std.testing.expect(no_length_dgram.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.protocol_violation),
+        no_length_dgram.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.datagram)),
+        no_length_dgram.close_info.?.frame_type,
+    );
+    try std.testing.expectEqualStrings(
+        "datagram",
+        no_length_dgram.close_info.?.reason_phrase,
+    );
+
     var limited = try one_rtt.Connection.init(&endpoint, .{
         .peer = endpoint.address(),
         .receive_keys = keys,
