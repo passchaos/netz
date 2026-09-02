@@ -1,6 +1,7 @@
 const std = @import("std");
 const webtransport = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 
 test "WebTransport handshake sessions exchange drain and close capsules" {
@@ -208,6 +209,106 @@ test "WebTransport handshake clean CONNECT FIN is normal close" {
     try std.testing.expectEqualStrings("", event.closed.reason);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport handshake rejects FIN during Capsule type varint" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server_cid = [_]u8{ 0x57, 0x54, 0x56, 0x00 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xa3} ** 32,
+            .x25519_secret_key = [_]u8{0xa4} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    // Each value is one byte short of the length selected by its first two
+    // bits. The enclosing HTTP/3 DATA frame is complete; only the Capsule type
+    // varint is truncated when the CONNECT response direction reaches FIN.
+    const truncated_types = [_][]const u8{
+        &.{0x40},
+        &.{ 0x80, 0x00, 0x00 },
+        &.{ 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+    };
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *runtime.HandshakeServer) !void {
+            for (truncated_types) |truncated| {
+                var session = try server_ptr.accept();
+                defer session.deinit();
+                try session.h3.sendResponseBodyPaced(
+                    session.session_id.value,
+                    truncated,
+                    true,
+                );
+
+                const event = try session.receiveSessionEvent();
+                try std.testing.expect(event == .reset);
+                try std.testing.expectEqual(
+                    @as(u64, http3.ApplicationErrorCode.message_error),
+                    event.reset.http3_code,
+                );
+                try std.testing.expect(event.reset.application_code == null);
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for (truncated_types, 0..) |_, index| {
+        const marker: u8 = @intCast(index + 1);
+        const original_dcid =
+            [_]u8{ 0x57, 0x54, 0x56, marker, 0x57, 0x54, 0x56, marker };
+        const client_cid = [_]u8{ 0x57, 0x54, 0x57, marker };
+        {
+            var client = try runtime.HandshakeClientSession.connect(
+                allocator,
+                io,
+                .{ .ip4 = .loopback(0) },
+                server.address(),
+                .{
+                    .authority = "localhost",
+                    .path = "/wt-truncated-capsule-type",
+                    .h3 = .{ .handshake = .{
+                        .original_destination_connection_id = &original_dcid,
+                        .local_connection_id = &client_cid,
+                        .server_name = "localhost",
+                        .random = [_]u8{0xa1} ** 32,
+                        .x25519_secret_key = [_]u8{0xa2} ** 32,
+                    } },
+                },
+            );
+            defer client.deinit();
+            try std.testing.expectError(
+                error.InvalidCapsule,
+                client.receiveSessionEvent(),
+            );
+        }
+    }
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 

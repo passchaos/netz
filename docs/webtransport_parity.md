@@ -369,8 +369,10 @@ The CONNECT stream uses a fixed-size incremental state machine. HTTP/3 DATA
 frame headers and Capsule Protocol varints may split at any byte boundary;
 unknown capsule values are skipped without allocation or whole-value buffering.
 Focused tests sweep every split point around an unknown capsule followed by
-WT_DRAIN_SESSION, while real-handshake tests cover drain, post-drain stream
-traffic, detailed close, clean-FIN close and post-close rejection.
+WT_DRAIN_SESSION. Real-handshake tests cover drain, post-drain stream traffic,
+detailed close, clean-FIN close and post-close rejection, and reject FIN after
+truncated 2-, 4-, or 8-byte Capsule type varints with H3_MESSAGE_ERROR rather
+than misreporting a clean session close.
 
 The lightweight preconfigured-key protected runtime also establishes
 WebTransport with incremental HTTP/3 request/response HEADERS rather than the

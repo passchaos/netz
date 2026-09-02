@@ -377,7 +377,10 @@ pub const Control = struct {
     fn atMessageBoundary(self: Control) bool {
         return self.h3_stage == .frame_type and
             self.h3_varint.len == 0 and
-            self.capsule_stage == .capsule_type;
+            self.capsule_stage == .capsule_type and
+            // `capsule_type` is also the stage used while a type varint is
+            // incomplete. FIN there is truncation, not an empty clean close.
+            self.capsule_varint.len == 0;
     }
 };
 
