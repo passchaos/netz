@@ -208,13 +208,18 @@ pub const RequestHead = struct {
     body_framing: BodyFraming,
     content_length: ?usize,
     head_len: usize,
+    /// Transfer-Encoding takes framing precedence over Content-Length, but a
+    /// request carrying both is an HTTP request-smuggling hazard. The message
+    /// remains parseable as chunked while its connection becomes one-shot.
+    must_close: bool = false,
 
     pub fn header(self: RequestHead, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
     }
 
     pub fn keepAlive(self: RequestHead) bool {
-        return headersKeepAlive(self.version, self.headers);
+        return !self.must_close and
+            headersKeepAlive(self.version, self.headers);
     }
 
     /// Total bytes for a pipelined message when its body boundary is known from
@@ -293,6 +298,9 @@ pub const Request = struct {
     header_value_storage: [][]u8 = &.{},
     trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
+    /// True when safe message framing requires retiring the connection even
+    /// if its Connection fields would otherwise permit persistence.
+    must_close: bool = false,
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
         if (self.body_storage) |body| allocator.free(body);
@@ -308,7 +316,8 @@ pub const Request = struct {
     }
 
     pub fn keepAlive(self: Request) bool {
-        return headersKeepAlive(self.version, self.headers);
+        return !self.must_close and
+            headersKeepAlive(self.version, self.headers);
     }
 
     pub fn upgradeProtocol(self: Request) ?[]const u8 {
@@ -339,6 +348,26 @@ pub fn headersKeepAlive(
         "keep-alive",
     )) return true;
     return version == .http_1_1;
+}
+
+fn hasHeaderNamed(headers: []const Header, name: []const u8) bool {
+    for (headers) |header| {
+        if (header.eqlName(name)) return true;
+    }
+    return false;
+}
+
+/// Filter descriptors in caller-owned storage without touching the wire
+/// bytes. This lets the borrowed request-head API expose Hyper's TE-over-CL
+/// normalization without allocating.
+fn stripHeaderInPlace(headers: []Header, name: []const u8) []Header {
+    var kept: usize = 0;
+    for (headers) |header| {
+        if (header.eqlName(name)) continue;
+        headers[kept] = header;
+        kept += 1;
+    }
+    return headers[0..kept];
 }
 
 pub const Response = struct {
@@ -414,14 +443,23 @@ pub fn parseRequestHead(
         parsed.headers,
     );
     const framing = try bodyFraming(parsed.headers);
+    const must_close = requestFramingMustClose(
+        parsed.headers,
+        framing,
+    );
+    const exposed_headers = if (framing == .chunked)
+        stripHeaderInPlace(parsed.headers, "content-length")
+    else
+        parsed.headers;
     return .{
         .method = method,
         .target = request_line.target,
         .version = version,
-        .headers = parsed.headers,
+        .headers = exposed_headers,
         .body_framing = framing,
         .content_length = if (framing == .content_length) try contentLength(parsed.headers) else null,
         .head_len = parsed.head_len,
+        .must_close = must_close,
     };
 }
 
@@ -572,6 +610,10 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
     const consumed_head = head_end + 4;
+    const must_close = requestFramingMustClose(
+        parsed_headers.headers,
+        try bodyFraming(parsed_headers.headers),
+    );
     const parsed_body = try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
     if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
@@ -590,6 +632,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
         .header_value_storage = parsed_headers.value_storage,
         .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
+        .must_close = must_close,
     };
 }
 
@@ -1050,6 +1093,15 @@ pub fn bodyFraming(headers: []const Header) Error!BodyFraming {
     if (try transferEncodingFraming(headers)) |framing| return framing;
     if ((try contentLength(headers)) != null) return .content_length;
     return .none;
+}
+
+fn requestFramingMustClose(
+    headers: []const Header,
+    framing: BodyFraming,
+) bool {
+    return framing == .chunked and
+        hasHeaderNamed(headers, "transfer-encoding") and
+        hasHeaderNamed(headers, "content-length");
 }
 
 pub fn contentLength(headers: []const Header) Error!?usize {
@@ -2509,9 +2561,46 @@ test "HTTP/1 parser decodes chunked transfer bodies" {
 
     try std.testing.expectEqual(BodyFraming.chunked, req.body_framing);
     try std.testing.expect(req.header("content-length") == null);
+    try std.testing.expect(req.must_close);
+    try std.testing.expect(!req.keepAlive());
     try std.testing.expectEqualStrings("hello world", req.body);
     try std.testing.expectEqualStrings("sha-256=demo", req.trailers[0].value);
     try std.testing.expectEqual(raw.len - "next".len, req.consumed);
+}
+
+test "HTTP/1 request TE plus CL is chunked but must close in either order" {
+    const allocator = std.testing.allocator;
+    const requests = [_][]const u8{
+        "POST /cl-first HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "Content-Length: 999\r\n" ++
+            "Transfer-Encoding: chunked\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+        "POST /te-first HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "Content-Length: 999\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+    };
+
+    for (requests) |raw| {
+        var header_storage: [8]Header = undefined;
+        const head = try parseRequestHead(raw, &header_storage, .{});
+        try std.testing.expectEqual(BodyFraming.chunked, head.body_framing);
+        try std.testing.expect(head.header("content-length") == null);
+        try std.testing.expect(head.must_close);
+        try std.testing.expect(!head.keepAlive());
+
+        var request = try parseRequest(allocator, raw, .{});
+        defer request.deinit(allocator);
+        try std.testing.expectEqual(BodyFraming.chunked, request.body_framing);
+        try std.testing.expectEqualStrings("ok", request.body);
+        try std.testing.expect(request.header("content-length") == null);
+        try std.testing.expect(request.must_close);
+        try std.testing.expect(!request.keepAlive());
+    }
 }
 
 test "HTTP/1 parser preserves exact chunked trailer field-name spelling" {

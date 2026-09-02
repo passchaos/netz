@@ -412,6 +412,7 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
             );
             try std.testing.expectEqualStrings("hello world", body.items);
             try std.testing.expect(first.header("content-length") == null);
+            try std.testing.expect(!first.must_close);
             try std.testing.expectEqual(@as(usize, 1), first.trailers.len);
             try std.testing.expectEqualStrings(
                 "sha-256=demo",
@@ -446,7 +447,6 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
     const raw =
         "POST /chunked HTTP/1.1\r\n" ++
         "Host: localhost\r\n" ++
-        "Content-Length: 999\r\n" ++
         "Transfer-Encoding: chunked\r\n\r\n" ++
         "5\r\nhello\r\n" ++
         "6\r\n world\r\n" ++
@@ -466,6 +466,82 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 streaming requests retain TE plus CL must-close semantics" {
+    const allocator = std.testing.allocator;
+    const Reader = @import("body_reader.zig").Reader(runtime.Error);
+    const requests = [_][]const u8{
+        "POST /cl-first HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Content-Length: 9\r\n" ++
+            "Transfer-Encoding: chunked\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+        "POST /te-first HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "Content-Length: 9\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+    };
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+
+        fn readSome(raw_context: ?*anyopaque, out: []u8) runtime.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            if (self.offset == self.bytes.len) return 0;
+            const count = @min(out.len, self.bytes.len - self.offset);
+            @memcpy(out[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+    };
+    const Context = struct {
+        saw_head: bool = false,
+        body: std.ArrayList(u8) = .empty,
+
+        fn begin(self: *@This(), head: Reader.RequestHead) !void {
+            try std.testing.expectEqual(http1.BodyFraming.chunked, head.body_framing);
+            try std.testing.expect(head.header("content-length") == null);
+            try std.testing.expect(head.must_close);
+            try std.testing.expect(!head.keepAlive());
+            self.saw_head = true;
+        }
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+
+    for (requests) |raw| {
+        var source = Source{ .bytes = raw };
+        var inbuf: std.ArrayList(u8) = .empty;
+        defer inbuf.deinit(allocator);
+        var context: Context = .{};
+        defer context.body.deinit(allocator);
+        var reader = Reader{
+            .allocator = allocator,
+            .context = &source,
+            .read_some = Source.readSome,
+            .inbuf = &inbuf,
+            .limits = .{
+                .max_head_bytes = limits.max_head_bytes,
+                .max_body_bytes = limits.max_body_bytes,
+            },
+            .options = .{},
+        };
+        var request = try reader.readRequest(
+            &context,
+            Context.begin,
+            Context.consume,
+        );
+        defer request.deinit(allocator);
+        try std.testing.expect(context.saw_head);
+        try std.testing.expectEqualStrings("ok", context.body.items);
+        try std.testing.expect(request.header("content-length") == null);
+        try std.testing.expect(request.must_close);
+        try std.testing.expect(!request.keepAlive());
+    }
 }
 
 test "HTTP/1 streaming request optionally unfolds chunked trailers" {

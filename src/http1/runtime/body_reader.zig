@@ -49,6 +49,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []http1.Header,
             body_framing: http1.BodyFraming,
             body_bytes: usize,
+            must_close: bool = false,
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
             trailer_value_storage: [][]u8 = &.{},
@@ -77,7 +78,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             }
 
             pub fn keepAlive(self: Request) bool {
-                return http1.headersKeepAlive(
+                return !self.must_close and http1.headersKeepAlive(
                     self.version,
                     self.headers,
                 );
@@ -134,6 +135,24 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []const http1.Header,
             body_framing: http1.BodyFraming,
             content_length: ?usize,
+            must_close: bool = false,
+
+            pub fn header(
+                self: RequestHead,
+                name: []const u8,
+            ) ?[]const u8 {
+                for (self.headers) |field| {
+                    if (field.eqlName(name)) return field.value;
+                }
+                return null;
+            }
+
+            pub fn keepAlive(self: RequestHead) bool {
+                return !self.must_close and http1.headersKeepAlive(
+                    self.version,
+                    self.headers,
+                );
+            }
         };
 
         pub const ResponseHead = struct {
@@ -188,17 +207,11 @@ pub fn Reader(comptime RuntimeError: type) type {
             defer if (headers.ptr != headers_stack[0..].ptr) {
                 self.allocator.free(headers);
             };
-            var head = try http1.parseRequestHead(
+            const head = try http1.parseRequestHead(
                 head_bytes,
                 headers,
                 self.options,
             );
-            if (head.body_framing == .chunked) {
-                head.headers = stripHeader(
-                    head.headers,
-                    "content-length",
-                );
-            }
             try self.validateKnownBodyLength(
                 head.body_framing,
                 head.content_length,
@@ -214,6 +227,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 .headers = head.headers,
                 .body_framing = head.body_framing,
                 .content_length = head.content_length,
+                .must_close = head.must_close,
             }) catch |err| {
                 return err;
             };
@@ -243,6 +257,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 .headers = owned_headers,
                 .body_framing = head.body_framing,
                 .body_bytes = body.body_bytes,
+                .must_close = head.must_close,
                 .trailers = body.trailers.headers,
                 .trailer_bytes = body.trailers.bytes,
                 .trailer_value_storage = body.trailers.value_storage,

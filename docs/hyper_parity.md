@@ -92,6 +92,15 @@ when a later response field carries `close`. This matches Hyper's `get_all`
 handling for connection-close reuse decisions rather than inspecting only the
 first field.
 
+Request framing also follows Hyper's smuggling hardening when both
+`Transfer-Encoding` and `Content-Length` are present: chunked decoding still
+wins and `Content-Length` is removed from borrowed, aggregate, and streaming
+request metadata, but the request is marked `must_close` so `keepAlive()` is
+false regardless of header order or an explicit `Connection: keep-alive`. The
+HTTP/1 serve loop therefore completes exactly that response with
+`Connection: close` and never interprets a buffered pipeline suffix as another
+request. Response-side framing semantics are unchanged.
+
 The parser also mirrors Hyper's explicitly opt-in HTTP/1 compatibility
 controls while preserving strict defaults.
 Header field names retain their exact input spelling in both borrowed and

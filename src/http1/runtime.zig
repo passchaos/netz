@@ -6357,6 +6357,18 @@ fn adjustResponseForServeLoop(
             "close",
         );
         out = adjusted.response;
+    } else if (request.must_close) {
+        // TE+CL is locally decoded as chunked, but the response must not
+        // advertise persistence even when an application supplied its own
+        // Connection field. Replace every such field to make the wire signal
+        // agree with the serve loop's decision to retire the connection.
+        if (adjusted.headers_owned) adjusted.deinit(allocator);
+        adjusted = try replaceConnectionHeaderForServeLoop(
+            allocator,
+            out,
+            "close",
+        );
+        out = adjusted.response;
     } else if (!request_keep_alive and
         !hasHeader(out.headers, "connection"))
     {
@@ -8951,6 +8963,100 @@ test "HTTP/1 serveConnection adds close for request close" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 serveConnection retires TE plus CL requests before pipeline suffix" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        count: usize = 0,
+
+        fn handle(self: *@This(), request: http1.Request) Error!ResponseOptions {
+            self.count += 1;
+            if (!request.must_close or request.keepAlive() or
+                !std.mem.eql(u8, "payload", request.body) or
+                request.header("content-length") != null)
+            {
+                return error.InvalidResponse;
+            }
+            return .{
+                .headers = &.{.{
+                    .name = "Connection",
+                    .value = "keep-alive",
+                }},
+                .body = "handled",
+            };
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        served: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.served = shared.server.serveConnection(
+                &shared.context,
+                Context.handle,
+                4,
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAllToStream(
+        io,
+        stream,
+        "POST /ambiguous HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "Content-Length: 1\r\n\r\n" ++
+            "7\r\npayload\r\n0\r\n\r\n" ++
+            "GET /smuggled HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+
+    var response = try readResponseFromStreamForRequest(
+        allocator,
+        io,
+        stream,
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+        .{},
+        .POST,
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("handled", response.response.body);
+    try std.testing.expectEqualStrings(
+        "close",
+        response.response.header("connection").?,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.served);
+    try std.testing.expectEqual(@as(usize, 1), shared.context.count);
 }
 
 test "HTTP/1 serveConnection fixes HTTP/1.0 keep-alive response" {
