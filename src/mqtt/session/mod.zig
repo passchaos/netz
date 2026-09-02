@@ -258,6 +258,11 @@ const InflightState = enum {
     await_pubcomp,
 };
 
+pub const IncomingQoS2State = enum {
+    await_pubrel,
+    release_pending,
+};
+
 const Inflight = struct {
     publish: OwnedPublish,
     packet_id: u16,
@@ -300,7 +305,10 @@ const Session = struct {
     /// lets a failed write return the message to the durable queue.
     pending_qos0: ?PendingQoS0 = null,
     packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
-    incoming_qos2: std.AutoHashMapUnmanaged(u16, void) = .empty,
+    incoming_qos2: std.AutoHashMapUnmanaged(
+        u16,
+        IncomingQoS2State,
+    ) = .empty,
     next_packet_id: u16 = 1,
     allocation_bytes: usize,
 
@@ -1989,7 +1997,7 @@ pub const Store = struct {
         try session.incoming_qos2.put(
             self.allocator,
             packet_id,
-            {},
+            .await_pubrel,
         );
         return false;
     }
@@ -2016,6 +2024,29 @@ pub const Store = struct {
     ) Error!bool {
         const session = try self.getSession(handle);
         return session.incoming_qos2.contains(packet_id);
+    }
+
+    pub fn incomingQoS2State(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!?IncomingQoS2State {
+        const session = try self.getSession(handle);
+        return session.incoming_qos2.get(packet_id);
+    }
+
+    /// Mark that PUBREL has authorized application release. Repeated PUBREL
+    /// keeps the same phase so a failed idempotent release can be retried by a
+    /// later event without creating a second protocol transaction.
+    pub fn markIncomingQoS2ReleasePending(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        const state = session.incoming_qos2.getPtr(packet_id) orelse
+            return error.InvalidPacketIdentifier;
+        state.* = .release_pending;
     }
 
     fn getSession(self: *Store, handle: Handle) Error!*Session {

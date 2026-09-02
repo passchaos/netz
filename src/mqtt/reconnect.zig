@@ -991,6 +991,16 @@ pub const QueuedEventRun = struct {
     }
 };
 
+pub const InboundQoS2ReleasePolicy = enum {
+    /// Complete incoming QoS 2 immediately when PUBREL arrives.
+    automatic,
+    /// Surface PUBREL and wait for `Client.completeIncomingQoS2`. PUBREL can
+    /// be surfaced again while completion remains pending, so the application
+    /// release operation must be idempotent. This lets it establish a durable
+    /// boundary before making PUBCOMP visible to the peer.
+    deferred,
+};
+
 pub const ClientOptions = struct {
     /// Maximum number of filters retained for fresh-session replay.
     max_subscriptions: usize = 1024,
@@ -998,6 +1008,7 @@ pub const ClientOptions = struct {
     /// application must acknowledge them through this Client or its queued
     /// handle so the single socket-owner invariant is preserved.
     manual_acknowledgements: bool = false,
+    inbound_qos2_release_policy: InboundQoS2ReleasePolicy = .automatic,
     /// Optional notification emitted when an outbound PUBLISH reaches its
     /// protocol delivery boundary: socket completion for QoS 0, PUBACK for
     /// QoS 1, and PUBCOMP (or a negative PUBREC) for QoS 2. This observes all
@@ -1239,6 +1250,11 @@ pub const Client = struct {
         var owned_target = target;
         errdefer owned_target.deinit(allocator);
         try policy.validate();
+        if (client_options.inbound_qos2_release_policy == .deferred and
+            !client_options.manual_acknowledgements)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
         if (options.client_id.len == 0) return error.InvalidClientId;
         var owned_options = try OwnedConnectOptions.init(allocator, options);
         errdefer owned_options.deinit(allocator);
@@ -1527,6 +1543,25 @@ pub const Client = struct {
                 if (!active.hasPendingIncomingPublish(packet_id, qos)) {
                     return error.UnexpectedPacket;
                 }
+                // Validate and size the complete ACK before making the Session
+                // marker visible. Errors here are provably pre-wire, so a
+                // corrected acknowledgement can retry on this transport. The
+                // runtime writer still has its own scratch allocation; failure
+                // there is conservatively treated like ambiguous output below.
+                var validated_ack: std.ArrayList(u8) = .empty;
+                defer validated_ack.deinit(self.allocator);
+                try mqtt.AckPacket.write(
+                    &validated_ack,
+                    self.allocator,
+                    active.protocol,
+                    .pubrec,
+                    packet_id,
+                    options.reason_code,
+                    options.properties,
+                );
+                if (validated_ack.items.len > active.peerMaximumPacketSize()) {
+                    return error.OutgoingPacketTooLarge;
+                }
                 var recorded = false;
                 if (options.reason_code < 0x80) {
                     const duplicate = try self.outgoing.recordIncomingQoS2(
@@ -1541,21 +1576,88 @@ pub const Client = struct {
                     options.reason_code,
                     options.properties,
                 ) catch |err| {
-                    // Local validation/allocation can fail before bytes are
-                    // emitted; a transport error can also happen after a
-                    // partial write. Rolling back is safe in both cases: the
-                    // peer either retries PUBLISH or resumes with PUBREL,
-                    // which this client acknowledges idempotently.
-                    if (recorded) {
+                    // Automatic release historically rolls this marker back.
+                    // Deferred release must retain it because a partial PUBREC
+                    // write can make PUBREL the peer's next legal packet; its
+                    // application-owned release boundary needs the stored
+                    // transaction to survive that ambiguous wire outcome.
+                    if (recorded and
+                        self.client_options.inbound_qos2_release_policy ==
+                            .automatic)
+                    {
                         self.outgoing.completeIncomingQoS2(
                             self.outgoing_handle,
                             packet_id,
                         ) catch unreachable;
                     }
+                    if (self.client_options.inbound_qos2_release_policy ==
+                        .deferred)
+                    {
+                        self.disconnectTransport();
+                    }
                     return err;
                 };
             },
         }
+        self.noteControlSent();
+    }
+
+    /// Complete a deferred inbound QoS 2 release and emit PUBCOMP.
+    ///
+    /// The Session marker is retained until the complete PUBCOMP write
+    /// succeeds. A transport failure therefore leaves the transaction
+    /// recoverable after Session-Present reconnect; callers must treat such a
+    /// write error as an unusable transport and reconnect before retrying.
+    pub fn completeIncomingQoS2(
+        self: *Client,
+        packet_id: u16,
+        options: runtime.AcknowledgeOptions,
+    ) Error!void {
+        if (!self.client_options.manual_acknowledgements) {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        if (self.client_options.inbound_qos2_release_policy != .deferred) {
+            return error.UnexpectedPacket;
+        }
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        // Keep protocol/property/packet-size failures before receive-state
+        // mutation. The runtime writer still allocates its retained scratch;
+        // any later failure keeps the Session marker because output may be
+        // ambiguous and a Session-Present reconnect can safely retry.
+        var validated_ack: std.ArrayList(u8) = .empty;
+        defer validated_ack.deinit(self.allocator);
+        try mqtt.AckPacket.write(
+            &validated_ack,
+            self.allocator,
+            active.protocol,
+            .pubcomp,
+            packet_id,
+            options.reason_code,
+            options.properties,
+        );
+        if (validated_ack.items.len > active.peerMaximumPacketSize()) {
+            return error.OutgoingPacketTooLarge;
+        }
+        const state = try self.outgoing.incomingQoS2State(
+            self.outgoing_handle,
+            packet_id,
+        ) orelse return error.UnexpectedPacket;
+        if (state != .release_pending) return error.UnexpectedPacket;
+        try active.resumeIncomingQoS2(packet_id);
+        active.writePubCompWithProperties(
+            packet_id,
+            options.reason_code,
+            options.properties,
+        ) catch |err| {
+            self.disconnectTransport();
+            return err;
+        };
+        self.outgoing.completeIncomingQoS2(
+            self.outgoing_handle,
+            packet_id,
+        ) catch unreachable;
         self.noteControlSent();
     }
 
@@ -1808,7 +1910,16 @@ pub const Client = struct {
             };
             var packet_owned = true;
             defer if (packet_owned) packet_event.deinit(self.allocator);
-            const client_event = try self.applyPacketEvent(&packet_event);
+            const client_event = self.applyPacketEvent(&packet_event) catch |err| {
+                if (err == error.UnexpectedPacket and
+                    packet_event == .pubrel and
+                    self.client_options.inbound_qos2_release_policy ==
+                        .deferred)
+                {
+                    self.disconnectTransport();
+                }
+                return err;
+            };
             if (client_event) |event| {
                 packet_owned = false;
                 return event;
@@ -2266,11 +2377,41 @@ pub const Client = struct {
             },
             .pubrel => |owned| blk: {
                 const packet_id = owned.ack.packet_id;
-                const pending = try self.outgoing.containsIncomingQoS2(
+                const incoming_state = try self.outgoing.incomingQoS2State(
                     self.outgoing_handle,
                     packet_id,
                 );
-                if (pending) {
+                if (self.client_options.inbound_qos2_release_policy ==
+                    .deferred)
+                {
+                    if (incoming_state != null) {
+                        try self.outgoing.markIncomingQoS2ReleasePending(
+                            self.outgoing_handle,
+                            packet_id,
+                        );
+                        // The application owns the release boundary. In
+                        // particular, do not clear durable state or expose
+                        // PUBCOMP until it explicitly completes the
+                        // transaction.
+                        break :blk .{ .pubrel = owned };
+                    }
+                    if (active.hasPendingIncomingPublish(
+                        packet_id,
+                        .exactly_once,
+                    )) {
+                        // A PUBLISH that has not reached PUBREC cannot legally
+                        // advance to PUBREL. Do not let an early packet erase
+                        // the receive slot or masquerade as a lost PUBCOMP.
+                        return error.UnexpectedPacket;
+                    }
+                    // A lost PUBCOMP makes the peer repeat PUBREL after local
+                    // completion. Re-acknowledge it, but never manufacture a
+                    // second application release event without a marker.
+                    try active.writePubComp(packet_id, 0);
+                    self.noteControlSent();
+                    return null;
+                }
+                if (incoming_state != null) {
                     // Session Present can resume a transaction whose receive
                     // bit lived on the old socket. Recreate only that local
                     // accounting before the normal PUBCOMP writer clears it.

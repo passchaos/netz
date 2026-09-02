@@ -2676,8 +2676,24 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "QueuedRun"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ClientOptions"));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "InboundQoS2ReleasePolicy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.reconnect.ClientOptions,
+        "inbound_qos2_release_policy",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "hasSubscription",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "completeIncomingQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "peerMaximumPacketSize",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,

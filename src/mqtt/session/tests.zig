@@ -1032,12 +1032,25 @@ test "session persists incoming QoS2 packet identifiers" {
         opened.handle,
         42,
     )));
+    try std.testing.expectEqual(
+        session.IncomingQoS2State.await_pubrel,
+        (try store.incomingQoS2State(opened.handle, 42)).?,
+    );
+    try store.markIncomingQoS2ReleasePending(opened.handle, 42);
+    try std.testing.expectEqual(
+        session.IncomingQoS2State.release_pending,
+        (try store.incomingQoS2State(opened.handle, 42)).?,
+    );
     try store.disconnect(opened.handle, null, .zero);
     const resumed = try store.open("incoming-qos2", false, 60, .zero);
     try std.testing.expect(try store.recordIncomingQoS2(
         resumed.handle,
         42,
     ));
+    try std.testing.expectEqual(
+        session.IncomingQoS2State.release_pending,
+        (try store.incomingQoS2State(resumed.handle, 42)).?,
+    );
     try store.completeIncomingQoS2(resumed.handle, 42);
 }
 

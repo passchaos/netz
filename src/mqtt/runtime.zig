@@ -2539,6 +2539,13 @@ pub const Connection = struct {
         return self.peer_retain_available;
     }
 
+    /// Maximum complete MQTT Control Packet the peer advertised it can
+    /// receive. Reconnect preflights deferred acknowledgements against this
+    /// value before committing durable transaction state.
+    pub fn peerMaximumPacketSize(self: *const Connection) usize {
+        return self.peer_max_packet_size;
+    }
+
     /// Return the proxied source IP when available, otherwise the connected
     /// transport peer. PROXY UNKNOWN/LOCAL deliberately use the latter.
     pub fn remoteAddress(self: *const Connection) net.IpAddress {
