@@ -155,6 +155,25 @@ const DevelopmentStreamSet = struct {
         }
     }
 
+    /// Discard every extension-stream receive buffer for a retired peer.
+    ///
+    /// Unlike `removeMatching`, this intentionally removes a prefix that is too
+    /// short to reveal its Session ID. The caller may use this only after it has
+    /// proved that the peer has no live request or send state; while any session
+    /// remains active, an incomplete prefix must stay available to that session.
+    fn removePeer(self: *DevelopmentStreamSet, peer: net.IpAddress) void {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            const entry = &self.entries.items[index];
+            if (!entry.from.eql(&peer)) {
+                index += 1;
+                continue;
+            }
+            entry.deinit();
+            _ = self.entries.swapRemove(index);
+        }
+    }
+
     fn clear(self: *DevelopmentStreamSet) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.clearRetainingCapacity();
@@ -503,6 +522,33 @@ const DevelopmentPeerStreamSendSet = struct {
         }
     }
 
+    fn hasPeerEntries(
+        self: *DevelopmentPeerStreamSendSet,
+        peer: net.IpAddress,
+    ) bool {
+        for (self.entries.items) |entry| {
+            if (entry.to.eql(&peer)) return true;
+        }
+        return false;
+    }
+
+    /// Forget a peer's stream-ID cursor only after all of its send entries have
+    /// gone away. Returning false for a live peer makes the no-reuse invariant
+    /// explicit at this low-level boundary instead of relying on callers to
+    /// inspect the entry array correctly.
+    fn retirePeer(
+        self: *DevelopmentPeerStreamSendSet,
+        peer: net.IpAddress,
+    ) bool {
+        if (self.hasPeerEntries(peer)) return false;
+        for (self.cursors.items, 0..) |cursor, index| {
+            if (!cursor.peer.eql(&peer)) continue;
+            _ = self.cursors.swapRemove(index);
+            return true;
+        }
+        return false;
+    }
+
     fn contains(
         self: *DevelopmentPeerStreamSendSet,
         to: net.IpAddress,
@@ -569,7 +615,7 @@ const DevelopmentPeerStreamSendSet = struct {
     }
 };
 
-test "HTTP/3 development peer stream cursors stay bounded without ID reuse" {
+test "HTTP/3 development peer cursors retire without live ID reuse" {
     const allocator = std.testing.allocator;
     var sends = DevelopmentPeerStreamSendSet.init(allocator, 2);
     defer sends.deinit();
@@ -582,24 +628,66 @@ test "HTTP/3 development peer stream cursors stay bounded without ID reuse" {
         try sends.reserve(first, 0, .bidirectional),
     );
     try std.testing.expectEqual(
-        @as(u62, 1),
-        try sends.reserve(second, 4, .bidirectional),
-    );
-    try std.testing.expectError(
-        error.ExcessiveLoad,
-        sends.reserve(third, 8, .bidirectional),
-    );
-
-    sends.removeMatching(first, 0);
-    try std.testing.expectEqual(@as(usize, 2), sends.cursors.items.len);
-    try std.testing.expectEqual(
         @as(u62, 5),
+        try sends.reserve(first, 4, .bidirectional),
+    );
+    sends.removeMatching(first, 0);
+    try std.testing.expect(!sends.retirePeer(first));
+    sends.removeMatching(first, 4);
+    // Removing the last send entry is not itself permission to reset IDs. A
+    // higher layer may still have another live session for the same peer.
+    try std.testing.expectEqual(
+        @as(u62, 9),
         try sends.reserve(first, 8, .bidirectional),
     );
-    try std.testing.expectError(
-        error.ExcessiveLoad,
-        sends.reserve(third, 12, .bidirectional),
+    sends.removeMatching(first, 8);
+    try std.testing.expect(sends.retirePeer(first));
+    try std.testing.expectEqual(@as(usize, 0), sends.cursors.items.len);
+    try std.testing.expectEqual(
+        @as(u62, 1),
+        try sends.reserve(second, 12, .bidirectional),
     );
+    sends.removeMatching(second, 12);
+    try std.testing.expect(sends.retirePeer(second));
+    // Three historical peers pass through a table bounded to two concurrent
+    // cursors because each predecessor has been definitively retired.
+    try std.testing.expectEqual(
+        @as(u62, 1),
+        try sends.reserve(third, 16, .bidirectional),
+    );
+}
+
+test "HTTP/3 retired development peer drops incomplete stream prefix" {
+    const allocator = std.testing.allocator;
+    var streams = DevelopmentStreamSet.init(allocator, 32, 2);
+    defer streams.deinit();
+    const retired: net.IpAddress = .{ .ip4 = .loopback(2001) };
+    const live: net.IpAddress = .{ .ip4 = .loopback(2002) };
+
+    // 0x41 requires a two-byte QUIC varint. One byte cannot identify either
+    // the extension or its Session ID, so ordinary per-session cleanup must
+    // conservatively retain it while another session could still own it.
+    try streams.insert(retired, .{
+        .stream_id = 4,
+        .offset = 0,
+        .data = &.{0x40},
+        .fin = false,
+    });
+    try streams.insert(live, .{
+        .stream_id = 4,
+        .offset = 0,
+        .data = &.{0x40},
+        .fin = false,
+    });
+    streams.removeMatching(retired, .{
+        .session_id = 0,
+        .local_role = .server,
+    });
+    try std.testing.expect(streams.contains(retired, 4));
+
+    streams.removePeer(retired);
+    try std.testing.expect(!streams.contains(retired, 4));
+    try std.testing.expect(streams.contains(live, 4));
 }
 
 fn developmentStreamDirection(stream_id: u62) DevelopmentStreamDirection {
@@ -4086,6 +4174,33 @@ pub const Server = struct {
             peer,
             match.session_id,
         );
+        self.retireDevelopmentPeerIfInactive(peer);
+    }
+
+    /// Reclaim connection-scoped extension state only after the peer has no
+    /// request parser/lifecycle, response body, or associated-stream sender.
+    /// Until that point the cursor is part of the live peer's QUIC stream-ID
+    /// namespace and resetting it could collide with another active session.
+    fn retireDevelopmentPeerIfInactive(
+        self: *Server,
+        peer: net.IpAddress,
+    ) void {
+        if (self.streaming_peers.find(peer)) |request_peer| {
+            if (request_peer.retainedCount() != 0 or
+                request_peer.outbound_bodies.entries.items.len != 0 or
+                request_peer.response_send_offsets.count() != 0 or
+                request_peer.unusable)
+            {
+                return;
+            }
+            self.streaming_peers.removePeer(peer);
+        }
+        if (self.development_stream_sends.hasPeerEntries(peer)) return;
+        _ = self.development_stream_sends.retirePeer(peer);
+        // A partial association prefix has no Session ID, so it cannot be
+        // removed during ordinary session cleanup. Once both request and send
+        // ownership prove the peer retired, no live session can claim it.
+        self.development_streams.removePeer(peer);
     }
 
     pub fn developmentStreamDebugCounts(
@@ -4612,7 +4727,10 @@ pub const Server = struct {
         {
             return error.UnexpectedStream;
         }
-        const local_final_size = if (body) |entry| entry.send.next_offset else 0;
+        const local_final_size = if (body) |entry|
+            entry.send.next_offset
+        else
+            peer.response_send_offsets.get(stream_id) orelse 0;
         const send_reset = if (body) |entry|
             !entry.send.fin_sent
         else
@@ -4620,16 +4738,21 @@ pub const Server = struct {
         peer.request_streams.remove(stream_id);
         peer.streaming_requests.remove(stream_id);
         peer.qpack_encode.abandonStream(stream_id);
+        _ = peer.response_send_offsets.remove(stream_id);
         peer.lifecycle.markFinished(stream_id);
         _ = peer.outbound_bodies.finish(stream_id);
-        try sendRuntimeRequestCancellation(
+        sendRuntimeRequestCancellation(
             &self.quic_server.endpoint,
             to,
             stream_id,
             application_error_code,
             local_final_size,
             send_reset,
-        );
+        ) catch |err| {
+            self.retireDevelopmentPeerIfInactive(to);
+            return err;
+        };
+        self.retireDevelopmentPeerIfInactive(to);
     }
 
     /// Retire a development request without emitting RESET_STREAM or
@@ -4649,6 +4772,7 @@ pub const Server = struct {
         if (!self.streaming_peers.retireRequest(from, stream_id)) {
             return error.UnexpectedStream;
         }
+        self.retireDevelopmentPeerIfInactive(from);
     }
 };
 

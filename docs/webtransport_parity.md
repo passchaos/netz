@@ -133,13 +133,12 @@ or congestion recovery; production users should use the handshake-backed
 runtime.
 Session teardown releases every fully associated receive stream and local or
 reverse send entry for that CONNECT. A prefix that is still incomplete cannot
-yet be attributed to a session; such hostile/abandoned input remains bounded
-by the connection-scoped HTTP/3 stream count and byte limits until completion
-or endpoint teardown. Server-side peer stream-ID cursors are likewise bounded
-and retained until endpoint teardown; this avoids reusing an ID while another
-same-peer session remains active. After the configured number of distinct peer
-addresses has opened streams, a long-lived development server rejects further
-peer stream creation rather than growing cursor state without bound.
+yet be attributed to one session, so it is retained while any same-peer session
+remains active. Definitive peer retirement—no request lifecycle, response body,
+or associated send entry—then removes those otherwise-unclassifiable prefixes
+and the peer stream-ID cursor. IDs therefore remain monotonic without reuse for
+the complete live-peer lifetime, while long-lived servers bound cursor and
+partial-prefix storage by active peers rather than historical address churn.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte

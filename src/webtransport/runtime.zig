@@ -6395,6 +6395,19 @@ fn completeDevelopmentServerEvent(
         );
         session.control.control.local_close_sent = true;
     }
+    if (event == .closed or event == .reset) {
+        // Terminal control state is definitive session teardown. Release the
+        // adapter's associated streams now rather than waiting for deinit; H3
+        // retains the peer cursor only if another same-peer session is active.
+        session.server.h3.closeDevelopmentSession(
+            session.request.from,
+            development_stream.match(
+                &session.streams,
+                session.session_id,
+                .server,
+            ),
+        );
+    }
     return event;
 }
 
@@ -6526,6 +6539,13 @@ fn completeDevelopmentClientEvent(
         // reply does not trip the public open-state guard.
         try session.h3.sendRequestBody(session.session_id.value, &.{}, true);
         session.control.control.local_close_sent = true;
+    }
+    if (event == .closed or event == .reset) {
+        session.h3.closeDevelopmentSession(development_stream.match(
+            &session.streams,
+            session.session_id,
+            .client,
+        ));
     }
     return event;
 }
