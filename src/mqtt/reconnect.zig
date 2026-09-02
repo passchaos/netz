@@ -1487,6 +1487,15 @@ pub const Client = struct {
         return self.subscriptions.items.len;
     }
 
+    /// Return whether an accepted subscription is retained for reconnect
+    /// replay. The filter is borrowed only for this lookup.
+    pub fn hasSubscription(
+        self: *const Client,
+        filter: []const u8,
+    ) bool {
+        return self.subscriptionIndex(filter) != null;
+    }
+
     /// Acknowledge one inbound PUBLISH when manual acknowledgements are
     /// enabled. QoS 0 requires no wire response. QoS 1 emits PUBACK and QoS 2
     /// durably records the transaction before emitting PUBREC.

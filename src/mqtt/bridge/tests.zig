@@ -268,6 +268,68 @@ test "bridge rule maps only matching remote Topic Names" {
     );
 }
 
+test "bridge filter intersection follows MQTT wildcard semantics" {
+    const Case = struct {
+        left: []const u8,
+        right: []const u8,
+        overlaps: bool,
+    };
+    const cases = [_]Case{
+        .{ .left = "a/+", .right = "a/b", .overlaps = true },
+        .{ .left = "a/+", .right = "a/b/c", .overlaps = false },
+        .{ .left = "a/#", .right = "a", .overlaps = true },
+        .{ .left = "a/#", .right = "a/b/c", .overlaps = true },
+        .{ .left = "a/+", .right = "b/+", .overlaps = false },
+        .{ .left = "a//+", .right = "a//b", .overlaps = true },
+        .{ .left = "+/status", .right = "$SYS/status", .overlaps = false },
+        .{ .left = "#", .right = "$SYS/#", .overlaps = false },
+        .{ .left = "$SYS/+", .right = "$SYS/#", .overlaps = true },
+        .{
+            .left = "$share/a/sensors/+",
+            .right = "$share/b/sensors/room",
+            .overlaps = true,
+        },
+    };
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print(
+            "intersection case {d}: {s} vs {s}\n",
+            .{ index, case.left, case.right },
+        );
+        try std.testing.expectEqual(
+            case.overlaps,
+            try (Rule{ .filter = case.left }).overlaps(.{
+                .filter = case.right,
+            }),
+        );
+    }
+}
+
+test "bridge rejects empty duplicate and overlapping rule sets" {
+    try std.testing.expectError(
+        error.NoBridgeRules,
+        bridge_mod.testing.validateRules(&.{}),
+    );
+    try std.testing.expectError(
+        error.DuplicateBridgeFilter,
+        bridge_mod.testing.validateRules(&.{
+            .{ .filter = "devices/+" },
+            .{ .filter = "devices/+", .local_prefix = "other/" },
+        }),
+    );
+    try std.testing.expectError(
+        error.OverlappingBridgeFilters,
+        bridge_mod.testing.validateRules(&.{
+            .{ .filter = "devices/+" },
+            .{ .filter = "devices/room" },
+        }),
+    );
+    try bridge_mod.testing.validateRules(&.{
+        .{ .filter = "sensors/#", .local_prefix = "telemetry/" },
+        .{ .filter = "commands/#", .local_prefix = "control/" },
+        .{ .filter = "$SYS/#", .local_prefix = "remote-system/" },
+    });
+}
+
 test "bridge public configuration retains MQTT types" {
     const options = bridge_mod.Options{
         .connect = .{ .client_id = "bridge-test" },
@@ -278,6 +340,339 @@ test "bridge public configuration retains MQTT types" {
         },
     };
     try std.testing.expectEqual(mqtt.QoS.at_least_once, options.rule.qos);
+}
+
+test "bridge multi-rule constructor owns every filter and prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    var first_filter: [8]u8 = "sensor/#".*;
+    var first_prefix: [4]u8 = "one/".*;
+    var second_filter: [9]u8 = "command/#".*;
+    var second_prefix: [4]u8 = "two/".*;
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.initMany(
+        allocator,
+        io,
+        &local,
+        server.address(),
+        .{
+            .connect = .{ .client_id = "owned-many" },
+            .rules = &.{
+                .{ .filter = &first_filter, .local_prefix = &first_prefix },
+                .{ .filter = &second_filter, .local_prefix = &second_prefix },
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    @memset(&first_filter, 'x');
+    @memset(&first_prefix, 'x');
+    @memset(&second_filter, 'x');
+    @memset(&second_prefix, 'x');
+
+    try std.testing.expectEqual(@as(usize, 2), bridge.rules.len);
+    try std.testing.expectEqualStrings("sensor/#", bridge.rule.filter);
+    try std.testing.expectEqualStrings("one/", bridge.rule.local_prefix);
+    try std.testing.expectEqualStrings("command/#", bridge.rules[1].filter);
+    try std.testing.expectEqualStrings("two/", bridge.rules[1].local_prefix);
+}
+
+test "inbound bridge subscribes once and maps two disjoint rules" {
+    const allocator = std.testing.allocator;
+    const operation_timeout = std.Io.Duration.fromSeconds(2);
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local = try broker_mod.Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{ .max_connections = 1 } },
+    );
+    defer local.deinit();
+    var local_runner = BrokerRunner{
+        .broker = &local,
+        .accept_concurrency = 1,
+    };
+    const local_thread = try std.Thread.spawn(
+        .{},
+        BrokerRunner.run,
+        .{&local_runner},
+    );
+    var local_joined = false;
+    defer if (!local_joined) {
+        local_runner.shutdown.set(io);
+        local_thread.join();
+    };
+
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer remote.deinit();
+    const Peer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(usize, 2),
+                subscribe.subscribe.subscriptions.len,
+            );
+            try std.testing.expectEqualStrings(
+                "sensors/#",
+                subscribe.subscribe.subscriptions[0].topic_filter,
+            );
+            try std.testing.expect(
+                subscribe.subscribe.subscriptions[0].retain_as_published,
+            );
+            try std.testing.expectEqualStrings(
+                "commands/#",
+                subscribe.subscribe.subscriptions[1].topic_filter,
+            );
+            try std.testing.expect(
+                subscribe.subscribe.subscriptions[1].retain_as_published,
+            );
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{ 0x01, 0x01 },
+                &.{},
+            );
+            const first = (try accepted.connection.writePublish(
+                "sensors/room/state",
+                "online",
+                .{ .qos = .at_least_once },
+            )).?;
+            var first_ack = try accepted.connection.readPubAck();
+            defer first_ack.deinit(self.server.allocator);
+            try std.testing.expectEqual(first, first_ack.ack.packet_id);
+            const second = (try accepted.connection.writePublish(
+                "commands/room/restart",
+                "now",
+                .{ .qos = .at_least_once },
+            )).?;
+            var second_ack = try accepted.connection.readPubAck();
+            defer second_ack.deinit(self.server.allocator);
+            try std.testing.expectEqual(second, second_ack.ack.packet_id);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var peer = Peer{ .server = &remote };
+    const peer_thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var peer_joined = false;
+    defer if (!peer_joined) peer_thread.join();
+
+    var subscriber = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        local.address(),
+        .{ .protocol = .v5, .client_id = "many-local" },
+        operation_timeout,
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "mirror/#", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.initMany(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = "many-bridge",
+                .connect_timeout = operation_timeout,
+            },
+            .rules = &.{
+                .{
+                    .filter = "sensors/#",
+                    .qos = .at_least_once,
+                    .local_prefix = "mirror/telemetry/",
+                },
+                .{
+                    .filter = "commands/#",
+                    .qos = .at_least_once,
+                    .local_prefix = "mirror/control/",
+                },
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+    for (0..2) |_| try std.testing.expect(try bridge.step(.{
+        .timeout = operation_timeout,
+    }));
+
+    var first_event = try subscriber.readClientPacketEventWithTimeout(
+        operation_timeout,
+    );
+    defer first_event.deinit(allocator);
+    switch (first_event) {
+        .publish => |first| {
+            try std.testing.expectEqualStrings(
+                "mirror/telemetry/sensors/room/state",
+                first.publish.topic,
+            );
+            try subscriber.writePubAck(first.publish.packet_id.?, 0);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    var second_event = try subscriber.readClientPacketEventWithTimeout(
+        operation_timeout,
+    );
+    defer second_event.deinit(allocator);
+    switch (second_event) {
+        .publish => |second| {
+            try std.testing.expectEqualStrings(
+                "mirror/control/commands/room/restart",
+                second.publish.topic,
+            );
+            try subscriber.writePubAck(second.publish.packet_id.?, 0);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try bridge.client.disconnect(0);
+    try subscriber.disconnect(0);
+    peer_thread.join();
+    peer_joined = true;
+    if (peer.err) |err| return err;
+    try local_runner.stop(io, local_thread);
+    local_joined = true;
+}
+
+test "bridge disconnects after a partially refused multi-rule SUBACK" {
+    const allocator = std.testing.allocator;
+    const operation_timeout = std.Io.Duration.fromSeconds(2);
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer remote.deinit();
+
+    const Peer = struct {
+        server: *runtime.Server,
+        saw_close: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(usize, 2),
+                subscribe.subscribe.subscriptions.len,
+            );
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{ 0x01, 0x87 },
+                &.{},
+            );
+            var scratch: [1]u8 = undefined;
+            var bufs = [_][]u8{&scratch};
+            while (true) {
+                const read = accepted.connection.transport.tcp.io.vtable.netRead(
+                    accepted.connection.transport.tcp.io.userdata,
+                    accepted.connection.transport.tcp.stream.socket.handle,
+                    &bufs,
+                ) catch |err| switch (err) {
+                    error.ConnectionResetByPeer, error.SocketUnconnected => {
+                        self.saw_close = true;
+                        return;
+                    },
+                    else => return err,
+                };
+                if (read == 0) {
+                    self.saw_close = true;
+                    return;
+                }
+            }
+        }
+    };
+    var peer = Peer{ .server = &remote };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.initMany(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = "partial-suback-bridge",
+                .connect_timeout = operation_timeout,
+            },
+            .rules = &.{
+                .{ .filter = "accepted/#", .qos = .at_least_once },
+                .{ .filter = "refused/#", .qos = .at_least_once },
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    try std.testing.expectError(error.SubscriptionRefused, bridge.connect());
+    try std.testing.expect(bridge.client.connection() == null);
+    try std.testing.expect(bridge.client.hasSubscription("accepted/#"));
+    try std.testing.expect(!bridge.client.hasSubscription("refused/#"));
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
+    try std.testing.expect(peer.saw_close);
 }
 
 test "bridge hostname constructor owns endpoint and configuration strings" {

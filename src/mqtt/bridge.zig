@@ -1,8 +1,9 @@
 //! One-way inbound MQTT broker bridge.
 //!
-//! A Bridge owns one reconnecting client, subscribes to exactly one
-//! remote Topic Filter, maps each incoming Topic Name beneath a local prefix,
-//! and injects the resulting Application Message through `Broker.publishLocal`.
+//! A Bridge owns one reconnecting client, subscribes to one or more disjoint
+//! remote Topic Filters, maps each incoming Topic Name beneath its rule's local
+//! prefix, and injects the resulting Application Message through
+//! `Broker.publishLocal`.
 //! There is deliberately no local-to-remote path: using one direction per
 //! instance makes the topology explicit and prevents an instance from echoing
 //! its own injected messages back to the source broker.
@@ -16,11 +17,6 @@ const runtime = @import("runtime.zig");
 
 const net = std.Io.net;
 
-const bridge_client_options: reconnect.ClientOptions = .{
-    .max_subscriptions = 1,
-    .manual_acknowledgements = true,
-};
-
 const Remote = union(enum) {
     address: net.IpAddress,
     host: struct {
@@ -30,39 +26,10 @@ const Remote = union(enum) {
     connector: runtime.ClientConnector,
 };
 
-/// Owned backing for the public `Rule` view retained by a Bridge. Keeping the
-/// allocations together makes construction and rollback identical for every
-/// transport target.
-const OwnedRule = struct {
-    value: Rule,
-    filter: []u8,
-    local_prefix: []u8,
-
-    fn init(allocator: std.mem.Allocator, rule: Rule) Error!OwnedRule {
-        try rule.validate();
-        const filter = try allocator.dupe(u8, rule.filter);
-        errdefer allocator.free(filter);
-        const local_prefix = try allocator.dupe(u8, rule.local_prefix);
-        errdefer allocator.free(local_prefix);
-        return .{
-            .value = .{
-                .filter = filter,
-                .qos = rule.qos,
-                .local_prefix = local_prefix,
-            },
-            .filter = filter,
-            .local_prefix = local_prefix,
-        };
-    }
-
-    fn deinit(self: *OwnedRule, allocator: std.mem.Allocator) void {
-        allocator.free(self.local_prefix);
-        allocator.free(self.filter);
-        self.* = undefined;
-    }
-};
-
 pub const Error = broker_mod.Error || reconnect.Error || error{
+    NoBridgeRules,
+    DuplicateBridgeFilter,
+    OverlappingBridgeFilters,
     InvalidBridgeQoS,
     TopicOutsideBridgeRule,
 };
@@ -123,12 +90,68 @@ pub const Rule = struct {
         try mqtt.validateTopicName(mapped);
         return mapped;
     }
+
+    /// Return whether two valid filters can select at least one common Topic
+    /// Name under MQTT wildcard and leading-`$` matching rules. This compares
+    /// shared subscriptions by their effective inner filter because either
+    /// remote subscription may receive such a matching publication.
+    pub fn overlaps(self: Rule, other: Rule) Error!bool {
+        try self.validate();
+        try other.validate();
+        return topicFiltersOverlap(self.filter, other.filter);
+    }
 };
 
 pub const Options = struct {
     connect: runtime.ConnectOptions,
     reconnect_policy: reconnect.ReconnectPolicy = .{},
     rule: Rule,
+};
+
+pub const MultiOptions = struct {
+    connect: runtime.ConnectOptions,
+    reconnect_policy: reconnect.ReconnectPolicy = .{},
+    rules: []const Rule,
+};
+
+/// Deep-owned backing for every public Rule view retained by a Bridge.
+const OwnedRules = struct {
+    values: []Rule,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        source: []const Rule,
+    ) Error!OwnedRules {
+        try validateBridgeRules(source);
+        const values = try allocator.alloc(Rule, source.len);
+        errdefer allocator.free(values);
+        var initialized: usize = 0;
+        errdefer for (values[0..initialized]) |value| {
+            allocator.free(value.local_prefix);
+            allocator.free(value.filter);
+        };
+        for (source, values) |rule, *owned| {
+            const filter = try allocator.dupe(u8, rule.filter);
+            errdefer allocator.free(filter);
+            const local_prefix = try allocator.dupe(u8, rule.local_prefix);
+            owned.* = .{
+                .filter = filter,
+                .qos = rule.qos,
+                .local_prefix = local_prefix,
+            };
+            initialized += 1;
+        }
+        return .{ .values = values };
+    }
+
+    fn deinit(self: *OwnedRules, allocator: std.mem.Allocator) void {
+        for (self.values) |value| {
+            allocator.free(value.local_prefix);
+            allocator.free(value.filter);
+        }
+        allocator.free(self.values);
+        self.* = undefined;
+    }
 };
 
 pub const testing = if (builtin.is_test) struct {
@@ -159,6 +182,10 @@ pub const testing = if (builtin.is_test) struct {
         if (fault.fail_once(fault.context, remote)) return error.TestExpectedError;
         try bridge.inject(remote);
     }
+
+    pub fn validateRules(rules: []const Rule) Error!void {
+        return validateBridgeRules(rules);
+    }
 } else struct {};
 
 /// An inbound bridge and its reconnect/session state.
@@ -176,8 +203,11 @@ pub const Bridge = struct {
     allocator: std.mem.Allocator,
     local: *broker_mod.Broker,
     client: reconnect.Client,
+    /// Compatibility view of the first rule. Multi-rule callers should use
+    /// `rules`; single-rule constructors keep both views identical.
     rule: Rule,
-    rule_storage: OwnedRule,
+    rules: []const Rule,
+    rule_storage: OwnedRules,
 
     /// Construct a fixed-address cleartext bridge. Configuration slices are
     /// copied, so they may be released immediately after this call.
@@ -189,7 +219,31 @@ pub const Bridge = struct {
         options: Options,
         shutdown: *std.Io.Event,
     ) Error!Bridge {
-        return initRemote(
+        return initMany(
+            allocator,
+            io,
+            local,
+            remote_address,
+            .{
+                .connect = options.connect,
+                .reconnect_policy = options.reconnect_policy,
+                .rules = &.{options.rule},
+            },
+            shutdown,
+        );
+    }
+
+    /// Fixed-address counterpart accepting multiple disjoint rules. The rule
+    /// slice and every nested filter/prefix are copied.
+    pub fn initMany(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *broker_mod.Broker,
+        remote_address: net.IpAddress,
+        options: MultiOptions,
+        shutdown: *std.Io.Event,
+    ) Error!Bridge {
+        return initRemoteMany(
             allocator,
             io,
             local,
@@ -211,7 +265,32 @@ pub const Bridge = struct {
         options: Options,
         shutdown: *std.Io.Event,
     ) Error!Bridge {
-        return initRemote(
+        return initHostMany(
+            allocator,
+            io,
+            local,
+            remote_host,
+            remote_port,
+            .{
+                .connect = options.connect,
+                .reconnect_policy = options.reconnect_policy,
+                .rules = &.{options.rule},
+            },
+            shutdown,
+        );
+    }
+
+    /// Hostname counterpart accepting multiple disjoint, deeply copied rules.
+    pub fn initHostMany(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *broker_mod.Broker,
+        remote_host: []const u8,
+        remote_port: u16,
+        options: MultiOptions,
+        shutdown: *std.Io.Event,
+    ) Error!Bridge {
+        return initRemoteMany(
             allocator,
             io,
             local,
@@ -233,7 +312,31 @@ pub const Bridge = struct {
         options: Options,
         shutdown: *std.Io.Event,
     ) Error!Bridge {
-        return initRemote(
+        return initConnectorMany(
+            allocator,
+            io,
+            local,
+            connector,
+            .{
+                .connect = options.connect,
+                .reconnect_policy = options.reconnect_policy,
+                .rules = &.{options.rule},
+            },
+            shutdown,
+        );
+    }
+
+    /// Connector counterpart accepting multiple disjoint, deeply copied rules.
+    /// Connector context/configuration retain the borrowing contract above.
+    pub fn initConnectorMany(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *broker_mod.Broker,
+        connector: runtime.ClientConnector,
+        options: MultiOptions,
+        shutdown: *std.Io.Event,
+    ) Error!Bridge {
+        return initRemoteMany(
             allocator,
             io,
             local,
@@ -243,16 +346,20 @@ pub const Bridge = struct {
         );
     }
 
-    fn initRemote(
+    fn initRemoteMany(
         allocator: std.mem.Allocator,
         io: std.Io,
         local: *broker_mod.Broker,
         remote: Remote,
-        options: Options,
+        options: MultiOptions,
         shutdown: *std.Io.Event,
     ) Error!Bridge {
-        var owned_rule = try OwnedRule.init(allocator, options.rule);
-        errdefer owned_rule.deinit(allocator);
+        var owned_rules = try OwnedRules.init(allocator, options.rules);
+        errdefer owned_rules.deinit(allocator);
+        const client_options = reconnect.ClientOptions{
+            .max_subscriptions = owned_rules.values.len,
+            .manual_acknowledgements = true,
+        };
         const client = switch (remote) {
             .address => |address| try reconnect.Client.initWithOptions(
                 allocator,
@@ -261,7 +368,7 @@ pub const Bridge = struct {
                 options.connect,
                 options.reconnect_policy,
                 shutdown,
-                bridge_client_options,
+                client_options,
             ),
             .host => |host| try reconnect.Client.initHostWithOptions(
                 allocator,
@@ -271,7 +378,7 @@ pub const Bridge = struct {
                 options.connect,
                 options.reconnect_policy,
                 shutdown,
-                bridge_client_options,
+                client_options,
             ),
             .connector => |connector| try reconnect.Client.initConnectorWithOptions(
                 allocator,
@@ -280,15 +387,16 @@ pub const Bridge = struct {
                 options.connect,
                 options.reconnect_policy,
                 shutdown,
-                bridge_client_options,
+                client_options,
             ),
         };
         return .{
             .allocator = allocator,
             .local = local,
             .client = client,
-            .rule = owned_rule.value,
-            .rule_storage = owned_rule,
+            .rule = owned_rules.values[0],
+            .rules = owned_rules.values,
+            .rule_storage = owned_rules,
         };
     }
 
@@ -298,7 +406,7 @@ pub const Bridge = struct {
         self.* = undefined;
     }
 
-    /// Establish the remote connection and install the single inbound rule.
+    /// Establish the remote connection and install all inbound rules.
     pub fn connect(
         self: *Bridge,
     ) (Error || std.Io.Cancelable)!reconnect.ConnectEvent {
@@ -364,14 +472,18 @@ pub const Bridge = struct {
         self: *Bridge,
         _: reconnect.ConnectEvent,
     ) Error!void {
-        // `reconnect.Client` replays an accepted subscription whenever a
-        // reconnect reports a fresh Session, while a surviving remote Session
-        // already retains it. Install the rule only on the first connection.
-        if (self.client.subscriptionCount() != 0) return;
-        var suback = try self.client.subscribe(
-            &.{.{
-                .topic_filter = self.rule.filter,
-                .qos = self.rule.qos,
+        // A prior partial SUBACK is not a valid bridge configuration. The
+        // failed setup path disconnects, and this retry submits only missing
+        // rules in one packet. Existing accepted rules remain owned by the
+        // reconnect client for fresh-Session replay.
+        var subscriptions: std.ArrayList(mqtt.Subscription) = .empty;
+        defer subscriptions.deinit(self.allocator);
+        try subscriptions.ensureTotalCapacity(self.allocator, self.rules.len);
+        for (self.rules) |rule| {
+            if (self.client.hasSubscription(rule.filter)) continue;
+            subscriptions.appendAssumeCapacity(.{
+                .topic_filter = rule.filter,
+                .qos = rule.qos,
                 // Preserve the upstream RETAIN bit so retained publications
                 // populate the local broker's retained store as well as live
                 // fanout when MQTT 5 supports this subscription option. MQTT
@@ -379,26 +491,36 @@ pub const Bridge = struct {
                 // live deliveries, although the initial retained replay keeps
                 // it. The reconnect client owns and replays the exact option.
                 .retain_as_published = self.client.options.value.protocol == .v5,
-            }},
+            });
+        }
+        if (subscriptions.items.len == 0) return;
+        var suback = try self.client.subscribe(
+            subscriptions.items,
             .{},
         );
         defer suback.deinit(self.allocator);
-        if (suback.suback.reason_codes.len != 1 or
-            suback.suback.reason_codes[0] >= 0x80)
-        {
-            return error.SubscriptionRefused;
+        if (suback.suback.reason_codes.len != subscriptions.items.len) {
+            return error.UnexpectedPacket;
+        }
+        for (suback.suback.reason_codes) |reason| {
+            if (reason >= 0x80) return error.SubscriptionRefused;
         }
     }
 
     fn inject(self: *Bridge, remote: *const mqtt.Publish) Error!void {
         // A conforming remote broker sends only matching deliveries, but fail
         // closed before local injection if it violates the installed rule.
-        const topic = try self.rule.mapTopicAlloc(
+        const rule = self.matchingRule(remote.topic) orelse
+            return error.TopicOutsideBridgeRule;
+        const topic = try rule.mapTopicAlloc(
             self.allocator,
             remote.topic,
         );
         defer self.allocator.free(topic);
-        if (remote.qos == .exactly_once) return error.InvalidBridgeQoS;
+        if (remote.qos == .exactly_once) {
+            self.client.disconnectTransport();
+            return error.InvalidBridgeQoS;
+        }
 
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
@@ -438,7 +560,104 @@ pub const Bridge = struct {
             );
         }
     }
+
+    fn matchingRule(self: *const Bridge, topic: []const u8) ?Rule {
+        var matched: ?Rule = null;
+        for (self.rules) |rule| {
+            if (!mqtt.topicMatchesFilter(topic, rule.filter)) continue;
+            // Construction rejects intersections, so two matches would mean
+            // memory corruption or a broken matcher invariant. Fail closed in
+            // release builds rather than choosing by declaration order.
+            if (matched != null) return null;
+            matched = rule;
+        }
+        return matched;
+    }
 };
+
+fn validateBridgeRules(rules: []const Rule) Error!void {
+    if (rules.len == 0) return error.NoBridgeRules;
+    for (rules, 0..) |rule, index| {
+        try rule.validate();
+        for (rules[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.filter, rule.filter)) {
+                return error.DuplicateBridgeFilter;
+            }
+            if (topicFiltersOverlap(previous.filter, rule.filter)) {
+                return error.OverlappingBridgeFilters;
+            }
+        }
+    }
+}
+
+const FilterLevel = union(enum) {
+    literal: []const u8,
+    one,
+    many,
+};
+
+fn nextFilterLevel(
+    iterator: *std.mem.SplitIterator(u8, .scalar),
+) ?FilterLevel {
+    const level = iterator.next() orelse return null;
+    if (std.mem.eql(u8, level, "+")) return .one;
+    if (std.mem.eql(u8, level, "#")) return .many;
+    return .{ .literal = level };
+}
+
+/// Decide intersection by walking both filter automata. Valid MQTT filters
+/// have only a terminal `#`, so no backtracking or allocation is required.
+/// Empty levels are ordinary literal levels and are handled by slice equality.
+fn topicFiltersOverlap(left: []const u8, right: []const u8) bool {
+    // A Topic Name beginning with '$' is excluded when the first filter level
+    // is a wildcard. If one side requires '$' and the other starts wildcard,
+    // their otherwise-compatible languages remain disjoint. Shared filters
+    // are valid public inputs; matching semantics apply to their inner filter.
+    const a = effectiveFilter(left);
+    const b = effectiveFilter(right);
+    if (startsWithDollarLiteral(a) and startsWithWildcard(b)) return false;
+    if (startsWithDollarLiteral(b) and startsWithWildcard(a)) return false;
+
+    var a_levels = std.mem.splitScalar(u8, a, '/');
+    var b_levels = std.mem.splitScalar(u8, b, '/');
+    while (true) {
+        const a_level = nextFilterLevel(&a_levels);
+        const b_level = nextFilterLevel(&b_levels);
+        if (a_level == null or b_level == null) {
+            if (a_level == null and b_level == null) return true;
+            // A terminal `#` also matches zero additional levels, so `a/#`
+            // intersects the exact filter `a` at Topic Name `a`.
+            return if (a_level) |level| level == .many else if (b_level) |level| level == .many else false;
+        }
+        if (a_level.? == .many or b_level.? == .many) return true;
+        if (a_level.? == .literal and b_level.? == .literal and
+            !std.mem.eql(
+                u8,
+                a_level.?.literal,
+                b_level.?.literal,
+            ))
+        {
+            return false;
+        }
+    }
+}
+
+fn effectiveFilter(filter: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, filter, "$share/")) return filter;
+    const rest = filter["$share/".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse unreachable;
+    return rest[slash + 1 ..];
+}
+
+fn startsWithWildcard(filter: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, filter, '/') orelse filter.len;
+    const first = filter[0..slash];
+    return std.mem.eql(u8, first, "+") or std.mem.eql(u8, first, "#");
+}
+
+fn startsWithDollarLiteral(filter: []const u8) bool {
+    return filter.len != 0 and filter[0] == '$' and !startsWithWildcard(filter);
+}
 
 test {
     _ = @import("bridge/tests.zig");

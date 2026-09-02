@@ -801,6 +801,8 @@ test "MQTT reconnect replays accepted subscriptions only for a fresh session" {
     }, .{ .properties = &subscribe_properties });
     defer suback.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), client.subscriptionCount());
+    try std.testing.expect(client.hasSubscription("devices/+/state"));
+    try std.testing.expect(!client.hasSubscription("denied/#"));
     @memcpy(&replay_property_value, "later");
 
     const fresh = try client.reconnect();

@@ -2643,16 +2643,29 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Options"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "MultiOptions"));
+    try std.testing.expect(@hasField(netz.mqtt.bridge.Bridge, "rule"));
+    try std.testing.expect(@hasField(netz.mqtt.bridge.Bridge, "rules"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "init"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "initMany"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "initHost"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.bridge.Bridge,
+        "initHostMany",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.Bridge,
         "initConnector",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.Bridge,
+        "initConnectorMany",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "connect"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "step"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "run"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Rule, "mapTopicAlloc"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Rule, "overlaps"));
     try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ReconnectPolicy"));
@@ -2662,6 +2675,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "CommandQueue"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "QueuedRun"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ClientOptions"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "hasSubscription",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
         "PublishDelivery",
