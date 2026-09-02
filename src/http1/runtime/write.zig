@@ -152,6 +152,7 @@ fn prepareStreamingRequest(
     options: StreamingRequestOptions,
     scratch: *Scratch,
 ) Error!StreamingHead {
+    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     try http1.validateRequestTargetForMethod(options.method, options.target);
     if (options.method == .CONNECT) {
@@ -265,6 +266,7 @@ fn prepareStreamingResponse(
     options: StreamingResponseOptions,
     scratch: *Scratch,
 ) Error!StreamingHead {
+    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
@@ -579,6 +581,7 @@ pub fn prepareRequest(
     options: RequestOptions,
     scratch: *Scratch,
 ) Error!MessageParts {
+    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     try http1.validateRequestTargetForMethod(options.method, options.target);
     const target_authority = if (options.method == .CONNECT)
@@ -661,6 +664,7 @@ pub fn prepareResponse(
     options: ResponseOptions,
     scratch: *Scratch,
 ) Error!MessageParts {
+    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     const framing = try prepareResponseFraming(allocator, options, scratch);
     try encodeResponseHead(allocator, options, scratch);
@@ -774,6 +778,7 @@ fn prepareResponseFraming(
     options: ResponseOptions,
     scratch: *Scratch,
 ) Error!ResponseFraming {
+    if (options.version == .http_0_9) return error.InvalidVersion;
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
     try http1.validateResponseBodyForStatus(

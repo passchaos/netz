@@ -2771,9 +2771,66 @@ pub const Client = struct {
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
-        return self.requestWithInformational(
+        return self.requestWithParseOptions(
             request_options,
+            .{},
+        );
+    }
+
+    /// Send a complete request with explicit response parser compatibility.
+    pub fn requestWithParseOptions(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+    ) Error!OwnedResponse {
+        return self.requestWithParseOptionsAndInformational(
+            request_options,
+            parse_options,
             null,
+        );
+    }
+
+    pub fn requestWithParseOptionsAndTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithParseOptionsAndDeadline(
+            request_options,
+            parse_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn requestWithParseOptionsAndDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        return self.requestWithParseOptionsAndInformationalAndDeadline(
+            request_options,
+            parse_options,
+            null,
+            deadline,
+        );
+    }
+
+    pub fn requestWithParseOptionsAndInformationalAndTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestWithParseOptionsAndInformationalAndDeadline(
+            request_options,
+            parse_options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -2814,12 +2871,28 @@ pub const Client = struct {
         informational: ?InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        return self.requestWithParseOptionsAndInformationalAndDeadline(
+            request_options,
+            .{},
+            informational,
+            deadline,
+        );
+    }
+
+    pub fn requestWithParseOptionsAndInformationalAndDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.response_deadline == null);
         self.response_deadline = deadline;
         defer self.response_deadline = null;
-        return self.requestWithInformational(
+        return self.requestWithParseOptionsAndInformational(
             request_options,
+            parse_options,
             informational,
         );
     }
@@ -2846,6 +2919,19 @@ pub const Client = struct {
         request_options: RequestOptions,
         informational: ?InformationalObserver,
     ) Error!OwnedResponse {
+        return self.requestWithParseOptionsAndInformational(
+            request_options,
+            .{},
+            informational,
+        );
+    }
+
+    pub fn requestWithParseOptionsAndInformational(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+    ) Error!OwnedResponse {
         try self.writer_state.ensureAvailable();
         var options = request_options;
         if (options.host == null) options.host = self.default_host;
@@ -2861,7 +2947,7 @@ pub const Client = struct {
             self.allocator,
             self.transport(),
             self.limits,
-            .{},
+            parse_options,
             &self.inbuf,
             request_options.method,
             informational,
@@ -2980,6 +3066,107 @@ pub const Client = struct {
             request_options,
             parse_options,
             null,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithParseOptionsAndInformational(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.requestStreamingWithOptionsAndHead(
+            request_options,
+            parse_options,
+            informational,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithParseOptionsAndTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithParseOptionsAndDeadline(
+            request_options,
+            parse_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithParseOptionsAndDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.requestStreamingWithOptionsAndHead(
+            request_options,
+            parse_options,
+            null,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithParseOptionsAndInformationalAndTimeout(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestStreamingWithParseOptionsAndInformationalAndDeadline(
+            request_options,
+            parse_options,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithParseOptionsAndInformationalAndDeadline(
+        self: *Client,
+        request_options: RequestOptions,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.requestStreamingWithOptionsAndHead(
+            request_options,
+            parse_options,
+            informational,
             context,
             ignoreStreamingResponseHead,
             consume,
@@ -4534,6 +4721,16 @@ pub const RequestWriter = struct {
         return self.readResponseWithInformational(null);
     }
 
+    pub fn readResponseWithParseOptions(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+    ) Error!OwnedResponse {
+        return self.readResponseWithParseOptionsAndInformational(
+            parse_options,
+            null,
+        );
+    }
+
     pub fn readResponseWithTimeout(
         self: *RequestWriter,
         timeout: std.Io.Duration,
@@ -4552,6 +4749,63 @@ pub const RequestWriter = struct {
         return self.readResponseWithInformationalAndDeadline(
             null,
             deadline,
+        );
+    }
+
+    pub fn readResponseWithParseOptionsAndTimeout(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithParseOptionsAndDeadline(
+            parse_options,
+            .fromNow(self.client.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn readResponseWithParseOptionsAndDeadline(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponseWithParseOptionsAndInformational(
+            parse_options,
+            null,
+        );
+    }
+
+    pub fn readResponseWithParseOptionsAndInformationalAndTimeout(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseWithParseOptionsAndInformationalAndDeadline(
+            parse_options,
+            informational,
+            .fromNow(self.client.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn readResponseWithParseOptionsAndInformationalAndDeadline(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponseWithParseOptionsAndInformational(
+            parse_options,
+            informational,
         );
     }
 
@@ -4589,6 +4843,17 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         informational: ?InformationalObserver,
     ) Error!OwnedResponse {
+        return self.readResponseWithParseOptionsAndInformational(
+            .{},
+            informational,
+        );
+    }
+
+    pub fn readResponseWithParseOptionsAndInformational(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+    ) Error!OwnedResponse {
         try self.body.ensureExchangeActive();
         if (!self.body.isBodyFinished()) return error.InvalidWriterState;
 
@@ -4596,7 +4861,7 @@ pub const RequestWriter = struct {
             self.client.allocator,
             self.client.transport(),
             self.client.limits,
-            .{},
+            parse_options,
             &self.client.inbuf,
             self.method,
             informational,
@@ -4699,6 +4964,97 @@ pub const RequestWriter = struct {
         return self.readResponseStreamingWithOptionsAndHead(
             parse_options,
             null,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithParseOptionsAndInformational(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithOptionsAndHead(
+            parse_options,
+            informational,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithParseOptionsAndTimeout(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithParseOptionsAndDeadline(
+            parse_options,
+            .fromNow(self.client.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithParseOptionsAndDeadline(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponseStreamingWithOptionsAndHead(
+            parse_options,
+            null,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithParseOptionsAndInformationalAndTimeout(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithParseOptionsAndInformationalAndDeadline(
+            parse_options,
+            informational,
+            .fromNow(self.client.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithParseOptionsAndInformationalAndDeadline(
+        self: *RequestWriter,
+        parse_options: http1.ParseOptions,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponseStreamingWithOptionsAndHead(
+            parse_options,
+            informational,
             context,
             ignoreStreamingResponseHead,
             consume,
@@ -4907,6 +5263,31 @@ fn readTransportUntil(
         transport.read(buffer);
 }
 
+fn readHttp09Body(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    max_body_bytes: usize,
+    bytes: *std.ArrayList(u8),
+    scratch: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]u8 {
+    // HTTP/0.9 has no framing metadata; EOF is the only message boundary.
+    // Keep the same decoded-body and outer-deadline guarantees as an HTTP/1.x
+    // close-delimited response, and reject an empty EOF so a stale connection
+    // cannot masquerade as a successful legacy response.
+    while (true) {
+        if (bytes.items.len > max_body_bytes) return error.BodyTooLarge;
+        const remaining = max_body_bytes - bytes.items.len;
+        const read_buf = scratch[0..@min(scratch.len, remaining +| 1)];
+        const n = try readTransportUntil(transport, read_buf, deadline);
+        if (n == 0) {
+            if (bytes.items.len == 0) return error.ConnectionClosed;
+            return bytes.toOwnedSlice(allocator);
+        }
+        try bytes.appendSlice(allocator, read_buf[0..n]);
+    }
+}
+
 fn ensureResponseHeadDeadlineForBuffer(
     transport: RuntimeTransport,
     limits: Limits,
@@ -4923,6 +5304,26 @@ fn ensureResponseHeadDeadlineForBuffer(
     }
     const timeout = limits.response_head_timeout orelse return;
     deadline.* = try headReadDeadline(transport, timeout);
+}
+
+fn ensureResponseStartDeadlineForBuffer(
+    transport: RuntimeTransport,
+    limits: Limits,
+    buffered: []const u8,
+    allow_http_0_9_response: bool,
+    deadline: *?std.Io.Clock.Timestamp,
+) Error!void {
+    if (allow_http_0_9_response and
+        http1.classifyResponsePrefix(buffered) == .http_0_9)
+    {
+        return;
+    }
+    try ensureResponseHeadDeadlineForBuffer(
+        transport,
+        limits,
+        buffered,
+        deadline,
+    );
 }
 
 fn connectionMaybeWriteContinue(
@@ -4950,7 +5351,8 @@ fn responseIsReusable(response: http1.Response) bool {
     // Close-delimited bodies consume EOF as their message boundary, and 101
     // transfers the socket to another protocol. Neither can begin another
     // HTTP/1 exchange even if the header block omitted Connection: close.
-    return response.keepAlive() and
+    return response.version != .http_0_9 and
+        response.keepAlive() and
         response.body_framing != .close_delimited and
         response.status != 101;
 }
@@ -4959,7 +5361,8 @@ fn streamingResponseIsReusable(
     response: StreamingResponse,
     request_method: http1.Method,
 ) bool {
-    return response.keepAlive() and
+    return response.version != .http_0_9 and
+        response.keepAlive() and
         response.body_framing != .close_delimited and
         response.status != 101 and
         !(request_method == .CONNECT and
@@ -5014,6 +5417,7 @@ pub fn readRequestFromStreamWithDeadline(
         limits,
         null,
         true,
+        false,
         false,
         deadline,
         deadline,
@@ -5082,6 +5486,7 @@ pub fn readRequestFromStreamBufferedWithDeadline(
         null,
         true,
         false,
+        false,
         deadline,
         deadline,
     );
@@ -5130,6 +5535,7 @@ fn readRequestFromTransportBuffered(
         null,
         true,
         false,
+        false,
         head_deadline,
         null,
     );
@@ -5173,10 +5579,11 @@ pub fn readResponseFromStreamObserved(
     var informational_count: usize = 0;
     var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        try ensureResponseHeadDeadlineForBuffer(
+        try ensureResponseStartDeadlineForBuffer(
             transport,
             limits,
             &.{},
+            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const bytes = try readMessageBytesWithContext(
@@ -5186,6 +5593,7 @@ pub fn readResponseFromStreamObserved(
             null,
             false,
             true,
+            options.allow_http_0_9_responses,
             response_head_deadline,
             null,
         );
@@ -5336,10 +5744,11 @@ fn readResponseFromStreamForRequestObservedUntil(
     var informational_count: usize = 0;
     var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        try ensureResponseHeadDeadlineForBuffer(
+        try ensureResponseStartDeadlineForBuffer(
             transport,
             limits,
             &.{},
+            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const effective_head_deadline = if (response_deadline) |deadline|
@@ -5353,6 +5762,7 @@ fn readResponseFromStreamForRequestObservedUntil(
             request_method,
             false,
             true,
+            options.allow_http_0_9_responses,
             effective_head_deadline,
             response_deadline,
         );
@@ -5435,10 +5845,11 @@ pub fn readResponseFromStreamBufferedObserved(
     var informational_count: usize = 0;
     var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        try ensureResponseHeadDeadlineForBuffer(
+        try ensureResponseStartDeadlineForBuffer(
             transport,
             limits,
             inbuf.items,
+            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const bytes = try readMessageBytesBufferedWithContext(
@@ -5450,6 +5861,7 @@ pub fn readResponseFromStreamBufferedObserved(
             null,
             false,
             true,
+            options.allow_http_0_9_responses,
             response_head_deadline,
             null,
         );
@@ -5611,10 +6023,11 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
     var informational_count: usize = 0;
     var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        try ensureResponseHeadDeadlineForBuffer(
+        try ensureResponseStartDeadlineForBuffer(
             transport,
             limits,
             inbuf.items,
+            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const bytes = try readMessageBytesBufferedWithContext(
@@ -5626,6 +6039,7 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             request_method,
             false,
             true,
+            options.allow_http_0_9_responses,
             response_head_deadline,
             null,
         );
@@ -5654,6 +6068,27 @@ fn parseResponseForRuntime(
     options: http1.ParseOptions,
     request_method: ?http1.Method,
 ) Error!http1.Response {
+    if (options.allow_http_0_9_responses and bytes.len != 0 and
+        http1.classifyResponsePrefix(bytes) != .http_1_x)
+    {
+        if (request_method != null and request_method.? != .GET) {
+            return error.InvalidResponse;
+        }
+        // Aggregate readers reach this point only after EOF established the
+        // legacy boundary. That distinction lets `parseResponse` itself keep
+        // returning BufferTooShort for a potentially fragmented `HTTP/`
+        // prefix while accepting the same bytes here once EOF is definitive.
+        return .{
+            .version = .http_0_9,
+            .status = 200,
+            .reason = "",
+            .headers = @constCast(&[_]http1.Header{}),
+            .body = bytes,
+            .body_framing = .close_delimited,
+            .trailers = @constCast(&[_]http1.Header{}),
+            .consumed = bytes.len,
+        };
+    }
     if (request_method) |method| {
         return http1.parseResponseForRequest(allocator, bytes, options, method) catch |err| switch (err) {
             error.InvalidTransferEncoding => try parseNonChunkedTransferResponse(allocator, bytes, options, method),
@@ -5993,6 +6428,7 @@ fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net
         null,
         true,
         false,
+        false,
         if (limits.request_head_timeout) |timeout|
             try headReadDeadline(transport, timeout)
         else
@@ -6008,6 +6444,7 @@ fn readMessageBytesWithContext(
     request_method: ?http1.Method,
     auto_continue: bool,
     close_delimited_when_unknown: bool,
+    allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
     body_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
@@ -6015,8 +6452,22 @@ fn readMessageBytesWithContext(
     errdefer bytes.deinit(allocator);
 
     var scratch: [4096]u8 = undefined;
-    var head_end: ?usize = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
+    var head_end: ?usize = null;
     while (head_end == null) {
+        if (allow_http_0_9_response and
+            (request_method == null or request_method.? == .GET)) switch (http1.classifyResponsePrefix(bytes.items)) {
+            .http_0_9 => return readHttp09Body(
+                allocator,
+                transport,
+                limits.max_body_bytes,
+                &bytes,
+                &scratch,
+                body_deadline,
+            ),
+            .incomplete, .http_1_x => {},
+        };
+        head_end = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
+        if (head_end != null) break;
         // The non-buffered helpers have nowhere to keep bytes that belong to
         // the next pipelined message.  Read the head one byte at a time until
         // CRLFCRLF so this API remains safe even without an explicit inbuf.
@@ -6025,9 +6476,17 @@ fn readMessageBytesWithContext(
             try transport.readWithDeadline(read_buf, deadline)
         else
             try transport.read(read_buf);
-        if (n == 0) return error.ConnectionClosed;
+        if (n == 0) {
+            if (allow_http_0_9_response and
+                (request_method == null or request_method.? == .GET) and
+                bytes.items.len != 0 and
+                http1.classifyResponsePrefix(bytes.items) == .incomplete)
+            {
+                return bytes.toOwnedSlice(allocator);
+            }
+            return error.ConnectionClosed;
+        }
         try bytes.appendSlice(allocator, scratch[0..n]);
-        head_end = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
     }
     try maybeWriteContinue(transport, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
 
@@ -6109,6 +6568,7 @@ fn readRequestMessageBytesBuffered(
         null,
         true,
         false,
+        false,
         if (limits.request_head_timeout) |timeout|
             try headReadDeadline(transport, timeout)
         else
@@ -6153,10 +6613,11 @@ fn readResponseFromTransportBufferedForRequestObserved(
         &local_informational_count;
     var response_head_deadline: ?std.Io.Clock.Timestamp = null;
     while (true) {
-        try ensureResponseHeadDeadlineForBuffer(
+        try ensureResponseStartDeadlineForBuffer(
             transport,
             limits,
             inbuf.items,
+            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const effective_head_deadline = if (response_deadline) |deadline|
@@ -6247,6 +6708,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         request_method,
         false,
         true,
+        options.allow_http_0_9_responses,
         head_deadline,
         body_deadline,
     );
@@ -6271,20 +6733,49 @@ fn readMessageBytesBufferedWithContext(
     request_method: ?http1.Method,
     auto_continue: bool,
     close_delimited_when_unknown: bool,
+    allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
     body_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
-    var head_end: ?usize = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
+    var head_end: ?usize = null;
     while (head_end == null) {
+        if (allow_http_0_9_response and
+            (request_method == null or request_method.? == .GET)) switch (http1.classifyResponsePrefix(inbuf.items)) {
+            .http_0_9 => {
+                const bytes = try readHttp09Body(
+                    allocator,
+                    transport,
+                    limits.max_body_bytes,
+                    inbuf,
+                    &scratch,
+                    body_deadline,
+                );
+                inbuf.* = .empty;
+                return bytes;
+            },
+            .incomplete, .http_1_x => {},
+        };
+        head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
+        if (head_end != null) break;
         const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - inbuf.items.len)];
         const n = if (head_deadline) |deadline|
             try transport.readWithDeadline(read_buf, deadline)
         else
             try transport.read(read_buf);
-        if (n == 0) return error.ConnectionClosed;
+        if (n == 0) {
+            if (allow_http_0_9_response and
+                (request_method == null or request_method.? == .GET) and
+                inbuf.items.len != 0 and
+                http1.classifyResponsePrefix(inbuf.items) == .incomplete)
+            {
+                const bytes = try inbuf.toOwnedSlice(allocator);
+                inbuf.* = .empty;
+                return bytes;
+            }
+            return error.ConnectionClosed;
+        }
         try inbuf.appendSlice(allocator, scratch[0..n]);
-        head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
     }
     try maybeWriteContinue(transport, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
 
@@ -6392,6 +6883,7 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
         null,
         false,
         true,
+        false,
         null,
         null,
     );
@@ -9483,6 +9975,37 @@ test "HTTP/1 runtime target length rejects ambiguous head framing" {
     try std.testing.expectError(error.InvalidChunk, messageTargetLength(signed_chunk, signed_chunk_head_end, 1024, 1024, null));
 }
 
+test "HTTP/0.9 aggregate body reader is opt in and bounded" {
+    const allocator = std.testing.allocator;
+    // Public parsing keeps legacy responses strict by default and exposes the
+    // same synthetic metadata used by the aggregate runtime after EOF.
+    try std.testing.expectError(error.BufferTooShort, http1.parseResponse(
+        allocator,
+        "legacy",
+        .{},
+    ));
+    var response = try http1.parseResponse(allocator, "legacy", .{
+        .allow_http_0_9_responses = true,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(http1.Version.http_0_9, response.version);
+    try std.testing.expectEqualStrings("legacy", response.body);
+    try std.testing.expect(!responseIsReusable(response));
+
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    try std.testing.expectError(error.InvalidVersion, runtime_write.prepareResponse(
+        allocator,
+        .{ .version = .http_0_9, .body = "legacy" },
+        &scratch,
+    ));
+    try std.testing.expectError(error.InvalidVersion, runtime_write.prepareRequest(
+        allocator,
+        .{ .version = .http_0_9 },
+        &scratch,
+    ));
+}
+
 test "HTTP/1 aggregate chunk limits count decoded payload only" {
     const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
     const head_end = std.mem.indexOf(u8, head, "\r\n\r\n").?;
@@ -9563,6 +10086,7 @@ test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
         &inbuf,
         null,
         true,
+        false,
         false,
         null,
         null,
@@ -9758,6 +10282,7 @@ test "HTTP/1 non-buffered chunked reader accepts exact and zero body limits" {
 
 test {
     _ = @import("runtime/unix_tests.zig");
+    _ = @import("runtime/http09_tests.zig");
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");

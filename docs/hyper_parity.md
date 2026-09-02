@@ -131,6 +131,25 @@ zig test -ODebug \
   --test-filter 'HTTP/1 invalid-header compatibility' ...
 ```
 
+Client response parsing also exposes an opt-in
+`ParseOptions.allow_http_0_9_responses`, matching Hyper's
+`http09_responses` switch while retaining a strict default. The aggregate and
+callback-streaming clients classify fragmented `H`, `HT`, `HTT`, and `HTTP`
+prefixes before falling back to a headerless response, so a split HTTP/1.x
+status line is never mistaken for legacy body data and malformed `HTTP/...`
+still fails the normal parser. Accepted HTTP/0.9 data is represented as a 200
+close-delimited response, remains subject to the configured body and absolute
+deadline limits, rejects empty EOF, and permanently retires the connection.
+The response-head timeout covers classification until the first unambiguous
+legacy body byte; caller-owned whole-response deadlines continue through the
+EOF-delimited body.
+Runtime clients accept this legacy response form only for GET requests. The
+lower-level `parseResponse` option is intentionally request-context-free, so
+callers using that codec directly remain responsible for applying method
+semantics.
+The representation is receive-only: every request and response writer rejects
+`.http_0_9`.
+
 The streaming chunked-body reader now applies the same opt-in obs-fold policy
 to trailers instead of silently retaining a stricter second parser. Strict
 mode continues to reject folded trailers. Compatibility mode unfolds each

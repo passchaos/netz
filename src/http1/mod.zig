@@ -71,6 +71,9 @@ pub const Method = enum {
 };
 
 pub const Version = enum {
+    /// Response-only compatibility representation for an HTTP/0.9 body.
+    /// Request parsing never accepts this version and writers reject it.
+    http_0_9,
     http_1_0,
     http_1_1,
 
@@ -82,6 +85,7 @@ pub const Version = enum {
 
     pub fn string(self: Version) []const u8 {
         return switch (self) {
+            .http_0_9 => "HTTP/0.9",
             .http_1_0 => "HTTP/1.0",
             .http_1_1 => "HTTP/1.1",
         };
@@ -91,6 +95,10 @@ pub const Version = enum {
 pub const ParseOptions = struct {
     max_headers: usize = 100,
     allow_obs_fold: bool = false,
+    /// Accept a headerless HTTP/0.9 response body on client response paths.
+    /// This is deliberately response-only and disabled by default, matching
+    /// Hyper's `http09_responses` compatibility switch.
+    allow_http_0_9_responses: bool = false,
     /// Compatibility switch matching Hyper's HTTP/1 server builder. Strict
     /// parsing remains the default because accepting a different request-line
     /// grammar at intermediaries can create routing ambiguity.
@@ -106,6 +114,79 @@ pub const ParseOptions = struct {
     /// Response-side counterpart to `ignore_invalid_headers_in_requests`.
     ignore_invalid_headers_in_responses: bool = false,
 };
+
+/// Classification used by client runtimes before they decide whether bytes
+/// belong to an HTTP/1.x response head or an opt-in HTTP/0.9 body. Waiting on
+/// every proper prefix prevents a fragmented `HTTP/` status line from being
+/// mistaken for legacy body bytes. Once `HTTP/` is complete, malformed
+/// versions remain on the strict HTTP/1 parser path instead of being accepted
+/// as HTTP/0.9.
+pub const ResponsePrefix = enum { incomplete, http_1_x, http_0_9 };
+
+pub fn classifyResponsePrefix(bytes: []const u8) ResponsePrefix {
+    const marker = "HTTP/";
+    const compared = @min(bytes.len, marker.len);
+    if (std.mem.eql(u8, bytes[0..compared], marker[0..compared])) {
+        return if (bytes.len < marker.len) .incomplete else .http_1_x;
+    }
+    return .http_0_9;
+}
+
+test "HTTP/1 response prefix classification keeps fragmented versions strict" {
+    const prefixes = [_][]const u8{ "", "H", "HT", "HTT", "HTTP" };
+    for (prefixes) |prefix| {
+        try std.testing.expectEqual(ResponsePrefix.incomplete, classifyResponsePrefix(prefix));
+    }
+    try std.testing.expectEqual(ResponsePrefix.http_1_x, classifyResponsePrefix("HTTP/1.1"));
+    try std.testing.expectEqual(ResponsePrefix.http_1_x, classifyResponsePrefix("HTTP/bad"));
+    try std.testing.expectEqual(ResponsePrefix.http_0_9, classifyResponsePrefix("Hello"));
+
+    try std.testing.expectError(error.BufferTooShort, parseResponse(
+        std.testing.allocator,
+        "HTTP",
+        .{ .allow_http_0_9_responses = true },
+    ));
+    try std.testing.expectError(error.BufferTooShort, parseResponse(
+        std.testing.allocator,
+        "HTTP/bad",
+        .{ .allow_http_0_9_responses = true },
+    ));
+}
+
+test "HTTP/0.9 responses are opt in and writers remain strict" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.BufferTooShort, parseResponse(allocator, "legacy body", .{}));
+
+    var response = try parseResponse(allocator, "legacy body", .{
+        .allow_http_0_9_responses = true,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(Version.http_0_9, response.version);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("legacy body", response.body);
+    try std.testing.expect(!response.keepAlive());
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try std.testing.expectError(error.InvalidVersion, writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_0_9,
+        200,
+        "OK",
+        &.{},
+        "body",
+    ));
+    try std.testing.expectError(error.InvalidVersion, writeRequestChecked(
+        &encoded,
+        allocator,
+        .GET,
+        "/",
+        .http_0_9,
+        &.{},
+        "",
+    ));
+}
 
 pub const ResponseContext = struct {
     request_method: ?Method = null,
@@ -524,6 +605,19 @@ pub fn parseResponseWithContext(
     options: ParseOptions,
     context: ResponseContext,
 ) Error!Response {
+    if (options.allow_http_0_9_responses) switch (classifyResponsePrefix(bytes)) {
+        .http_0_9 => return .{
+            .version = .http_0_9,
+            .status = 200,
+            .reason = "",
+            .headers = @constCast(&[_]Header{}),
+            .body = bytes,
+            .body_framing = .close_delimited,
+            .trailers = @constCast(&[_]Header{}),
+            .consumed = bytes.len,
+        },
+        .incomplete, .http_1_x => {},
+    };
     const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
     var lines = std.mem.splitSequence(u8, head, "\r\n");
@@ -1082,6 +1176,7 @@ pub fn writeRequest(
     headers: []const Header,
     body: []const u8,
 ) !void {
+    if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
     try list.ensureUnusedCapacity(allocator, try requestWireLen(method, target, version, headers, body));
     try list.appendSlice(allocator, method.string());
@@ -1104,6 +1199,7 @@ pub fn writeRequestChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
+    if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
     try list.ensureUnusedCapacity(allocator, try requestWireLen(method, target, version, headers, body));
     try list.appendSlice(allocator, method.string());
@@ -1138,6 +1234,7 @@ pub fn writeResponse(
     headers: []const Header,
     body: []const u8,
 ) !void {
+    if (version == .http_0_9) return error.InvalidVersion;
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
     try validateResponseBodyForStatus(status, headers, body, &.{});
@@ -1164,6 +1261,7 @@ pub fn writeResponseChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
+    if (version == .http_0_9) return error.InvalidVersion;
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
     try validateResponseBodyForStatus(status, headers, body, &.{});
