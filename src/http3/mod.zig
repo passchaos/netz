@@ -2222,7 +2222,7 @@ fn validateSetting(id: u64, value: u64, seen: []const Setting) Error!void {
         // RFC 9114 reserves HTTP/2 SETTINGS identifiers that have no HTTP/3
         // meaning.  Reference stacks such as tquic and quic-zig reject these as
         // H3_SETTINGS_ERROR instead of silently ignoring them.
-        0x00, 0x02, 0x03, 0x04, 0x05 => return error.InvalidSetting,
+        0x02, 0x03, 0x04, 0x05 => return error.InvalidSetting,
         @intFromEnum(SettingId.enable_connect_protocol),
         @intFromEnum(SettingId.h3_datagram),
         @intFromEnum(SettingId.enable_webtransport),
@@ -5069,6 +5069,25 @@ test "HTTP/3 frame settings and qpack literal block" {
     defer Qpack.freeDecodedFields(allocator, decoded);
     try std.testing.expectEqualStrings(":method", decoded[0].name);
     try std.testing.expectEqualStrings("GET", decoded[0].value);
+}
+
+test "HTTP/3 settings identifier zero is an ignorable extension" {
+    const allocator = std.testing.allocator;
+
+    const parsed = try parseSettings(allocator, &.{ 0x00, 0x2a });
+    defer allocator.free(parsed);
+    try std.testing.expectEqualSlices(Setting, &.{.{ .id = 0x00, .value = 0x2a }}, parsed);
+
+    // Identifier zero has no defined HTTP/3 meaning, so the typed settings
+    // view must ignore it just like any other unknown extension identifier.
+    try std.testing.expectEqual(Settings{}, Settings.fromList(parsed));
+
+    for ([_]u8{ 0x02, 0x03, 0x04, 0x05 }) |reserved_id| {
+        try std.testing.expectError(
+            error.InvalidSetting,
+            parseSettings(allocator, &.{ reserved_id, 0x00 }),
+        );
+    }
 }
 
 test "HTTP/3 frame header parses before payload arrives" {

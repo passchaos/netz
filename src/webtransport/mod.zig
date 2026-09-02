@@ -193,7 +193,10 @@ pub const Capsule = union(enum) {
                 if (!std.unicode.utf8ValidateSlice(payload[4..])) return error.InvalidCapsule;
                 break :blk .{ .close_session = .{ .code = code, .reason = payload[4..] } };
             },
-            CapsuleType.drain_webtransport_session => .{ .drain_session = {} },
+            CapsuleType.drain_webtransport_session => blk: {
+                if (payload.len != 0) return error.InvalidCapsule;
+                break :blk .{ .drain_session = {} };
+            },
             else => .{ .unknown = .{ .capsule_type = capsule_type, .payload = payload } },
         };
         return .{ .capsule = capsule, .consumed = cursor.pos };
@@ -389,6 +392,23 @@ test "WebTransport capsule and stream headers" {
     try std.testing.expectEqual(@as(usize, 6), headers.len);
     try std.testing.expectEqualStrings("capsule-protocol", headers[5].name);
     try std.testing.expect(try http3.capsule.protocolEnabled(&headers));
+}
+
+test "DRAIN_WEBTRANSPORT_SESSION capsule requires an empty payload" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try (Capsule{ .drain_session = {} }).write(&encoded, allocator);
+    const parsed = try Capsule.parse(encoded.items);
+    try std.testing.expect(parsed.capsule == .drain_session);
+    try std.testing.expectEqual(encoded.items.len, parsed.consumed);
+
+    encoded.clearRetainingCapacity();
+    try quic.varint.encode(&encoded, allocator, CapsuleType.drain_webtransport_session);
+    try quic.varint.encode(&encoded, allocator, 1);
+    try encoded.append(allocator, 0);
+    try std.testing.expectError(error.InvalidCapsule, Capsule.parse(encoded.items));
 }
 
 test "WebTransport stream registry enforces IDs limits and lifecycle" {
