@@ -22,6 +22,7 @@ pub const endpoint_dispatcher = @import("endpoint_dispatcher.zig");
 pub const handshake_inbox = @import("handshake_inbox.zig");
 pub const connection_id = @import("connection_id.zig");
 pub const stateless_reset = @import("stateless_reset.zig");
+pub const ecn = @import("ecn.zig");
 pub const congestion = @import("congestion.zig");
 pub const pacing = @import("pacing.zig");
 pub const hystart = @import("hystart.zig");
@@ -2041,10 +2042,10 @@ fn validateAckFrame(ack: AckFrame) Error!void {
         smallest = range_largest - range.ack_range_length;
     }
 
-    if (ack.ecn_counts) |ecn| {
-        try validateQuicVarint(ecn.ect0_count);
-        try validateQuicVarint(ecn.ect1_count);
-        try validateQuicVarint(ecn.ecn_ce_count);
+    if (ack.ecn_counts) |ecn_counts| {
+        try validateQuicVarint(ecn_counts.ect0_count);
+        try validateQuicVarint(ecn_counts.ect1_count);
+        try validateQuicVarint(ecn_counts.ecn_ce_count);
     }
 }
 
@@ -2080,10 +2081,10 @@ fn writeAckFieldsAssumeCapacity(list: *std.ArrayList(u8), ack: AckFrame) Error!v
         try appendVarintAssumeCapacity(list, range.gap);
         try appendVarintAssumeCapacity(list, range.ack_range_length);
     }
-    if (ack.ecn_counts) |ecn| {
-        try appendVarintAssumeCapacity(list, ecn.ect0_count);
-        try appendVarintAssumeCapacity(list, ecn.ect1_count);
-        try appendVarintAssumeCapacity(list, ecn.ecn_ce_count);
+    if (ack.ecn_counts) |ecn_counts| {
+        try appendVarintAssumeCapacity(list, ecn_counts.ect0_count);
+        try appendVarintAssumeCapacity(list, ecn_counts.ect1_count);
+        try appendVarintAssumeCapacity(list, ecn_counts.ecn_ce_count);
     }
 }
 
@@ -2098,10 +2099,10 @@ fn ackFrameWireLen(ack: AckFrame) Error!usize {
         len = try addWireLen(len, try varint.length(range.gap));
         len = try addWireLen(len, try varint.length(range.ack_range_length));
     }
-    if (ack.ecn_counts) |ecn| {
-        len = try addWireLen(len, try varint.length(ecn.ect0_count));
-        len = try addWireLen(len, try varint.length(ecn.ect1_count));
-        len = try addWireLen(len, try varint.length(ecn.ecn_ce_count));
+    if (ack.ecn_counts) |ecn_counts| {
+        len = try addWireLen(len, try varint.length(ecn_counts.ect0_count));
+        len = try addWireLen(len, try varint.length(ecn_counts.ect1_count));
+        len = try addWireLen(len, try varint.length(ecn_counts.ecn_ce_count));
     }
     return len;
 }

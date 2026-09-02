@@ -393,6 +393,10 @@ test "QUIC 1-RTT connection sends and validates PMTU probes" {
     const probe_size = (try client.sendPmtuProbeAt(1300, 10)).?;
     try std.testing.expectEqual(@as(usize, 1300), probe_size);
     try std.testing.expect(!client.pmtudShouldProbe());
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&client).?,
+    );
 
     var raw = try server_endpoint.receiveBytes();
     defer raw.deinit(allocator);
@@ -1243,6 +1247,11 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
         .max_datagram_size = 1400,
     });
     defer server.deinit();
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&server),
+    );
+    const old_path_epoch = one_rtt.testing.currentPathEpoch(&server);
     server.pmtud.onProbeSentWithIdentity(0, 1, 1300);
     server.pmtud.onProbeAckedWithIdentity(0, 1, 1300, 1300, 10);
     server.congestion.onMtuUpdate(server.currentSendDatagramSize());
@@ -1259,6 +1268,13 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
     try std.testing.expectEqualStrings("rebinding", packet.frames[0].stream.data);
     try std.testing.expectEqual(rebound_client_endpoint.address(), server.config.peer);
     try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&server),
+    );
+    try std.testing.expect(
+        one_rtt.testing.currentPathEpoch(&server) != old_path_epoch,
+    );
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, server.pmtudCurrentSize());
     try std.testing.expect(server.pmtudShouldProbe());
     try std.testing.expectEqual(
@@ -1402,6 +1418,12 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     });
     defer connection.deinit();
     connection.setPeerAddressValidated(true);
+    connection.ecn_path.onValidatedAck();
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.capable,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    const old_path_epoch = one_rtt.testing.currentPathEpoch(&connection);
     connection.pmtud.onProbeSentWithIdentity(0, 1, 1300);
     connection.pmtud.onProbeAckedWithIdentity(0, 1, 1300, 1300, 10);
     connection.congestion.onMtuUpdate(connection.currentSendDatagramSize());
@@ -1418,6 +1440,13 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
         connection.peerAddress(),
     );
     try std.testing.expect(!connection.peerAddressValidated());
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expect(
+        one_rtt.testing.currentPathEpoch(&connection) != old_path_epoch,
+    );
     try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.pmtudCurrentSize());
     try std.testing.expect(connection.pmtudShouldProbe());
@@ -1439,6 +1468,157 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     try std.testing.expect(connection.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 0), connection.path_validation.outstandingChallengeCount());
     try std.testing.expectEqual(@as(?usize, null), connection.antiAmplificationLimitRemaining());
+}
+
+test "QUIC 1-RTT late old-path plain ACK does not fail fresh path ECN" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var original_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer original_endpoint.deinit();
+    var migrated_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer migrated_endpoint.deinit();
+
+    const local_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const peer_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x91} ** quic.protection.secret_len);
+
+    var connection = try one_rtt.Connection.init(&original_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.send(&.{.{ .ping = {} }}); // packet 0 on old path, auto ECT(0)
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+
+    const challenge = [_]u8{ 9, 7, 5, 3, 1, 2, 4, 6 };
+    try connection.beginPeerMigration(migrated_endpoint.address(), challenge);
+    // This test isolates ECN epoch handling rather than path-validation
+    // pacing. Model a validated replacement path before sending application
+    // traffic so the anti-amplification guard cannot obscure the ECN result.
+    connection.setPeerAddressValidated(true);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    const new_path_epoch = one_rtt.testing.currentPathEpoch(&connection);
+
+    try connection.send(&.{.{ .ping = {} }}); // packet 1 on new path, still auto ECT(0)
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+
+    // A late plain ACK for only the old-path packet must not fail the new path.
+    try one_rtt.testing.applyReceivedFrames(&connection, 10, &.{.{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }}, null, .not_ect);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expectEqual(
+        new_path_epoch,
+        one_rtt.testing.currentPathEpoch(&connection),
+    );
+
+    // The first advancing ACK_ECN after the late plain ACK establishes a
+    // fresh cumulative counter baseline. It cannot prove which path supplied
+    // the counter increase, so it deliberately does not validate the new path.
+    try one_rtt.testing.applyReceivedFrames(&connection, 11, &.{.{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{ .ect0_count = 2, .ect1_count = 0, .ecn_ce_count = 0 },
+    } }}, null, .not_ect);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expect(!one_rtt.testing.ecnBaselinePending(&connection));
+
+    try connection.send(&.{.{ .ping = {} }}); // packet 2, unambiguous new path
+    try one_rtt.testing.applyReceivedFrames(&connection, 12, &.{.{ .ack = .{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{ .ect0_count = 3, .ect1_count = 0, .ecn_ce_count = 0 },
+    } }}, null, .not_ect);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.capable,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+}
+
+test "QUIC 1-RTT late old-path ACK_ECN still advances baseline without validating fresh path" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var original_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer original_endpoint.deinit();
+    var migrated_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer migrated_endpoint.deinit();
+
+    const local_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const peer_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xa1} ** quic.protection.secret_len);
+
+    var connection = try one_rtt.Connection.init(&original_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.send(&.{.{ .ping = {} }}); // packet 0 old path
+    try connection.beginPeerMigration(migrated_endpoint.address(), [_]u8{ 1, 1, 2, 3, 5, 8, 13, 21 });
+    connection.setPeerAddressValidated(true);
+    try connection.send(&.{.{ .ping = {} }}); // packet 1 new path
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 20, &.{.{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{ .ect0_count = 1, .ect1_count = 0, .ecn_ce_count = 0 },
+    } }}, null, .not_ect);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expectEqual(@as(u64, 1), connection.sent.latest_ecn_counts.ect0_count);
+
+    // Because the old-path-only ACK_ECN advanced the global baseline, the new-path
+    // ACK_ECN must still account for packet 1 explicitly instead of reusing stale delta.
+    try one_rtt.testing.applyReceivedFrames(&connection, 21, &.{.{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{ .ect0_count = 2, .ect1_count = 0, .ecn_ce_count = 0 },
+    } }}, null, .not_ect);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.capable,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expectEqual(@as(u64, 2), connection.sent.latest_ecn_counts.ect0_count);
 }
 
 test "QUIC 1-RTT preferred address migration selects address and CID" {

@@ -6651,6 +6651,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.StunClient, "iceBindingRequest"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "pto_jitter_percentage"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pto_jitter_percentage"));
+    try std.testing.expect(@hasDecl(netz.quic, "ecn"));
+    try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "automatic_ecn_policy"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "automatic_ecn_policy"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "jitteredPtoPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoJitterEnabled"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoJitterEpoch"));

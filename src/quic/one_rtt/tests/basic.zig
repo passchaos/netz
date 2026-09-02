@@ -3129,6 +3129,286 @@ test "QUIC 1-RTT receivePacket records socket ECN marks" {
     try std.testing.expectEqual(@as(u64, 0), counts.ecn_ce_count);
 }
 
+test "QUIC 1-RTT send automatically marks eligible packets ECT(0)" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x91} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "auto-ecn-local",
+        .peer_connection_id = "auto-ecn-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.testing,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+    try std.testing.expectEqual(@as(u64, 1), connection.sent.stats().sent_ect0_count);
+
+    try connection.send(&.{.{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+
+    try connection.send(&.{.{ .path_challenge = .{
+        .data = [_]u8{0x17} ** 8,
+    } }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+
+    try connection.sendWithEcn(&.{.{ .ping = {} }}, .ect1);
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect1,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+}
+
+test "QUIC 1-RTT automatic ECN batch marks only an all-eligible batch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x93} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "auto-ecn-batch-local",
+        .peer_connection_id = "auto-ecn-batch-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const first = [_]quic.Frame{.{ .ping = {} }};
+    const second = [_]quic.Frame{.{ .ping = {} }};
+    const eligible = [_][]const quic.Frame{ &first, &second };
+    const sent = try connection.sendManyProgressAt(&eligible, 1_000);
+    try std.testing.expectEqual(@as(usize, 2), sent.sent_count);
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        connection.sent.packets.items[0].ecn,
+    );
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        connection.sent.packets.items[1].ecn,
+    );
+
+    const ack_only = [_]quic.Frame{.{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }};
+    const mixed = [_][]const quic.Frame{ &first, &ack_only };
+    const mixed_sent = try connection.sendManyProgressAt(&mixed, 2_000);
+    try std.testing.expectEqual(@as(usize, 2), mixed_sent.sent_count);
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        connection.sent.packets.items[2].ecn,
+    );
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        connection.sent.packets.items[3].ecn,
+    );
+}
+
+test "QUIC 1-RTT automatic ECN disabled policy keeps convenience sends Not-ECT" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x92} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "auto-ecn-off-local",
+        .peer_connection_id = "auto-ecn-off-peer",
+        .enable_pacing = false,
+        .automatic_ecn_policy = .disabled,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.disabled,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+}
+
+test "QUIC 1-RTT automatic ECN unavailable falls back without changing explicit sends" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x94} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "ecn-fallback-local",
+        .peer_connection_id = "ecn-fallback-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    quic.runtime.testing.forceEcnUnavailable(&sender, true);
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.failed,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.sent.stats().sent_ect0_count);
+    var delivered = try receiver.receiveBytes();
+    delivered.deinit(allocator);
+
+    // Explicit ECN is a strict caller request: it reports platform failure,
+    // does not emit a Not-ECT substitute, and rolls back tracker state.
+    const tracked_before = connection.sent.stats().tracked_packets;
+    try std.testing.expectError(
+        error.EcnUnavailable,
+        connection.sendWithEcn(&.{.{ .ping = {} }}, .ect1),
+    );
+    try std.testing.expectEqual(
+        tracked_before,
+        connection.sent.stats().tracked_packets,
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.sent.stats().sent_ect1_count);
+}
+
+test "QUIC 1-RTT automatic ECN batch fallback rewrites every packet ledger" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x95} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "ecn-batch-fallback",
+        .peer_connection_id = "ecn-batch-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    quic.runtime.testing.forceEcnUnavailable(&sender, true);
+    const first = [_]quic.Frame{.{ .ping = {} }};
+    const second = [_]quic.Frame{.{ .ping = {} }};
+    const packets = [_][]const quic.Frame{ &first, &second };
+    const result = try connection.sendManyProgressAt(&packets, 1_000);
+    try std.testing.expectEqual(@as(usize, 2), result.sent_count);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.failed,
+        one_rtt.testing.ecnPathState(&connection),
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.sent.stats().sent_ect0_count);
+    for (connection.sent.packets.items) |packet| {
+        try std.testing.expectEqual(
+            quic.packet_space.EcnCodepoint.not_ect,
+            packet.ecn,
+        );
+    }
+    var first_datagram = try receiver.receiveBytes();
+    first_datagram.deinit(allocator);
+    var second_datagram = try receiver.receiveBytes();
+    second_datagram.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesWithTimeout(.fromMilliseconds(1)),
+    );
+}
+
 test "QUIC 1-RTT connection validates ACK_ECN counters" {
     const allocator = std.testing.allocator;
 
@@ -3171,6 +3451,10 @@ test "QUIC 1-RTT connection validates ACK_ECN counters" {
     defer valid.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), client.sent.latest_ecn_counts.ect0_count);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.capable,
+        one_rtt.testing.ecnPathState(&client),
+    );
 
     try client.sendWithEcn(&[_]quic.Frame{.{ .ping = {} }}, .ect1);
     const bytes_in_flight = client.congestion.bytes_in_flight;
@@ -3190,9 +3474,106 @@ test "QUIC 1-RTT connection validates ACK_ECN counters" {
     try std.testing.expect(client.sent.packets.items[1].acknowledged);
     try std.testing.expect(client.congestion.bytes_in_flight < bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 0), client.sent.latest_ecn_counts.ect1_count);
-    try std.testing.expect(client.sent.ecnDisabled());
-    try std.testing.expectError(error.EcnDisabled, client.sendWithEcn(&[_]quic.Frame{.{ .ping = {} }}, .ect0));
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.failed,
+        one_rtt.testing.ecnPathState(&client),
+    );
+    try client.sendWithEcn(&[_]quic.Frame{.{ .ping = {} }}, .ect0);
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        one_rtt.testing.lastSentPacketEcn(&client).?,
+    );
     try client.send(&[_]quic.Frame{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&client).?,
+    );
+}
+
+test "QUIC 1-RTT plain ACK fails only automatic ECN on the current path" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+    const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xb9} ** quic.protection.secret_len);
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+
+    try client.send(&.{.{ .ping = {} }});
+    try one_rtt.testing.applyReceivedFrames(&client, 10, &.{.{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }}, null, .not_ect);
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.failed,
+        one_rtt.testing.ecnPathState(&client),
+    );
+
+    try client.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.not_ect,
+        one_rtt.testing.lastSentPacketEcn(&client).?,
+    );
+    try client.sendWithEcn(&.{.{ .ping = {} }}, .ect1);
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect1,
+        one_rtt.testing.lastSentPacketEcn(&client).?,
+    );
+}
+
+test "QUIC 1-RTT legacy ECN disable remains an explicit-send compatibility latch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xba} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "legacy-ecn-local",
+        .peer_connection_id = "legacy-ecn-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    connection.sent.disableEcnValidation();
+    try std.testing.expect(connection.sent.ecnDisabled());
+    try std.testing.expect(connection.sent.stats().ecn_validation_failed);
+    try std.testing.expectError(
+        error.EcnDisabled,
+        connection.sendWithEcn(&.{.{ .ping = {} }}, .ect0),
+    );
+    // The compatibility latch does not silently disable the new path policy.
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        one_rtt.testing.lastSentPacketEcn(&connection).?,
+    );
 }
 
 test "QUIC 1-RTT ACK_ECN CE increase enters congestion recovery" {

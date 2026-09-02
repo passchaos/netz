@@ -233,6 +233,11 @@ pub const Endpoint = struct {
     limits: Limits = .{},
     receive_ecn_enabled: bool = false,
     send_ecn_mark: quic.packet_space.EcnCodepoint = .not_ect,
+    /// Deterministic fault injection for automatic ECN fallback tests. The
+    /// production default is always false; keeping the failure at the socket
+    /// option boundary exercises the same transaction and rollback path as an
+    /// unsupported operating system.
+    test_force_ecn_unavailable: bool = false,
     gso_send_enabled: bool = udpGsoSupported(),
     gro_receive_enabled: bool = false,
     /// Serializes socket options and fault-injection state with the associated
@@ -372,12 +377,37 @@ pub const Endpoint = struct {
     /// the unsent suffix. Validation and ECN setup still fail through the error
     /// union because they happen before the first datagram can be emitted.
     pub fn sendManyBytesProgress(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!SendManyBytesResult {
-        self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
-        return self.sendManyBytesProgressLocked(to, datagrams);
+        return self.sendManyBytesProgressWithEcn(
+            to,
+            datagrams,
+            .not_ect,
+        );
     }
 
-    fn sendManyBytesProgressLocked(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!SendManyBytesResult {
+    /// Send a batch while applying one ECN codepoint to every datagram.
+    ///
+    /// QUIC's stateful batch packetizer currently emits one path-scoped policy
+    /// decision per batch.  Keeping that decision explicit here preserves the
+    /// existing default `Not-ECT` surface while letting 1-RTT automatically
+    /// mark ordinary application batches with `ECT(0)` when ECN is still being
+    /// validated on the current path.
+    pub fn sendManyBytesProgressWithEcn(
+        self: *Endpoint,
+        to: net.IpAddress,
+        datagrams: []const []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!SendManyBytesResult {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        return self.sendManyBytesProgressLocked(to, datagrams, ecn);
+    }
+
+    fn sendManyBytesProgressLocked(
+        self: *Endpoint,
+        to: net.IpAddress,
+        datagrams: []const []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!SendManyBytesResult {
         if (datagrams.len == 0) return .{ .sent_count = 0 };
         for (datagrams) |bytes| {
             if (bytes.len == 0) return error.EmptyDatagram;
@@ -388,7 +418,7 @@ pub const Endpoint = struct {
             // submitting individually preserves exact deterministic filtering
             // and prevents GSO from hiding segment boundaries.
             for (datagrams) |bytes| {
-                try self.sendBytesWithEcnLocked(to, bytes, .not_ect);
+                try self.sendBytesWithEcnLocked(to, bytes, ecn);
             }
             // A batch ending exactly on a selected packet has no later call
             // inside this batch to release it. Flush at the batch boundary so
@@ -396,7 +426,7 @@ pub const Endpoint = struct {
             try self.flushHeldSend();
             return .{ .sent_count = datagrams.len };
         }
-        try self.applyOutgoingEcnMark(.not_ect);
+        try self.applyOutgoingEcnMark(ecn);
 
         if (self.gso_send_enabled) {
             if (gsoPlan(datagrams)) |plan| {
@@ -1250,6 +1280,9 @@ pub const Endpoint = struct {
     }
 
     fn applyOutgoingEcnMark(self: *Endpoint, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        if (self.test_force_ecn_unavailable and ecn != .not_ect) {
+            return error.EcnUnavailable;
+        }
         if (ecn == self.send_ecn_mark) return;
         if (!socketEcnSupported()) {
             if (ecn == .not_ect) {
@@ -1465,6 +1498,12 @@ pub fn socketEcnSupported() bool {
         else => false,
     };
 }
+
+pub const testing = struct {
+    pub fn forceEcnUnavailable(endpoint: *Endpoint, enabled: bool) void {
+        endpoint.test_force_ecn_unavailable = enabled;
+    }
+};
 
 pub fn udpGsoSupported() bool {
     return builtin.os.tag == .linux;

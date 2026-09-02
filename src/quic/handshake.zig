@@ -213,6 +213,13 @@ pub const OneRttConfig = struct {
     /// Randomize established-connection PTOs by up to this percentage. Valid
     /// values are 0...50; zero is deterministic and consumes no entropy.
     pto_jitter_percentage: u8 = 0,
+    /// Automatically test ordinary application traffic with ECT(0).
+    ///
+    /// This setting is copied into the established 1-RTT connection so a
+    /// handshake-created client or server can opt out just like a directly
+    /// constructed connection. Explicit `sendWithEcn*` calls remain
+    /// independent of this policy.
+    automatic_ecn_policy: quic.ecn.Policy = .enabled,
     keep_alive_period_ms: u64 = 0,
 
     fn apply(
@@ -265,6 +272,7 @@ pub const OneRttConfig = struct {
             .enable_pacing = self.enable_pacing,
             .pacing_max_burst_packets = self.pacing_max_burst_packets,
             .pto_jitter_percentage = self.pto_jitter_percentage,
+            .automatic_ecn_policy = self.automatic_ecn_policy,
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
@@ -656,6 +664,39 @@ test "preconfigured QUIC propagates established PTO jitter" {
     );
     defer established.deinit();
     try std.testing.expect(established.connection.ptoJitterEnabled());
+}
+
+test "preconfigured QUIC propagates automatic ECN policy" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var established = try establishPreconfigured(
+        &endpoint,
+        .{ .ip4 = .loopback(443) },
+        .client,
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "local-ecn-policy",
+            .peer_connection_id = "peer-ecn-policy",
+            .one_rtt = .{ .automatic_ecn_policy = .disabled },
+        },
+    );
+    defer established.deinit();
+    try std.testing.expectEqual(
+        quic.ecn.ValidationState.disabled,
+        quic.one_rtt.testing.ecnPathState(&established.connection),
+    );
 }
 
 fn validateConfiguredVersions(version: quic.Version, available_versions: []const quic.Version) Error!void {

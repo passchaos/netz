@@ -385,6 +385,9 @@ pub const SentPacketStats = struct {
     bytes_in_flight: usize,
     sent_ect0_count: u64,
     sent_ect1_count: u64,
+    /// Deprecated compatibility latch for callers that used the old
+    /// tracker-global ECN disable bit. Automatic ECN fallback now lives in
+    /// `quic.ecn.PathState` and must not depend on this manual override.
     ecn_validation_failed: bool,
 };
 
@@ -419,8 +422,15 @@ pub const SentPacketTracker = struct {
     latest_ack_eliciting_in_flight_index: ?usize = null,
     largest_acknowledged: ?u64 = null,
     latest_ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
-    ecn_validation_failed: bool = false,
     ecn_largest_acknowledged: ?u64 = null,
+    /// Deprecated compatibility latch preserved for older callers that
+    /// explicitly disabled ECN validation on the packet-number-space tracker.
+    ///
+    /// The new automatic ECN sender state is path-local and lives above this
+    /// tracker in `one_rtt`. Keeping this bit manual-only avoids letting
+    /// legacy source-compat APIs silently influence path migration resets or
+    /// automatic ECT(0) fallback decisions.
+    deprecated_ecn_validation_failed: bool = false,
     sent_ect0_count: u64 = 0,
     sent_ect1_count: u64 = 0,
     loss_generation: u32 = 0,
@@ -571,6 +581,28 @@ pub const SentPacketTracker = struct {
         try self.sentInFlightAtWithStoredMetadata(packet_number, ack_eliciting, in_flight, bytes, datagram_size, ecn, sent_time_ns, pmtu_probe_size, 0, pmtu_path_epoch, largest_acknowledged_sent);
     }
 
+    pub fn rewritePacketEcn(
+        self: *SentPacketTracker,
+        packet_number: u64,
+        ecn: EcnCodepoint,
+    ) bool {
+        const index = self.findPacketIndex(packet_number) orelse return false;
+        const packet = &self.packets.items[index];
+        if (packet.ecn == ecn) return true;
+        switch (packet.ecn) {
+            .not_ect, .ce => {},
+            .ect0 => self.sent_ect0_count -|= 1,
+            .ect1 => self.sent_ect1_count -|= 1,
+        }
+        switch (ecn) {
+            .not_ect, .ce => {},
+            .ect0 => self.sent_ect0_count +|= 1,
+            .ect1 => self.sent_ect1_count +|= 1,
+        }
+        packet.ecn = ecn;
+        return true;
+    }
+
     fn sentInFlightAtWithStoredMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_probe_epoch: u32, pmtu_path_epoch: u32, largest_acknowledged_sent: ?u64) !void {
         const monotonic_append = self.packets.items.len == 0 or
             packet_number > self.packets.items[self.packets.items.len - 1].packet_number;
@@ -626,6 +658,7 @@ pub const SentPacketTracker = struct {
         const tail_index = self.packets.items.len - 1;
         if (self.packets.items[tail_index].packet_number == packet_number) {
             const latest = self.latest_ack_eliciting_in_flight_index;
+            self.decrementSentEcnCount(self.packets.items[tail_index].ecn);
             _ = self.packets.pop();
             _ = self.packet_index.remove(packet_number);
             self.first_unacknowledged_index = @min(
@@ -639,6 +672,7 @@ pub const SentPacketTracker = struct {
         }
         const index = self.findPacketIndex(packet_number) orelse return false;
         const latest = self.latest_ack_eliciting_in_flight_index;
+        self.decrementSentEcnCount(self.packets.items[index].ecn);
         _ = self.packets.orderedRemove(index);
         _ = self.packet_index.remove(packet_number);
         if (index < self.first_unacknowledged_index) {
@@ -654,6 +688,17 @@ pub const SentPacketTracker = struct {
         }
         self.advanceFirstUnacknowledged();
         return true;
+    }
+
+    fn decrementSentEcnCount(
+        self: *SentPacketTracker,
+        ecn: EcnCodepoint,
+    ) void {
+        switch (ecn) {
+            .not_ect, .ce => {},
+            .ect0 => self.sent_ect0_count -|= 1,
+            .ect1 => self.sent_ect1_count -|= 1,
+        }
     }
 
     pub fn markAcknowledged(self: *SentPacketTracker, packet_number: u64) bool {
@@ -708,7 +753,7 @@ pub const SentPacketTracker = struct {
             .bytes_in_flight = bytes_in_flight,
             .sent_ect0_count = self.sent_ect0_count,
             .sent_ect1_count = self.sent_ect1_count,
-            .ecn_validation_failed = self.ecn_validation_failed,
+            .ecn_validation_failed = self.deprecated_ecn_validation_failed,
         };
     }
 
@@ -723,6 +768,12 @@ pub const SentPacketTracker = struct {
         probe_bytes: usize = 0,
         ect0_packets: usize = 0,
         ect1_packets: usize = 0,
+        current_path_ect0_packets: usize = 0,
+        current_path_ect1_packets: usize = 0,
+        /// The accepted ACK_ECN advanced the packet-number-space counter
+        /// baseline. Connection-level path validation uses this when draining
+        /// ambiguous evidence left by a retired path.
+        ecn_counts_updated: bool = false,
         largest_packet_number: ?u64 = null,
         largest_sent_time_ns: ?u64 = null,
         ecn_ce_delta: u64 = 0,
@@ -802,15 +853,17 @@ pub const SentPacketTracker = struct {
         sent_packets: u64 = 0,
         newly_acked_packets: usize = 0,
         newly_acked_ect: NewlyAckedEctCounts = .{},
+        current_path_newly_acked_ect: NewlyAckedEctCounts = .{},
 
         fn observeSentPacket(self: *AckPrecheck, packet: SentPacket) void {
             self.sent_packets += 1;
-            self.observeNewlyAckedPacket(packet);
+            self.observeNewlyAckedPacket(packet, null);
         }
 
         fn observeNewlyAckedPacket(
             self: *AckPrecheck,
             packet: SentPacket,
+            current_path_epoch: ?u32,
         ) void {
             if (packet.acknowledged) return;
             self.newly_acked_packets += 1;
@@ -818,6 +871,15 @@ pub const SentPacketTracker = struct {
                 .not_ect => {},
                 .ect0 => self.newly_acked_ect.ect0 += 1,
                 .ect1 => self.newly_acked_ect.ect1 += 1,
+                .ce => {},
+            }
+            if (current_path_epoch) |epoch| {
+                if (packet.pmtu_path_epoch != epoch) return;
+            }
+            switch (packet.ecn) {
+                .not_ect => {},
+                .ect0 => self.current_path_newly_acked_ect.ect0 += 1,
+                .ect1 => self.current_path_newly_acked_ect.ect1 += 1,
                 .ce => {},
             }
         }
@@ -886,7 +948,11 @@ pub const SentPacketTracker = struct {
         const decoded = try decodeAckRanges(self.allocator, ack, &stack_ranges);
         defer decoded.deinit(self.allocator);
         const sorted = self.packetsSortedAscending();
-        const precheck = try self.precheckAckRanges(decoded.ranges, sorted);
+        const precheck = try self.precheckAckRanges(
+            decoded.ranges,
+            sorted,
+            pmtu_path_epoch,
+        );
         const ecn_validation = try self.validateAckEcnFrameDetailedForPrecheck(
             ack,
             precheck,
@@ -903,21 +969,12 @@ pub const SentPacketTracker = struct {
                 pmtu_path_epoch,
             );
         }
+        acked.ecn_counts_updated = ecn_validation.update_counts;
         if (ack.ecn_counts) |ecn_counts| {
             if (ecn_validation.update_counts) {
                 self.latest_ecn_counts = ecn_counts;
                 self.ecn_largest_acknowledged = ack.largest_acknowledged;
                 acked.ecn_ce_delta = ecn_validation.ce_delta;
-            }
-        } else if (acked.ect0_packets != 0 or acked.ect1_packets != 0) {
-            // RFC 9000 ECN validation requires ECN-capable packets to be
-            // acknowledged with ACK_ECN.  A plain ACK covering ECT-marked
-            // packets disables ECN for the packet number space, unless this is
-            // a reordered ACK that does not advance the largest ACK_ECN already
-            // validated for this path/space.  quicz and s2n-quic both ignore
-            // such historical ACKs so reordering cannot spuriously disable ECN.
-            if (!self.ackDoesNotAdvanceEcnLargest(ack.largest_acknowledged)) {
-                self.ecn_validation_failed = true;
             }
         }
         self.compactAcknowledgedPrefix();
@@ -948,11 +1005,11 @@ pub const SentPacketTracker = struct {
         _ = try self.precheckAckRanges(
             decoded.ranges,
             self.packetsSortedAscending(),
+            null,
         );
     }
 
     pub fn validateAckEcnCounters(self: SentPacketTracker, counts: quic.EcnCounts) Error!void {
-        if (self.ecn_validation_failed) return error.InvalidAckFrame;
         if (counts.ect0_count < self.latest_ecn_counts.ect0_count or
             counts.ect1_count < self.latest_ecn_counts.ect1_count or
             counts.ecn_ce_count < self.latest_ecn_counts.ecn_ce_count)
@@ -972,12 +1029,43 @@ pub const SentPacketTracker = struct {
         _ = try self.validateAckEcnFrameDetailed(ack);
     }
 
+    pub fn validateAckEcnFrameForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) Error!void {
+        _ = try self.validateAckEcnFrameDetailedForPathEpoch(
+            ack,
+            current_path_epoch,
+        );
+    }
+
     pub fn validateAckEcnFrameWouldFail(self: SentPacketTracker, ack: quic.AckFrame) bool {
         _ = self.validateAckEcnFrameDetailed(ack) catch return true;
         return false;
     }
 
+    pub fn validateAckEcnFrameWouldFailForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) bool {
+        _ = self.validateAckEcnFrameDetailedForPathEpoch(
+            ack,
+            current_path_epoch,
+        ) catch return true;
+        return false;
+    }
+
     fn validateAckEcnFrameDetailed(self: SentPacketTracker, ack: quic.AckFrame) Error!EcnAckValidation {
+        return self.validateAckEcnFrameDetailedForPathEpoch(ack, null);
+    }
+
+    fn validateAckEcnFrameDetailedForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) Error!EcnAckValidation {
         var stack_ranges: [32]AckedRange = undefined;
         const decoded = try decodeAckRanges(
             self.allocator,
@@ -988,6 +1076,7 @@ pub const SentPacketTracker = struct {
         const precheck = try self.precheckAckRanges(
             decoded.ranges,
             self.packetsSortedAscending(),
+            current_path_epoch,
         );
         return self.validateAckEcnFrameDetailedForPrecheck(ack, precheck);
     }
@@ -998,7 +1087,6 @@ pub const SentPacketTracker = struct {
         precheck: AckPrecheck,
     ) Error!EcnAckValidation {
         const counts = ack.ecn_counts orelse return .{};
-        if (self.ecn_validation_failed) return error.InvalidAckFrame;
 
         // RFC 9000 §13.4.2.1 permits reordered ACK_ECN frames.  Once ECN has
         // been validated for a larger ACK, older ACK_ECN counters are only
@@ -1009,7 +1097,15 @@ pub const SentPacketTracker = struct {
         }
 
         try self.validateAckEcnCounters(counts);
-        const newly_acked = precheck.newly_acked_ect;
+        const all_newly_acked = precheck.newly_acked_ect;
+        if (all_newly_acked.ect0 == 0 and all_newly_acked.ect1 == 0) {
+            // ACK_ECN counters are cumulative for the packet number space, not
+            // scoped to the currently selected path. Even when this ACK only
+            // advances old-path ECN history, keep the global baseline in sync
+            // so a later current-path ACK_ECN cannot smuggle a stale old-path
+            // increase past the delta checks.
+            return .{ .update_counts = true };
+        }
 
         const previous = self.latest_ecn_counts;
         const ect0_delta = counts.ect0_count - previous.ect0_count;
@@ -1017,17 +1113,106 @@ pub const SentPacketTracker = struct {
         const ce_delta = counts.ecn_ce_count - previous.ecn_ce_count;
         const covered_ect0 = std.math.add(u64, ect0_delta, ce_delta) catch return error.InvalidAckFrame;
         const covered_ect1 = std.math.add(u64, ect1_delta, ce_delta) catch return error.InvalidAckFrame;
-        if (covered_ect0 < newly_acked.ect0 or covered_ect1 < newly_acked.ect1) return error.InvalidAckFrame;
+        if (covered_ect0 < all_newly_acked.ect0 or
+            covered_ect1 < all_newly_acked.ect1)
+        {
+            return error.InvalidAckFrame;
+        }
 
-        return .{ .update_counts = true, .ce_delta = ce_delta };
+        return .{
+            .update_counts = true,
+            .ce_delta = ce_delta,
+        };
     }
 
+    pub fn plainAckWouldFailForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) bool {
+        const precheck = self.precheckAckForPathEpoch(
+            ack,
+            current_path_epoch,
+        ) catch return false;
+        if (precheck.current_path_newly_acked_ect.ect0 == 0 and
+            precheck.current_path_newly_acked_ect.ect1 == 0)
+        {
+            return false;
+        }
+        // RFC 9000 requires ACK_ECN for newly acknowledged ECN-capable
+        // packets, but reordered historical plain ACKs must not retroactively
+        // disable ECN after a larger ACK_ECN already validated the space.
+        return !self.ackDoesNotAdvanceEcnLargest(ack.largest_acknowledged);
+    }
+
+    /// Return whether ECN-capable packets can still be acknowledged after a
+    /// path switch. Those packets make the next cumulative ACK_ECN delta
+    /// ambiguous: it can contain marks from both the retired and active paths.
+    pub fn hasUnacknowledgedEct(self: SentPacketTracker) bool {
+        for (self.packets.items) |packet| {
+            if (packet.acknowledged) continue;
+            if (packet.ecn == .ect0 or packet.ecn == .ect1 or
+                packet.ecn == .ce)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// True when an advancing cumulative ACK_ECN could still include an ECT
+    /// packet that was acknowledged without usable ECN counters. The next
+    /// valid counter update must be treated as a baseline-only sample.
+    pub fn hasAcknowledgedEctBeyondEcnWatermark(
+        self: SentPacketTracker,
+    ) bool {
+        const watermark = self.ecn_largest_acknowledged;
+        for (self.packets.items) |packet| {
+            if (!packet.acknowledged) continue;
+            if (watermark) |largest| {
+                if (packet.packet_number <= largest) continue;
+            }
+            if (packet.ecn == .ect0 or packet.ecn == .ect1 or
+                packet.ecn == .ce)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn precheckAckForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) Error!AckPrecheck {
+        var stack_ranges: [32]AckedRange = undefined;
+        const decoded = try decodeAckRanges(
+            self.allocator,
+            ack,
+            &stack_ranges,
+        );
+        defer decoded.deinit(self.allocator);
+        return try self.precheckAckRanges(
+            decoded.ranges,
+            self.packetsSortedAscending(),
+            current_path_epoch,
+        );
+    }
+
+    /// Deprecated manual compatibility API.
+    ///
+    /// Older callers treated the sent-packet tracker as owning a single
+    /// connection-wide ECN disable bit. Preserve that source surface as an
+    /// explicit latch for diagnostics/manual policy only; path-local automatic
+    /// ECN state is now tracked separately by `quic.ecn.PathState`.
     pub fn disableEcnValidation(self: *SentPacketTracker) void {
-        self.ecn_validation_failed = true;
+        self.deprecated_ecn_validation_failed = true;
     }
 
+    /// Deprecated manual compatibility API.
     pub fn ecnDisabled(self: SentPacketTracker) bool {
-        return self.ecn_validation_failed;
+        return self.deprecated_ecn_validation_failed;
     }
 
     fn nextLossGeneration(self: *SentPacketTracker) u32 {
@@ -1363,11 +1548,13 @@ pub const SentPacketTracker = struct {
         self: SentPacketTracker,
         ranges: []const AckedRange,
         sorted_packets: bool,
+        current_path_epoch: ?u32,
     ) Error!AckPrecheck {
         if (ranges.len == 1 and ranges[0].start == ranges[0].end) {
             var precheck: AckPrecheck = .{ .total_span = 1 };
             if (self.findSentPacket(ranges[0].start)) |packet| {
-                precheck.observeSentPacket(packet);
+                precheck.sent_packets += 1;
+                precheck.observeNewlyAckedPacket(packet, current_path_epoch);
             } else if (self.retiredContains(ranges[0].start)) {
                 precheck.sent_packets = 1;
             } else {
@@ -1400,14 +1587,18 @@ pub const SentPacketTracker = struct {
                 );
                 if (unresolved_start < range_end) {
                     for (self.packets.items[unresolved_start..range_end]) |packet| {
-                        precheck.observeNewlyAckedPacket(packet);
+                        precheck.observeNewlyAckedPacket(
+                            packet,
+                            current_path_epoch,
+                        );
                     }
                 }
             }
         } else {
             for (self.packets.items) |packet| {
                 if (!ackRangesContain(ranges, packet.packet_number)) continue;
-                precheck.observeSentPacket(packet);
+                precheck.sent_packets += 1;
+                precheck.observeNewlyAckedPacket(packet, current_path_epoch);
             }
         }
 
@@ -1551,6 +1742,23 @@ pub const SentPacketTracker = struct {
             .ect0 => result.ect0_packets += 1,
             .ect1 => result.ect1_packets += 1,
             .ce => {},
+        }
+        if (pmtu_path_epoch) |epoch| {
+            if (packet.pmtu_path_epoch == epoch) {
+                switch (packet.ecn) {
+                    .not_ect => {},
+                    .ect0 => result.current_path_ect0_packets += 1,
+                    .ect1 => result.current_path_ect1_packets += 1,
+                    .ce => {},
+                }
+            }
+        } else {
+            switch (packet.ecn) {
+                .not_ect => {},
+                .ect0 => result.current_path_ect0_packets += 1,
+                .ect1 => result.current_path_ect1_packets += 1,
+                .ce => {},
+            }
         }
     }
 
@@ -2147,6 +2355,52 @@ test "QUIC sent packet tracker forgets tail without index slots" {
     try std.testing.expect(!sent.forget(10));
 }
 
+test "QUIC sent packet tracker forget rolls back sent ECT counters" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(10, true, 100, .ect0, 1_000);
+    try sent.sentAt(11, true, 100, .ect1, 2_000);
+    try std.testing.expectEqual(@as(u64, 1), sent.stats().sent_ect0_count);
+    try std.testing.expectEqual(@as(u64, 1), sent.stats().sent_ect1_count);
+
+    try std.testing.expect(sent.forget(11));
+    try std.testing.expectEqual(@as(u64, 1), sent.stats().sent_ect0_count);
+    try std.testing.expectEqual(@as(u64, 0), sent.stats().sent_ect1_count);
+
+    try std.testing.expect(sent.forget(10));
+    try std.testing.expectEqual(@as(u64, 0), sent.stats().sent_ect0_count);
+    try std.testing.expectEqual(@as(u64, 0), sent.stats().sent_ect1_count);
+}
+
+test "QUIC sent packet tracker exposes ACKed ECT beyond counter watermark" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentWithEcn(0, true, 1200, .ect0);
+    _ = try sent.applyAckDetailed(.{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expect(sent.hasAcknowledgedEctBeyondEcnWatermark());
+
+    try sent.sentWithEcn(1, true, 1200, .ect0);
+    _ = try sent.applyAckDetailed(.{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{
+            .ect0_count = 2,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    });
+    try std.testing.expect(!sent.hasAcknowledgedEctBeyondEcnWatermark());
+}
+
 test "QUIC sent packet tracker finds tail without index slots" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
@@ -2633,6 +2887,30 @@ test "QUIC sent packet tracker rejects ACK_ECN counters that miss newly acked EC
     try std.testing.expect(!sent.packets.items[0].acknowledged);
 }
 
+test "QUIC sent packet tracker rejects mixed-path ACK_ECN that only covers current-path ECT packets" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAtWithDatagramSizeAndPathEpoch(0, true, 1200, 1200, .ect0, 1_000, 1);
+    try sent.sentAtWithDatagramSizeAndPathEpoch(1, true, 1200, 1200, .ect0, 2_000, 2);
+
+    const mixed_ack = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    };
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        sent.validateAckEcnFrameForPathEpoch(mixed_ack, 2),
+    );
+}
+
 test "QUIC sent packet tracker tolerates reordered ACK_ECN frames" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
@@ -2656,11 +2934,18 @@ test "QUIC sent packet tracker tolerates reordered ACK_ECN frames" {
         .ecn_counts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
     };
     _ = try sent.applyAckDetailed(reordered);
-    try std.testing.expect(!sent.ecn_validation_failed);
+    try std.testing.expect(!sent.plainAckWouldFailForPathEpoch(
+        .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        null,
+    ));
     try std.testing.expectEqual(@as(u64, 1), sent.latest_ecn_counts.ect0_count);
 }
 
-test "QUIC sent packet tracker disables ECN validation on plain ACK for ECT packet" {
+test "QUIC sent packet tracker flags plain ACK for newly acked ECT packet" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
     defer sent.deinit();
@@ -2671,18 +2956,9 @@ test "QUIC sent packet tracker disables ECN validation on plain ACK for ECT pack
         .ack_delay = 0,
         .first_ack_range = 0,
     };
+    try std.testing.expect(sent.plainAckWouldFailForPathEpoch(plain_ack, null));
     const result = try sent.applyAckDetailed(plain_ack);
     try std.testing.expectEqual(@as(usize, 1), result.ect0_packets);
-    try std.testing.expect(sent.ecn_validation_failed);
-
-    try sent.sentWithEcn(1, true, 1200, .ect0);
-    const later_ecn = quic.AckFrame{
-        .largest_acknowledged = 1,
-        .ack_delay = 0,
-        .first_ack_range = 0,
-        .ecn_counts = .{ .ect0_count = 2, .ect1_count = 0, .ecn_ce_count = 0 },
-    };
-    try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(later_ecn));
 }
 
 test "QUIC sent packet tracker detects time-threshold loss" {

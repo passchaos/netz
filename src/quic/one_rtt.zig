@@ -238,6 +238,11 @@ pub const ConnectionConfig = struct {
     local_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
+    /// Automatic ECN marking policy for ordinary 1-RTT sends.
+    ///
+    /// Explicit `sendWithEcn*` calls keep their requested codepoint. This
+    /// policy only affects convenience send paths such as `send`/`sendAt`.
+    automatic_ecn_policy: quic.ecn.Policy = .enabled,
     enable_pmtud: bool = false,
     pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
     peer_disable_active_migration: bool = false,
@@ -772,6 +777,12 @@ pub const Connection = struct {
     peer_address_validated: bool = true,
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
+    ecn_path: quic.ecn.PathState = .{},
+    /// A cumulative ACK_ECN counter update can include packets from the old
+    /// path. Consume one advancing counter report as a fresh baseline before
+    /// allowing it to validate the replacement path. This prevents a delayed
+    /// old-path mark from masking bleaching on the new path.
+    ecn_path_baseline_pending: bool = false,
     pmtud: quic.pmtu.State = .{},
     pmtu_probe_epoch: u32 = 1,
     pmtu_path_epoch: u32 = 1,
@@ -848,6 +859,7 @@ pub const Connection = struct {
                 config.pacing_max_burst_packets,
             ),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
+            .ecn_path = .init(config.automatic_ecn_policy),
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
             .path_validation = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
@@ -996,7 +1008,46 @@ pub const Connection = struct {
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
-        try self.sendWithEcn(frames, .not_ect);
+        try self.sendAutomaticallyWithLoop(frames);
+    }
+
+    fn handleAutomaticEcnUnavailable(
+        self: *Connection,
+        requested_ecn: quic.packet_space.EcnCodepoint,
+    ) bool {
+        if (requested_ecn == .not_ect) return false;
+        self.ecn_path.onValidationFailure();
+        return true;
+    }
+
+    fn sendAutomaticallyWithLoop(
+        self: *Connection,
+        frames: []const quic.Frame,
+    ) Error!void {
+        while (true) {
+            const now_ns = self.monotonicNowNs();
+            self.sendAutomaticallyAt(frames, now_ns) catch |err| switch (err) {
+                error.PacingLimited => {
+                    try self.waitForPacing(now_ns);
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
+    }
+
+    fn sendAutomaticallyAt(
+        self: *Connection,
+        frames: []const quic.Frame,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        try self.sendWithEcnAtImpl(
+            frames,
+            self.autoEcnForFrames(frames),
+            sent_time_ns,
+            true,
+        );
     }
 
     /// Send TLS post-handshake CRYPTO bytes in the application packet-number
@@ -1106,10 +1157,11 @@ pub const Connection = struct {
         // the caller's frames, preserving application order, and later calls
         // retain normal GSO/sendmmsg batching.
         if (self.handshake_status.needsHandshakeDone()) {
-            try self.sendWithEcnAt(
+            try self.sendWithEcnAtImpl(
                 packets[0],
-                .not_ect,
+                self.autoEcnForFrames(packets[0]),
                 sent_time_ns,
+                true,
             );
             return .{ .sent_count = 1, .protected_count = 1 };
         }
@@ -1353,6 +1405,14 @@ pub const Connection = struct {
             count += 1;
         }
         if (count == 0) return error.MissingFrame;
+        // One socket-level traffic-class setting applies to this sendmmsg/GSO
+        // submission. Mark the batch only when every packet that will
+        // actually be submitted is eligible; later input outside this paced
+        // prefix must not suppress ECN for the current batch.
+        const batch_ecn = if (allBatchPacketsAutoEcnEligible(packets[0..count]))
+            self.autoEcnForFrames(packets[0])
+        else
+            .not_ect;
 
         try self.send_packet_buffer.ensureTotalCapacity(
             self.endpoint.allocator,
@@ -1470,7 +1530,7 @@ pub const Connection = struct {
                 packet.in_flight,
                 packet.payload_len,
                 packet.packet_len,
-                .not_ect,
+                batch_ecn,
                 sent_time_ns,
                 self.pmtu_path_epoch,
             );
@@ -1503,10 +1563,25 @@ pub const Connection = struct {
             packet_offset += sealed.len;
         }
 
-        const send_result = try self.endpoint.sendManyBytesProgress(
+        const send_result = self.endpoint.sendManyBytesProgressWithEcn(
             self.config.peer,
             datagrams[0..count],
-        );
+            batch_ecn,
+        ) catch |err| switch (err) {
+            error.EcnUnavailable => if (self.handleAutomaticEcnUnavailable(batch_ecn)) blk: {
+                for (prepared[0..count]) |packet| {
+                    std.debug.assert(
+                        self.sent.rewritePacketEcn(packet.packet_number, .not_ect),
+                    );
+                }
+                break :blk try self.endpoint.sendManyBytesProgressWithEcn(
+                    self.config.peer,
+                    datagrams[0..count],
+                    .not_ect,
+                );
+            } else return err,
+            else => return err,
+        };
         std.debug.assert(send_result.sent_count <= count);
 
         var sent_payload_len: usize = 0;
@@ -1596,10 +1671,20 @@ pub const Connection = struct {
     }
 
     pub fn sendAt(self: *Connection, frames: []const quic.Frame, sent_time_ns: u64) Error!void {
-        try self.sendWithEcnAt(frames, .not_ect, sent_time_ns);
+        try self.sendAutomaticallyAt(frames, sent_time_ns);
     }
 
     pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
+        try self.sendWithEcnAtImpl(frames, ecn, sent_time_ns, false);
+    }
+
+    fn sendWithEcnAtImpl(
+        self: *Connection,
+        frames: []const quic.Frame,
+        ecn: quic.packet_space.EcnCodepoint,
+        sent_time_ns: ?u64,
+        automatic_ecn: bool,
+    ) Error!void {
         if (frames.len != 0 and
             self.handshake_status.needsHandshakeDone() and
             !containsHandshakeDone(frames))
@@ -1620,15 +1705,26 @@ pub const Connection = struct {
                 combined,
                 ecn,
                 sent_time_ns,
+                automatic_ecn,
             );
         }
-        try self.sendWithEcnAtRaw(frames, ecn, sent_time_ns);
+        try self.sendWithEcnAtRaw(frames, ecn, sent_time_ns, automatic_ecn);
     }
 
-    fn sendWithEcnAtRaw(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
+    fn sendWithEcnAtRaw(
+        self: *Connection,
+        frames: []const quic.Frame,
+        ecn: quic.packet_space.EcnCodepoint,
+        sent_time_ns: ?u64,
+        automatic_ecn: bool,
+    ) Error!void {
         self.pacing_blocked_until_ns = null;
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
+        // Preserve the legacy explicit-disable contract without coupling that
+        // connection-global compatibility latch to automatic per-path ECN.
+        if (!automatic_ecn and ecn != .not_ect and self.sent.ecnDisabled()) {
+            return error.EcnDisabled;
+        }
         try self.validateNextPacketNumber();
         try self.validateOutboundFrames(frames);
         const packet_streams = &self.send_batch_packet_stream_scratch;
@@ -1703,7 +1799,12 @@ pub const Connection = struct {
             try entry.flow.reserve(credit.bytes);
             reserved_streams.items[reserved_index].bytes = credit.bytes;
         }
-        try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
+        try self.sendPreparedFramesEcnAtUnchecked(
+            prepared,
+            ecn,
+            sent_time_ns,
+            automatic_ecn,
+        );
         self.observePacketSent(
             qlog_now_ns,
             self.next_packet_number - 1,
@@ -1879,7 +1980,8 @@ pub const Connection = struct {
             .latest_rtt_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.latest_rtt else null,
             .pending_recovery_count = self.recovery.pendingCount(),
             .pto_backoff_count = self.pto_count,
-            .ecn_validation_failed = self.sent.ecnDisabled(),
+            .ecn_validation_failed = self.ecn_path.state() == .failed or
+                self.sent.ecnDisabled(),
             .authentication_failures = self.receive_authentication_failures,
             .local_key_update_count = self.send_key_phase.keyUpdateCount(),
             .peer_key_update_count = self.receive_key_phase.keyUpdateCount(),
@@ -2568,7 +2670,12 @@ pub const Connection = struct {
     fn sendTrackedFramesEcnAtUncheckedRaw(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
         const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
-        try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
+        try self.sendPreparedFramesEcnAtUnchecked(
+            prepared,
+            ecn,
+            sent_time_ns,
+            false,
+        );
         self.observePacketSent(
             qlog_now_ns,
             self.next_packet_number - 1,
@@ -2635,6 +2742,7 @@ pub const Connection = struct {
         prepared: PreparedFrames,
         ecn: quic.packet_space.EcnCodepoint,
         sent_time_ns: ?u64,
+        automatic_ecn: bool,
     ) Error!void {
         const packet_number = self.next_packet_number;
         var tracked_congestion = false;
@@ -2722,6 +2830,7 @@ pub const Connection = struct {
             sent_time_ns,
             prepared.is_ack_eliciting,
             prepared.is_in_flight,
+            automatic_ecn,
         );
         if (prepared.contains_handshake_done) {
             self.handshake_status.onHandshakeDoneTracked(
@@ -2825,6 +2934,31 @@ pub const Connection = struct {
         self.pmtud.onMtuSizedPacketAcked(packet_number, datagram_size);
     }
 
+    fn autoEcnForFrames(
+        self: Connection,
+        frames: []const quic.Frame,
+    ) quic.packet_space.EcnCodepoint {
+        if (!autoEcnEligible(frames)) return .not_ect;
+        if (!self.ecn_path.mayMarkEct0()) return .not_ect;
+        return .ect0;
+    }
+
+    fn allBatchPacketsAutoEcnEligible(
+        packets: []const []const quic.Frame,
+    ) bool {
+        for (packets) |frames| {
+            if (!autoEcnEligible(frames)) return false;
+        }
+        return true;
+    }
+
+    fn resetEcnForPath(self: *Connection) void {
+        self.ecn_path_baseline_pending =
+            self.sent.hasUnacknowledgedEct() or
+            self.sent.hasAcknowledgedEctBeyondEcnWatermark();
+        self.ecn_path.resetForPath();
+    }
+
     fn reportLostPmtuEvidence(self: *Connection, generation: u32, now_ns: ?u64) void {
         const now = now_ns orelse return;
         if (generation == 0) return;
@@ -2917,6 +3051,7 @@ pub const Connection = struct {
             sent_time_ns,
             true,
             true,
+            false,
         );
         self.next_packet_number += 1;
         self.pmtud.onProbeSentWithIdentity(
@@ -2986,6 +3121,7 @@ pub const Connection = struct {
             sent_time_ns,
             true,
             pace_packet,
+            false,
         );
     }
 
@@ -2998,6 +3134,7 @@ pub const Connection = struct {
         sent_time_ns: ?u64,
         ack_eliciting: bool,
         pace_packet: bool,
+        automatic_ecn: bool,
     ) Error!void {
         const sizing_options: quic.protection.ShortPacketOptions = .{
             .destination_connection_id = self.config.peer_connection_id,
@@ -3050,7 +3187,21 @@ pub const Connection = struct {
             packet_options,
         );
         self.recordPacketEncrypted();
-        try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
+        self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn) catch |err| switch (err) {
+            error.EcnUnavailable => if (automatic_ecn and
+                self.handleAutomaticEcnUnavailable(ecn))
+            blk: {
+                std.debug.assert(
+                    self.sent.rewritePacketEcn(packet_number, .not_ect),
+                );
+                break :blk try self.endpoint.sendBytesWithEcn(
+                    self.config.peer,
+                    packet,
+                    .not_ect,
+                );
+            } else return err,
+            else => return err,
+        };
         self.noteOneRttPacketSent(packet_number, packet.len, now_ns, ack_eliciting);
         if (pace_packet) {
             self.pacer.onPacketSentAt(
@@ -3062,6 +3213,17 @@ pub const Connection = struct {
             self.congestion.onPacketSent(packet_number);
         }
         self.pacing_blocked_until_ns = null;
+    }
+
+    fn precheckPlainAckCurrentPathFailure(
+        self: Connection,
+        ack: quic.AckFrame,
+    ) bool {
+        if (ack.ecn_counts != null) return false;
+        return self.sent.plainAckWouldFailForPathEpoch(
+            ack,
+            self.pmtu_path_epoch,
+        );
     }
 
     fn aeadConfidentialityLimit(self: Connection) u64 {
@@ -4336,6 +4498,7 @@ pub const Connection = struct {
         self.peer_address_validated = false;
         self.peer_address_bytes_received = 0;
         self.peer_address_bytes_sent = 0;
+        self.resetEcnForPath();
         self.pmtud.resetForPath();
         self.pmtuProbeEpochBump();
         self.pmtuPathEpochBump();
@@ -6447,6 +6610,7 @@ pub const Connection = struct {
                 self.peer_address_validated = true;
                 self.peer_address_bytes_received = 0;
                 self.peer_address_bytes_sent = 0;
+                self.resetEcnForPath();
                 self.pmtud.resetForPath();
                 self.pmtuProbeEpochBump();
                 self.pmtuPathEpochBump();
@@ -6465,6 +6629,7 @@ pub const Connection = struct {
                 self.peer_address_bytes_received = 0;
                 self.peer_address_bytes_sent = 0;
                 self.recordPeerAddressBytesReceived(new_path.datagram_len);
+                self.resetEcnForPath();
                 self.rtt_stats = .init(std.math.mul(
                     u64,
                     self.config.peer_max_ack_delay_ms,
@@ -6550,6 +6715,8 @@ pub const Connection = struct {
                         self.congestion.isCongestionWindowUtilized();
                     const handshake_done_group =
                         self.handshake_status.recoveryGroupId();
+                    const plain_ack_current_path_failure =
+                        self.precheckPlainAckCurrentPathFailure(frame.ack);
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
                     const acked = self.sent.applyAckDetailedForProbe(
                         frame.ack,
@@ -6580,8 +6747,40 @@ pub const Connection = struct {
                         );
                         self.applyCurrentPmtuToPath();
                     }
+                    const consumed_retired_path_baseline =
+                        self.ecn_path_baseline_pending and
+                        acked.ecn_counts_updated;
+                    if (consumed_retired_path_baseline) {
+                        self.ecn_path_baseline_pending = false;
+                    }
+                    if (frame.ack.ecn_counts != null and
+                        (acked.current_path_ect0_packets != 0 or
+                            acked.current_path_ect1_packets != 0) and
+                        !consumed_retired_path_baseline)
+                    {
+                        self.ecn_path.onValidatedAck();
+                    } else if (plain_ack_current_path_failure) {
+                        self.ecn_path.onValidationFailure();
+                    }
+                    if (frame.ack.ecn_counts == null and
+                        (acked.ect0_packets != 0 or
+                            acked.ect1_packets != 0))
+                    {
+                        // A future cumulative ACK_ECN can include these marks
+                        // even though this ACK supplied no usable baseline.
+                        // Consume the next valid counter update before using
+                        // its delta to validate the active path.
+                        self.ecn_path_baseline_pending = true;
+                    }
+                    if (!self.ecn_path_baseline_pending and
+                        self.sent.hasAcknowledgedEctBeyondEcnWatermark())
+                    {
+                        self.ecn_path_baseline_pending = true;
+                    }
                     self.reportAckedPmtuEvidence(acked);
-                    if (acked.ecn_ce_delta > 0) {
+                    if (acked.ecn_ce_delta > 0 and
+                        !consumed_retired_path_baseline)
+                    {
                         self.congestion.onExplicitCongestion(now_ns);
                     }
                     self.congestion.onAckedWithContextAndUtilization(
@@ -7642,9 +7841,21 @@ pub const Connection = struct {
     }
 
     fn applyAckWithEcnFailure(self: *Connection, ack: quic.AckFrame) Error!quic.packet_space.SentPacketTracker.AckResult {
-        if (ack.ecn_counts == null or !self.sent.validateAckEcnFrameWouldFail(ack)) return error.InvalidAckFrame;
         var plain_ack = ack;
         plain_ack.ecn_counts = null;
+        const plain_ack_current_path_failure =
+            self.sent.plainAckWouldFailForPathEpoch(
+                plain_ack,
+                self.pmtu_path_epoch,
+            );
+        if (ack.ecn_counts == null or
+            !self.sent.validateAckEcnFrameWouldFailForPathEpoch(
+                ack,
+                self.pmtu_path_epoch,
+            ))
+        {
+            return error.InvalidAckFrame;
+        }
         const result = try self.sent.applyAckDetailedForProbe(
             plain_ack,
             self.pmtud.active_probe_packet_number,
@@ -7652,7 +7863,12 @@ pub const Connection = struct {
             self.pmtud.currentSize(),
             self.pmtu_path_epoch,
         );
-        self.sent.disableEcnValidation();
+        if (plain_ack_current_path_failure) {
+            self.ecn_path.onValidationFailure();
+        }
+        if (result.ect0_packets != 0 or result.ect1_packets != 0) {
+            self.ecn_path_baseline_pending = true;
+        }
         return result;
     }
 
@@ -8511,6 +8727,34 @@ fn packetInFlight(frames: []const quic.Frame) bool {
     return false;
 }
 
+fn containsPathValidationFrame(frames: []const quic.Frame) bool {
+    for (frames) |frame| {
+        switch (frame) {
+            .path_challenge, .path_response => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn containsAckOrCloseFrame(frames: []const quic.Frame) bool {
+    for (frames) |frame| {
+        switch (frame) {
+            .ack, .connection_close, .application_close => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn autoEcnEligible(frames: []const quic.Frame) bool {
+    if (!ackEliciting(frames)) return false;
+    if (!packetInFlight(frames)) return false;
+    if (containsPathValidationFrame(frames)) return false;
+    if (containsAckOrCloseFrame(frames)) return false;
+    return true;
+}
+
 fn countStreamBytes(frames: []const quic.Frame) u64 {
     var total: u64 = 0;
     for (frames) |frame| {
@@ -8756,6 +9000,27 @@ pub const testing = struct {
         frame_type: u64,
         reason_phrase: []const u8,
     };
+
+    pub fn ecnPathState(connection: *const Connection) quic.ecn.ValidationState {
+        return connection.ecn_path.state();
+    }
+
+    pub fn currentPathEpoch(connection: *const Connection) u32 {
+        return connection.pmtu_path_epoch;
+    }
+
+    pub fn ecnBaselinePending(connection: *const Connection) bool {
+        return connection.ecn_path_baseline_pending;
+    }
+
+    pub fn lastSentPacketEcn(
+        connection: *const Connection,
+    ) ?quic.packet_space.EcnCodepoint {
+        if (connection.sent.packets.items.len == 0) return null;
+        return connection.sent.packets.items[
+            connection.sent.packets.items.len - 1
+        ].ecn;
+    }
 
     pub fn localCloseInfo(connection: *const Connection) ?LocalCloseInfo {
         const close_info = connection.close_info orelse return null;

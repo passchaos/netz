@@ -92,6 +92,11 @@ test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
     try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
     try std.testing.expectEqual(
+        quic.packet_space.EcnCodepoint.ect0,
+        client.sent.packets.items[0].ecn,
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.sent.stats().sent_ect0_count);
+    try std.testing.expectEqual(
         @as(u64, 2),
         client.encryptedPacketsWithCurrentKeys(),
     );

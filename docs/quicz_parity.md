@@ -188,6 +188,23 @@ and cwnd heuristics remain coherent with the new path size. Dedicated
 PING/PADDING probes stay outside generic retransmission ownership; their sent
 metadata retains an independent loss timer, so a lost lone probe is retried by
 the PMTU search rather than accidentally resurfacing as an ordinary PTO packet.
+QUIC 1-RTT automatic ECN marking is now path-scoped rather than a single
+tracker-global latch. Ordinary convenience sends mark eligible application
+packets `ECT(0)` while the current path is in testing/capable state, reset
+back to testing on NAT rebinding or authenticated migration, and fall back to
+`Not-ECT` only for the current path after pre-mutation plain-ACK or invalid
+ACK_ECN evidence shows validation failure. Explicit `sendWithEcn*` calls keep
+their caller-selected codepoint and do not participate in the automatic socket
+fallback to `Not-ECT` on `EcnUnavailable`. Batch sends apply `ECT(0)` only
+when every packet in the submitted batch is auto-ECN-eligible; if the runtime
+must retry the automatic send as `Not-ECT`, the tracked sent-packet ECN
+metadata is rewritten to match the on-wire retry. For source compatibility,
+`SentPacketTracker.disableEcnValidation`, `SentPacketTracker.ecnDisabled()`,
+and `SentPacketStats.ecn_validation_failed` remain as deprecated manual-latch
+surfaces only; they no longer drive the new path-local automatic ECN state.
+Focused regression coverage for this redesign lives under
+`src/quic/one_rtt/tests/basic.zig`, `src/quic/one_rtt/tests/crypto_path.zig`,
+and `src/quic/ecn.zig`.
 Stateless Reset generation now has the same caller-buffer boundary. The public
 codec validates before modifying output, and the endpoint derives the token,
 fills unpredictable bytes, caps responses at 1200 bytes, requires a valid
