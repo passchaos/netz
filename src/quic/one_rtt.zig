@@ -243,6 +243,14 @@ pub const ConnectionConfig = struct {
     /// Explicit `sendWithEcn*` calls keep their requested codepoint. This
     /// policy only affects convenience send paths such as `send`/`sendAt`.
     automatic_ecn_policy: quic.ecn.Policy = .enabled,
+    /// Allow already-buffered contiguous stream data to be drained after a
+    /// peer RESET_STREAM, then report the reset exactly once.
+    ///
+    /// The default preserves netz's historical reset-first application view:
+    /// unread bytes remain retained for duplicate/conflict validation but are
+    /// no longer returned by application receive APIs once the reset is
+    /// observed.
+    enable_reset_partial_delivery: bool = false,
     enable_pmtud: bool = false,
     pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
     peer_disable_active_migration: bool = false,
@@ -288,6 +296,10 @@ const StreamRecvFlowEntry = struct {
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
     reset: ?StreamResetInfo = null,
+    /// Absolute application-read boundary captured by the first RESET_STREAM.
+    /// Later reordered STREAM frames may still be retained for validation, but
+    /// they must never appear after the terminal reset becomes observable.
+    reset_delivery_end: ?usize = null,
     reset_reported: bool = false,
     fin_reported: bool = false,
     stop_sending_sent: ?StopSendingInfo = null,
@@ -305,6 +317,9 @@ const RecvStreamPreflightEntry = struct {
     recv_state: quic.stream_state.RecvState.Preflight,
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
+    /// RESET_STREAM accounts its complete final size at most once, even when
+    /// a duplicate reset or a reordered STREAM shares the same packet.
+    reset_received: bool = false,
 
     fn deinit(self: *RecvStreamPreflightEntry) void {
         self.recv_state.deinit();
@@ -512,6 +527,30 @@ fn recvStreamStatsFromEntry(entry: *const StreamRecvFlowEntry) RecvStreamStats {
         .reset = entry.reset,
         .stop_sending_sent = entry.stop_sending_sent,
     };
+}
+
+/// Limit every application read surface to the reset-time frontier. The
+/// receive state can retain later reordered bytes to validate QUIC final-size
+/// and overlap invariants, but those bytes are transport evidence rather than
+/// application data once RESET_STREAM has made the stream terminal.
+fn applicationAvailableStreamBytes(
+    entry: *const StreamRecvFlowEntry,
+    enable_reset_partial_delivery: bool,
+) []const u8 {
+    const available = entry.recv_state.available();
+    if (entry.reset_delivery_end) |delivery_end| {
+        if (!enable_reset_partial_delivery or
+            entry.reset_reported or
+            delivery_end <= entry.recv_state.read_offset)
+        {
+            return available[0..0];
+        }
+        return available[0..@min(
+            available.len,
+            delivery_end - entry.recv_state.read_offset,
+        )];
+    }
+    return available;
 }
 
 const PeerAddressUpdate = union(enum) {
@@ -3511,6 +3550,12 @@ pub const Connection = struct {
         return self.pto_jitter_state.currentEpoch();
     }
 
+    /// Whether this connection preserves the contiguous prefix buffered when
+    /// RESET_STREAM arrives for application delivery before its reset event.
+    pub fn resetPartialDeliveryEnabled(self: Connection) bool {
+        return self.config.enable_reset_partial_delivery;
+    }
+
     pub fn ptoPeriod(self: Connection) u64 {
         var period = self.rtt_stats.pto(true);
         var remaining = self.pto_count;
@@ -4096,13 +4141,18 @@ pub const Connection = struct {
     /// consume stream data on this connection. This is the allocation-free
     /// application read path; call `releaseReceivedCapacity` after processing
     /// a prefix so the receive buffer can compact and the peer can regain
-    /// connection- and stream-level flow-control credit.
+    /// connection- and stream-level flow-control credit. After RESET_STREAM,
+    /// the slice is empty by default or capped to the opt-in reset-time
+    /// delivery frontier.
     pub fn availableReceivedStream(
         self: *Connection,
         stream_id: u64,
     ) ?[]const u8 {
         const entry = self.findRecvStreamEntry(stream_id) orelse return null;
-        return entry.recv_state.available();
+        return applicationAvailableStreamBytes(
+            entry,
+            self.config.enable_reset_partial_delivery,
+        );
     }
 
     /// Whether FIN has been received contiguously and all stream bytes have
@@ -4386,7 +4436,17 @@ pub const Connection = struct {
         entry: *StreamRecvFlowEntry,
         out: []u8,
     ) Error!?StreamRead {
-        if (entry.reset) |reset| {
+        const available = applicationAvailableStreamBytes(
+            entry,
+            self.config.enable_reset_partial_delivery,
+        );
+        if (entry.reset) |reset| reset: {
+            if (self.config.enable_reset_partial_delivery and
+                !entry.reset_reported and
+                entry.reset_delivery_end.? > entry.recv_state.read_offset)
+            {
+                break :reset;
+            }
             if (entry.reset_reported) return null;
             entry.reset_reported = true;
             return .{ .reset = .{
@@ -4396,11 +4456,11 @@ pub const Connection = struct {
             } };
         }
         if (entry.fin_reported) return null;
-        const available = entry.recv_state.available();
         if (available.len != 0) {
             const count = @min(out.len, available.len);
             @memcpy(out[0..count], available[0..count]);
-            const fin = entry.recv_state.final_size != null and
+            const fin = entry.reset == null and
+                entry.recv_state.final_size != null and
                 entry.recv_state.read_offset + count ==
                     entry.recv_state.final_size.?;
             try self.releaseReceivedCapacity(entry.stream_id, count);
@@ -4422,9 +4482,12 @@ pub const Connection = struct {
         return null;
     }
 
-    /// Copy the currently assembled receive bytes for diagnostics and
-    /// handshake-integrated early-data consumers. The returned slice is owned
-    /// by the caller; consuming flow-control credit remains explicit.
+    /// Copy the currently application-readable receive bytes for diagnostics
+    /// and handshake-integrated early-data consumers. Reset partial-delivery
+    /// boundaries match `availableReceivedStream`; retained late transport
+    /// evidence remains visible only through stream statistics. The returned
+    /// slice is owned by the caller; consuming flow-control credit remains
+    /// explicit.
     pub fn copyReceivedStream(
         self: Connection,
         allocator: std.mem.Allocator,
@@ -4435,7 +4498,13 @@ pub const Connection = struct {
         if (index >= self.stream_recv_flows.items.len) return null;
         const entry = self.stream_recv_flows.items[index];
         if (entry.stream_id != stream_id) return null;
-        return try allocator.dupe(u8, entry.recv_state.available());
+        return try allocator.dupe(
+            u8,
+            applicationAvailableStreamBytes(
+                &entry,
+                self.config.enable_reset_partial_delivery,
+            ),
+        );
     }
 
     pub fn streamStopped(self: Connection, stream_id: u64) ?StopSendingInfo {
@@ -6941,6 +7010,7 @@ pub const Connection = struct {
                 }),
                 .stream => |stream| {
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
+                    const reset_received = recv_stream.reset != null;
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
                     const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
                     try self.applyFinalSize(recv_stream, stream_end, stream.fin);
@@ -6951,7 +7021,7 @@ pub const Connection = struct {
                     // based.  Retransmissions or partially overlapping frames
                     // must not consume connection credit again, while conflicting
                     // overlaps are rejected by RecvState before this counter moves.
-                    if (newly_received != 0) {
+                    if (!reset_received and newly_received != 0) {
                         const next_total = std.math.add(u64, self.recv_data_total, newly_received) catch return error.FlowControlViolation;
                         try self.recv_flow.receive(next_total);
                         self.recv_data_total = next_total;
@@ -7156,7 +7226,13 @@ pub const Connection = struct {
         try preflightApplyFinalSize(recv_stream, stream_end, stream.fin);
         if (stream_end > recv_stream.flow_limit) return error.FlowControlViolation;
         const newly_received = try recv_stream.recv_state.insertTracked(stream);
-        try self.preflightRecvCredit(recv_stream, newly_received, recv_data_total);
+        if (!recv_stream.reset_received) {
+            try self.preflightRecvCredit(
+                recv_stream,
+                newly_received,
+                recv_data_total,
+            );
+        }
         recv_stream.highest_received_end = @max(recv_stream.highest_received_end, stream_end);
     }
 
@@ -7179,7 +7255,14 @@ pub const Connection = struct {
         if (reset.final_size > recv_stream.flow_limit) return error.FlowControlViolation;
         const received = recv_stream.recv_state.receivedByteCount();
         if (reset.final_size < received) return error.FinalSizeMismatch;
-        try self.preflightRecvCredit(recv_stream, reset.final_size - received, recv_data_total);
+        if (!recv_stream.reset_received) {
+            try self.preflightRecvCredit(
+                recv_stream,
+                reset.final_size - received,
+                recv_data_total,
+            );
+            recv_stream.reset_received = true;
+        }
         recv_stream.highest_received_end = @max(recv_stream.highest_received_end, reset.final_size);
     }
 
@@ -7207,6 +7290,7 @@ pub const Connection = struct {
                 .recv_state = recv_state,
                 .highest_received_end = existing.highest_received_end,
                 .final_size = existing.final_size,
+                .reset_received = existing.reset != null,
             });
             appended = true;
         } else {
@@ -7425,12 +7509,16 @@ pub const Connection = struct {
 
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
         var recv_stream = try self.recvStreamFlow(reset.stream_id);
+        const first_reset = recv_stream.reset == null;
         try self.applyFinalSize(recv_stream, reset.final_size, true);
         try recv_stream.flow.receive(reset.final_size);
 
         const received = recv_stream.recv_state.receivedByteCount();
         if (reset.final_size < received) return error.FinalSizeMismatch;
-        const new_stream_credit = reset.final_size - received;
+        const new_stream_credit = if (first_reset)
+            reset.final_size - received
+        else
+            0;
         if (new_stream_credit != 0) {
             const next_total = std.math.add(u64, self.recv_data_total, new_stream_credit) catch return error.FlowControlViolation;
             try self.recv_flow.receive(next_total);
@@ -7438,6 +7526,14 @@ pub const Connection = struct {
         }
         recv_stream.highest_received_end = @max(recv_stream.highest_received_end, reset.final_size);
 
+        if (first_reset) {
+            // Snapshot the contiguous prefix at the first reset. STREAM frames
+            // can be reordered behind RESET_STREAM and remain useful for
+            // protocol validation, but partial delivery is specifically for
+            // bytes already available when the reset became observable.
+            recv_stream.reset_delivery_end = recv_stream.recv_state.read_offset +
+                recv_stream.recv_state.available().len;
+        }
         recv_stream.reset = .{
             .application_error_code = reset.application_error_code,
             .final_size = reset.final_size,
@@ -9145,6 +9241,10 @@ pub const testing = struct {
             entry.recv_state.available().len
         else
             null;
+    }
+
+    pub fn receiveDataTotal(connection: *const Connection) u64 {
+        return connection.recv_data_total;
     }
 
     pub fn validateDatagramFrame(

@@ -4774,12 +4774,20 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_pacing"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_receive_window"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_stream_receive_window"));
+    try std.testing.expect(@hasField(
+        netz.quic.handshake.OneRttConfig,
+        "enable_reset_partial_delivery",
+    ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_receive_window"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_stream_receive_window"));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.ConnectionConfig,
+        "enable_reset_partial_delivery",
+    ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_spin_bit"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "active_connection_id_limit"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_max_idle_timeout_ms"));
@@ -6657,5 +6665,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "jitteredPtoPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoJitterEnabled"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoJitterEpoch"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "resetPartialDeliveryEnabled",
+    ));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveManyConcurrent"));
 }

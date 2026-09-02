@@ -220,6 +220,10 @@ pub const OneRttConfig = struct {
     /// constructed connection. Explicit `sendWithEcn*` calls remain
     /// independent of this policy.
     automatic_ecn_policy: quic.ecn.Policy = .enabled,
+    /// Deliver contiguous bytes received before RESET_STREAM to the
+    /// application before surfacing the terminal reset event. Disabled by
+    /// default to retain reset-first compatibility.
+    enable_reset_partial_delivery: bool = false,
     keep_alive_period_ms: u64 = 0,
 
     fn apply(
@@ -273,6 +277,7 @@ pub const OneRttConfig = struct {
             .pacing_max_burst_packets = self.pacing_max_burst_packets,
             .pto_jitter_percentage = self.pto_jitter_percentage,
             .automatic_ecn_policy = self.automatic_ecn_policy,
+            .enable_reset_partial_delivery = self.enable_reset_partial_delivery,
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
@@ -696,6 +701,38 @@ test "preconfigured QUIC propagates automatic ECN policy" {
     try std.testing.expectEqual(
         quic.ecn.ValidationState.disabled,
         quic.one_rtt.testing.ecnPathState(&established.connection),
+    );
+}
+
+test "preconfigured QUIC propagates reset partial delivery policy" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6c} ** quic.protection.secret_len,
+    );
+    var established = try establishPreconfigured(
+        &endpoint,
+        .{ .ip4 = .loopback(443) },
+        .client,
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "local-reset-partial",
+            .peer_connection_id = "peer-reset-partial",
+            .one_rtt = .{ .enable_reset_partial_delivery = true },
+        },
+    );
+    defer established.deinit();
+    try std.testing.expect(
+        established.connection.resetPartialDeliveryEnabled(),
     );
 }
 

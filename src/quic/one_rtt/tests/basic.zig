@@ -1410,6 +1410,281 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     try std.testing.expectEqualStrings("ded", out[0..bounded_final.data.bytes]);
 }
 
+test "QUIC 1-RTT optionally drains buffered stream data before reset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x9d} ** quic.protection.secret_len,
+    );
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-partial-client",
+        .peer_connection_id = "reset-partial-server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-partial-server",
+        .peer_connection_id = "reset-partial-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .enable_reset_partial_delivery = true,
+    });
+    defer server.deinit();
+
+    // Deliver STREAM and RESET_STREAM in separate packets so the receive
+    // buffer demonstrably predates the terminal signal. RESET_STREAM's final
+    // size equals the sender's highest offset, as required by RFC 9000.
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "abcdef",
+    } }});
+    var data_packet = try server.receivePacket();
+    defer data_packet.deinit(allocator);
+    try client.resetStream(0, 91);
+    var reset_packet = try server.receivePacket();
+    defer reset_packet.deinit(allocator);
+
+    var out: [2]u8 = undefined;
+    const first = (try server.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try std.testing.expectEqual(@as(u62, 0), first.data.stream_id);
+    try std.testing.expectEqual(@as(usize, 2), first.data.bytes);
+    try std.testing.expect(!first.data.fin);
+    try std.testing.expectEqualStrings("ab", out[0..first.data.bytes]);
+
+    const second = (try server.pollStreamId(0, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(second == .data);
+    try std.testing.expectEqualStrings("cd", out[0..second.data.bytes]);
+    const third = (try server.pollStreamId(0, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(third == .data);
+    try std.testing.expectEqualStrings("ef", out[0..third.data.bytes]);
+    // A reset is not a FIN even when all bytes before its final size happened
+    // to arrive; applications must still observe the peer's error code.
+    try std.testing.expect(!third.data.fin);
+
+    const reset = (try server.pollStreamId(0, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(@as(u62, 0), reset.reset.stream_id);
+    try std.testing.expectEqual(@as(u64, 91), reset.reset.application_error_code);
+    try std.testing.expectEqual(@as(u64, 6), reset.reset.final_size);
+    try std.testing.expect((try server.pollStreamId(0, &out)) == null);
+
+    const stats = server.recvStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 6), stats.bytes_read);
+    try std.testing.expectEqual(@as(usize, 0), stats.available_bytes);
+}
+
+test "QUIC 1-RTT reset-first default hides buffered data from polling" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x9e} ** 32);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-default-local",
+        .peer_connection_id = "reset-default-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 0, &.{
+        .{ .stream = .{ .stream_id = 0, .data = "kept" } },
+    }, null, .not_ect);
+    try one_rtt.testing.applyReceivedFrames(&connection, 1, &.{
+        .{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 92,
+            .final_size = 4,
+        } },
+    }, null, .not_ect);
+
+    var out: [2]u8 = undefined;
+    const reset = (try connection.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(@as(u64, 92), reset.reset.application_error_code);
+    try std.testing.expect((try connection.pollStream(&out)) == null);
+    // Every application read surface follows the historical reset-first view.
+    // Diagnostic stats still retain the bytes for reordered/duplicate checks.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.availableReceivedStream(0).?.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        connection.recvStreamStats(0).?.available_bytes,
+    );
+}
+
+test "QUIC 1-RTT partial reset delivery preserves fair polling" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x9f} ** 32);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-fair-local",
+        .peer_connection_id = "reset-fair-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .enable_reset_partial_delivery = true,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 0, &.{
+        .{ .stream = .{ .stream_id = 0, .data = "aaaa" } },
+        .{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 93,
+            .final_size = 4,
+        } },
+        .{ .stream = .{ .stream_id = 4, .data = "bbbb" } },
+    }, null, .not_ect);
+
+    var out: [2]u8 = undefined;
+    const first = (try connection.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    const second = (try connection.pollStream(&out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try std.testing.expect(second == .data);
+    try std.testing.expectEqual(@as(u62, 0), first.data.stream_id);
+    try std.testing.expectEqual(@as(u62, 4), second.data.stream_id);
+}
+
+test "QUIC 1-RTT partial reset delivery excludes reordered late data" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xa0} ** 32);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-late-local",
+        .peer_connection_id = "reset-late-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .enable_reset_partial_delivery = true,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 0, &.{
+        .{ .stream = .{ .stream_id = 0, .data = "abc" } },
+    }, null, .not_ect);
+    try one_rtt.testing.applyReceivedFrames(&connection, 1, &.{
+        .{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 94,
+            .final_size = 6,
+        } },
+    }, null, .not_ect);
+    const charged_at_reset = one_rtt.testing.receiveDataTotal(&connection);
+    const stream_received_at_reset = connection.recvStreamStats(0).?.bytes_received;
+    try one_rtt.testing.applyReceivedFrames(&connection, 2, &.{
+        .{ .stream = .{ .stream_id = 0, .offset = 3, .data = "def" } },
+    }, null, .not_ect);
+    try std.testing.expectEqual(
+        charged_at_reset,
+        one_rtt.testing.receiveDataTotal(&connection),
+    );
+    try std.testing.expectEqual(
+        stream_received_at_reset + 3,
+        connection.recvStreamStats(0).?.bytes_received,
+    );
+    try one_rtt.testing.applyReceivedFrames(&connection, 3, &.{
+        .{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 94,
+            .final_size = 6,
+        } },
+    }, null, .not_ect);
+    try std.testing.expectEqual(
+        charged_at_reset,
+        one_rtt.testing.receiveDataTotal(&connection),
+    );
+
+    var out: [8]u8 = undefined;
+    const data = (try connection.pollStreamId(0, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(data == .data);
+    try std.testing.expectEqualStrings("abc", out[0..data.data.bytes]);
+    try std.testing.expect(!data.data.fin);
+    const reset = (try connection.pollStreamId(0, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(@as(u64, 94), reset.reset.application_error_code);
+    try std.testing.expect((try connection.pollStreamId(0, &out)) == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.availableReceivedStream(0).?.len);
+    const copied = (try connection.copyReceivedStream(allocator, 0)) orelse
+        return error.TestUnexpectedResult;
+    defer allocator.free(copied);
+    try std.testing.expectEqual(@as(usize, 0), copied.len);
+    // Diagnostic statistics continue to expose retained transport evidence,
+    // which is distinct from the application-readable prefix above.
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        connection.recvStreamStats(0).?.available_bytes,
+    );
+}
+
 test "QUIC 1-RTT stats include datagram queue drops" {
     const allocator = std.testing.allocator;
 
