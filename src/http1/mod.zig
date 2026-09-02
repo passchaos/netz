@@ -20,6 +20,7 @@ pub const Error = wire.Error || error{
     MalformedHeader,
     InvalidMethod,
     InvalidVersion,
+    InvalidResponse,
     InvalidStatus,
     InvalidChunk,
     InvalidHost,
@@ -165,6 +166,12 @@ test "HTTP/0.9 responses are opt in and writers remain strict" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("legacy body", response.body);
     try std.testing.expect(!response.keepAlive());
+    try std.testing.expectError(error.InvalidResponse, parseResponseForRequest(
+        allocator,
+        "legacy body",
+        .{ .allow_http_0_9_responses = true },
+        .POST,
+    ));
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -606,15 +613,23 @@ pub fn parseResponseWithContext(
     context: ResponseContext,
 ) Error!Response {
     if (options.allow_http_0_9_responses) switch (classifyResponsePrefix(bytes)) {
-        .http_0_9 => return .{
-            .version = .http_0_9,
-            .status = 200,
-            .reason = "",
-            .headers = @constCast(&[_]Header{}),
-            .body = bytes,
-            .body_framing = .close_delimited,
-            .trailers = @constCast(&[_]Header{}),
-            .consumed = bytes.len,
+        .http_0_9 => {
+            // HTTP/0.9 defines only GET. The context-free parser cannot infer
+            // a method, but callers that provide one must not reinterpret a
+            // headerless response to any other request method.
+            if (context.request_method) |method| {
+                if (method != .GET) return error.InvalidResponse;
+            }
+            return .{
+                .version = .http_0_9,
+                .status = 200,
+                .reason = "",
+                .headers = @constCast(&[_]Header{}),
+                .body = bytes,
+                .body_framing = .close_delimited,
+                .trailers = @constCast(&[_]Header{}),
+                .consumed = bytes.len,
+            };
         },
         .incomplete, .http_1_x => {},
     };

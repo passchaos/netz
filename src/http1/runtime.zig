@@ -6482,6 +6482,11 @@ fn readMessageBytesWithContext(
                 bytes.items.len != 0 and
                 http1.classifyResponsePrefix(bytes.items) == .incomplete)
             {
+                // EOF disambiguates a legacy body that happens to be a proper
+                // prefix of `HTTP/`; it does not bypass the body-size budget.
+                if (bytes.items.len > limits.max_body_bytes) {
+                    return error.BodyTooLarge;
+                }
                 return bytes.toOwnedSlice(allocator);
             }
             return error.ConnectionClosed;
@@ -6769,6 +6774,11 @@ fn readMessageBytesBufferedWithContext(
                 inbuf.items.len != 0 and
                 http1.classifyResponsePrefix(inbuf.items) == .incomplete)
             {
+                // This is the buffered counterpart of the EOF-only prefix
+                // fallback above and must enforce the identical body limit.
+                if (inbuf.items.len > limits.max_body_bytes) {
+                    return error.BodyTooLarge;
+                }
                 const bytes = try inbuf.toOwnedSlice(allocator);
                 inbuf.* = .empty;
                 return bytes;

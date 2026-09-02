@@ -397,6 +397,63 @@ test "HTTP/0.9 prefix body is accepted only after EOF" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/0.9 EOF prefix body enforces aggregate limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            inline for (0..2) |_| {
+                const stream = try self.listener.accept(self.io);
+                defer stream.close(self.io);
+                try readRequestHead(self.io, stream);
+                try writeAll(self.io, stream, "HTTP");
+            }
+        }
+    };
+    var shared = Shared{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var exact = try runtime.Client.connect(allocator, io, listener.socket.address, .{
+        .max_head_bytes = 128,
+        .max_body_bytes = 4,
+    });
+    defer exact.close();
+    var response = try exact.requestWithParseOptions(.{ .host = "localhost" }, .{
+        .allow_http_0_9_responses = true,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("HTTP", response.response.body);
+
+    var over = try runtime.Client.connect(allocator, io, listener.socket.address, .{
+        .max_head_bytes = 128,
+        .max_body_bytes = 3,
+    });
+    defer over.close();
+    try std.testing.expectError(error.BodyTooLarge, over.requestWithParseOptions(
+        .{ .host = "localhost" },
+        .{ .allow_http_0_9_responses = true },
+    ));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/0.9 response body obeys caller deadline after classification" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
