@@ -620,14 +620,27 @@ fn topicFiltersOverlap(left: []const u8, right: []const u8) bool {
 
     var a_levels = std.mem.splitScalar(u8, a, '/');
     var b_levels = std.mem.splitScalar(u8, b, '/');
+    var matched_level_count: usize = 0;
+    var prefix_is_valid_topic = false;
     while (true) {
         const a_level = nextFilterLevel(&a_levels);
         const b_level = nextFilterLevel(&b_levels);
         if (a_level == null or b_level == null) {
-            if (a_level == null and b_level == null) return true;
+            if (a_level == null and b_level == null) {
+                return prefix_is_valid_topic;
+            }
             // A terminal `#` also matches zero additional levels, so `a/#`
-            // intersects the exact filter `a` at Topic Name `a`.
-            return if (a_level) |level| level == .many else if (b_level) |level| level == .many else false;
+            // intersects the exact filter `a` at Topic Name `a`. The already
+            // matched prefix must itself be a valid, non-empty Topic Name:
+            // `+` and `/#` can agree only on one empty level, which would be
+            // the forbidden empty Topic Name rather than an intersection.
+            const remaining_is_many = if (a_level) |level|
+                level == .many
+            else if (b_level) |level|
+                level == .many
+            else
+                false;
+            return remaining_is_many and prefix_is_valid_topic;
         }
         if (a_level.? == .many or b_level.? == .many) return true;
         if (a_level.? == .literal and b_level.? == .literal and
@@ -639,6 +652,21 @@ fn topicFiltersOverlap(left: []const u8, right: []const u8) bool {
         {
             return false;
         }
+
+        const level_can_be_nonempty = switch (a_level.?) {
+            .literal => |literal| literal.len != 0,
+            .one => switch (b_level.?) {
+                .literal => |literal| literal.len != 0,
+                .one => true,
+                .many => unreachable,
+            },
+            .many => unreachable,
+        };
+        matched_level_count += 1;
+        // A slash between any two levels makes the Topic Name non-empty even
+        // when both levels themselves are empty.
+        prefix_is_valid_topic = prefix_is_valid_topic or
+            level_can_be_nonempty or matched_level_count > 1;
     }
 }
 

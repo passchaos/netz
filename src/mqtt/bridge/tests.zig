@@ -281,12 +281,37 @@ test "bridge filter intersection follows MQTT wildcard semantics" {
         .{ .left = "a/#", .right = "a/b/c", .overlaps = true },
         .{ .left = "a/+", .right = "b/+", .overlaps = false },
         .{ .left = "a//+", .right = "a//b", .overlaps = true },
+        // `/#` can consume zero levels only after its leading empty level.
+        // The sole common level with `+` would produce an invalid empty Topic
+        // Name, so these filters are disjoint despite terminal `#`.
+        .{ .left = "+", .right = "/#", .overlaps = false },
+        .{ .left = "/#", .right = "+", .overlaps = false },
+        .{ .left = "+", .right = "/+", .overlaps = false },
+        .{ .left = "#", .right = "/#", .overlaps = true },
+        .{ .left = "+/+", .right = "/#", .overlaps = true },
+        .{ .left = "a/+", .right = "a//#", .overlaps = true },
+        .{ .left = "a/+", .right = "a//+", .overlaps = false },
         .{ .left = "+/status", .right = "$SYS/status", .overlaps = false },
         .{ .left = "#", .right = "$SYS/#", .overlaps = false },
         .{ .left = "$SYS/+", .right = "$SYS/#", .overlaps = true },
         .{
             .left = "$share/a/sensors/+",
             .right = "$share/b/sensors/room",
+            .overlaps = true,
+        },
+        .{
+            .left = "$share/a/+",
+            .right = "$share/b//#",
+            .overlaps = false,
+        },
+        .{
+            .left = "$share/a//#",
+            .right = "$share/b/+",
+            .overlaps = false,
+        },
+        .{
+            .left = "$share/a/#",
+            .right = "$share/b//#",
             .overlaps = true,
         },
     };
@@ -302,6 +327,85 @@ test "bridge filter intersection follows MQTT wildcard semantics" {
             }),
         );
     }
+}
+
+test "bridge filter intersection agrees with matcher over representative languages" {
+    const filters = [_][]const u8{
+        "#",
+        "+",
+        "/",
+        "/#",
+        "/+",
+        "+/",
+        "+/+",
+        "+/#",
+        "a",
+        "a/#",
+        "a/+",
+        "a/",
+        "a//",
+        "a//#",
+        "a//+",
+        "a/b",
+        "a/b/#",
+        "b/+",
+        "$SYS/#",
+        "$SYS/+",
+        "$SYS/a",
+        "$share/g/+",
+        "$share/g//#",
+        "$share/h/a/#",
+    };
+    for (filters, 0..) |left, left_index| {
+        for (filters[left_index..]) |right| {
+            const expected = filtersShareRepresentativeTopic(left, right);
+            errdefer std.debug.print(
+                "representative intersection: {s} vs {s}\n",
+                .{ left, right },
+            );
+            try std.testing.expectEqual(
+                expected,
+                try (Rule{ .filter = left }).overlaps(.{ .filter = right }),
+            );
+        }
+    }
+}
+
+fn filtersShareRepresentativeTopic(
+    left: []const u8,
+    right: []const u8,
+) bool {
+    // Every literal used by the filter matrix appears here. Four levels are
+    // sufficient to witness an intersection because no tested fixed prefix
+    // is deeper than three levels; terminal `#` never requires extra depth.
+    const levels = [_][]const u8{ "", "a", "b", "$SYS" };
+    for (1..5) |depth| {
+        var combination_count: usize = 1;
+        for (0..depth) |_| combination_count *= levels.len;
+        for (0..combination_count) |combination| {
+            var digits = combination;
+            var selected: [4][]const u8 = undefined;
+            for (selected[0..depth]) |*level| {
+                level.* = levels[digits % levels.len];
+                digits /= levels.len;
+            }
+            var storage: [64]u8 = undefined;
+            var length: usize = 0;
+            for (selected[0..depth], 0..) |level, index| {
+                if (index != 0) {
+                    storage[length] = '/';
+                    length += 1;
+                }
+                @memcpy(storage[length..][0..level.len], level);
+                length += level.len;
+            }
+            if (length == 0) continue;
+            const topic = storage[0..length];
+            if (mqtt.topicMatchesFilter(topic, left) and
+                mqtt.topicMatchesFilter(topic, right)) return true;
+        }
+    }
+    return false;
 }
 
 test "bridge rejects empty duplicate and overlapping rule sets" {
