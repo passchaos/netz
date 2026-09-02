@@ -83,6 +83,13 @@ because correctly bridging its two-phase transaction would require additional
 durable inbound state. Running two opposing rules that map back into one
 another can create a deployment-level cycle; the type intentionally models
 only one direction per instance so such a cycle must be configured explicitly.
+The broker now includes a bounded `BridgeQoS2Store` building block for that
+follow-up: it keys final mapped messages by stable bridge identity, upstream
+Session epoch, and Packet Identifier; deep-owns connection-independent
+properties; supports transactional release/rollback plus released tombstones;
+and round-trips pending and released phases through a versioned snapshot. It is
+not yet wired into `Bridge`, so the public bridge continues to reject QoS 2
+rather than overstating end-to-end exactly-once behavior.
 The automated in-process integration tests include a real hostname-authenticated
 TLS 1.3 bridge using a local CA and `HostReconnectConnector`; it injects an
 upstream QoS 1 publication and observes that the remote PUBACK follows completed

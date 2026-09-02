@@ -17,6 +17,7 @@ const load_metrics = @import("broker/load_metrics.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
 const qos2_mod = @import("broker/qos2.zig");
+pub const BridgeQoS2Store = @import("broker/bridge_qos2.zig").Store;
 const publication_mod = @import("broker/publication.zig");
 const session_delivery = @import("broker/session_delivery.zig");
 const session_route = @import("broker/session_route.zig");
