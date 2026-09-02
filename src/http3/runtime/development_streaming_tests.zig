@@ -801,3 +801,69 @@ test "HTTP/3 dev streaming cancellation uses valid local final sizes" {
     try std.testing.expect(!client_saw_reset);
     try std.testing.expect(client_saw_stop);
 }
+
+test "HTTP/3 dev informational response reset retires prefix offset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        test_limits,
+    );
+    defer server.deinit();
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        test_limits,
+    );
+    defer client.deinit();
+
+    const stream_id = try client.startRequest(.{
+        .method = "CONNECT",
+        .path = "/informational-reset",
+        .authority = "localhost",
+        .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+    }, null);
+    var head = try server.receiveRequestHeadWithDeadline(futureDeadline(io));
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .message);
+    try std.testing.expect(head.message.value == .head);
+
+    try server.sendInformationalResponse(
+        client.address(),
+        stream_id,
+        .{ .status = 103 },
+    );
+    try client.cancelRequest(
+        stream_id,
+        http3.ApplicationErrorCode.request_cancelled,
+    );
+    var reset = try server.receiveRequestEventForWithDeadline(
+        client.address(),
+        stream_id,
+        futureDeadline(io),
+    );
+    defer reset.deinit(allocator);
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.request_cancelled),
+        reset.reset.application_error_code,
+    );
+
+    // Reset delivery owns the terminal cleanup. A second cancellation must not
+    // rediscover an informational-only offset as a phantom live request.
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        server.cancelRequest(
+            client.address(),
+            stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        ),
+    );
+}

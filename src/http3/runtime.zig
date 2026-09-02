@@ -61,8 +61,12 @@ pub const DevelopmentStreamMatch = struct {
 pub const DevelopmentEndpointRole = enum { client, server };
 
 pub const DevelopmentStreamDebugCounts = struct {
+    /// Receive buffers whose association prefix identifies this session.
     receives: usize,
     sends: usize,
+    /// Every extension receive buffer for the peer, including prefixes too
+    /// short to expose a Session ID. Intended for lifecycle diagnostics/tests.
+    peer_receives: usize,
 };
 
 const webtransport_bidi_stream_type: u64 = 0x41;
@@ -4188,11 +4192,13 @@ pub const Server = struct {
         if (self.streaming_peers.find(peer)) |request_peer| {
             if (request_peer.retainedCount() != 0 or
                 request_peer.outbound_bodies.entries.items.len != 0 or
-                request_peer.response_send_offsets.count() != 0 or
-                request_peer.unusable)
+                request_peer.response_send_offsets.count() != 0)
             {
                 return;
             }
+            // `unusable` records a prior socket-visible send failure, not live
+            // protocol ownership. Once every state container is empty, keeping
+            // that flag would retain this address and its cursor forever.
             self.streaming_peers.removePeer(peer);
         }
         if (self.development_stream_sends.hasPeerEntries(peer)) return;
@@ -4218,8 +4224,10 @@ pub const Server = struct {
                 entry.session_id == session_id);
         }
         var receives: usize = 0;
+        var peer_receives: usize = 0;
         for (self.development_streams.entries.items) |entry| {
             if (!entry.from.eql(&peer)) continue;
+            peer_receives += 1;
             const stream_id: u62 = @intCast(entry.receive.stream_id);
             receives += @intFromBool(developmentStreamMayBelongTo(
                 entry.receive.available(),
@@ -4230,7 +4238,11 @@ pub const Server = struct {
                 },
             ));
         }
-        return .{ .receives = receives, .sends = sends };
+        return .{
+            .receives = receives,
+            .sends = sends,
+            .peer_receives = peer_receives,
+        };
     }
 
     /// Atomically allocate the peer-scoped transport ID after the caller has
@@ -4568,7 +4580,7 @@ pub const Server = struct {
             stream_id,
             &peer.qpack_encode,
         );
-        try sendRuntimeResponsePrefix(
+        sendRuntimeResponsePrefix(
             &self.quic_server.endpoint,
             to,
             &peer.stream_send_scratch,
@@ -4723,7 +4735,8 @@ pub const Server = struct {
         const body = peer.outbound_bodies.find(stream_id);
         if (body == null and !peer.lifecycle.contains(stream_id) and
             !peer.request_streams.contains(stream_id) and
-            !peer.streaming_requests.contains(stream_id))
+            !peer.streaming_requests.contains(stream_id) and
+            !peer.response_send_offsets.contains(stream_id))
         {
             return error.UnexpectedStream;
         }
@@ -7021,6 +7034,7 @@ const DevelopmentServerPeerSet = struct {
                 while (peer.takeUnadmittedReset()) |reset| {
                     peer.lifecycle.markFinished(reset.stream_id);
                     _ = peer.outbound_bodies.finish(reset.stream_id);
+                    _ = peer.response_send_offsets.remove(reset.stream_id);
                     peer.qpack_encode.abandonStream(reset.stream_id);
                 }
             } else if (if (stream_id) |target|
@@ -7030,6 +7044,7 @@ const DevelopmentServerPeerSet = struct {
             {
                 peer.lifecycle.markFinished(reset_event.stream_id);
                 _ = peer.outbound_bodies.finish(reset_event.stream_id);
+                _ = peer.response_send_offsets.remove(reset_event.stream_id);
                 peer.qpack_encode.abandonStream(reset_event.stream_id);
                 self.last_peer_index = index;
                 return .{ .reset = .{

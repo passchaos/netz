@@ -218,8 +218,8 @@ test "WebTransport development peer churn reclaims cursor and partial prefix" {
     const Shared = struct {
         server: *runtime.Server,
         io: std.Io,
-        session_ready: std.Io.Event = .unset,
-        release_session: std.Io.Event = .unset,
+        session_ready: [3]std.Io.Event = @splat(.unset),
+        release_session: [3]std.Io.Event = @splat(.unset),
         peer_ports: [3]u16 = undefined,
         err: ?anyerror = null,
 
@@ -240,8 +240,8 @@ test "WebTransport development peer churn reclaims cursor and partial prefix" {
                 );
                 const opened = try session.openBidirectionalStream();
                 try std.testing.expectEqual(@as(u62, 1), opened);
-                self.session_ready.set(self.io);
-                try self.release_session.wait(self.io);
+                self.session_ready[generation].set(self.io);
+                try self.release_session[generation].wait(self.io);
                 const peer = session.remoteAddress();
                 const session_id = session.sessionId().value;
                 self.peer_ports[generation] = switch (peer) {
@@ -258,8 +258,10 @@ test "WebTransport development peer churn reclaims cursor and partial prefix" {
                 );
                 try std.testing.expectEqual(@as(usize, 0), released.receives);
                 try std.testing.expectEqual(@as(usize, 0), released.sends);
-                self.session_ready.reset();
-                self.release_session.reset();
+                try std.testing.expectEqual(
+                    @as(usize, 0),
+                    released.peer_receives,
+                );
             }
         }
     };
@@ -285,8 +287,8 @@ test "WebTransport development peer churn reclaims cursor and partial prefix" {
             },
             futureDeadline(io),
         );
+        try shared.session_ready[generation].wait(io);
         if (generation == 0) {
-            try shared.session_ready.wait(io);
             // A peer-started uni stream begins with 0x54 and then its Session
             // ID. Send only the first byte of the two-byte stream-type varint:
             // session-targeted cleanup cannot attribute this receive entry.
@@ -305,7 +307,7 @@ test "WebTransport development peer churn reclaims cursor and partial prefix" {
                 ),
             );
         }
-        shared.release_session.set(io);
+        shared.release_session[generation].set(io);
         client.deinit();
     }
 
