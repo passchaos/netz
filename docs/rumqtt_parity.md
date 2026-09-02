@@ -179,7 +179,14 @@ persists:
 - scheduled Wills with ClientID, full Application Message properties, canonical
   publisher identity and exact remaining delay,
 - inbound QoS 2 Application Message bodies awaiting PUBREL, keyed by stable
-  Session route identity rather than a short-lived connection slot.
+  Session route identity rather than a short-lived connection slot,
+- staged inbound bridge QoS 2 messages and released tombstones, keyed by a
+  stable bridge identity, upstream Session epoch, and Packet Identifier.
+
+Adding the bridge transaction section advances the on-disk snapshot version
+from 4 to 5. Restore deliberately rejects older versions rather than guessing
+at absent transaction state; deployments carrying a version-4 snapshot or
+commit log must migrate or start from a fresh state file before upgrading.
 
 `Broker.saveSnapshot` is a quiescent shutdown/admin operation: it holds the
 broker state lock and rejects live clients, pending broker QoS 2 transactions

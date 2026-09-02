@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const pending_qos2 = @import("../broker/qos2.zig");
+const bridge_qos2 = @import("../broker/bridge_qos2.zig");
 const retained = @import("../retained/mod.zig");
 const session = @import("../session/mod.zig");
 const will = @import("../will/mod.zig");
@@ -14,11 +15,11 @@ pub const codec = @import("codec.zig");
 pub const commit_log = @import("commit_log.zig");
 
 const magic = "netz-mqtt-db\x00\x01";
-const version: u32 = 4;
+const version: u32 = 5;
 const max_section_bytes: usize = 1024 * 1024 * 1024;
-pub const max_snapshot_bytes: usize = 4 *| max_section_bytes +| 192;
+pub const max_snapshot_bytes: usize = 5 *| max_section_bytes +| 224;
 
-pub const Error = codec.Error || pending_qos2.Error || retained.Error ||
+pub const Error = codec.Error || pending_qos2.Error || bridge_qos2.Error || retained.Error ||
     session.Error || will.Error || error{
     SnapshotNotFound,
     SnapshotBusy,
@@ -33,6 +34,7 @@ pub const State = struct {
     wills: *will.Scheduler,
     will_publishers: *const will.PublisherMap,
     pending_qos2: *pending_qos2.Store,
+    bridge_qos2: *bridge_qos2.Store,
 };
 
 pub const RestoredState = struct {
@@ -41,6 +43,7 @@ pub const RestoredState = struct {
     wills: will.Scheduler,
     will_publishers: will.PublisherMap,
     pending_qos2: pending_qos2.Store,
+    bridge_qos2: bridge_qos2.Store,
 };
 
 /// Encode and atomically install a quiescent broker-state snapshot.
@@ -98,6 +101,7 @@ pub fn load(
     session_options: session.Options,
     will_options: will.Options,
     pending_qos2_maximum: usize,
+    bridge_qos2_options: bridge_qos2.Options,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!RestoredState {
@@ -118,6 +122,7 @@ pub fn load(
         session_options,
         will_options,
         pending_qos2_maximum,
+        bridge_qos2_options,
         monotonic_now,
         realtime_now,
     );
@@ -225,6 +230,13 @@ fn encodeMode(
             PublisherLookup.exists,
         );
     }
+    var bridge_qos2_bytes: std.ArrayList(u8) = .empty;
+    defer bridge_qos2_bytes.deinit(allocator);
+    try state.bridge_qos2.writeSnapshot(
+        &bridge_qos2_bytes,
+        allocator,
+        monotonic_now,
+    );
 
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
@@ -240,6 +252,7 @@ fn encodeMode(
     try appendSection(&encoded, allocator, 2, session_bytes.items);
     try appendSection(&encoded, allocator, 3, will_bytes.items);
     try appendSection(&encoded, allocator, 4, qos2_bytes.items);
+    try appendSection(&encoded, allocator, 5, bridge_qos2_bytes.items);
     try codec.appendInt(
         &encoded,
         allocator,
@@ -256,6 +269,7 @@ pub fn decode(
     session_options: session.Options,
     will_options: will.Options,
     pending_qos2_maximum: usize,
+    bridge_qos2_options: bridge_qos2.Options,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!RestoredState {
@@ -293,6 +307,7 @@ pub fn decode(
     const session_section = try readSection(&cursor, 2);
     const will_section = try readSection(&cursor, 3);
     const qos2_section = try readSection(&cursor, 4);
+    const bridge_qos2_section = try readSection(&cursor, 5);
     try cursor.finish();
 
     var staged_retained = retained.Store.init(
@@ -359,12 +374,26 @@ pub fn decode(
     );
     try qos2_cursor.finish();
 
+    var staged_bridge_qos2 = try bridge_qos2.Store.init(
+        allocator,
+        bridge_qos2_options,
+    );
+    errdefer staged_bridge_qos2.deinit();
+    var bridge_qos2_cursor = codec.Cursor.init(bridge_qos2_section);
+    try staged_bridge_qos2.restoreSnapshot(
+        &bridge_qos2_cursor,
+        monotonic_now,
+        downtime_ns,
+    );
+    try bridge_qos2_cursor.finish();
+
     return .{
         .retained = staged_retained,
         .sessions = staged_sessions,
         .wills = staged_wills,
         .will_publishers = staged_publishers,
         .pending_qos2 = staged_qos2,
+        .bridge_qos2 = staged_bridge_qos2,
     };
 }
 

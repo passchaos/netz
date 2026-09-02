@@ -3501,6 +3501,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker,
+        "BridgeQoS2Key",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "stageBridgeQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "releaseBridgeQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "completeBridgeQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
         "ConnectContext",
     ));
     try std.testing.expect(@hasDecl(

@@ -64,9 +64,7 @@ pub const Options = struct {
     max_owned_bytes: usize = 64 * 1024 * 1024,
 };
 
-pub const SnapshotHeader = struct {
-    version: u32 = 1,
-};
+const snapshot_version: u32 = 1;
 
 pub const Publish = struct {
     allocator: std.mem.Allocator,
@@ -221,6 +219,12 @@ pub const Store = struct {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn swap(self: *Store, other: *Store) void {
+        const value = self.*;
+        self.* = other.*;
+        other.* = value;
     }
 
     pub fn stats(self: Store) Stats {
@@ -394,6 +398,23 @@ pub const Store = struct {
         return self.entries.items[index].phase;
     }
 
+    /// Replace a pending message with its released tombstone without moving
+    /// ownership through a Claim. Broker integration uses this while holding
+    /// its state barrier so routing effects and the tombstone enter one
+    /// persisted snapshot. Returns false for an unknown key or an existing
+    /// tombstone.
+    pub fn markReleased(self: *Store, key: Key) bool {
+        const index = self.findIndex(key) orelse return false;
+        const entry = &self.entries.items[index];
+        if (entry.phase == .released) return false;
+        const publish = entry.publish orelse return false;
+        self.releaseOwnedBytes(publish.allocation_bytes);
+        entry.publish.?.deinit();
+        entry.publish = null;
+        entry.phase = .released;
+        return true;
+    }
+
     /// Remove every transaction belonging to one superseded upstream Session
     /// epoch. Bridge reconnect code uses this when CONNACK reports Session
     /// Present=false; Packet Identifiers from the old epoch can no longer be
@@ -430,7 +451,7 @@ pub const Store = struct {
             out,
             allocator,
             u32,
-            SnapshotHeader.version,
+            snapshot_version,
         );
         var count: u32 = 0;
         for (self.entries.items) |entry| {
@@ -513,7 +534,7 @@ pub const Store = struct {
         downtime_ns: i96,
     ) Error!void {
         const version = try cursor.readInt(u32);
-        if (version != SnapshotHeader.version) {
+        if (version != snapshot_version) {
             return error.UnsupportedSnapshotVersion;
         }
         const count = try cursor.readInt(u32);
@@ -657,9 +678,6 @@ pub const Store = struct {
 
 fn validateStagedPublish(publish: mqtt.Publish) Error!void {
     if (publish.qos != .exactly_once) return error.InvalidQoS;
-    if (mqtt.subscriptionIdentifier(publish.properties) != null) {
-        return error.InvalidProperty;
-    }
     try mqtt.validateTopicName(publish.topic);
     try mqtt.validatePublishProperties(publish.properties);
 }
@@ -1021,13 +1039,19 @@ test "bridge QoS2 store retires one upstream Session epoch" {
     var next_epoch = first;
     next_epoch.session_epoch += 1;
     _ = try store.stage(first, .{
+        .dup = false,
         .qos = .exactly_once,
+        .retain = false,
         .topic = "old",
+        .packet_id = null,
         .payload = "one",
     }, .zero);
     _ = try store.stage(next_epoch, .{
+        .dup = false,
         .qos = .exactly_once,
+        .retain = false,
         .topic = "new",
+        .packet_id = null,
         .payload = "two",
     }, .zero);
 
@@ -1118,7 +1142,7 @@ test "bridge QoS2 store snapshot restores pending and released state and rejects
         restored.restoreSnapshot(
             &corrupt_cursor,
             .zero,
-            .zero,
+            0,
         ),
     );
 }

@@ -1217,6 +1217,8 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
     defer will_publishers.deinit(allocator);
     var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
     defer pending_qos2.deinit();
+    var bridge_qos2 = try mqtt.broker.BridgeQoS2Store.init(allocator, .{});
+    defer bridge_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
         100 * std.time.ns_per_s,
     );
@@ -1252,6 +1254,7 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
             .wills = &wills,
             .will_publishers = &will_publishers,
             .pending_qos2 = &pending_qos2,
+            .bridge_qos2 = &bridge_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -1264,6 +1267,7 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
         .{},
         .{},
         16,
+        .{},
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(1_006 * std.time.ns_per_s),
     );
@@ -1272,6 +1276,7 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
     defer restored.pending_qos2.deinit();
+    defer restored.bridge_qos2.deinit();
 
     var out: [1]mqtt.retained.Match = undefined;
     const matches = try restored.retained.matchInto(
@@ -1450,6 +1455,8 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
     defer publishers.deinit(allocator);
     var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
     defer pending_qos2.deinit();
+    var bridge_qos2 = try mqtt.broker.BridgeQoS2Store.init(allocator, .{});
+    defer bridge_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
         100 * std.time.ns_per_s,
     );
@@ -1471,6 +1478,7 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
             .wills = &wills,
             .will_publishers = &publishers,
             .pending_qos2 = &pending_qos2,
+            .bridge_qos2 = &bridge_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -1487,6 +1495,7 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
         .{},
         .{},
         16,
+        .{},
         restored_now,
         std.Io.Timestamp.fromNanoseconds(
             1_004 * std.time.ns_per_s,
@@ -1497,6 +1506,7 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
     defer before_due.wills.deinit();
     defer before_due.will_publishers.deinit(allocator);
     defer before_due.pending_qos2.deinit();
+    defer before_due.bridge_qos2.deinit();
     try std.testing.expectEqual(
         @as(i96, restored_now.nanoseconds + 6 * std.time.ns_per_s),
         before_due.wills.nextDeadline().?.nanoseconds,
@@ -1515,6 +1525,7 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
         .{},
         .{},
         16,
+        .{},
         restored_now,
         std.Io.Timestamp.fromNanoseconds(
             1_011 * std.time.ns_per_s,
@@ -1525,6 +1536,7 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
     defer overdue.wills.deinit();
     defer overdue.will_publishers.deinit(allocator);
     defer overdue.pending_qos2.deinit();
+    defer overdue.bridge_qos2.deinit();
     try std.testing.expectEqual(
         restored_now.nanoseconds,
         overdue.wills.nextDeadline().?.nanoseconds,
@@ -1847,6 +1859,8 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
     defer will_publishers.deinit(allocator);
     var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
     defer pending_qos2.deinit();
+    var bridge_qos2 = try mqtt.broker.BridgeQoS2Store.init(allocator, .{});
+    defer bridge_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.zero;
     const saved_realtime = std.Io.Timestamp.fromNanoseconds(
         1_000 * std.time.ns_per_s,
@@ -1898,6 +1912,7 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
             .wills = &wills,
             .will_publishers = &will_publishers,
             .pending_qos2 = &pending_qos2,
+            .bridge_qos2 = &bridge_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -1910,6 +1925,7 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
         .{},
         .{},
         16,
+        .{},
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(1_010 * std.time.ns_per_s),
     );
@@ -1918,6 +1934,7 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
     defer restored.pending_qos2.deinit();
+    defer restored.bridge_qos2.deinit();
     const handle = restored.sessions.find(
         "qos2-pubrel",
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
@@ -1944,6 +1961,8 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
     defer publishers.deinit(allocator);
     var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
     defer pending_qos2.deinit();
+    var bridge_qos2 = try mqtt.broker.BridgeQoS2Store.init(allocator, .{});
+    defer bridge_qos2.deinit();
     const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
         100 * std.time.ns_per_s,
     );
@@ -1966,6 +1985,7 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
             .wills = &wills,
             .will_publishers = &publishers,
             .pending_qos2 = &pending_qos2,
+            .bridge_qos2 = &bridge_qos2,
         },
         saved_monotonic,
         saved_realtime,
@@ -1981,6 +2001,7 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
         .{},
         .{},
         16,
+        .{},
         restored_now,
         std.Io.Timestamp.fromNanoseconds(1_004 * std.time.ns_per_s),
     );
@@ -1989,6 +2010,7 @@ test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
     defer restored.pending_qos2.deinit();
+    defer restored.bridge_qos2.deinit();
 
     try std.testing.expectEqual(
         @as(i96, restored_now.nanoseconds + 6 * std.time.ns_per_s),
@@ -2023,6 +2045,8 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
     defer publishers.deinit(allocator);
     var pending_qos2 = try mqtt.broker.PendingQoS2Store.init(allocator, 16);
     defer pending_qos2.deinit();
+    var bridge_qos2 = try mqtt.broker.BridgeQoS2Store.init(allocator, .{});
+    defer bridge_qos2.deinit();
     const handle = try wills.set(
         "resume-will",
         delayedWill(30, false),
@@ -2038,6 +2062,7 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
             .wills = &wills,
             .will_publishers = &publishers,
             .pending_qos2 = &pending_qos2,
+            .bridge_qos2 = &bridge_qos2,
         },
         .zero,
         std.Io.Timestamp.fromNanoseconds(1_000 * std.time.ns_per_s),
@@ -2050,6 +2075,7 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
         .{},
         .{},
         16,
+        .{},
         .zero,
         std.Io.Timestamp.fromNanoseconds(1_001 * std.time.ns_per_s),
     );
@@ -2058,6 +2084,7 @@ test "MQTT restored scheduled Will is canceled by continued Session" {
     defer restored.wills.deinit();
     defer restored.will_publishers.deinit(allocator);
     defer restored.pending_qos2.deinit();
+    defer restored.bridge_qos2.deinit();
 
     const restored_handle =
         restored.wills.handleForClient("resume-will").?;
@@ -2345,4 +2372,42 @@ test "MQTT Clean Start removes pending inbound QoS 2 transaction" {
 
 fn sessionRouteSubscriberId(route_id: u64) u64 {
     return (@as(u64, 1) << 63) | route_id;
+}
+
+test "MQTT broker snapshot restores bridge QoS2 transactions" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try createBroker(allocator, io);
+    defer broker.deinit();
+    const key = mqtt.broker.bridge_qos2_mod.Key{
+        .bridge_id = [_]u8{0x5a} ** 16,
+        .session_epoch = 7,
+        .packet_id = 44,
+    };
+    _ = try broker.bridge_qos2.stage(key, .{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "bridge/persisted",
+        .packet_id = null,
+        .payload = "payload",
+    }, std.Io.Clock.awake.now(io));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try broker.saveSnapshot(tmp.dir, "bridge-qos2.db");
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "bridge-qos2.db");
+    try std.testing.expectEqual(
+        mqtt.broker.bridge_qos2_mod.Phase.pending,
+        restored.bridge_qos2.getPhase(key).?,
+    );
+    try std.testing.expectEqualStrings(
+        "payload",
+        restored.bridge_qos2.getPending(key).?.payload,
+    );
 }

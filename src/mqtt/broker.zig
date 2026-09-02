@@ -17,7 +17,29 @@ const load_metrics = @import("broker/load_metrics.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
 const qos2_mod = @import("broker/qos2.zig");
-pub const BridgeQoS2Store = @import("broker/bridge_qos2.zig").Store;
+pub const bridge_qos2_mod = @import("broker/bridge_qos2.zig");
+pub const BridgeQoS2Store = bridge_qos2_mod.Store;
+pub const BridgeQoS2Key = bridge_qos2_mod.Key;
+pub const BridgeQoS2StageResult = bridge_qos2_mod.StageResult;
+pub const BridgeQoS2StageOptions = struct {
+    /// Mirrors the upstream PUBLISH DUP bit. The stored local message always
+    /// clears this connection-scoped flag.
+    duplicate: bool = false,
+};
+
+pub const BridgeQoS2ReleaseResult = enum {
+    applied,
+    already_applied,
+    unknown,
+};
+
+pub const BridgeQoS2Release = struct {
+    disposition: BridgeQoS2ReleaseResult,
+    /// A non-null error means durable admission succeeded but one or more live
+    /// subscriber writes did not. The caller may still complete upstream QoS 2:
+    /// retransmitting PUBREL cannot safely repeat the already-persisted route.
+    delivery_error: ?anyerror = null,
+};
 const publication_mod = @import("broker/publication.zig");
 const session_delivery = @import("broker/session_delivery.zig");
 const session_route = @import("broker/session_route.zig");
@@ -33,6 +55,7 @@ pub const LoadSnapshot = load_metrics.Snapshot;
 
 pub const Error = runtime.Error || router_mod.Error ||
     retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
+    bridge_qos2_mod.Error ||
     session_mod.Error || will_mod.Error || persistence_mod.Error ||
     commit_log_mod.Error ||
     std.Io.RandomSecureError || error{
@@ -86,6 +109,7 @@ pub const Options = struct {
     retained: retained_mod.Options = .{},
     session: session_mod.Options = .{},
     will: will_mod.Options = .{},
+    bridge_qos2: bridge_qos2_mod.Options = .{},
     /// Mosquitto-compatible opt-in that sends messages at the subscription
     /// QoS even when that raises the publisher's original QoS. MQTT otherwise
     /// requires min(source QoS, granted subscription QoS), which remains the
@@ -831,6 +855,7 @@ pub const Broker = struct {
     options: Options,
     router: router_mod.Router,
     pending_qos2: qos2_mod.Store,
+    bridge_qos2: bridge_qos2_mod.Store,
     retained: retained_mod.Store,
     sessions: session_mod.Store,
     wills: will_mod.Scheduler,
@@ -984,6 +1009,11 @@ pub const Broker = struct {
             options.limits.max_pending_incoming_qos2,
         );
         errdefer pending_qos2.deinit();
+        var bridge_qos2 = try bridge_qos2_mod.Store.init(
+            allocator,
+            options.bridge_qos2,
+        );
+        errdefer bridge_qos2.deinit();
         var retained = retained_mod.Store.init(
             allocator,
             options.retained,
@@ -1021,6 +1051,7 @@ pub const Broker = struct {
             .options = owned_options,
             .router = router,
             .pending_qos2 = pending_qos2,
+            .bridge_qos2 = bridge_qos2,
             .retained = retained,
             .sessions = sessions,
             .wills = wills,
@@ -1063,6 +1094,7 @@ pub const Broker = struct {
         self.sessions.deinit();
         self.retained.deinit();
         self.pending_qos2.deinit();
+        self.bridge_qos2.deinit();
         self.router.deinit();
         if (self.server) |*server| server.deinit();
         if (self.commit_log) |*log| log.deinit();
@@ -1191,6 +1223,164 @@ pub const Broker = struct {
             persistent_changed,
         );
         try self.flushPlan(plan);
+    }
+
+    /// Durably stage one already-mapped bridge QoS 2 Application Message.
+    /// The returned result may be acknowledged upstream with PUBREC only after
+    /// this call succeeds. The complete mapped message, not connection-scoped
+    /// Topic Alias or Subscription Identifier metadata, becomes part of the
+    /// broker snapshot/commit-log state.
+    pub fn stageBridgeQoS2(
+        self: *Broker,
+        key: BridgeQoS2Key,
+        publish: mqtt.Publish,
+        options: BridgeQoS2StageOptions,
+    ) Error!BridgeQoS2StageResult {
+        var staged = publish;
+        staged.dup = false;
+        staged.packet_id = null;
+        try validateLocalPublish(staged);
+        if (staged.qos != .exactly_once) return error.InvalidQoS;
+        if (self.payloadTooLarge(staged.payload)) return error.PacketTooLarge;
+        staged.dup = options.duplicate;
+
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        const result = self.bridge_qos2.stage(
+            key,
+            staged,
+            std.Io.Clock.awake.now(self.io),
+        ) catch |err| {
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
+        const changed = result != .duplicate;
+        self.recordPersistentChangeLocked(changed);
+        self.state_mutex.unlock(self.io);
+        // A duplicate may be retrying an earlier call whose commit append
+        // failed after the in-memory stage succeeded. Re-append the current
+        // snapshot before permitting PUBREC even when no state changed now.
+        try self.finalizePersistentChangeLocked(true, changed);
+        return result;
+    }
+
+    /// Atomically move one staged bridge message through the broker's retained
+    /// and durable Session admission boundary and install a released tombstone.
+    /// Socket flushing happens only after that snapshot/commit-log transaction.
+    /// A repeated release sees the tombstone and never enqueues the message
+    /// again. Online delivery errors are reported separately from durable
+    /// admission; callers may complete upstream QoS 2 because downstream
+    /// Session retry/connection cleanup owns those already-admitted messages.
+    pub fn releaseBridgeQoS2(
+        self: *Broker,
+        key: BridgeQoS2Key,
+    ) Error!BridgeQoS2Release {
+        self.persistence_mutex.lockUncancelable(self.io);
+        var persistence_locked = true;
+        defer if (persistence_locked) self.persistence_mutex.unlock(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        const phase = self.bridge_qos2.getPhase(key) orelse {
+            self.state_mutex.unlock(self.io);
+            // An earlier successful tombstone deletion may have been followed
+            // by an ambiguous commit-log append. Rewriting the current state
+            // closes that durability gap before reporting the missing key.
+            try self.finalizePersistentChangeLocked(true, false);
+            return .{ .disposition = .unknown };
+        };
+        if (phase == .released) {
+            self.state_mutex.unlock(self.io);
+            // The first release may have installed the in-memory tombstone
+            // before its journal append failed. Retry persistence on every
+            // duplicate PUBREL before reporting an idempotent completion.
+            try self.finalizePersistentChangeLocked(true, true);
+            return .{ .disposition = .already_applied };
+        }
+        const publish = self.bridge_qos2.getPending(key) orelse {
+            self.state_mutex.unlock(self.io);
+            return error.InvalidReleaseState;
+        };
+        const released_payload_len = publish.payload.len;
+        var persistent_changed = false;
+        var publication_effect_committed = false;
+        const plan = self.enqueuePublishLocked(
+            null,
+            publish,
+            null,
+            std.Io.Clock.awake.now(self.io),
+            &persistent_changed,
+            &publication_effect_committed,
+        ) catch |err| {
+            if (publication_effect_committed) {
+                if (!self.bridge_qos2.markReleased(key)) {
+                    self.state_mutex.unlock(self.io);
+                    return error.InvalidReleaseState;
+                }
+                self.recordPersistentChangeLocked(true);
+                self.state_mutex.unlock(self.io);
+                // Some durable effect has already escaped. Persist that state
+                // and consume the transaction rather than retrying a partial
+                // fanout and duplicating its successful prefix.
+                try self.finalizePersistentChangeLocked(true, true);
+                self.persistence_mutex.unlock(self.io);
+                persistence_locked = false;
+                return .{
+                    .disposition = .applied,
+                    .delivery_error = err,
+                };
+            }
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
+        defer self.allocator.free(plan.storage);
+        if (!self.bridge_qos2.markReleased(key)) {
+            self.state_mutex.unlock(self.io);
+            return error.InvalidReleaseState;
+        }
+        self.publish_messages_received +|= 1;
+        self.publish_payload_bytes_received +|= released_payload_len;
+        self.recordPersistentChangeLocked(true);
+        self.state_mutex.unlock(self.io);
+        try self.finalizePersistentChangeLocked(true, true);
+        self.persistence_mutex.unlock(self.io);
+        persistence_locked = false;
+
+        // Durable admission is already complete. A subscriber write error must
+        // not make a repeated PUBREL enqueue the Application Message again.
+        const delivery_error: ?anyerror = blk: {
+            self.flushPlan(plan) catch |err| break :blk err;
+            break :blk null;
+        };
+        return .{
+            .disposition = .applied,
+            .delivery_error = delivery_error,
+        };
+    }
+
+    /// Forget a released bridge tombstone after the corresponding upstream
+    /// PUBCOMP has been written successfully. The deletion is itself
+    /// persisted; retrying after an ambiguous append writes the current
+    /// snapshot again and remains idempotent. Pending messages cannot be
+    /// completed without first crossing `releaseBridgeQoS2`.
+    pub fn completeBridgeQoS2(
+        self: *Broker,
+        key: BridgeQoS2Key,
+    ) Error!bool {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        if (self.bridge_qos2.getPhase(key) == .pending) {
+            self.state_mutex.unlock(self.io);
+            return error.InvalidReleaseState;
+        }
+        const removed = self.bridge_qos2.complete(key);
+        self.recordPersistentChangeLocked(removed);
+        self.state_mutex.unlock(self.io);
+        // Even an absent key can be a retry after an in-memory deletion whose
+        // previous journal append failed. Re-appending is the only way to make
+        // the idempotent result durable before its caller forgets the key.
+        try self.finalizePersistentChangeLocked(true, removed);
+        return removed;
     }
 
     fn statsLocked(self: *const Broker) Stats {
@@ -1679,6 +1869,7 @@ pub const Broker = struct {
                     .wills = &self.wills,
                     .will_publishers = &self.will_publishers,
                     .pending_qos2 = &self.pending_qos2,
+                    .bridge_qos2 = &self.bridge_qos2,
                 },
                 std.Io.Clock.awake.now(self.io),
                 std.Io.Clock.real.now(self.io),
@@ -1762,6 +1953,7 @@ pub const Broker = struct {
                 .wills = &self.wills,
                 .will_publishers = &self.will_publishers,
                 .pending_qos2 = &self.pending_qos2,
+                .bridge_qos2 = &self.bridge_qos2,
             },
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
@@ -1805,6 +1997,7 @@ pub const Broker = struct {
         }
         if (self.router.subscriptionCount() != 0 or
             self.pending_qos2.count() != 0 or
+            self.bridge_qos2.stats().entries != 0 or
             self.session_owners.count() != 0 or
             self.will_publishers.count() != 0)
         {
@@ -1817,6 +2010,7 @@ pub const Broker = struct {
             self.options.session,
             self.options.will,
             self.options.limits.max_pending_incoming_qos2,
+            self.options.bridge_qos2,
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
         );
@@ -1826,6 +2020,7 @@ pub const Broker = struct {
             restored.wills.deinit();
             restored.will_publishers.deinit(self.allocator);
             restored.pending_qos2.deinit();
+            restored.bridge_qos2.deinit();
         }
         var staged_router = try router_mod.Router.initWithOptions(
             self.allocator,
@@ -1854,6 +2049,7 @@ pub const Broker = struct {
         self.sessions.swap(&restored.sessions);
         self.wills.swap(&restored.wills);
         self.pending_qos2.swap(&restored.pending_qos2);
+        self.bridge_qos2.swap(&restored.bridge_qos2);
         std.mem.swap(
             will_mod.PublisherMap,
             &self.will_publishers,
@@ -1871,6 +2067,7 @@ pub const Broker = struct {
         restored.wills.deinit();
         restored.will_publishers.deinit(self.allocator);
         restored.pending_qos2.deinit();
+        restored.bridge_qos2.deinit();
     }
 
     /// Accept exactly `connection_count` clients and serve them concurrently.

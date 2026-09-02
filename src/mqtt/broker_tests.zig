@@ -638,6 +638,101 @@ test "broker trusted local publication rejects connection-scoped metadata" {
     );
 }
 
+test "broker bridge QoS2 stages durably and releases once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "bridge-qos2-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "bridge/qos2/#", .qos = .exactly_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    const key = broker_mod.BridgeQoS2Key{
+        .bridge_id = [_]u8{0x61} ** 16,
+        .session_epoch = 1,
+        .packet_id = 7,
+    };
+    try std.testing.expectEqual(
+        broker_mod.BridgeQoS2StageResult.inserted,
+        try broker.stageBridgeQoS2(key, .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "bridge/qos2/value",
+            .packet_id = null,
+            .payload = "once",
+        }, .{}),
+    );
+    try std.testing.expectEqual(
+        broker_mod.BridgeQoS2StageResult.duplicate,
+        try broker.stageBridgeQoS2(key, .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "bridge/qos2/value",
+            .packet_id = null,
+            .payload = "once",
+        }, .{ .duplicate = true }),
+    );
+    try std.testing.expectEqual(
+        broker_mod.BridgeQoS2ReleaseResult.applied,
+        (try broker.releaseBridgeQoS2(key)).disposition,
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "bridge/qos2/value",
+        delivered.publish.topic,
+    );
+    try std.testing.expectEqualStrings("once", delivered.publish.payload);
+    try subscriber.writePubRec(delivered.publish.packet_id.?, 0);
+    var pubrel = try subscriber.readPubRel();
+    defer pubrel.deinit(allocator);
+    try subscriber.writePubComp(pubrel.ack.packet_id, 0);
+
+    try std.testing.expectEqual(
+        broker_mod.BridgeQoS2ReleaseResult.already_applied,
+        (try broker.releaseBridgeQoS2(key)).disposition,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        subscriber.readClientPacketEventWithTimeout(
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(try broker.completeBridgeQoS2(key));
+    try std.testing.expect(!(try broker.completeBridgeQoS2(key)));
+    try std.testing.expectEqual(
+        broker_mod.BridgeQoS2ReleaseResult.unknown,
+        (try broker.releaseBridgeQoS2(key)).disposition,
+    );
+
+    try disconnectAll(&.{&subscriber});
+    try joinServer(thread, &joined, &serve);
+}
+
 test "transient Session fanout does not consume durable queue bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
