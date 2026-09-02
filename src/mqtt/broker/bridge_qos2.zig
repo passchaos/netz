@@ -1013,15 +1013,21 @@ test "bridge QoS2 replacement accounts the net owned-byte delta" {
     defer store.deinit();
 
     _ = try store.stage(key, .{
+        .dup = false,
         .qos = .exactly_once,
+        .retain = false,
         .topic = small_topic,
+        .packet_id = null,
         .payload = small_payload,
     }, .zero);
     try std.testing.expectEqual(
         StageResult.replaced,
         try store.stage(key, .{
+            .dup = false,
             .qos = .exactly_once,
+            .retain = false,
             .topic = large_topic,
+            .packet_id = null,
             .payload = large_payload,
         }, .zero),
     );
