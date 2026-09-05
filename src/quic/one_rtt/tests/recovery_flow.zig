@@ -2286,11 +2286,28 @@ test "QUIC 1-RTT connection releases completed peer stream credit once" {
     var reply = try client.receivePacket();
     defer reply.deinit(allocator);
     try std.testing.expectEqualStrings("reply", reply.frames[0].stream.data);
+    try server.send(&.{.{ .ping = {} }});
+    var later_ping = try client.receivePacket();
+    defer later_ping.deinit(allocator);
+    try std.testing.expect(later_ping.frames[0] == .ping);
 
     // A sent FIN is not terminal until acknowledged. The early release request
     // is remembered and completed automatically by ACK processing.
     try std.testing.expect(!try server.releaseCompletedPeerStream(0));
-    try client.sendAck(0);
+    try client.send(&.{.{ .ack = .{
+        .largest_acknowledged = later_ping.packet.packet_number,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }});
+    var unrelated_ack = try server.receivePacket();
+    defer unrelated_ack.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), server.recv_max_streams_bidi);
+
+    try client.send(&.{.{ .ack = .{
+        .largest_acknowledged = reply.packet.packet_number,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }});
     var reply_ack = try server.receivePacket();
     defer reply_ack.deinit(allocator);
     const packets_after_release = server.stats().packets_sent;

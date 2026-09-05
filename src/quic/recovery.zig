@@ -303,16 +303,18 @@ pub const Queue = struct {
             while (pos < payload.len) {
                 const parsed = quic.parseFrame(payload[pos..]) catch
                     return true;
-                if (parsed.frame == .reset_stream and
-                    parsed.frame.reset_stream.stream_id == stream_id)
-                {
-                    return true;
-                }
-                if (!reset_only and
-                    parsed.frame == .stream and
-                    parsed.frame.stream.stream_id == stream_id)
-                {
-                    return true;
+                if (reset_only) {
+                    if (parsed.frame == .reset_stream and
+                        parsed.frame.reset_stream.stream_id == stream_id)
+                    {
+                        return true;
+                    }
+                } else {
+                    if (parsed.frame == .stream and
+                        parsed.frame.stream.stream_id == stream_id)
+                    {
+                        return true;
+                    }
                 }
                 if (parsed.consumed == 0) return true;
                 pos += parsed.consumed;
@@ -710,6 +712,38 @@ test "QUIC recovery queue exposes stable uninitialized payload ownership" {
         tracked.payload.ptr,
         queue.packetNumberCandidate(7).?.payload.ptr,
     );
+}
+
+test "QUIC recovery queue identifies pending stream terminal frames" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .ping = {} }).write(&payload, allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 4,
+        .offset = 9,
+        .data = "done",
+        .fin = true,
+    } }).write(&payload, allocator);
+    try (quic.Frame{ .reset_stream = .{
+        .stream_id = 8,
+        .application_error_code = 42,
+        .final_size = 17,
+    } }).write(&payload, allocator);
+
+    _ = try queue.trackSent(11, payload.items);
+    try std.testing.expect(queue.hasPendingStreamData(4));
+    try std.testing.expect(!queue.hasPendingStreamData(8));
+    try std.testing.expect(queue.hasPendingResetStream(8));
+    try std.testing.expect(!queue.hasPendingResetStream(4));
+    try std.testing.expect(!queue.hasPendingStreamData(12));
+
+    try std.testing.expect(queue.acknowledgePacketNumber(11));
+    try std.testing.expect(!queue.hasPendingStreamData(4));
+    try std.testing.expect(!queue.hasPendingResetStream(8));
 }
 
 test "QUIC recovery uninitialized tracking rejects empty payload transactionally" {

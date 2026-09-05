@@ -581,11 +581,11 @@ pub fn main(init: std.process.Init) !void {
                     stream_id,
                     expected,
                 );
-                if (!try established.connection
-                    .releaseCompletedPeerStream(stream_id))
-                {
-                    return error.StreamCreditNotReleased;
-                }
+                // The response FIN is not terminal until quic-go ACKs it. An
+                // early request is retained and the ACK receive path emits
+                // MAX_STREAMS before the next blocked stream is admitted.
+                _ = try established.connection
+                    .releaseCompletedPeerStream(stream_id);
             }
         },
         .uni => {
